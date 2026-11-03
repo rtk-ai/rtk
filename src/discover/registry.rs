@@ -309,6 +309,15 @@ pub fn classify_command(cmd: &str) -> Classification {
             estimated_savings_pct: savings,
             status,
         }
+    } else if let Some(rtk_equivalent) =
+        crate::core::toml_filter::matching_filter_rtk_equivalent(cmd_clean)
+    {
+        Classification::Supported {
+            rtk_equivalent,
+            category: "Infra",
+            estimated_savings_pct: 60.0,
+            status: super::report::RtkStatus::Existing,
+        }
     } else {
         // Extract base command for unsupported
         let base = extract_base_command(cmd_clean);
@@ -2021,32 +2030,31 @@ fn rewrite_segment_inner(
             }
             rtk_equivalent
         }
-        // TOML-only commands: consult the registry so the hook filters them too (#2179).
-        Classification::Unsupported { .. } => {
-            if context != RewriteContext::Normal {
-                return None;
-            }
-            if crate::core::toml_filter::toml_disabled() {
-                return None;
-            }
-            let normalized = strip_absolute_path(cmd_part.trim());
-            if is_excluded(&normalized, excluded) {
-                return None;
-            }
-            let base = normalized.split_whitespace().next().unwrap_or("");
-            if crate::core::toml_filter::is_rtk_reserved_command(base) {
-                return None;
-            }
-            if crate::core::toml_filter::command_matches_filter(&normalized) {
-                return Some(format!("rtk {}{}", cmd_part, redirect_suffix));
-            }
-            return None;
-        }
-        Classification::Ignored => return None,
+        Classification::Unsupported { .. } | Classification::Ignored => return None,
     };
 
     // Find the matching rule (rtk_cmd values are unique across all rules)
-    let rule = RULES.iter().find(|r| r.rtk_cmd == rtk_equivalent)?;
+    let Some(rule) = RULES.iter().find(|r| r.rtk_cmd == rtk_equivalent) else {
+        // TOML-only commands: consult the registry so the hook filters them too (#2179).
+        if context != RewriteContext::Normal {
+            return None;
+        }
+        if crate::core::toml_filter::toml_disabled() {
+            return None;
+        }
+        let normalized = strip_absolute_path(cmd_part.trim());
+        if is_excluded(&normalized, excluded) {
+            return None;
+        }
+        let base = normalized.split_whitespace().next().unwrap_or("");
+        if crate::core::toml_filter::is_rtk_reserved_command(base) {
+            return None;
+        }
+        if crate::core::toml_filter::command_matches_filter(&normalized) {
+            return Some(format!("rtk {}{}", cmd_part, redirect_suffix));
+        }
+        return None;
+    };
     if context == RewriteContext::PipelineFinal
         && (!rule.pipeline_safety.final_safe() || !pipeline_command_is_safe(rule.rtk_cmd, cmd_part))
     {
@@ -8977,5 +8985,33 @@ mod tests {
             rewrite_command_no_prefixes("bash -c 'git status && bash -c \"cargo test\"'", &[]),
             Some("bash -c 'rtk git status && bash -c \"cargo test\"'".into())
         );
+    }
+
+    #[test]
+    fn test_classify_builtin_toml_filter_commands_as_supported() {
+        for (cmd, expected_equiv) in [
+            ("terraform plan", "rtk terraform"),
+            ("ansible-playbook site.yml", "rtk ansible-playbook"),
+            ("brew install jq", "rtk brew"),
+            ("make -j4", "rtk make"),
+            ("helm list", "rtk helm"),
+        ] {
+            match classify_command(cmd) {
+                Classification::Supported {
+                    rtk_equivalent,
+                    status,
+                    ..
+                } => {
+                    assert_eq!(rtk_equivalent, expected_equiv, "unexpected equiv for {cmd}");
+                    assert_eq!(status, super::super::report::RtkStatus::Existing);
+                }
+                other => panic!("expected Supported for {cmd:?}, got {other:?}"),
+            }
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(format!("rtk {cmd}")),
+                "expected rewrite for {cmd:?}"
+            );
+        }
     }
 }
