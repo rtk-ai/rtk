@@ -358,7 +358,7 @@ jobs:
 
       - name: Test the service
         if: steps.touched.outputs.yes == 'true'
-        run: cd desktop-plugin/desktop-src && node --test test/
+        run: cd desktop-plugin/desktop-src && node --test 'test/*.test.mjs'
 
       - name: Test the hooks against this rtk
         if: steps.touched.outputs.yes == 'true'

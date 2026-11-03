@@ -17,7 +17,7 @@ Two pieces are never committed: `plugin/runtime/rtk`, the Linux x86_64 musl `rtk
 
 ```sh
 # tests of the service (no network, no Laya)
-(cd desktop-plugin/desktop-src && node --test test/)
+(cd desktop-plugin/desktop-src && node --test 'test/*.test.mjs')
 
 # tests of the hooks against an rtk binary (any build of this version line)
 RTK_BIN=target/release/rtk python3 desktop-plugin/test_hooks.py

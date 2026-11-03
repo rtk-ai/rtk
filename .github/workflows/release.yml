@@ -396,7 +396,7 @@ jobs:
           musl/bin/rtk --version
 
       - name: Test the service
-        run: cd desktop-plugin/desktop-src && node --test test/
+        run: cd desktop-plugin/desktop-src && node --test 'test/*.test.mjs'
 
       - name: Test the hooks against this rtk
         run: RTK_BIN="$PWD/musl/bin/rtk" python3 desktop-plugin/test_hooks.py
