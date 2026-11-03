@@ -2663,4 +2663,20 @@ mod tests {
             PermissionVerdict::Ask
         );
     }
+
+    #[test]
+    fn test_deny_rule_matches_command_after_zsh_disown_bang() {
+        let deny = vec!["rm:*".to_string()];
+        let allow = vec!["*".to_string()];
+        for cmd in [
+            "git status &!rm -rf /tmp/example",
+            "git status &! rm -rf /tmp/example",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &allow),
+                PermissionVerdict::Deny,
+                "{cmd:?}"
+            );
+        }
+    }
 }
