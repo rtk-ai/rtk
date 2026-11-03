@@ -46,7 +46,13 @@ fn guarded_output(filtered: &str, hint: Option<&str>, raw: &str, clean_outputs: 
     // byte that is not the difference between them.
     let body = terminated(&body);
     let raw = terminated(raw);
-    guard_stdout(&raw, &body, clean_outputs).to_string()
+    let selected = guard_stdout(&raw, &body, clean_outputs);
+    if let Some(h) = hint
+        && !std::ptr::eq(selected, body.as_ref())
+    {
+        crate::core::tee::discard_hint(h);
+    }
+    selected.to_string()
 }
 
 /// `filtered` followed by the recovery `hint`, as [`emit_guarded`] composes them.
