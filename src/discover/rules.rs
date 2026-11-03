@@ -561,7 +561,10 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^go\s+(test|build|vet)(?:\s|$|[;|&()<>])",
+        // `-C DIR` (also -C=DIR, -C=DIR single-arg) may sit between `go` and
+        // the subcommand: `go -C ./sub test ./...` (#4970). Go only accepts it
+        // as the first flag, so one optional group covers the whole form.
+        pattern: r"^go(?:\s+-C(?:=|\s+)\S+)?\s+(test|build|vet)(?:\s|$|[;|&()<>])",
         rtk_cmd: "rtk go",
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &["go"],

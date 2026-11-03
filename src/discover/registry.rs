@@ -219,6 +219,9 @@ pub fn classify_command(cmd: &str) -> Classification {
     // Strip golangci-lint global options before `run` so classify/rewrite stays
     // aligned with the runtime wrapper behavior.
     let cmd_normalized = strip_golangci_global_opts(&cmd_normalized);
+    // Strip the go global chdir flag (`go -C DIR test`) so classification
+    // matches the subcommand form the rule pattern expects (#4970).
+    let cmd_normalized = strip_go_chdir_opt(&cmd_normalized);
     // Strip pnpm global options (-r, --filter, -w) before the subcommand so
     // `pnpm -r install` classifies like `pnpm install` — but only adopt the
     // stripped form when it routes to the `rtk pnpm` rule itself. For the tool
@@ -492,6 +495,41 @@ fn matches_pnpm_rule(cmd: &str) -> bool {
 /// Strip golangci-lint global options before the `run` subcommand.
 /// `golangci-lint --color never run ./...` → `golangci-lint run ./...`
 /// Returns the original string unchanged if this is not a supported compact `run` invocation.
+/// Strip the go global chdir flag (`-C DIR`, `-C=DIR`, `--C DIR`, `--C=DIR`
+/// — go accepts it only as the first flag) so `go -C ./sub test ./...`
+/// classifies like `go test ./...`. Classification only: the rewrite re-emits
+/// the ORIGINAL command, so the flag reaches `rtk go` untouched (#4970).
+fn strip_go_chdir_opt(cmd: &str) -> String {
+    let Some(rest) = cmd.strip_prefix("go ") else {
+        return cmd.to_string();
+    };
+    let rest = rest.trim_start();
+    let mut tokens = rest.split_whitespace();
+    let first = tokens.next().unwrap_or("");
+    let (dir_swallowed, remainder): (bool, String) = match first {
+        "-C" | "--C" => {
+            // `-C DIR`: the next token is the directory.
+            match tokens.next() {
+                Some(_dir) => (true, tokens.collect::<Vec<_>>().join(" ")),
+                None => (false, rest.to_string()),
+            }
+        }
+        f if f.starts_with("-C=") || f.starts_with("--C=") => {
+            (true, tokens.collect::<Vec<_>>().join(" "))
+        }
+        _ => (false, rest.to_string()),
+    };
+    if !dir_swallowed {
+        return cmd.to_string();
+    }
+    let remainder = remainder.trim();
+    if remainder.is_empty() {
+        // `go -C DIR` alone has no subcommand to classify.
+        return cmd.to_string();
+    }
+    format!("go {}", remainder)
+}
+
 fn strip_golangci_global_opts(cmd: &str) -> String {
     match parse_golangci_run_parts(cmd) {
         Some(parts) => format!("golangci-lint {}", parts.run_segment),
@@ -3604,6 +3642,59 @@ mod tests {
             rewrite_command_no_prefixes("cargo test", &[]),
             Some("rtk cargo test".into())
         );
+    }
+
+    #[test]
+    fn go_chdir_flag_before_subcommand_rewrites() {
+        // #4970: `go -C DIR test` in all four spellings go accepts, each only
+        // as the first flag.
+        for cmd in [
+            "go -C ./sub test ./...",
+            "go -C=./sub test ./...",
+            "go --C ./sub test ./...",
+            "go --C=./sub test ./...",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(format!("rtk {}", cmd)),
+                "chdir spelling: {}",
+                cmd
+            );
+        }
+        // The subcommand-after form keeps working.
+        assert_eq!(
+            rewrite_command_no_prefixes("go test -C ./sub ./...", &[]),
+            Some("rtk go test -C ./sub ./...".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("go test ./...", &[]),
+            Some("rtk go test ./...".into())
+        );
+        // classify must agree with the rewrite for the discover accounting.
+        assert!(matches!(
+            classify_command("go -C ./sub test ./..."),
+            Classification::Supported { .. }
+        ));
+        // A bare `go -C DIR` (no subcommand) and other subcommands stay put.
+        assert_eq!(rewrite_command_no_prefixes("go -C ./sub", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("go -C ./sub env", &[]), None);
+    }
+
+    #[test]
+    fn go_chdir_flag_classification_alignment() {
+        // The helper strips exactly the flag go itself accepts, first only.
+        assert_eq!(
+            strip_go_chdir_opt("go -C ./sub test ./..."),
+            "go test ./..."
+        );
+        assert_eq!(strip_go_chdir_opt("go -C=./sub build"), "go build");
+        assert_eq!(strip_go_chdir_opt("go --C ./sub vet ./..."), "go vet ./...");
+        assert_eq!(strip_go_chdir_opt("go --C=./sub test"), "go test");
+        // Untouched: no flag, flag not first, not a go command, no subcommand.
+        assert_eq!(strip_go_chdir_opt("go test -C ./sub"), "go test -C ./sub");
+        assert_eq!(strip_go_chdir_opt("go test ./..."), "go test ./...");
+        assert_eq!(strip_go_chdir_opt("cargo test"), "cargo test");
+        assert_eq!(strip_go_chdir_opt("go -C ./sub"), "go -C ./sub");
     }
 
     #[test]
