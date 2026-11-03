@@ -1,0 +1,84 @@
+command-instead-of-shell: Use shell only when shell functionality is required.
+roles/example/tasks/main.yml:2 Task/Handler: shell echo hello
+
+fqcn[action-core]: Use FQCN for builtin module actions (shell).
+roles/example/tasks/main.yml:2:3 Use `ansible.builtin.shell` or `ansible.legacy.shell` instead.
+
+name[missing]: All tasks should be named.
+roles/example/tasks/main.yml:2 Task/Handler: shell echo hello
+
+no-changed-when: Commands should not change things if nothing needs doing.
+roles/example/tasks/main.yml:2 Task/Handler: shell echo hello
+
+command-instead-of-shell: Use shell only when shell functionality is required.
+roles/example/tasks/main.yml:3 Task/Handler: shell echo world
+
+fqcn[action-core]: Use FQCN for builtin module actions (shell).
+roles/example/tasks/main.yml:3:3 Use `ansible.builtin.shell` or `ansible.legacy.shell` instead.
+
+name[missing]: All tasks should be named.
+roles/example/tasks/main.yml:3 Task/Handler: shell echo world
+
+no-changed-when: Commands should not change things if nothing needs doing.
+roles/example/tasks/main.yml:3 Task/Handler: shell echo world
+
+command-instead-of-shell: Use shell only when shell functionality is required.
+roles/example/tasks/main.yml:4 Task/Handler: shell echo again
+
+fqcn[action-core]: Use FQCN for builtin module actions (shell).
+roles/example/tasks/main.yml:4:3 Use `ansible.builtin.shell` or `ansible.legacy.shell` instead.
+
+name[missing]: All tasks should be named.
+roles/example/tasks/main.yml:4 Task/Handler: shell echo again
+
+no-changed-when: Commands should not change things if nothing needs doing.
+roles/example/tasks/main.yml:4 Task/Handler: shell echo again
+
+command-instead-of-shell: Use shell only when shell functionality is required.
+roles/example/tasks/main.yml:5 Task/Handler: shell echo more
+
+fqcn[action-core]: Use FQCN for builtin module actions (shell).
+roles/example/tasks/main.yml:5:3 Use `ansible.builtin.shell` or `ansible.legacy.shell` instead.
+
+name[missing]: All tasks should be named.
+roles/example/tasks/main.yml:5 Task/Handler: shell echo more
+
+no-changed-when: Commands should not change things if nothing needs doing.
+roles/example/tasks/main.yml:5 Task/Handler: shell echo more
+
+command-instead-of-shell: Use shell only when shell functionality is required.
+roles/example/tasks/main.yml:6 Task/Handler: shell echo last
+
+fqcn[action-core]: Use FQCN for builtin module actions (shell).
+roles/example/tasks/main.yml:6:3 Use `ansible.builtin.shell` or `ansible.legacy.shell` instead.
+
+name[missing]: All tasks should be named.
+roles/example/tasks/main.yml:6 Task/Handler: shell echo last
+
+no-changed-when: Commands should not change things if nothing needs doing.
+roles/example/tasks/main.yml:6 Task/Handler: shell echo last
+
+command-instead-of-shell: Use shell only when shell functionality is required.
+roles/example/tasks/main.yml:7 Task/Handler: shell echo extra
+
+fqcn[action-core]: Use FQCN for builtin module actions (shell).
+roles/example/tasks/main.yml:7:3 Use `ansible.builtin.shell` or `ansible.legacy.shell` instead.
+
+name[missing]: All tasks should be named.
+roles/example/tasks/main.yml:7 Task/Handler: shell echo extra
+
+no-changed-when: Commands should not change things if nothing needs doing.
+roles/example/tasks/main.yml:7 Task/Handler: shell echo extra
+
+WARNING  Directory expansion discovered 1 file(s). If this is more than expected, use 'exclude_paths' in your ansible-lint configuration to narrow the scope. See: https://docs.ansible.com/projects/lint/configuring/
+WARNING  Listing 24 violation(s) that are fatal
+Read documentation for instructions on how to ignore specific rule violations.
+
+# Rule Violation Summary
+
+  6 command-instead-of-shell profile:basic tags:command-shell,idiom
+  6 name profile:basic tags:idiom
+  6 no-changed-when profile:basic tags:command-shell,idempotency
+  6 fqcn profile:basic tags:formatting
+
+Failed: 24 failure(s), 0 warning(s) in 2 files processed of 3 encountered. Last profile that met the validation criteria was 'min'.

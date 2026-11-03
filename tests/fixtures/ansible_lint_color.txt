@@ -1,0 +1,84 @@
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/command-instead-of-shell/\command-instead-of-shell]8;;\[0m[2m:[0m [31mUse shell only when shell functionality is required.[0m
+[35mroles/example/tasks/main.yml[0m:2 [2mTask/Handler: shell echo hello[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/fqcn/\fqcn[action-core]]8;;\[0m[2m:[0m [31mUse FQCN for builtin module actions (shell).[0m
+[35mroles/example/tasks/main.yml[0m:2:3 [2mUse `ansible.builtin.shell` or `ansible.legacy.shell` instead.[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/name/\name[missing]]8;;\[0m[2m:[0m [31mAll tasks should be named.[0m
+[35mroles/example/tasks/main.yml[0m:2 [2mTask/Handler: shell echo hello[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/no-changed-when/\no-changed-when]8;;\[0m[2m:[0m [31mCommands should not change things if nothing needs doing.[0m
+[35mroles/example/tasks/main.yml[0m:2 [2mTask/Handler: shell echo hello[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/command-instead-of-shell/\command-instead-of-shell]8;;\[0m[2m:[0m [31mUse shell only when shell functionality is required.[0m
+[35mroles/example/tasks/main.yml[0m:3 [2mTask/Handler: shell echo world[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/fqcn/\fqcn[action-core]]8;;\[0m[2m:[0m [31mUse FQCN for builtin module actions (shell).[0m
+[35mroles/example/tasks/main.yml[0m:3:3 [2mUse `ansible.builtin.shell` or `ansible.legacy.shell` instead.[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/name/\name[missing]]8;;\[0m[2m:[0m [31mAll tasks should be named.[0m
+[35mroles/example/tasks/main.yml[0m:3 [2mTask/Handler: shell echo world[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/no-changed-when/\no-changed-when]8;;\[0m[2m:[0m [31mCommands should not change things if nothing needs doing.[0m
+[35mroles/example/tasks/main.yml[0m:3 [2mTask/Handler: shell echo world[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/command-instead-of-shell/\command-instead-of-shell]8;;\[0m[2m:[0m [31mUse shell only when shell functionality is required.[0m
+[35mroles/example/tasks/main.yml[0m:4 [2mTask/Handler: shell echo again[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/fqcn/\fqcn[action-core]]8;;\[0m[2m:[0m [31mUse FQCN for builtin module actions (shell).[0m
+[35mroles/example/tasks/main.yml[0m:4:3 [2mUse `ansible.builtin.shell` or `ansible.legacy.shell` instead.[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/name/\name[missing]]8;;\[0m[2m:[0m [31mAll tasks should be named.[0m
+[35mroles/example/tasks/main.yml[0m:4 [2mTask/Handler: shell echo again[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/no-changed-when/\no-changed-when]8;;\[0m[2m:[0m [31mCommands should not change things if nothing needs doing.[0m
+[35mroles/example/tasks/main.yml[0m:4 [2mTask/Handler: shell echo again[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/command-instead-of-shell/\command-instead-of-shell]8;;\[0m[2m:[0m [31mUse shell only when shell functionality is required.[0m
+[35mroles/example/tasks/main.yml[0m:5 [2mTask/Handler: shell echo more[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/fqcn/\fqcn[action-core]]8;;\[0m[2m:[0m [31mUse FQCN for builtin module actions (shell).[0m
+[35mroles/example/tasks/main.yml[0m:5:3 [2mUse `ansible.builtin.shell` or `ansible.legacy.shell` instead.[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/name/\name[missing]]8;;\[0m[2m:[0m [31mAll tasks should be named.[0m
+[35mroles/example/tasks/main.yml[0m:5 [2mTask/Handler: shell echo more[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/no-changed-when/\no-changed-when]8;;\[0m[2m:[0m [31mCommands should not change things if nothing needs doing.[0m
+[35mroles/example/tasks/main.yml[0m:5 [2mTask/Handler: shell echo more[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/command-instead-of-shell/\command-instead-of-shell]8;;\[0m[2m:[0m [31mUse shell only when shell functionality is required.[0m
+[35mroles/example/tasks/main.yml[0m:6 [2mTask/Handler: shell echo last[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/fqcn/\fqcn[action-core]]8;;\[0m[2m:[0m [31mUse FQCN for builtin module actions (shell).[0m
+[35mroles/example/tasks/main.yml[0m:6:3 [2mUse `ansible.builtin.shell` or `ansible.legacy.shell` instead.[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/name/\name[missing]]8;;\[0m[2m:[0m [31mAll tasks should be named.[0m
+[35mroles/example/tasks/main.yml[0m:6 [2mTask/Handler: shell echo last[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/no-changed-when/\no-changed-when]8;;\[0m[2m:[0m [31mCommands should not change things if nothing needs doing.[0m
+[35mroles/example/tasks/main.yml[0m:6 [2mTask/Handler: shell echo last[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/command-instead-of-shell/\command-instead-of-shell]8;;\[0m[2m:[0m [31mUse shell only when shell functionality is required.[0m
+[35mroles/example/tasks/main.yml[0m:7 [2mTask/Handler: shell echo extra[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/fqcn/\fqcn[action-core]]8;;\[0m[2m:[0m [31mUse FQCN for builtin module actions (shell).[0m
+[35mroles/example/tasks/main.yml[0m:7:3 [2mUse `ansible.builtin.shell` or `ansible.legacy.shell` instead.[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/name/\name[missing]]8;;\[0m[2m:[0m [31mAll tasks should be named.[0m
+[35mroles/example/tasks/main.yml[0m:7 [2mTask/Handler: shell echo extra[0m
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/no-changed-when/\no-changed-when]8;;\[0m[2m:[0m [31mCommands should not change things if nothing needs doing.[0m
+[35mroles/example/tasks/main.yml[0m:7 [2mTask/Handler: shell echo extra[0m
+[0m
+[2mWARNING  Directory expansion discovered 1 file(s). If this is more than expected, use 'exclude_paths' in your ansible-lint configuration to narrow the scope. See: https://docs.ansible.com/projects/lint/configuring/[0m
+[2mWARNING  Listing 24 violation(s) that are fatal[0m
+Read [34m]8;;https://docs.ansible.com/projects/lint/configuring/#ignoring-rules-for-entire-files\documentation]8;;\[0m for instructions on how to ignore specific rule violations.
+
+# Rule Violation Summary
+
+  6 [34m]8;;https://docs.ansible.com/projects/lint/rules/\command-instead-of-shell]8;;\[0m [2mprofile:basic tags:command-shell,idiom[0m
+  6 [34m]8;;https://docs.ansible.com/projects/lint/rules/\name]8;;\[0m [2mprofile:basic tags:idiom[0m
+  6 [34m]8;;https://docs.ansible.com/projects/lint/rules/\no-changed-when]8;;\[0m [2mprofile:basic tags:command-shell,idempotency[0m
+  6 [34m]8;;https://docs.ansible.com/projects/lint/rules/\fqcn]8;;\[0m [2mprofile:basic tags:formatting[0m
+
+[31m[1mFailed[0m[0m: 24 failure(s), 0 warning(s) in 2 files processed of 3 encountered. Last profile that met the validation criteria was 'min'.

@@ -63,6 +63,7 @@ RTK intercepts shell commands and compresses their output before your agent read
 | `cargo test` / `npm test` | Failures only, passing tests collapsed to a count |
 | `ruff check` | Grouped by rule and file |
 | `sqlfluff lint` | Grouped by rule and file |
+| `ansible-lint` | Grouped by rule with sample paths and the final summary |
 | `pytest` | Failures only, traceback trimmed |
 | `go test` | NDJSON parsed, failures only |
 | `docker ps` | Essential fields only |

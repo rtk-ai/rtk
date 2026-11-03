@@ -796,6 +796,13 @@ pub const RULES: &[RtkRule] = &[
         ],
         ..RtkRule::DEFAULT
     },
+    RtkRule {
+        pattern: r"^ansible-lint(?:\s|$)",
+        rtk_cmd: "rtk ansible-lint",
+        rewrite_prefixes: &["ansible-lint"],
+        category: "Infra",
+        ..RtkRule::DEFAULT
+    },
     // TOML-filtered commands
     RtkRule {
         pattern: r"^ansible-playbook\b",

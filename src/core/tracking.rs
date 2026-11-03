@@ -1956,7 +1956,7 @@ fn categorize_command(rtk_cmd: &str) -> String {
         | "prettier" | "next" | "playwright" | "prisma" => "js",
         "pytest" | "ruff" | "mypy" | "pip" | "sqlfluff" | "uv" => "python",
         "go" | "golangci-lint" => "go",
-        "docker" | "kubectl" => "cloud",
+        "docker" | "kubectl" | "ansible-lint" => "cloud",
         "rspec" | "rubocop" | "rake" => "ruby",
         "dotnet" => "dotnet",
         "ctest" => "cpp",

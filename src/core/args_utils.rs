@@ -1,6 +1,14 @@
 //! Utility functions for argument handling, particularly for restoring "--" escape
 //! arguments that clap consumes during parsing.
 
+use std::ffi::{OsStr, OsString};
+
+/// Restore the boundary without converting native paths to UTF-8.
+pub fn restore_double_dash_os(parsed_args: &[OsString]) -> Vec<OsString> {
+    let raw_args: Vec<OsString> = std::env::args_os().collect();
+    restore_double_dash_with_raw(parsed_args, &raw_args)
+}
+
 /// Restores `--` tokens that clap consumed when using `trailing_var_arg = true`.
 ///
 /// Returns `parsed_args` unchanged when `raw_args` has the same or fewer `--` tokens
@@ -22,9 +30,12 @@ pub fn restore_double_dash(parsed_args: &[String]) -> Vec<String> {
 ///
 /// Returning `raw_args[user_region_start..]` restores all stripped `--` tokens at
 /// their original positions without any value-based matching.
-pub fn restore_double_dash_with_raw(parsed_args: &[String], raw_args: &[String]) -> Vec<String> {
-    let raw_dash_count = raw_args.iter().filter(|a| a.as_str() == "--").count();
-    let parsed_dash_count = parsed_args.iter().filter(|a| a.as_str() == "--").count();
+pub fn restore_double_dash_with_raw<T: AsRef<OsStr> + Clone>(
+    parsed_args: &[T],
+    raw_args: &[T],
+) -> Vec<T> {
+    let raw_dash_count = raw_args.iter().filter(|a| a.as_ref() == "--").count();
+    let parsed_dash_count = parsed_args.iter().filter(|a| a.as_ref() == "--").count();
 
     if raw_dash_count <= parsed_dash_count {
         return parsed_args.to_vec();
