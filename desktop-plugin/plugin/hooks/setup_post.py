@@ -9,6 +9,8 @@ def main():
         ev = json.load(sys.stdin)
     except ValueError:
         return
+    if not isinstance(ev, dict):
+        return
     resp = ev.get("tool_response")
     if isinstance(resp, dict):
         resp = resp.get("content", resp)
@@ -17,8 +19,14 @@ def main():
         data = json.loads(text)
     except ValueError:
         return
-    failed = pl.apply_setup(data)
-    msg = data.get("notice") or ""
+    if not isinstance(data, dict):
+        return
+    msg = str(data.get("notice") or "")
+    try:
+        failed = pl.apply_setup(data)
+    except Exception as e:
+        pl.note("setup.log", f"apply_setup failed: {e!r}"[:200])
+        failed, msg = [], "RTK keeps its default pipelines for this task."
     if failed:
         msg += " Tell the user once, in one short sentence: these RTK pipelines could not be installed: " + ", ".join(failed) + "."
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedMCPToolOutput": [

@@ -26,11 +26,12 @@ def main():
         return
     session = ev.get("session_id") or "x"
     os.makedirs(ledger.START, exist_ok=True)
-    path = os.path.join(ledger.START, session + ".json")
+    path = os.path.join(ledger.START, pl.safe(session) + ".json")
     if mode == "start":
         if not os.path.exists(path):
             cmds, saved = ledger.rtk_totals()
-            json.dump({"cmds": cmds, "saved": saved, "shown": 0}, open(path, "w"))
+            with open(path, "w") as fh:
+                json.dump({"cmds": cmds, "saved": saved, "shown": 0}, fh)
         return
     try:
         rec = ledger.build(session)
@@ -39,7 +40,8 @@ def main():
         return
     gain = ledger.gained(rec)
     try:
-        st = json.load(open(path))
+        with open(path) as fh:
+            st = json.load(fh)
     except Exception:
         st = {"shown": 0}
     total = rec["compression"]["saved"] + rec["device"]["saved"]
@@ -49,7 +51,9 @@ def main():
         note(f"silent (gain {gain})")
         return
     st["shown"] = [total, kept]
-    json.dump(st, open(path, "w"))
+    with open(path, "w") as fh:
+        json.dump(st, fh)
+
     msg = f"RTK saved ~{fmt(total)} tokens this task ({n} commands compressed)"
     if kept:
         msg += f"; helpers kept ~{fmt(kept)} tokens out of the main context"

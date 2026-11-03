@@ -56,7 +56,9 @@ def main():
     command = (fed.get("tool_input") or {}).get("command") or ""
     if not off and not asked and not setup.get("done") and not setup.get("hide") and calls and LOOK.search(command) and tool in LOOKS and not ev.get("agent_id"):
         setup["hide"] = [ev.get("tool_use_id")]
-        json.dump(setup, open(pl.SETUP, "w"))
+        with open(pl.SETUP, "w") as fh:
+            json.dump(setup, fh)
+
         log(ev, "ask-setup")
         deny(ASK % pl.call_state(command, goal, calls))
         return

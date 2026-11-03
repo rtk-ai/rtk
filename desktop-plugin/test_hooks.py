@@ -1,12 +1,15 @@
-import json, os, shutil, subprocess, sys, tempfile, unittest
+import atexit, json, os, shutil, subprocess, sys, tempfile, threading, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RTK_BIN = os.environ.get("RTK_BIN") or os.path.join(HERE, ".rtk-musl", "rtk")
 if not os.path.isfile(RTK_BIN):
     sys.exit(f"set RTK_BIN to an rtk binary (no file at {RTK_BIN})")
 ROOT = tempfile.mkdtemp(prefix="rtk-hooks-test-")
+if not os.environ.get("KEEP"):
+    atexit.register(shutil.rmtree, ROOT, True)
 PLUGIN = os.path.join(ROOT, "plugin")
 HOME = os.path.join(ROOT, "home")
+FIXTURE = os.path.join(HERE, "desktop-src", "test", "fixtures", "laya-tiered.toml")
 shutil.copytree(os.path.join(HERE, "plugin"), PLUGIN, ignore=shutil.ignore_patterns("desktop", "runtime", "__pycache__"))
 os.makedirs(os.path.join(PLUGIN, "runtime"))
 shutil.copy(RTK_BIN, os.path.join(PLUGIN, "runtime", "rtk"))
@@ -19,13 +22,13 @@ for sh in os.listdir(os.path.join(PLUGIN, "hooks")):
         with open(p, "w") as fh:
             fh.write("\n".join(l for l in lines if "uname -s" not in l))
 os.makedirs(os.path.join(HOME, ".claude", "projects", "-home-claude"), exist_ok=True)
-os.environ.update(HOME=HOME, CLAUDE_PLUGIN_ROOT=PLUGIN, RTK_CONFIG_DIR=os.path.join(HOME, "rtkcfg"))
+STATE = os.path.join(ROOT, "state")
+os.environ.update(HOME=HOME, CLAUDE_PLUGIN_ROOT=PLUGIN, RTK_CONFIG_DIR=os.path.join(HOME, "rtkcfg"), RTK_COWORK_STATE=STATE)
 sys.path.insert(0, os.path.join(PLUGIN, "hooks"))
 import pipeline as pl
 import ledger
 import summary
 
-STATE = os.path.join(ROOT, "state")
 pl.STATE, pl.OFF_CFG, pl.LABELS, pl.SETUP = STATE, os.path.join(STATE, "cfg-off"), os.path.join(STATE, "labels.json"), os.path.join(STATE, "setup.json")
 pl.DEVICE_LOG = os.path.join(ROOT, "device.log")
 ledger.START = os.path.join(ROOT, "start")
@@ -70,9 +73,22 @@ def write_transcripts(sub_read_chars=100000):
 
 def run_hook(module, event, argv=()):
     code = PATCH + f"import {module}; " + (f"{module}.LOG = {os.path.join(STATE, 'pre.log')!r}; " if module == "pre" else "") + f"{module}.main()"
-    r = subprocess.run([sys.executable, "-c", code, *argv], input=json.dumps(event), capture_output=True, text=True, env=dict(os.environ))
+    r = subprocess.run([sys.executable, "-c", code, *argv], input=json.dumps(event) if not isinstance(event, str) else event, capture_output=True, text=True, env=dict(os.environ))
     assert r.stderr == "", r.stderr
     return json.loads(r.stdout) if r.stdout.strip() else None
+
+
+DSID = "dddddddd-2222-3333-4444-555555555555"
+
+
+def device_event(command, text):
+    return {"session_id": DSID, "hook_event_name": "PostToolUse", "tool_name": pl.DEV, "tool_input": {"command": command},
+            "tool_response": {"content": [{"type": "text", "text": text}]}, "transcript_path": os.path.join(PROJ, SID + ".jsonl")}
+
+
+def device_log():
+    with open(pl.DEVICE_LOG) as fh:
+        return fh.read()
 
 
 class Ledger(unittest.TestCase):
@@ -184,7 +200,165 @@ class Allow(unittest.TestCase):
         self.assertNotIn("sonnet-4-6", r.stdout)
 
 
+class DevicePost(unittest.TestCase):
+    def run_device(self, command, text):
+        before = len(device_log().splitlines()) if os.path.exists(pl.DEVICE_LOG) else 0
+        out = run_hook("device_post", device_event(command, text))
+        status = [l.split("\t")[2:4] for l in device_log().splitlines()[before:]]
+        return (out["hookSpecificOutput"]["updatedMCPToolOutput"][0]["text"] if out else None), status
+
+    def test_pytest_failure_is_compressed_with_a_tag(self):
+        raw = "=" * 29 + " test session starts " + "=" * 30 + "\n" + "".join(f"tests/test_m{i}.py ..F.{' ' * 50}[ 50%]\n" for i in range(30))
+        raw += "=" * 35 + " FAILURES " + "=" * 35 + "\n___ test_x ___\n    assert 1 == 2\nE   assert 1 == 2\ntests/test_m1.py:12: AssertionError\n" + "=" * 25 + " 1 failed, 119 passed in 2.31s " + "=" * 24 + "\n"
+        text, status = self.run_device("cd $HOME/mnt/x && pytest -q", raw)
+        self.assertRegex(text, r"^\[rtk: \d+ KB -> \d+ B \(-\d+%\)\]\n")
+        self.assertIn("1 failed", text)
+        self.assertIn("test_x", text)
+        self.assertEqual(status, [["ok", "pytest"]])
+
+    def test_listings_are_never_summarised_away(self):
+        pytest_list = "".join(f"tests/test_module_{i % 9}.py::test_case_{i}\n" for i in range(120))
+        go_list = "".join(f"TestHandler{i}\n" for i in range(120)) + "ok      example.com/pkg 0.004s\n"
+        tsc_list = "".join(f"/home/claude/project/src/component_{i}.tsx\n" for i in range(60))
+        cargo_list = "".join(f"module::tests::case_{i}: test\n" for i in range(60)) + "\n60 tests, 0 benchmarks\n"
+        for command, raw, keep in (("pytest --collect-only -q", pytest_list, "test_case_7"), ("go test -list . ./...", go_list, "TestHandler7"),
+                                   ("npx tsc --listFiles --noEmit", tsc_list, "component_7"), ("cargo test -- --list", cargo_list, "case_7"),
+                                   ("pytest tests/ -k handler", pytest_list, "test_case_7")):
+            text, status = self.run_device(command, raw)
+            self.assertTrue(text is None or keep in text, (command, text))
+            self.assertNotIn("ok", [s[0] for s in status], (command, status))
+            self.assertTrue(all(s[0].startswith("skip-") for s in status), (command, status))
+        self.assertEqual(status[0], ["skip-marker", "pytest"])
+
+    def test_small_piped_and_unknown_outputs_pass(self):
+        text, status = self.run_device("pytest -q", "1 passed\n")
+        self.assertIsNone(text)
+        self.assertEqual(status, [["skip-small", "pytest"]])
+        text, status = self.run_device("pytest -q | tail -5", "x\n" * 600)
+        self.assertIsNone(text)
+        self.assertEqual([s[0] for s in status], ["skip-nofilter"])
+        text, status = self.run_device("python3 scripts/x.py", "x\n" * 600)
+        self.assertIsNone(text)
+        self.assertEqual([s[0] for s in status], ["skip-nofilter"])
+        self.assertIsNone(run_hook("device_post", "null"))
+        self.assertIsNone(run_hook("device_post", "not json"))
+
+    def test_saved_output_outside_tool_results_is_left_alone(self):
+        ev = device_event("grep -rn x src", "Output has been saved to /etc/passwd.txt")
+        ev["tool_response"] = "Output has been saved to /etc/passwd.txt"
+        self.assertIsNone(run_hook("device_post", ev))
+        self.assertIn("skip-saved", device_log())
+
+
+class SetupPost(unittest.TestCase):
+    def setUp(self):
+        for f in os.listdir(pl.pipelines_dir()) if os.path.isdir(pl.pipelines_dir()) else []:
+            os.remove(os.path.join(pl.pipelines_dir(), f))
+        for name in ("installed", "labels.json"):
+            if os.path.exists(os.path.join(STATE, name)):
+                os.remove(os.path.join(STATE, name))
+
+    def run_setup(self, data):
+        ev = {"session_id": SID, "hook_event_name": "PostToolUse", "tool_name": "mcp__remote-devices__plugin_rtk_rtk-desktop__rtk_task_setup",
+              "tool_input": {"state": "x"}, "tool_response": {"content": [{"type": "text", "text": json.dumps(data)}]}}
+        out = run_hook("setup_post", ev)
+        return out["hookSpecificOutput"]["updatedMCPToolOutput"][0]["text"] if out else None
+
+    def test_pipelines_dir_follows_rtk_config_dir(self):
+        self.assertEqual(pl.pipelines_dir(), os.path.join(HOME, "rtkcfg", "pipelines"))
+
+    def test_setup_installs_the_active_pipelines_only(self):
+        with open(FIXTURE) as fh:
+            toml = fh.read()
+        msg = self.run_setup({"active": ["default-bash-compress", "laya-tiered"], "pipelines": {"laya-tiered": toml}, "os": "darwin", "notice": "Tell the user once: hi."})
+        self.assertEqual(msg, "Tell the user once: hi. Carry on with the task; do not mention this step otherwise.")
+        self.assertEqual(sorted(os.listdir(pl.pipelines_dir())), ["default-bash-compress.toml", "laya-tiered.toml"])
+        setup = pl.read_json(pl.SETUP, {})
+        self.assertEqual((setup["done"], setup["active"], setup["failed"], setup["os"]), (True, ["default-bash-compress", "laya-tiered"], [], "darwin"))
+        self.assertFalse(os.path.exists(pl.LABELS))
+
+    def test_setup_reports_a_pipeline_it_could_not_install(self):
+        msg = self.run_setup({"active": ["default-bash-compress", "explore-first", "broken"], "pipelines": {"broken": "not a pipeline"}})
+        self.assertIn("could not be installed: broken", msg)
+        self.assertEqual(sorted(os.listdir(pl.pipelines_dir())), ["default-bash-compress.toml", "explore-first.toml"])
+
+    def test_setup_survives_a_malformed_response(self):
+        self.assertIsNone(self.run_setup(["not", "an", "object"]))
+        self.assertIsNone(self.run_setup("plain text"))
+        msg = self.run_setup({"active": "explore-first", "pipelines": "oops"})
+        self.assertEqual(msg, "RTK keeps its default pipelines for this task. Carry on with the task; do not mention this step otherwise.")
+        with open(os.path.join(STATE, "setup.log")) as fh:
+            self.assertIn("apply_setup failed", fh.read())
+
+    def test_labels_start_the_bridge_once(self):
+        calls = []
+        os.makedirs(STATE, exist_ok=True)
+        with open(os.path.join(STATE, "installed"), "w") as fh:
+            fh.write("x\n")
+        real = pl.subprocess.Popen
+        pl.subprocess.Popen = lambda *a, **k: calls.append(a[0])
+        try:
+
+            pl.apply_setup({"active": ["default-bash-compress"], "labels": {"kind": {"choice": "write", "confidence": 0.9}}})
+        finally:
+            pl.subprocess.Popen = real
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0][1].endswith("laya_bridge.py"))
+        self.assertEqual(pl.read_json(pl.LABELS, {}), {"kind": {"choice": "write", "confidence": 0.9}})
+
+
+class Transcript(unittest.TestCase):
+    def test_parallel_hooks_share_a_transcript_without_racing(self):
+        write_transcripts()
+        src = os.path.join(PROJ, SID + ".jsonl")
+        errors = []
+
+        def one():
+            try:
+                for _ in range(20):
+                    path, asked, goal, calls = pl.present(src, SID, None)
+                    assert os.path.exists(path) and goal.startswith("Add a unit test") and calls
+            except Exception as e:
+                errors.append(repr(e))
+        threads = [threading.Thread(target=one) for _ in range(6)]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+        self.assertEqual(errors, [])
+        self.assertEqual([f for f in os.listdir(STATE) if f.endswith(".tmp")], [])
+
+    def test_odd_session_ids_stay_inside_the_state_dir(self):
+        write_transcripts()
+        path = pl.present(os.path.join(PROJ, SID + ".jsonl"), "../../etc/passwd", None)[0]
+        self.assertEqual(os.path.dirname(path), STATE)
+        self.assertNotIn("..", os.path.basename(path))
+
+    @unittest.skipIf(pl.cowork(), "inside a Cowork workspace")
+    def test_commands_stay_quiet_outside_cowork(self):
+        for arg in ("report", "off"):
+            r = subprocess.run([sys.executable, os.path.join(HOOKS, "pipeline.py"), arg], capture_output=True, text=True, env=dict(os.environ))
+            self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "This RTK command works in Claude Desktop tasks only.\n", ""))
+        self.assertFalse(os.path.exists(os.path.join(STATE, "pipeline")))
+
+
+class RunSh(unittest.TestCase):
+    def test_off_mode_points_rtk_at_an_empty_config(self):
+        os.makedirs(STATE, exist_ok=True)
+        with open(os.path.join(STATE, "pipeline"), "w") as fh:
+            fh.write("off\n")
+        try:
+            ev = {"session_id": SID, "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_response": {"stdout": "a\nb\n", "stderr": ""}, "cwd": "/tmp"}
+            env = {k: v for k, v in os.environ.items() if k != "RTK_CONFIG_DIR"}
+            r = subprocess.run(["sh", os.path.join(HOOKS, "run.sh")], input=json.dumps(ev), capture_output=True, text=True, env=env)
+            self.assertEqual(r.stderr, "")
+            self.assertTrue(os.path.exists(os.path.join(STATE, "cfg-off", "config.toml")))
+            if r.stdout.strip():
+                json.loads(r.stdout)
+        finally:
+            os.remove(os.path.join(STATE, "pipeline"))
+
+
 class Rtk(unittest.TestCase):
+
 
     def test_rtk_commands(self):
         rtk = os.path.join(PLUGIN, "runtime", "rtk")

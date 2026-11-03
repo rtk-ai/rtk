@@ -1,7 +1,8 @@
-import collections, glob, json, os, re, shutil, subprocess, sys, time
+import collections, glob, json, os, re, shutil, subprocess, sys, tempfile, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-STATE = "/tmp/rtk-cowork"
+STATE = os.environ.get("RTK_COWORK_STATE") or "/tmp/rtk-cowork"
+
 OFF_CFG = os.path.join(STATE, "cfg-off")
 LABELS = os.path.join(STATE, "labels.json")
 SETUP = os.path.join(STATE, "setup.json")
@@ -32,6 +33,23 @@ def rtk():
     return c
 
 
+def cowork():
+    return sys.platform.startswith("linux") and os.path.isdir("/home/claude")
+
+
+def safe(s):
+    return re.sub(r"[^\w-]", "_", str(s or "x"))[:80]
+
+
+def note(name, what):
+    try:
+        os.makedirs(STATE, exist_ok=True)
+        with open(os.path.join(STATE, name), "a") as fh:
+            fh.write(f"{time.strftime('%H:%M:%S')} {what}\n")
+    except OSError:
+        pass
+
+
 def is_off():
     try:
         return open(os.path.join(STATE, "pipeline")).read().strip() == "off"
@@ -48,6 +66,9 @@ def read_json(path, default):
 
 
 def pipelines_dir():
+    cfg = os.environ.get("RTK_CONFIG_DIR")
+    if cfg:
+        return os.path.join(cfg, "pipelines")
     out = subprocess.run([rtk(), "config"], capture_output=True, text=True).stdout
     for line in out.splitlines():
         if line.startswith("Config: "):
@@ -67,7 +88,8 @@ def ensure_defaults():
     for name in DEFAULTS:
         add(os.path.join(ROOT, "pipeline", name + ".toml"))
     subprocess.run([rtk(), "pipeline", "log", "on"], capture_output=True)
-    open(mark, "w").write(time.strftime("%H:%M:%S\n"))
+    with open(mark, "w") as fh:
+        fh.write(time.strftime("%H:%M:%S\n"))
 
 
 def apply_setup(data):
@@ -79,8 +101,9 @@ def apply_setup(data):
         if os.path.basename(f)[:-5] not in active:
             os.remove(f)
     for name, toml in (data.get("pipelines") or {}).items():
-        path = os.path.join(STATE, re.sub(r"[^\w.-]", "_", name) + ".toml")
-        open(path, "w").write(toml)
+        path = os.path.join(STATE, safe(name) + ".toml")
+        with open(path, "w") as fh:
+            fh.write(str(toml))
         r = add(path)
         if r.returncode != 0 or not os.path.exists(os.path.join(pdir, name + ".toml")):
             failed.append(name)
@@ -88,12 +111,14 @@ def apply_setup(data):
         add(os.path.join(ROOT, "pipeline", "explore-first.toml"))
     labels = data.get("labels") or {}
     if labels:
-        json.dump(labels, open(LABELS, "w"))
+        with open(LABELS, "w") as fh:
+            json.dump(labels, fh)
         subprocess.Popen([sys.executable, os.path.join(ROOT, "hooks", "laya_bridge.py")], stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
     setup = read_json(SETUP, {})
     setup.update(done=True, active=active, failed=failed, os=data.get("os") or "")
-    json.dump(setup, open(SETUP, "w"))
+    with open(SETUP, "w") as fh:
+        json.dump(setup, fh)
     return failed
 
 
@@ -108,11 +133,14 @@ def history_command(cmd):
 
 
 def present(src, sid, skip_id):
-    dst = os.path.join(STATE, f"transcript-{sid}.jsonl")
+    dst = os.path.join(STATE, f"transcript-{safe(sid)}.jsonl")
+    os.makedirs(STATE, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f"transcript-{safe(sid)}.", suffix=".tmp", dir=STATE)
     asked_setup = False
     goal, seen_calls = "", []
     hide = set(read_json(SETUP, {}).get("hide") or [])
-    with open(src, "rb") as f, open(dst + ".tmp", "w") as g:
+    with open(src, "rb") as f, open(fd, "w") as g:
+
         for line in f:
             try:
                 e = json.loads(line)
@@ -148,7 +176,7 @@ def present(src, sid, skip_id):
                     continue
                 e["message"]["content"] = kept
             g.write(json.dumps(e) + "\n")
-    os.replace(dst + ".tmp", dst)
+    os.replace(tmp, dst)
     return dst, asked_setup, goal, seen_calls
 
 
@@ -166,7 +194,8 @@ def rtk_env():
 
 def on():
     os.makedirs(STATE, exist_ok=True)
-    open(os.path.join(STATE, "pipeline"), "w").write("on\n")
+    with open(os.path.join(STATE, "pipeline"), "w") as fh:
+        fh.write("on\n")
     ensure_defaults()
     print("RTK pipelines are on for this task.")
 
@@ -174,7 +203,8 @@ def on():
 def off():
     os.makedirs(STATE, exist_ok=True)
     os.makedirs(OFF_CFG, exist_ok=True)
-    open(os.path.join(STATE, "pipeline"), "w").write("off\n")
+    with open(os.path.join(STATE, "pipeline"), "w") as fh:
+        fh.write("off\n")
     print("RTK pipelines are off for this task (output compression stays on).")
 
 
@@ -286,7 +316,11 @@ def report():
         seen_by_rtk = []
         with open(p, errors="replace") as fh:
             for line in fh:
-                for b in ((json.loads(line).get("message") or {}).get("content") or []):
+                try:
+                    content = (json.loads(line).get("message") or {}).get("content") or []
+                except (ValueError, AttributeError):
+                    continue
+                for b in content:
                     if isinstance(b, dict) and b.get("type") == "tool_use":
                         seen_by_rtk.append(f"{b.get('name')} {str((b.get('input') or {}).get('command') or '')[:48]}".strip())
         out.append("- rtk sees: " + " · ".join(f"`{s}`" for s in seen_by_rtk[:4]))
@@ -314,4 +348,8 @@ def report():
 
 
 if __name__ == "__main__":
+    if not cowork():
+        print("This RTK command works in Claude Desktop tasks only.")
+        sys.exit(0)
     {"on": on, "off": off, "report": report}.get(sys.argv[1] if len(sys.argv) > 1 else "report", report)()
+

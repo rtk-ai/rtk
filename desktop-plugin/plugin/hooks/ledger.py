@@ -21,7 +21,8 @@ def rtk_totals():
 
 def start_totals(session):
     try:
-        st = json.load(open(os.path.join(START, session + ".json")))
+        with open(os.path.join(START, pl.safe(session) + ".json")) as fh:
+            st = json.load(fh)
         return int(st.get("cmds", 0)), int(st.get("saved", 0))
     except Exception:
         return 0, 0
@@ -176,4 +177,5 @@ def gained(rec):
 
 if __name__ == "__main__":
     ev = json.load(sys.stdin) if not sys.stdin.isatty() else {}
-    print(json.dumps(build(ev.get("session_id") or sys.argv[1] if len(sys.argv) > 1 else "x")))
+    print(json.dumps(build(ev.get("session_id") or (sys.argv[1] if len(sys.argv) > 1 else "x"))))
+

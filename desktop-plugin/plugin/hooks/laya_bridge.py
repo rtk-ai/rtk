@@ -21,11 +21,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)))
-            labels = json.load(open(LABELS))
+            with open(LABELS) as fh:
+                labels = json.load(fh)
         except (OSError, ValueError):
             return self.reply(400, {"error": "no labels"})
+        if not isinstance(body, dict) or not isinstance(labels, dict):
+            return self.reply(400, {"error": "bad request"})
         answers = {}
         for q in body.get("questions") or {}:
+
             if q in labels:
                 answers[q] = {"type": "choice", "choice": labels[q].get("choice"), "confidence": labels[q].get("confidence", 0.0)}
         self.reply(200, {"model": "laya", "answers": answers})
