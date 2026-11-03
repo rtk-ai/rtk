@@ -117,6 +117,10 @@ test_rewrite "npx prisma migrate" \
   "npx prisma migrate" \
   "rtk prisma migrate"
 
+test_rewrite "rtk git status" \
+  "rtk git status" \
+  "rtk git status"
+
 echo ""
 
 # ---- SECTION 2: Env var prefix handling (THE BIG FIX) ----
@@ -134,8 +138,8 @@ test_rewrite "env + git log" \
   "GIT_PAGER=cat rtk git log --oneline -10"
 
 test_rewrite "multi env + vitest" \
-  "NODE_ENV=test CI=1 npx vitest run" \
-  "NODE_ENV=test CI=1 rtk vitest run"
+  "NODE_ENV=test CI=1 npx vitest" \
+  "NODE_ENV=test CI=1 rtk vitest"
 
 test_rewrite "env + ls" \
   "LANG=C ls -la" \
@@ -143,7 +147,7 @@ test_rewrite "env + ls" \
 
 test_rewrite "env + npm run" \
   "NODE_ENV=test npm run test:e2e" \
-  "NODE_ENV=test rtk npm test:e2e"
+  "NODE_ENV=test rtk npm run test:e2e"
 
 test_rewrite "env + docker compose (unsupported subcommand, NOT rewritten)" \
   "COMPOSE_PROJECT_NAME=test docker compose up -d" \
@@ -159,23 +163,15 @@ echo ""
 echo "--- New patterns ---"
 test_rewrite "npm run test:e2e" \
   "npm run test:e2e" \
-  "rtk npm test:e2e"
+  "rtk npm run test:e2e"
 
 test_rewrite "npm run build" \
   "npm run build" \
-  "rtk npm build"
+  "rtk npm run build"
 
-test_rewrite "npm test" \
-  "npm test" \
-  "rtk npm test"
-
-test_rewrite "vue-tsc -b" \
-  "vue-tsc -b" \
-  "rtk tsc -b"
-
-test_rewrite "npx vue-tsc --noEmit" \
-  "npx vue-tsc --noEmit" \
-  "rtk tsc --noEmit"
+test_rewrite "npm jest run" \
+  "npm jest run" \
+  "rtk jest"
 
 test_rewrite "docker compose up -d (NOT rewritten — unsupported by rtk)" \
   "docker compose up -d" \
@@ -209,17 +205,17 @@ test_rewrite "docker exec -it db psql" \
   "docker exec -it db psql" \
   "rtk docker exec -it db psql"
 
-test_rewrite "find (NOT rewritten — different arg format)" \
+test_rewrite "find . -name '*.ts'" \
   "find . -name '*.ts'" \
-  ""
+  "rtk find . -name '*.ts'"
 
-test_rewrite "tree (NOT rewritten — different arg format)" \
+test_rewrite "tree src/" \
   "tree src/" \
-  ""
+  "rtk tree src/"
 
-test_rewrite "wget (NOT rewritten — different arg format)" \
+test_rewrite "wget https://example.com/file" \
   "wget https://example.com/file" \
-  ""
+  "rtk wget https://example.com/file"
 
 test_rewrite "gh api repos/owner/repo" \
   "gh api repos/owner/repo" \
@@ -281,32 +277,28 @@ echo ""
 echo "--- Vitest run dedup ---"
 test_rewrite "vitest (no args)" \
   "vitest" \
-  "rtk vitest run"
+  "rtk vitest"
 
-test_rewrite "vitest run (no double run)" \
+test_rewrite "vitest run (no run)" \
   "vitest run" \
-  "rtk vitest run"
+  "rtk vitest"
 
-test_rewrite "vitest run --reporter" \
-  "vitest run --reporter=verbose" \
-  "rtk vitest run --reporter=verbose"
+test_rewrite "vitest --reporter" \
+  "vitest --reporter=verbose" \
+  "rtk vitest --reporter=verbose"
 
-test_rewrite "npx vitest run" \
-  "npx vitest run" \
-  "rtk vitest run"
+test_rewrite "npx vitest" \
+  "npx vitest" \
+  "rtk vitest"
 
-test_rewrite "pnpm vitest run --coverage" \
-  "pnpm vitest run --coverage" \
-  "rtk vitest run --coverage"
+test_rewrite "pnpm vitest --coverage" \
+  "pnpm vitest --coverage" \
+  "rtk vitest --coverage"
 
 echo ""
 
 # ---- SECTION 5: Should NOT rewrite ----
 echo "--- Should NOT rewrite ---"
-test_rewrite "already rtk" \
-  "rtk git status" \
-  ""
-
 test_rewrite "heredoc" \
   "cat <<'EOF'
 hello
@@ -429,6 +421,43 @@ else
 fi
 
 echo ""
+
+# ---- SECTION: inherited RTK_REWRITE_HOST must not relax this hook ----
+# This hook turns exit 0 into an explicit allow, and RTK_REWRITE_HOST is the
+# channel that turns RTK's default ask into exit 0. An inherited value (a shell
+# rc, .envrc, or CI env) must therefore be scrubbed before the hook calls
+# `rtk rewrite`.
+if command -v rtk &>/dev/null; then
+  echo "--- Inherited host name (RTK_REWRITE_HOST) ---"
+  HOST_TMP=$(mktemp -d)
+  mkdir -p "$HOST_TMP/home/.config" "$HOST_TMP/claude" "$HOST_TMP/cache" "$HOST_TMP/project/.claude"
+  printf '{"permissions":{}}' >"$HOST_TMP/claude/settings.json"
+  host_input=$(jq -n --arg cmd "git status" '{"tool_name":"Bash","tool_input":{"command":$cmd}}')
+  host_output=$(
+    cd "$HOST_TMP/project" &&
+      echo "$host_input" |
+      HOME="$HOST_TMP/home" \
+        CLAUDE_CONFIG_DIR="$HOST_TMP/claude" \
+        XDG_CONFIG_HOME="$HOST_TMP/home/.config" \
+        XDG_CACHE_HOME="$HOST_TMP/cache" \
+        RTK_REWRITE_HOST=openclaw \
+        bash "$HOOK" 2>/dev/null
+  ) || true
+  TOTAL=$((TOTAL + 1))
+  host_decision=$(echo "$host_output" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)
+  host_cmd=$(echo "$host_output" | jq -r '.hookSpecificOutput.updatedInput.command // empty' 2>/dev/null)
+  if [ "$host_cmd" = "rtk git status" ] && [ "$host_decision" != "allow" ]; then
+    printf "  ${GREEN}PASS${RESET} host: inherited RTK_REWRITE_HOST does not auto-allow\n"
+    PASS=$((PASS + 1))
+  else
+    printf "  ${RED}FAIL${RESET} host: inherited RTK_REWRITE_HOST auto-allowed a rewrite\n"
+    printf "       expected: rtk git status with no permissionDecision\n"
+    printf "       actual:   %s (decision: %s)\n" "$host_cmd" "${host_decision:-none}"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$HOST_TMP"
+  echo ""
+fi
 
 # ---- SUMMARY ----
 echo "============================================"

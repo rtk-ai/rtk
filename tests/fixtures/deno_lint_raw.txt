@@ -1,0 +1,50 @@
+[0m[1m[31merror[no-var][0m: [0m[1m`var` keyword is not allowed.[0m
+ [0m[38;5;12m-->[0m [0m[36m/home/user/project/mod.ts[0m[0m[33m:2:3[0m
+ [0m[38;5;12m | [0m
+[0m[38;5;12m2 | [0m  var unused = 1;
+ [0m[38;5;12m | [0m  [0m[1m[31m^^^[0m
+
+  [0m[38;5;12mdocs[0m: https://docs.deno.com/lint/rules/no-var
+
+
+[0m[1m[31merror[no-unused-vars][0m: [0m[1m`unused` is never used[0m
+ [0m[38;5;12m-->[0m [0m[36m/home/user/project/mod.ts[0m[0m[33m:2:7[0m
+ [0m[38;5;12m | [0m
+[0m[38;5;12m2 | [0m  var unused = 1;
+ [0m[38;5;12m | [0m      [0m[1m[31m^^^^^^[0m
+  [0m[38;5;12m=[0m [0m[1mhint[0m: If this is intentional, prefix it with an underscore like `_unused`
+
+  [0m[38;5;12mdocs[0m: https://docs.deno.com/lint/rules/no-unused-vars
+
+
+[0m[1m[31merror[prefer-const][0m: [0m[1m`x` is never reassigned[0m
+ [0m[38;5;12m-->[0m [0m[36m/home/user/project/mod.ts[0m[0m[33m:3:7[0m
+ [0m[38;5;12m | [0m
+[0m[38;5;12m3 | [0m  let x: any = a;
+ [0m[38;5;12m | [0m      [0m[1m[31m^[0m
+  [0m[38;5;12m=[0m [0m[1mhint[0m: Use `const` instead
+
+  [0m[38;5;12mdocs[0m: https://docs.deno.com/lint/rules/prefer-const
+
+
+[0m[1m[31merror[no-explicit-any][0m: [0m[1m`any` type is not allowed[0m
+ [0m[38;5;12m-->[0m [0m[36m/home/user/project/mod.ts[0m[0m[33m:3:10[0m
+ [0m[38;5;12m | [0m
+[0m[38;5;12m3 | [0m  let x: any = a;
+ [0m[38;5;12m | [0m         [0m[1m[31m^^^[0m
+  [0m[38;5;12m=[0m [0m[1mhint[0m: Use a specific type other than `any`
+
+  [0m[38;5;12mdocs[0m: https://docs.deno.com/lint/rules/no-explicit-any
+
+
+[0m[1m[31merror[no-var][0m: [0m[1m`var` keyword is not allowed.[0m
+ [0m[38;5;12m-->[0m [0m[36m/home/user/project/mod.ts[0m[0m[33m:6:34[0m
+ [0m[38;5;12m | [0m
+[0m[38;5;12m6 | [0mexport function dup(a: number) { var t = a; return t; }
+ [0m[38;5;12m | [0m                                 [0m[1m[31m^^^[0m
+
+  [0m[38;5;12mdocs[0m: https://docs.deno.com/lint/rules/no-var
+
+
+Found 5 problems
+Checked 1 file

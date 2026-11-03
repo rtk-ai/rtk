@@ -1,0 +1,176 @@
+---
+title: What RTK Optimizes
+description: Commands and ecosystems automatically optimized by RTK
+sidebar:
+  order: 1
+---
+
+# What RTK Optimizes
+
+Once RTK is installed with a hook, these commands are automatically intercepted and filtered. You run them normally — the hook rewrites them transparently before execution.
+
+:::note
+RTK reduces **bash output bytes** — the only thing it controls. Those bytes are one contributor to input tokens, and input tokens are only part of a bill that also counts output tokens. See [How RTK Savings Work](./savings-explained.md).
+:::
+
+## Git
+
+| Command | What changes |
+|---------|--------------|
+| `git status` | Compact stat format, grouped by state |
+| `git log` | Hash + author + subject only |
+| `git diff` | Context reduced, headers stripped |
+| `git show` | Same as diff |
+| `git stash list` | Compact one-line per entry |
+| `git ls-tree --name-only` / `--name-status` | Consecutive paths grouped by directory; other formats pass through unchanged |
+
+For `ls-tree`, read `src/ lib.rs main.rs` as `src/lib.rs` and `src/main.rs`.
+`./` means no directory part in Git's output; omit that prefix to rebuild the
+original paths. Paths with spaces or Git C-quoting stand alone in
+double quotes; Git's escapes are preserved. Listings that would not shrink pass
+through unchanged. The hook keeps Git's original lines when you pipe a foldable
+listing into `head`, `tail`, or `cat`.
+
+## GitHub CLI
+
+| Command | What changes |
+|---------|--------------|
+| `gh pr view` | Removes ASCII art and verbose metadata |
+| `gh pr checks` | Status + name only, failures highlighted |
+| `gh run list` | Compact workflow run summary |
+| `gh issue view` | Body only, no decoration |
+
+## Graphite (Stacked PRs)
+
+| Command | What changes |
+|---------|--------------|
+| `gt log` | Stack summary only |
+| `gt status` | Current branch context |
+
+## Cargo / Rust
+
+| Command | What changes |
+|---------|--------------|
+| `cargo test` | Failures only, passed tests suppressed |
+| `cargo build` | Errors and warnings only |
+| `cargo check` | Errors and warnings only |
+| `cargo clippy` | Lint warnings grouped by file |
+
+## JavaScript / TypeScript
+
+| Command | What changes |
+|---------|--------------|
+| `jest` | Failures only |
+| `vitest` | Failures only |
+| `tsc` | Type errors grouped by file |
+| `eslint` | Violations grouped by rule |
+| `pnpm list` | Compact dependency tree |
+| `pnpm outdated` | Package + current + latest only |
+| `next build` | Route summary + errors only |
+| `ng build` | Compact Angular build tables; every bundle and diagnostic retained |
+| `prisma migrate` | Migration status only |
+| `playwright test` | Failures + trace links only |
+
+## Python
+
+| Command | What changes |
+|---------|--------------|
+| `pytest` | Failures only |
+| `ruff check` | Violations grouped by file |
+| `mypy` | Type errors grouped by file |
+| `pip install` | Installed packages only, progress stripped |
+
+## Go
+
+| Command | What changes |
+|---------|--------------|
+| `go test` | Failures only |
+| `golangci-lint run` | Violations grouped by file |
+| `go build` | Errors only |
+
+## Ruby
+
+| Command | What changes |
+|---------|--------------|
+| `rspec` | Failures only |
+| `rubocop` | Offenses grouped by file |
+| `rake test` | Test task output, failures highlighted |
+
+## .NET
+
+| Command | What changes |
+|---------|--------------|
+| `dotnet build` | Errors and warnings only |
+| `dotnet restore` | Restore summary, errors and warnings kept |
+
+## Docker / Kubernetes
+
+| Command | What changes |
+|---------|--------------|
+| `docker ps` | Essential columns (name, image, status, port) |
+| `docker images` | Name + tag + size only |
+| `docker logs` | Deduplicated, last N lines |
+| `docker compose ps` | Container status and ports |
+| `docker compose logs` | Deduplicated logs |
+| `docker compose build` | Build output, warnings and errors highlighted |
+| `kubectl get pods` | Name + status + restarts only |
+| `kubectl logs` | Deduplicated entries |
+
+## Build Tools
+
+| Command | What changes |
+|---------|--------------|
+| `make` | Errors and warnings highlighted, noise stripped |
+
+## Files and Search
+
+| Command | What changes |
+|---------|--------------|
+| `ls` | Tree format with file counts |
+| `find` | Tree format |
+| `grep` | Truncated lines, grouped by file |
+| `ast-grep` | Grouped by file, capped overflow; `--json` passes through |
+| `diff` | Context reduced |
+| `wc` | Compact counts |
+| `cat <file>` | Smart file reading via `rtk read` |
+| `head <file>` | First 10 lines via `rtk read --head-lines 10` |
+| `tail -n <N> <file>` | Last N lines via `rtk read --tail-lines <N>` |
+
+## Cloud and Infrastructure
+
+| Command | What changes |
+|---------|--------------|
+| `aws` | JSON condensed, relevant fields only |
+| `psql` | Query results without decoration |
+| `curl` | Response body only, headers stripped |
+| `helm list` | Release name, namespace, status, and chart columns |
+| `terraform plan` | Planned changes summary, resource diffs condensed |
+
+## Global flags
+
+These flags apply to all RTK commands and must come before the subcommand:
+
+| Flag | Description |
+|------|-------------|
+| `-v` / `--verbose` | Show filtering details on stderr (`-v`, `-vv`, `-vvv` for increasing detail) |
+
+```bash
+# Debug: see what RTK is doing
+rtk -vvv git status
+```
+
+## Commands that are not rewritten
+
+If a command isn't intercepted by the hook rules, RTK runs it through passthrough — the output reaches the LLM unchanged. You can explicitly track unsupported commands:
+
+```bash
+rtk bypass cargo run      # runs cargo run, tracks usage, no filtering
+```
+
+To check whether any command will be rewritten before running it:
+
+```bash
+rtk rewrite "<command>"   # prints the rewritten command, or exits 1 if left alone
+```
+
+To check which commands were missed opportunities: `rtk discover`.

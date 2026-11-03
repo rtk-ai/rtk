@@ -1,0 +1,29 @@
+[INFO] Scanning for projects...
+[INFO]
+[INFO] ----------------------< commons-cli:commons-cli >-----------------------
+[INFO] Building Apache Commons CLI 1.11.1-SNAPSHOT
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO]
+[INFO] --- compiler:3.15.0:compile (default-compile) @ commons-cli ---
+[INFO] Recompiling the module because of changed source code.
+[INFO] Compiling 37 source files with javac [debug release 8] to target/classes
+[INFO] -------------------------------------------------------------
+[ERROR] COMPILATION ERROR :
+[INFO] -------------------------------------------------------------
+[ERROR] src/main/java/org/apache/commons/cli/CompileBreaker.java:[21,16] cannot find symbol
+  symbol:   variable bar
+  location: class org.apache.commons.cli.CompileBreaker
+[INFO] 1 error
+[INFO] -------------------------------------------------------------
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  3.214 s
+[INFO] Finished at: 2026-05-21T15:02:31Z
+[INFO] ------------------------------------------------------------------------
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.15.0:compile (default-compile) on project commons-cli: Compilation failure
+[ERROR] /home/runner/commons-cli/src/main/java/org/apache/commons/cli/CompileBreaker.java:[21,16] cannot find symbol
+[ERROR]   symbol:   variable bar
+[ERROR]   location: class org.apache.commons.cli.CompileBreaker
+[ERROR] -> [Help 1]

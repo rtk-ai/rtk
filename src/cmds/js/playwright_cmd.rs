@@ -1,14 +1,17 @@
 //! Filters Playwright E2E test output to show only failures.
 
+use crate::core::shell::{display_args, with_args};
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{detect_package_manager, resolved_command, strip_ansi};
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Deserialize;
+use std::sync::LazyLock;
 
 use crate::parser::{
-    emit_degradation_warning, emit_passthrough_warning, truncate_passthrough, FormatMode,
-    OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
+    FormatMode, OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
+    emit_degradation_warning, emit_passthrough_warning, truncate_passthrough,
 };
 
 /// Matches real Playwright JSON reporter output (suites → specs → tests → results)
@@ -162,14 +165,10 @@ fn collect_test_results(
 
 /// Tier 2: Extract test statistics using regex (degraded mode)
 fn extract_playwright_regex(output: &str) -> Option<TestResult> {
-    lazy_static::lazy_static! {
-        static ref SUMMARY_RE: Regex = Regex::new(
-            r"(\d+)\s+(passed|failed|flaky|skipped)"
-        ).unwrap();
-        static ref DURATION_RE: Regex = Regex::new(
-            r"\((\d+(?:\.\d+)?)(ms|s|m)\)"
-        ).unwrap();
-    }
+    static SUMMARY_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(\d+)\s+(passed|failed|flaky|skipped)").unwrap());
+    static DURATION_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\((\d+(?:\.\d+)?)(ms|s|m)\)").unwrap());
 
     let clean_output = strip_ansi(output);
 
@@ -218,11 +217,8 @@ fn extract_playwright_regex(output: &str) -> Option<TestResult> {
 
 /// Extract failures using regex
 fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
-    lazy_static::lazy_static! {
-        static ref TEST_PATTERN: Regex = Regex::new(
-            r"[×✗]\s+.*?›\s+([^›]+\.spec\.[tj]sx?)"
-        ).unwrap();
-    }
+    static TEST_PATTERN: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"[×✗]\s+.*?›\s+([^›]+\.spec\.[tj]sx?)").unwrap());
 
     let mut failures = Vec::new();
 
@@ -285,16 +281,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: playwright {}", args.join(" "));
     }
 
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .context("Failed to run playwright (try: npm install -g playwright)")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
     // Parse output using PlaywrightParser
-    let parse_result = PlaywrightParser::parse(&stdout);
+    let parse_result = PlaywrightParser::parse(&result.stdout);
     let mode = FormatMode::from_verbosity(verbose);
 
     let filtered = match parse_result {
@@ -316,23 +309,15 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         }
     };
 
-    let exit_code = crate::core::utils::exit_code_from_output(&output, "playwright");
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "playwright", exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
+    let hint = crate::core::tee::tee_and_hint(&raw, "playwright", result.exit_code);
+    let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
 
-    timer.track(
-        &format!("playwright {}", args.join(" ")),
-        &format!("rtk playwright {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
+    let tracked = with_args("playwright", &display_args(args));
+    timer.track(&tracked, &format!("rtk {tracked}"), &raw, &shown);
 
     // Preserve exit code for CI/CD
-    if !output.status.success() {
-        return Ok(exit_code);
+    if !result.success() {
+        return Ok(result.exit_code);
     }
 
     Ok(0)

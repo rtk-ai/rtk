@@ -1,6 +1,7 @@
 ---
 model: haiku
 description: Check background cargo check status for a git worktree
+argument-hint: "<branch-name>"
 ---
 
 # Worktree Status Check

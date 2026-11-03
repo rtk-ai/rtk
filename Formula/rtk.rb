@@ -7,7 +7,7 @@ class Rtk < Formula
   desc "High-performance CLI proxy to minimize LLM token consumption"
   homepage "https://www.rtk-ai.app"
   version "0.1.0"
-  license "MIT"
+  license all_of: ["Apache-2.0", "BUSL-1.1"]
 
   on_macos do
     on_intel do

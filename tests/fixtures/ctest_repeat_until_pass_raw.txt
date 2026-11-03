@@ -1,0 +1,11 @@
+Test project /tmp/build
+    Start  1: pass_fast
+1/2 Test  #1: pass_fast ........................   Passed    0.00 sec
+    Start 12: flaky_case
+2/2 Test #12: flaky_case .......................***Failed    0.00 sec
+    Start 12: flaky_case
+    Test #12: flaky_case .......................   Passed    0.00 sec
+
+100% tests passed, 0 tests failed out of 2
+
+Total Test time (real) =   0.01 sec

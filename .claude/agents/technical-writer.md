@@ -28,7 +28,7 @@ Write for developers using RTK, not for yourself. Prioritize clarity with workin
 ## Key Actions RTK
 
 1. **Document CLI Commands**: Clear syntax, flags, examples with real output
-2. **Evidence Performance Claims**: Benchmark data supporting 60-90% token savings
+2. **Evidence Performance Claims**: Measured token savings (≥20% floor per filter)
 3. **Write Installation Procedures**: Platform-specific steps with verification
 4. **Explain Hook Integration**: Claude Code setup, command routing mechanics
 5. **Guide Filter Development**: Contribution workflow, testing patterns, quality standards
@@ -73,7 +73,7 @@ commit def5678 Fix bug Y
 **Methodology**:
 - Fixtures: Real command output from production environments
 - Measurement: Whitespace-based tokenization (`count_tokens()`)
-- Verification: Tests enforce ≥60% savings threshold
+- Verification: Tests enforce ≥20% savings threshold
 
 **Results by Filter**:
 
@@ -97,7 +97,7 @@ Range (min … max):     5.8 ms …   7.1 ms    100 runs
 # Run token accuracy tests
 cargo test test_token_savings
 
-# All tests should pass, enforcing ≥60% savings
+# All tests should pass, enforcing ≥20% savings
 ```
 ```
 
@@ -233,12 +233,11 @@ touch src/cmds/<ecosystem>/newcmd_cmd.rs
 ```rust
 // src/cmds/<ecosystem>/newcmd_cmd.rs
 use anyhow::{Context, Result};
-use lazy_static::lazy_static;
 use regex::Regex;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref PATTERN: Regex = Regex::new(r"pattern").unwrap();
-}
+static PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"pattern").unwrap());
 
 pub fn filter_newcmd(input: &str) -> Result<String> {
     // Filter logic
@@ -255,7 +254,7 @@ mod tests {
         let output = filter_newcmd(input).unwrap();
 
         let savings = calculate_savings(input, &output);
-        assert!(savings >= 60.0);
+        assert!(savings >= 20.0);
     }
 }
 ```
@@ -298,9 +297,9 @@ cargo fmt --all && cargo clippy --all-targets && cargo test --all
 
 ## Filter Quality Standards
 
-- **Token savings**: ≥60% verified in tests
+- **Token savings**: ≥20% verified in tests
 - **Startup time**: <10ms with `hyperfine`
-- **Lazy regex**: All patterns in `lazy_static!`
+- **Lazy regex**: Fixed, reused patterns use `LazyLock<Regex>`
 - **Error handling**: Fallback to raw command on failure
 - **Cross-platform**: Tested on macOS + Linux
 ```

@@ -1,0 +1,33 @@
+Starting 2 tests on Pixel_6_API_33(AVD) - 13
+Installing APK 'app-debug.apk' on 'Pixel_6_API_33(AVD) - 13'...
+Installing APK 'app-debug-androidTest.apk' on 'Pixel_6_API_33(AVD) - 13'...
+
+> Task :app:connectedDebugAndroidTest
+INSTRUMENTATION_STATUS: class=com.example.myapp.MainActivityTest
+INSTRUMENTATION_STATUS: current=1
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=2
+INSTRUMENTATION_STATUS: stream=
+INSTRUMENTATION_STATUS: test=exampleInstrumentedTest
+INSTRUMENTATION_STATUS_CODE: 1
+INSTRUMENTATION_STATUS: class=com.example.myapp.MainActivityTest
+INSTRUMENTATION_STATUS: current=1
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=2
+INSTRUMENTATION_STATUS: stream=
+.
+INSTRUMENTATION_STATUS: test=exampleInstrumentedTest
+INSTRUMENTATION_STATUS_CODE: 0
+com.example.myapp.MainActivityTest > exampleInstrumentedTest[Pixel_6_API_33(AVD) - 13] PASSED
+INSTRUMENTATION_STATUS: class=com.example.myapp.MainActivityTest
+INSTRUMENTATION_STATUS: current=2
+INSTRUMENTATION_STATUS: test=anotherTest
+INSTRUMENTATION_STATUS_CODE: 1
+com.example.myapp.MainActivityTest > anotherTest[Pixel_6_API_33(AVD) - 13] PASSED
+INSTRUMENTATION_STATUS_CODE: 0
+INSTRUMENTATION_RESULT: stream=
+Tests run: 2,  Failures: 0
+INSTRUMENTATION_CODE: -1
+
+BUILD SUCCESSFUL in 45s
+3 actionable tasks: 1 executed, 2 up-to-date

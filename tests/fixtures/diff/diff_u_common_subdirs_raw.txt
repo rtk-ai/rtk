@@ -1,0 +1,8 @@
+diff -u g1/c.txt g2/c.txt
+--- g1/c.txt	2026-09-07 09:10:28.655909600 -0400
++++ g2/c.txt	2026-09-07 09:10:28.655909600 -0400
+@@ -1,2 +1,2 @@
+ one
+-two
++TWO
+Common subdirectories: g1/sub and g2/sub

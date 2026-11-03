@@ -1,0 +1,33 @@
+[info] welcome to sbt 1.9.7 (Eclipse Adoptium Java 17.0.9)
+[info] loading settings for project root-build from plugins.sbt ...
+[info] loading project definition from /home/user/promotion/project
+[info] loading settings for project root from build.sbt ...
+[info] set current project to promotion (in build file:/home/user/promotion/)
+[info] Compiling 4 Scala sources to /home/user/promotion/target/scala-2.13/test-classes ...
+[info] PromotionServiceSpec:
+[info] A PromotionService
+[info]   - should apply discount when user is eligible
+[info]   - should not apply discount when user is ineligible *** FAILED ***
+[info]     org.mockito.exceptions.verification.WantedButNotInvoked:
+[info]     Wanted but not invoked:
+[info]     -> at com.example.promotion.PromotionServiceSpec.$anonfun$new$4(PromotionServiceSpec.scala:52)
+[info]     However, there were other interactions with this mock:
+[info]     -> at com.example.promotion.PromotionServiceSpec.$anonfun$new$3(PromotionServiceSpec.scala:45)
+[info]   - should calculate final price correctly *** FAILED ***
+[info]     org.mockito.exceptions.verification.TooManyActualInvocations:
+[info]     userRepository.findById(42L) wanted 1 time but was called 2 times.
+[info]     -> at com.example.promotion.PromotionServiceSpec.$anonfun$new$6(PromotionServiceSpec.scala:71)
+[info]   - should persist promotion result
+[info] UserRepositorySpec:
+[info] A UserRepository
+[info]   - should find user by id
+[info]   - should return None for missing user
+[info] Run completed in 6 seconds, 103 milliseconds.
+[info] Total number of tests run: 6
+[info] Suites: completed 2, aborted 0
+[info] Tests: succeeded 4, failed 2, canceled 0, ignored 0, pending 0
+[info] *** 2 TESTS FAILED ***
+[error] Failed tests:
+[error]   com.example.promotion.PromotionServiceSpec
+[error] (Test / test) sbt.TestsFailedException: Tests unsuccessful
+[error] Total time: 9 s, completed Apr 3, 2026 14:22:11

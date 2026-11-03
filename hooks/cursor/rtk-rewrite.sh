@@ -39,16 +39,33 @@ if [ -z "$CMD" ]; then
 fi
 
 # Delegate all rewrite logic to the Rust binary.
-# rtk rewrite exits 1 when there's no rewrite — hook passes through silently.
-REWRITTEN=$(rtk rewrite "$CMD" 2>/dev/null) || { echo '{}'; exit 0; }
-
-# No change — nothing to do.
-if [ "$CMD" = "$REWRITTEN" ]; then
+# Exit codes: 0 = allow rewrite, 1 = no rewrite (passthrough),
+#             2 = deny, 3 = ask.
+# Scrub RTK_REWRITE_HOST: that channel relaxes RTK's approval gate, and this
+# hook turns exit 0 into an explicit allow, so an inherited value (a shell rc,
+# .envrc, or CI env) must not reach it. Only the delegate that sets it may
+# rely on it.
+REWRITTEN=$(env -u RTK_REWRITE_HOST rtk rewrite "$CMD" 2>/dev/null)
+RC=$?
+if [ "$RC" -ne 0 ] && [ "$RC" -ne 3 ]; then
   echo '{}'
   exit 0
 fi
 
-jq -n --arg cmd "$REWRITTEN" '{
-  "permission": "allow",
+# No change — nothing to do.
+if [ -z "$REWRITTEN" ] || [ "$CMD" = "$REWRITTEN" ]; then
+  echo '{}'
+  exit 0
+fi
+
+# RC 3 = ask (not enforced by Cursor yet, but future-proof).
+PERMISSION="allow"
+if [ "$RC" -eq 3 ]; then
+  PERMISSION="ask"
+fi
+
+jq -n --arg cmd "$REWRITTEN" --arg perm "$PERMISSION" '{
+  "continue": true,
+  "permission": $perm,
   "updated_input": { "command": $cmd }
 }'

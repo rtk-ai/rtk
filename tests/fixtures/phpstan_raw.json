@@ -1,0 +1,380 @@
+{
+  "totals": {
+    "errors": 47,
+    "file_errors": 47
+  },
+  "files": {
+    "/var/www/project/app/Models/User.php": {
+      "errors": 6,
+      "messages": [
+        {
+          "message": "Property User::$id (int) does not accept null.",
+          "line": 15,
+          "ignorable": false,
+          "identifier": "property.nonObject",
+          "tip": "Use ?int if null is a valid value."
+        },
+        {
+          "message": "Property User::$email (string) does not accept null.",
+          "line": 18,
+          "ignorable": false,
+          "identifier": "property.nonObject",
+          "tip": null
+        },
+        {
+          "message": "Method User::find() has no return type specified.",
+          "line": 45,
+          "ignorable": true,
+          "identifier": "missingType.return",
+          "tip": "Add @return type annotation or declare the return type."
+        },
+        {
+          "message": "Call to an undefined method Illuminate\\Database\\Eloquent\\Model::unknownMethod().",
+          "line": 67,
+          "ignorable": false,
+          "identifier": "method.notFound",
+          "tip": null
+        },
+        {
+          "message": "Parameter #1 $id of method User::find() expects int, string given.",
+          "line": 89,
+          "ignorable": false,
+          "identifier": "argument.type",
+          "tip": null
+        },
+        {
+          "message": "Dead catch - Exception is never thrown in the try block.",
+          "line": 120,
+          "ignorable": true,
+          "identifier": "deadCode.catch",
+          "tip": null
+        }
+      ]
+    },
+    "/var/www/project/app/Http/Controllers/UserController.php": {
+      "errors": 5,
+      "messages": [
+        {
+          "message": "Parameter $request of method UserController::store() has no type specified.",
+          "line": 34,
+          "ignorable": false,
+          "identifier": "missingType.parameter",
+          "tip": null
+        },
+        {
+          "message": "Variable $user might not be defined.",
+          "line": 56,
+          "ignorable": false,
+          "identifier": "variable.undefined",
+          "tip": null
+        },
+        {
+          "message": "Binary operation '+' between string and int results in an error.",
+          "line": 78,
+          "ignorable": true,
+          "identifier": "binaryOp.invalid",
+          "tip": null
+        },
+        {
+          "message": "Unreachable statement - code above always terminates.",
+          "line": 95,
+          "ignorable": false,
+          "identifier": "deadCode.unreachable",
+          "tip": null
+        },
+        {
+          "message": "Result of method UserRepository::create() (void) is used.",
+          "line": 112,
+          "ignorable": false,
+          "identifier": "return.void",
+          "tip": null
+        }
+      ]
+    },
+    "/var/www/project/app/Services/AuthService.php": {
+      "errors": 4,
+      "messages": [
+        {
+          "message": "Method AuthService::login() should return User but returns User|null.",
+          "line": 23,
+          "ignorable": false,
+          "identifier": "return.type",
+          "tip": null
+        },
+        {
+          "message": "Comparison operation '>' between int<0, max> and 0 is always true.",
+          "line": 45,
+          "ignorable": true,
+          "identifier": "comparison.alwaysTrue",
+          "tip": null
+        },
+        {
+          "message": "Parameter #2 $password of function password_verify expects string, int given.",
+          "line": 67,
+          "ignorable": false,
+          "identifier": "argument.type",
+          "tip": null
+        },
+        {
+          "message": "Property AuthService::$logger is never read, only written.",
+          "line": 89,
+          "ignorable": true,
+          "identifier": "deadCode.property",
+          "tip": null
+        }
+      ]
+    },
+    "/var/www/project/app/Repositories/UserRepository.php": {
+      "errors": 3,
+      "messages": [
+        {
+          "message": "Access to an undefined property User::$unknownField.",
+          "line": 28,
+          "ignorable": false,
+          "identifier": "property.notFound",
+          "tip": null
+        },
+        {
+          "message": "Method UserRepository::all() should return Collection<User> but returns Collection.",
+          "line": 52,
+          "ignorable": false,
+          "identifier": "return.type",
+          "tip": "Specify the collection type parameter."
+        },
+        {
+          "message": "Instanceof between User and stdClass will always evaluate to false.",
+          "line": 78,
+          "ignorable": false,
+          "identifier": "instanceof.alwaysFalse",
+          "tip": null
+        }
+      ]
+    },
+    "/var/www/project/app/Http/Middleware/Authenticate.php": {
+      "errors": 2,
+      "messages": [
+        {
+          "message": "Method Authenticate::handle() has parameter $next with no type specified.",
+          "line": 19,
+          "ignorable": false,
+          "identifier": "missingType.parameter",
+          "tip": null
+        },
+        {
+          "message": "Negated boolean expression is always false.",
+          "line": 34,
+          "ignorable": true,
+          "identifier": "booleanNot.alwaysFalse",
+          "tip": null
+        }
+      ]
+    },
+    "/var/www/project/app/Console/Commands/SyncUsers.php": {
+      "errors": 3,
+      "messages": [
+        {
+          "message": "Method SyncUsers::handle() has no return type specified.",
+          "line": 22,
+          "ignorable": false,
+          "identifier": "missingType.return",
+          "tip": null
+        },
+        {
+          "message": "Variable $users might not be defined.",
+          "line": 45,
+          "ignorable": false,
+          "identifier": "variable.undefined",
+          "tip": null
+        },
+        {
+          "message": "Call to function array_map() with Closure and array|null will result in an error.",
+          "line": 67,
+          "ignorable": false,
+          "identifier": "argument.type",
+          "tip": null
+        }
+      ]
+    },
+    "/var/www/project/app/Events/UserRegistered.php": {
+      "errors": 2,
+      "messages": [
+        {
+          "message": "Property UserRegistered::$user has no type specified.",
+          "line": 12,
+          "ignorable": false,
+          "identifier": "missingType.property",
+          "tip": null
+        },
+        {
+          "message": "Call to an undefined method Illuminate\\Events\\Dispatcher::dispatch().",
+          "line": 30,
+          "ignorable": false,
+          "identifier": "method.notFound",
+          "tip": null
+        }
+      ]
+    },
+    "/var/www/project/app/Listeners/SendWelcomeEmail.php": {
+      "errors": 2,
+      "messages": [
+        {
+          "message": "Parameter $event of method SendWelcomeEmail::handle() has no type specified.",
+          "line": 18,
+          "ignorable": false,
+          "identifier": "missingType.parameter",
+          "tip": null
+        },
+        {
+          "message": "Variable $mailer might not be defined.",
+          "line": 35,
+          "ignorable": false,
+          "identifier": "variable.undefined",
+          "tip": null
+        }
+      ]
+    },
+    "/var/www/project/app/Policies/UserPolicy.php": {
+      "errors": 3,
+      "messages": [
+        {
+          "message": "Method UserPolicy::view() has no return type specified.",
+          "line": 25,
+          "ignorable": false,
+          "identifier": "missingType.return",
+          "tip": null
+        },
+        {
+          "message": "Method UserPolicy::create() has no return type specified.",
+          "line": 35,
+          "ignorable": false,
+          "identifier": "missingType.return",
+          "tip": null
+        },
+        {
+          "message": "Method UserPolicy::update() has no return type specified.",
+          "line": 45,
+          "ignorable": false,
+          "identifier": "missingType.return",
+          "tip": null
+        }
+      ]
+    },
+    "/var/www/project/app/Observers/UserObserver.php": {
+      "errors": 2,
+      "messages": [
+        {
+          "message": "Method UserObserver::created() has parameter $user with no type specified.",
+          "line": 14,
+          "ignorable": false,
+          "identifier": "missingType.parameter",
+          "tip": null
+        },
+        {
+          "message": "Method UserObserver::deleted() has parameter $user with no type specified.",
+          "line": 24,
+          "ignorable": false,
+          "identifier": "missingType.parameter",
+          "tip": null
+        }
+      ]
+    },
+    "/var/www/project/app/Providers/AuthServiceProvider.php": {
+      "errors": 2,
+      "messages": [
+        {
+          "message": "Method AuthServiceProvider::boot() has no return type specified.",
+          "line": 30,
+          "ignorable": false,
+          "identifier": "missingType.return",
+          "tip": null
+        },
+        {
+          "message": "Variable $gate might not be defined.",
+          "line": 45,
+          "ignorable": false,
+          "identifier": "variable.undefined",
+          "tip": null
+        }
+      ]
+    },
+    "/var/www/project/app/Jobs/ProcessPayment.php": {
+      "errors": 4,
+      "messages": [
+        {
+          "message": "Method ProcessPayment::handle() has no return type specified.",
+          "line": 35,
+          "ignorable": false,
+          "identifier": "missingType.return",
+          "tip": null
+        },
+        {
+          "message": "Property ProcessPayment::$amount has no type specified.",
+          "line": 18,
+          "ignorable": false,
+          "identifier": "missingType.property",
+          "tip": null
+        },
+        {
+          "message": "Variable $payment might not be defined.",
+          "line": 58,
+          "ignorable": false,
+          "identifier": "variable.undefined",
+          "tip": null
+        },
+        {
+          "message": "Call to an undefined method PaymentGateway::charge().",
+          "line": 72,
+          "ignorable": false,
+          "identifier": "method.notFound",
+          "tip": null
+        }
+      ]
+    },
+    "/var/www/project/app/Mail/WelcomeEmail.php": {
+      "errors": 2,
+      "messages": [
+        {
+          "message": "Method WelcomeEmail::build() has no return type specified.",
+          "line": 28,
+          "ignorable": false,
+          "identifier": "missingType.return",
+          "tip": null
+        },
+        {
+          "message": "Property WelcomeEmail::$user has no type specified.",
+          "line": 15,
+          "ignorable": false,
+          "identifier": "missingType.property",
+          "tip": null
+        }
+      ]
+    },
+    "/var/www/project/app/Http/Requests/StoreUserRequest.php": {
+      "errors": 3,
+      "messages": [
+        {
+          "message": "Method StoreUserRequest::rules() has no return type specified.",
+          "line": 18,
+          "ignorable": false,
+          "identifier": "missingType.return",
+          "tip": null
+        },
+        {
+          "message": "Method StoreUserRequest::authorize() has no return type specified.",
+          "line": 12,
+          "ignorable": false,
+          "identifier": "missingType.return",
+          "tip": null
+        },
+        {
+          "message": "Strict comparison using === between string and int will always evaluate to false.",
+          "line": 32,
+          "ignorable": false,
+          "identifier": "comparison.strict",
+          "tip": null
+        }
+      ]
+    }
+  },
+  "errors": []
+}

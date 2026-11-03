@@ -1,0 +1,30 @@
+Test Release v2.0
+alice_dev released this 3 days ago
+abc1234 - v2.0.0
+
+  ## What's Changed
+
+  - Added widget support
+  - Fixed authentication bug
+
+  ### Contributors
+
+  @alice_dev @bob_dev
+
+  --------
+
+  Image: logo → https://example.com/logo.png
+
+  <!-- internal tracking: PROJ-123 -->
+
+
+ASSETS
+There are no assets for this release
+SOURCES
+https://gitlab.example.com/acme/toolkit/-/archive/v2.0.0/toolkit-v2.0.0.zip
+https://gitlab.example.com/acme/toolkit/-/archive/v2.0.0/toolkit-v2.0.0.tar.gz
+https://gitlab.example.com/acme/toolkit/-/archive/v2.0.0/toolkit-v2.0.0.tar.bz2
+https://gitlab.example.com/acme/toolkit/-/archive/v2.0.0/toolkit-v2.0.0.tar
+
+
+View this release on GitLab at https://gitlab.example.com/acme/toolkit/-/releases/v2.0.0

@@ -1,0 +1,16 @@
+Les fichiers binaires g1/bin.dat et g2/bin.dat sont différents
+diff -ru g1/f.txt g2/f.txt
+--- g1/f.txt	2026-09-03 16:32:30.711562100 +0000
++++ g2/f.txt	2026-09-03 16:32:30.713933400 +0000
+@@ -1,2 +1,2 @@
+ a
+-b
++c
+Seulement dans g1: onlyleft.txt
+Seulement dans g2: onlyright.txt
+diff -ru g1/sub/deep.txt g2/sub/deep.txt
+--- g1/sub/deep.txt	2026-09-03 16:32:30.715596400 +0000
++++ g2/sub/deep.txt	2026-09-03 16:32:30.715596400 +0000
+@@ -1 +1 @@
+-x
++y

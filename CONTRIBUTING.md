@@ -13,7 +13,9 @@
 
 ## What is rtk?
 
-**rtk (Rust Token Killer)** is a coding agent proxy that cuts noise from command outputs. It filters and compresses CLI output before it reaches your LLM context, saving 60-90% of tokens on common operations. The vision is to make AI-assisted development faster and cheaper by eliminating unnecessary token consumption.
+**rtk (Rust Token Killer)** is a coding agent proxy that cuts noise from command outputs. It filters and compresses CLI output before it reaches your LLM context, so the agent reads less bash output on common operations.
+
+Every percentage in this repo measures **bash output**, not your bill: those bytes are one contributor to input tokens, and input tokens are only part of a cost that also counts output tokens. See [How RTK Savings Work](docs/guide/resources/savings-explained.md) before quoting any figure.
 
 ---
 
@@ -26,6 +28,7 @@
 | **Build** | New filters, new command support, new features (for core features, discuss with maintainers before) |
 | **Review** | Review open PRs, test changes locally, leave constructive feedback |
 | **Document** | Improve docs, clarify |
+| **Extend** | Write your own pipeline method as a Rust plugin — no core change needed. See the [Plugins guide](docs/guide/pipelines/plugins.md) (`rtk plugins new/build`) |
 ---
 
 ## Design Philosophy
@@ -38,7 +41,7 @@ When a user or LLM explicitly requests detailed output via flags (e.g., `git log
 
 Filters should be flag-aware: default output (no flags) gets aggressively compressed, but verbose/detailed flags should pass through more content. When in doubt, preserve correctness.
 
-> Example: `rtk cargo test` shows failures only (90% savings). But `rtk cargo test -- --nocapture` preserves all output because the user explicitly asked for it.
+> Example: `rtk cargo test` shows failures only. But `rtk cargo test -- --nocapture` preserves all output because the user explicitly asked for it.
 
 ### Transparency
 
@@ -46,17 +49,19 @@ The LLM doesn't know RTK is involved for which commands, hooks rewrite commands 
 
 Don't invent new output formats. Don't add RTK-specific headers or markers in the default output. The filtered output should be indistinguishable from "a shorter version of the real command."
 
+Enforce it with `guard::never_worse(raw, filtered)` — print and track the value it returns (use `runner::emit_guarded(filtered, hint, raw)` when appending a tee hint). It guarantees RTK never emits more tokens than the raw command, down to emitting nothing when the command produced nothing.
+
 ### Never Block
 
 If a filter fails, fall back to raw output. RTK should never prevent a command from executing or producing output. Better to pass through unfiltered than to error out. Same for hooks: exit 0 on all error paths so the agent's command runs unmodified.
 
-Every filter needs a fallback path. Every hook must handle malformed input gracefully.
+Every filter needs a fallback path. Every hook must handle malformed input gracefully. Truncation follows the same rule: capping output at N items is only acceptable if accompanied by a hint that lets the agent recover the hidden data.
 
 ### Zero Overhead
 
 <10ms startup. No async runtime. No config file I/O on the critical path. If developers perceive any delay, they'll disable RTK. Speed is the difference between adoption and abandonment.
 
-`lazy_static!` for all regex. No network calls. No disk reads in the hot path. Benchmark before/after with `hyperfine`.
+Use `LazyLock` statics for all regex. No network calls. No disk reads in the hot path. Benchmark before/after with `hyperfine`.
 
 ### Extensibility
 
@@ -69,7 +74,7 @@ If you want to submit a new core feature, this is an important point to watch.
 
 ### In Scope
 
-Commands that produce **text output** (typically 100+ tokens) and can be compressed **60%+** without losing essential information for the LLM.
+Commands that produce **text output** (typically 100+ tokens) whose bytes can be compressed **20%+** without losing essential information for the LLM. See [Correctness VS Token Savings](#correctness-vs-token-savings).
 
 - Test runners (vitest, pytest, cargo test, go test)
 - Linters and type checkers (eslint, ruff, tsc, mypy)
@@ -94,7 +99,7 @@ When implementing a new filter/cmds, be aware of the [Design Philosophy](#design
 | Use **TOML filter** when | Use **Rust module** when |
 |--------------------------|--------------------------|
 | Output is plain text with predictable line structure | Output is structured (JSON, NDJSON) |
-| Regex line filtering achieves 60%+ savings | Needs state machine parsing (e.g., pytest phases) |
+| Regex line filtering cuts 60%+ of the output bytes | Needs state machine parsing (e.g., pytest phases) |
 | No need to inject CLI flags | Needs to inject flags like `--format json` |
 | No cross-command routing | Routes to other commands (lint → ruff/mypy) |
 | Examples: brew, df, shellcheck, rsync, ping | Examples: vitest, pytest, golangci-lint, gh |
@@ -107,15 +112,50 @@ For the step-by-step checklist (create filter, register rewrite pattern, registe
 
 ---
 
+## Commit Messages & Changelog
+
+RTK uses [Conventional Commits](https://www.conventionalcommits.org/) and [release-please](https://github.com/googleapis/release-please) to **auto-generate CHANGELOG.md, version bumps, and GitHub releases**. Never edit `CHANGELOG.md` manually — it is fully managed by release-please from your commit messages.
+
+### Commit format
+
+```
+<type>(<scope>): <short description>
+```
+
+| Type | Semver Impact | When to Use |
+|------|---------------|-------------|
+| `feat` | Minor | New features, new filters, new command support |
+| `fix` | Patch | Bug fixes, corrections |
+| `perf` | Patch | Performance improvements |
+| `refactor` | — | Code restructuring (no changelog entry) |
+| `docs` | — | Documentation only |
+| `chore` | — | Maintenance, CI, deps |
+| `feat!` / `fix!` | Major | Breaking changes (add `!` after type) |
+
+**Scope** should match the module or area: `git`, `cargo`, `gh`, `hook`, `tracking`, `cicd`, etc.
+
+### Examples
+
+```
+feat(kubectl): add pod log filtering
+fix(git): preserve merge commit messages in log filter
+perf(cargo): lazy-compile clippy regex patterns
+feat!(hook): change rewrite config format
+```
+
+These commit messages directly become CHANGELOG entries when release-please creates a release PR. Write them as if they will be read by users.
+
+---
+
 ## Branch Naming Convention
 
 Git branch names cannot include spaces or colons, so we use slash-prefixed names. Pick the prefix that matches your change type and follow it with an optional scope and a short, kebab-case description.
 
-| Prefix | Semver Impact | When to Use |
-|--------|---------------|-------------|
-| `fix/` | Patch | Bug fixes, corrections, minor adjustments |
-| `feat/` | Minor | New features, new filters, new command support |
-| `chore/` | Major | Breaking changes, API changes, removed functionality |
+| Prefix | When to Use |
+|--------|-------------|
+| `fix/` | Bug fixes, corrections, minor adjustments |
+| `feat/` | New features, new filters, new command support |
+| `chore/` | CI/CD, deps, maintenance, breaking changes |
 
 Combine the prefix with a scope if it adds clarity (e.g. `git`, `kubectl`, `filter`, `tracking`, `config`) and finish with a descriptive slug: `fix/<scope>-<description>` or `feat/<description>`.
 
@@ -137,7 +177,7 @@ chore/release-pipeline-cleanup
 **For large features or refactors**, prefer multi-part PRs over one enormous PR. Split the work into logical, reviewable chunks that can each be merged independently. Examples:
 - feat(Part 1): Add data model and tests
 - feat(Part 2): Add CLI command and integration
-- feat(Part 3): Update documentation and CHANGELOG
+- feat(Part 3): Update documentation
 
 **Why**: Small, focused PRs are easier to review, safer to merge, and faster to ship. Large PRs slow down review, hide bugs, and increase merge conflict risk.
 
@@ -150,6 +190,13 @@ git pull origin develop
 git checkout -b feat/scope-your-clear-description
 ```
 
+Opt in once per clone so `git blame` skips the bulk-formatting commits listed in
+`.git-blame-ignore-revs` and reports whoever actually wrote each line:
+
+```bash
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
 ### 2. Make Your Changes
 
 **Respect the existing folder structure.** Place new files where similar files already live. Do not reorganize without prior discussion.
@@ -158,7 +205,7 @@ git checkout -b feat/scope-your-clear-description
 
 **No obvious comments.** Don't comment what the code already says. Comments should explain *why*, never *what* to avoid noise.
 
-**Large command files are expected.** Command modules (`*_cmd.rs`) contain the implementation, tests, and fixture in the same file. A big file is fine when it's self-contained for one command. This will be moved in the future.
+**Large command files are expected.** Command modules (`*_cmd.rs`) contain the implementation, tests, and fixture in the same file. A big file is fine when it's self-contained for one command.
 
 ### 3. Add Tests
 
@@ -166,15 +213,15 @@ Every change **must** include tests. See [Testing](#testing) below.
 
 ### 4. Add Documentation
 
-Every change **must** include documentation updates. See [Documentation](#documentation) below.
+Documentation updates are required for new filters, new features, and changes that affect already-documented behavior. Bug fixes and refactors typically don't need doc updates. See [Documentation](#documentation) below.
 
 ### Contributor License Agreement (CLA)
 
-All contributions require signing our [Contributor License Agreement (CLA)](CLA.md) before being merged.
+All contributions require signing our **Contributor License Agreement (CLA)** before being merged.
 
 By signing, you certify that:
 - You have authored 100% of the contribution, or have the necessary rights to submit it.
-- You grant **rtk-ai** and **rtk-ai Labs** a perpetual, worldwide, royalty-free license to use your contribution — including in commercial products such as **rtk Pro** — under the [Apache License 2.0](LICENSE).
+- You grant **RTK AI Labs** a perpetual, worldwide, royalty-free license to use your contribution — including in commercial products such as **rtk Pro**. A contribution to the `rtk` CLI is licensed under the [Apache License 2.0](LICENSE); a contribution to `engine/` or `proxy/` is licensed under [BUSL-1.1](engine/LICENSE), as those crates are (see [`engine/CONTRIBUTING.md`](engine/CONTRIBUTING.md)).
 - If your employer has rights over your work, you have obtained their permission.
 
 **This is automatic.** When you open a Pull Request, [CLA Assistant](https://cla-assistant.io) will post a comment asking you to sign. Click the link in that comment to sign with your GitHub account. You only need to sign once.
@@ -203,15 +250,15 @@ your branch --> develop (review + CI + integration testing) --> version branch -
 
 Every change **must** include tests. We follow **TDD (Red-Green-Refactor)**: write a failing test first, implement the minimum to pass, then refactor.
 
-For how to write tests (fixtures, snapshots, token savings verification), see [docs/contributing/TECHNICAL.md — Testing](docs/contributing/TECHNICAL.md#testing).
+For how to write tests (fixtures, snapshots, token savings verification), see [docs/contributing/TECHNICAL.md — Testing](docs/contributing/TECHNICAL.md#8-testing).
 
 ### Test Types
 
 | Type | Where | Run With |
 |------|-------|----------|
 | **Unit tests** | `#[cfg(test)] mod tests` in each module | `cargo test` |
-| **Snapshot tests** | `assert_snapshot!()` via `insta` crate | `cargo test` + `cargo insta review` |
-| **Smoke tests** | `scripts/test-all.sh` (69 assertions) | `bash scripts/test-all.sh` |
+| **Snapshot tests** | `#[cfg(test)]` create snapshots for filters modules | `cargo test` |
+| **Smoke tests** | `scripts/test-all.sh` | `bash scripts/test-all.sh` |
 | **Integration tests** | `#[ignore]` tests requiring installed binary | `cargo test --ignored` |
 
 ### Pre-Commit Gate (mandatory)
@@ -225,8 +272,9 @@ cargo fmt --all --check && cargo clippy --all-targets && cargo test
 ### PR Testing Checklist
 
 - [ ] Unit tests added/updated for changed code
-- [ ] Snapshot tests reviewed (`cargo insta review`)
-- [ ] Token savings >=60% verified
+- [ ] Snapshot tests for filters
+- [ ] >=20% reduction in bash output verified (measured with RTK's token estimator, not a real tokenizer)
+- [ ] Any truncated list has a recovery hint (`force_tee_tail_hint` or `force_tee_hint`) and uses a `CAP_*` from `src/core/truncate.rs`
 - [ ] Edge cases covered
 - [ ] `cargo fmt --all --check && cargo clippy --all-targets && cargo test` passes
 - [ ] Manual test: run `rtk <cmd>` and inspect output
@@ -235,17 +283,18 @@ cargo fmt --all --check && cargo clippy --all-targets && cargo test
 
 ## Documentation
 
-Every change **must** include documentation updates. Use this table to find which docs to update:
+Documentation updates are required for new filters, new features, and changes that affect already-documented behavior. Use this table to find which docs to update:
 
 | What you changed | Update these docs |
 |------------------|-------------------|
-| New Rust filter (`src/cmds/`) | Ecosystem `README.md` (e.g., `src/cmds/git/README.md`), [README.md](README.md) command list, [CHANGELOG.md](CHANGELOG.md) |
-| New TOML filter (`src/filters/`) | [src/filters/README.md](src/filters/README.md) if naming conventions change, [README.md](README.md) command list, [CHANGELOG.md](CHANGELOG.md) |
+| New Rust filter (`src/cmds/`) | Ecosystem `README.md` (e.g., `src/cmds/git/README.md`), [README.md](README.md) command list |
+| New TOML filter (`src/filters/`) | [src/filters/README.md](src/filters/README.md) if naming conventions change, [README.md](README.md) command list |
 | New rewrite pattern | `src/discover/rules.rs` — see [Adding a New Command Filter](src/cmds/README.md#adding-a-new-command-filter) |
 | Core infrastructure (`src/core/`) | [src/core/README.md](src/core/README.md), [docs/contributing/TECHNICAL.md](docs/contributing/TECHNICAL.md) if flow changes |
 | Hook system (`src/hooks/`) | [src/hooks/README.md](src/hooks/README.md), [hooks/README.md](hooks/README.md) for agent-facing docs |
 | Architecture or design change | [ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md), [docs/contributing/TECHNICAL.md](docs/contributing/TECHNICAL.md) |
-| Bug fix or breaking change | [CHANGELOG.md](CHANGELOG.md) |
+
+> **Note**: Do NOT edit `CHANGELOG.md` manually — it is auto-generated by [release-please](https://github.com/googleapis/release-please) from your commit messages. See [Commit Messages & Changelog](#commit-messages--changelog).
 
 **Navigation**: [CONTRIBUTING.md](CONTRIBUTING.md) (you are here) → [docs/contributing/TECHNICAL.md](docs/contributing/TECHNICAL.md) (architecture + flow) → each folder's `README.md` (implementation details).
 

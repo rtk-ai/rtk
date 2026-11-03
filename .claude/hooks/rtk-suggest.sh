@@ -85,22 +85,20 @@ elif echo "$FIRST_CMD" | grep -qE '^find\s+'; then
 elif echo "$FIRST_CMD" | grep -qE '^diff\s+'; then
   SUGGESTION=$(echo "$CMD" | sed 's/^diff /rtk diff /')
 elif echo "$FIRST_CMD" | grep -qE '^head\s+'; then
-  # Suggest rtk read with --max-lines transformation
+  # Suggest rtk read with --head-lines transformation
   if echo "$FIRST_CMD" | grep -qE '^head\s+-[0-9]+\s+'; then
     LINES=$(echo "$FIRST_CMD" | sed -E 's/^head +-([0-9]+) +.+$/\1/')
     FILE=$(echo "$FIRST_CMD" | sed -E 's/^head +-[0-9]+ +(.+)$/\1/')
-    SUGGESTION="rtk read $FILE --max-lines $LINES"
+    SUGGESTION="rtk read $FILE --head-lines $LINES"
   elif echo "$FIRST_CMD" | grep -qE '^head\s+--lines=[0-9]+\s+'; then
     LINES=$(echo "$FIRST_CMD" | sed -E 's/^head +--lines=([0-9]+) +.+$/\1/')
     FILE=$(echo "$FIRST_CMD" | sed -E 's/^head +--lines=[0-9]+ +(.+)$/\1/')
-    SUGGESTION="rtk read $FILE --max-lines $LINES"
+    SUGGESTION="rtk read $FILE --head-lines $LINES"
   fi
 
 # --- JS/TS tooling ---
-elif echo "$FIRST_CMD" | grep -qE '^(pnpm\s+)?vitest(\s|$)'; then
-  SUGGESTION="rtk vitest run"
-elif echo "$FIRST_CMD" | grep -qE '^pnpm\s+test(\s|$)'; then
-  SUGGESTION="rtk vitest run"
+elif echo "$FIRST_CMD" | grep -qE '^(pnpm\s+)?vitest(\s+run)?(\s|$)'; then
+  SUGGESTION="rtk vitest"
 elif echo "$FIRST_CMD" | grep -qE '^pnpm\s+tsc(\s|$)'; then
   SUGGESTION="rtk tsc"
 elif echo "$FIRST_CMD" | grep -qE '^(npx\s+)?tsc(\s|$)'; then
@@ -147,6 +145,6 @@ jq -n \
     "hookSpecificOutput": {
       "hookEventName": "PreToolUse",
       "permissionDecision": "allow",
-      "systemMessage": ("⚡ RTK available: `" + $suggestion + "` (60-90% token savings)")
+      "systemMessage": ("⚡ RTK available: `" + $suggestion + "` (token-optimized output)")
     }
   }'

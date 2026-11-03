@@ -1,0 +1,13 @@
+✘ [ERROR] TS2339: Property 'missingTitle' does not exist on type 'App'. [plugin angular-compiler]
+
+    /workspace/scratch/72640dd8823a/rtk-angular-fixture-work/fixture-app/src/app/app.html:1:15:
+      1 │ <header><h1>{{ missingTitle() }}</h1></header>
+        ╵                ~~~~~~~~~~~~
+
+  Error occurs in the template of component App.
+
+    /workspace/scratch/72640dd8823a/rtk-angular-fixture-work/fixture-app/src/app/app.ts:8:15:
+      8 │   templateUrl: './app.html',
+        ╵                ~~~~~~~~~~~~
+
+

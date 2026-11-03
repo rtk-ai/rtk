@@ -1,0 +1,15 @@
+Test project /tmp/build
+    Start 1: a
+1/9 Test #1: a ................................   Passed    0.00 sec
+    Start 2: b_fail
+2/9 Test #2: b_fail ...........................***Failed    0.00 sec
+REAL-EVIDENCE-b_fail-broke
+
+
+50% tests passed, 1 tests failed out of 2
+
+Total Test time (real) =   0.01 sec
+
+The following tests FAILED:
+	  2 - b_fail (Failed)
+Errors while running CTest

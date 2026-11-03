@@ -1,5 +1,7 @@
 //! Filters Prisma CLI output by stripping ASCII art and verbose decoration.
 
+use crate::core::guard::never_worse;
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::{Context, Result};
@@ -52,29 +54,26 @@ fn run_generate(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: prisma generate");
     }
 
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .context("Failed to run prisma generate (try: npm install -g prisma)")?;
 
-    let exit_code = crate::core::utils::exit_code_from_output(&output, "prisma");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    if !output.status.success() {
-        if !stdout.trim().is_empty() {
-            eprint!("{}", stdout);
+    if !result.success() {
+        if !result.stdout.trim().is_empty() {
+            eprint!("{}", result.stdout);
         }
-        if !stderr.trim().is_empty() {
-            eprint!("{}", stderr);
+        if !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
         }
         timer.track("prisma generate", "rtk prisma generate", &raw, &raw);
-        return Ok(exit_code);
+        return Ok(result.exit_code);
     }
 
     let filtered = filter_prisma_generate(&raw);
-    println!("{}", filtered);
-    timer.track("prisma generate", "rtk prisma generate", &raw, &filtered);
+    let shown = never_worse(&raw, &filtered);
+    println!("{}", shown);
+    timer.track("prisma generate", "rtk prisma generate", &raw, shown);
 
     Ok(0)
 }
@@ -111,22 +110,19 @@ fn run_migrate(subcommand: MigrateSubcommand, args: &[String], verbose: u8) -> R
         eprintln!("Running: {}", cmd_name);
     }
 
-    let output = cmd.output().context("Failed to run prisma migrate")?;
+    let result = exec_capture(&mut cmd).context("Failed to run prisma migrate")?;
 
-    let exit_code = crate::core::utils::exit_code_from_output(&output, "prisma");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    if !output.status.success() {
-        if !stdout.trim().is_empty() {
-            eprint!("{}", stdout);
+    if !result.success() {
+        if !result.stdout.trim().is_empty() {
+            eprint!("{}", result.stdout);
         }
-        if !stderr.trim().is_empty() {
-            eprint!("{}", stderr);
+        if !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
         }
         timer.track(cmd_name, &format!("rtk {}", cmd_name), &raw, &raw);
-        return Ok(exit_code);
+        return Ok(result.exit_code);
     }
 
     let filtered = match subcommand {
@@ -135,8 +131,9 @@ fn run_migrate(subcommand: MigrateSubcommand, args: &[String], verbose: u8) -> R
         MigrateSubcommand::Deploy => filter_migrate_deploy(&raw),
     };
 
-    println!("{}", filtered);
-    timer.track(cmd_name, &format!("rtk {}", cmd_name), &raw, &filtered);
+    let shown = never_worse(&raw, &filtered);
+    println!("{}", shown);
+    timer.track(cmd_name, &format!("rtk {}", cmd_name), &raw, shown);
 
     Ok(0)
 }
@@ -155,27 +152,25 @@ fn run_db_push(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: prisma db push");
     }
 
-    let output = cmd.output().context("Failed to run prisma db push")?;
+    let result = exec_capture(&mut cmd).context("Failed to run prisma db push")?;
 
-    let exit_code = crate::core::utils::exit_code_from_output(&output, "prisma");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    if !output.status.success() {
-        if !stdout.trim().is_empty() {
-            eprint!("{}", stdout);
+    if !result.success() {
+        if !result.stdout.trim().is_empty() {
+            eprint!("{}", result.stdout);
         }
-        if !stderr.trim().is_empty() {
-            eprint!("{}", stderr);
+        if !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
         }
         timer.track("prisma db push", "rtk prisma db push", &raw, &raw);
-        return Ok(exit_code);
+        return Ok(result.exit_code);
     }
 
     let filtered = filter_db_push(&raw);
-    println!("{}", filtered);
-    timer.track("prisma db push", "rtk prisma db push", &raw, &filtered);
+    let shown = never_worse(&raw, &filtered);
+    println!("{}", shown);
+    timer.track("prisma db push", "rtk prisma db push", &raw, shown);
 
     Ok(0)
 }
@@ -200,20 +195,21 @@ fn filter_prisma_generate(output: &str) -> String {
         }
 
         // Extract counts
-        if line.contains("model") && line.contains("generated") {
-            if let Some(num) = extract_number(line) {
-                models = num;
-            }
+        if line.contains("model")
+            && line.contains("generated")
+            && let Some(num) = extract_number(line)
+        {
+            models = num;
         }
-        if line.contains("enum") {
-            if let Some(num) = extract_number(line) {
-                enums = num;
-            }
+        if line.contains("enum")
+            && let Some(num) = extract_number(line)
+        {
+            enums = num;
         }
-        if line.contains("type") {
-            if let Some(num) = extract_number(line) {
-                types = num;
-            }
+        if line.contains("type")
+            && let Some(num) = extract_number(line)
+        {
+            types = num;
         }
 
         // Extract output path
@@ -250,13 +246,14 @@ fn filter_migrate_dev(output: &str) -> String {
 
     for line in output.lines() {
         // Extract migration name
-        if line.contains("migration") && line.contains("_") {
-            if let Some(pos) = line.find("202") {
-                let end = line[pos..]
-                    .find(|c: char| c.is_whitespace())
-                    .unwrap_or(line.len() - pos);
-                migration_name = line[pos..pos + end].to_string();
-            }
+        if line.contains("migration")
+            && line.contains("_")
+            && let Some(pos) = line.find("202")
+        {
+            let end = line[pos..]
+                .find(|c: char| c.is_whitespace())
+                .unwrap_or(line.len() - pos);
+            migration_name = line[pos..pos + end].to_string();
         }
 
         // Count changes
@@ -266,15 +263,15 @@ fn filter_migrate_dev(output: &str) -> String {
         if line.contains("ALTER TABLE") {
             tables_modified += 1;
         }
-        if line.contains("FOREIGN KEY") || line.contains("REFERENCES") {
-            if let Some(table) = extract_table_name(line) {
-                relations.push(table);
-            }
+        if (line.contains("FOREIGN KEY") || line.contains("REFERENCES"))
+            && let Some(table) = extract_table_name(line)
+        {
+            relations.push(table);
         }
-        if line.contains("CREATE INDEX") || line.contains("CREATE UNIQUE INDEX") {
-            if let Some(idx) = extract_index_name(line) {
-                indexes.push(idx);
-            }
+        if (line.contains("CREATE INDEX") || line.contains("CREATE UNIQUE INDEX"))
+            && let Some(idx) = extract_index_name(line)
+        {
+            indexes.push(idx);
         }
 
         if line.contains("applied") || line.contains("✓") {
@@ -286,7 +283,6 @@ fn filter_migrate_dev(output: &str) -> String {
 
     if !migration_name.is_empty() {
         result.push_str(&format!("Migration: {}\n", migration_name));
-        result.push_str("═══════════════════════════════════════\n");
     }
 
     result.push_str("Changes:\n");
@@ -320,11 +316,14 @@ fn filter_migrate_status(output: &str) -> String {
     for line in output.lines() {
         if line.contains("applied") {
             applied_count += 1;
-            if latest_migration.is_empty() && line.contains("202") {
-                if let Some(pos) = line.find("202") {
-                    let end = line[pos..].find(|c: char| c.is_whitespace()).unwrap_or(20);
-                    latest_migration = line[pos..pos + end].to_string();
-                }
+            if latest_migration.is_empty()
+                && line.contains("202")
+                && let Some(pos) = line.find("202")
+            {
+                let end = line[pos..]
+                    .find(|c: char| c.is_whitespace())
+                    .unwrap_or(line.len() - pos);
+                latest_migration = line[pos..pos + end].to_string();
             }
         }
         if line.contains("pending") || line.contains("unapplied") {
@@ -466,6 +465,21 @@ import { PrismaClient } from '@prisma/client'
         // Parser may not extract exact counts from this format, just check it doesn't crash
         assert!(!result.contains("Prisma schema loaded"));
         assert!(!result.contains("Start by importing"));
+    }
+
+    #[test]
+    fn test_filter_migrate_status_reads_a_timestamp_at_end_of_line() {
+        // The migration id ran to the end of the line, so there was no whitespace to find and
+        // the hardcoded fallback of 20 sliced past it -- a panic, which aborts in release and
+        // takes the user's whole command output with it.
+        let output = "Migration could not be applied at 2024-01-01T12:00:00";
+        let result = filter_migrate_status(output);
+        assert!(result.contains("2024-01-01T12:00:00"), "{result}");
+
+        // A multibyte character after the id must not split mid-char either.
+        let output = "1 migration applied 20240101_café";
+        let result = filter_migrate_status(output);
+        assert!(result.contains("20240101_café"), "{result}");
     }
 
     #[test]

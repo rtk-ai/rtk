@@ -1,0 +1,54 @@
+section_start:1711234567:prepare_executor[0K
+Running with gitlab-runner 16.9.0 (656c1943)
+  on runner-abc123 system ID: r_defGHI456
+Using Docker executor with image node:20-alpine ...
+Preparing the "docker" executor
+Using Docker executor with image node:20-alpine ...
+Running on runner-abc123-project-42-concurrent-0 via runner-host...
+section_end:1711234570:prepare_executor[0K
+section_start:1711234570:get_sources[0K
+Getting source from Git repository
+Fetching changes with git depth set to 20...
+Initialized empty Git repository in /builds/acme/toolkit/.git/
+Created fresh repository.
+Checking out abc12345 as main...
+Skipping Git submodules setup
+section_end:1711234575:get_sources[0K
+section_start:1711234575:download_artifacts[0K
+Downloading artifacts for build (job_id=98765)...
+Downloading artifacts from coordinator... ok  host=runner-host id=98765 responseStatus=200 OK token=abc123
+section_end:1711234578:download_artifacts[0K
+section_start:1711234578:build_script[0K
+$ npm ci
+added 847 packages in 12s
+$ npm run build
+> acme-toolkit@3.2.1 build
+> tsc && vite build
+[36;1mvite v5.2.0[0m building for production...
+[32m✓[0m 142 modules transformed.
+[33m⚠[0m Some chunks are larger than 500 kB after minification.
+dist/index.html              0.45 kB │ gzip:  0.29 kB
+dist/assets/main-a1b2c3.js  156.78 kB │ gzip: 48.23 kB
+dist/assets/style-d4e5f6.css  12.34 kB │ gzip:  3.45 kB
+[32m✓[0m built in 4.56s
+$ npm test
+> acme-toolkit@3.2.1 test
+> vitest run
+[32m✓[0m src/utils.test.ts (3 tests) 45ms
+[32m✓[0m src/api.test.ts (7 tests) 123ms
+[31m✗[0m src/auth.test.ts (2 tests) 67ms
+  FAIL  src/auth.test.ts > validateToken > should reject expired tokens
+    AssertionError: expected true to be false
+      at src/auth.test.ts:42:18
+Test Files  1 failed | 2 passed | 3 total
+Tests       1 failed | 11 passed | 12 total
+Duration    0.89s
+section_end:1711234600:build_script[0K
+section_start:1711234600:upload_artifacts[0K
+Uploading artifacts...
+Uploading artifacts as "archive" to coordinator... ok  id=98765 responseStatus=201 Created token=abc123
+section_end:1711234605:upload_artifacts[0K
+section_start:1711234605:cleanup_file_variables[0K
+Cleaning up project directory and file based variables
+section_end:1711234606:cleanup_file_variables[0K
+[31;1mERROR: Job failed: exit code 1[0m

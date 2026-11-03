@@ -1,6 +1,7 @@
 ---
 model: haiku
 description: Remove a specific worktree (directory + git reference + branch)
+argument-hint: "<branch-name>"
 ---
 
 # Remove Worktree

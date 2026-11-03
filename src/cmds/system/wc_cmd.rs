@@ -1,32 +1,42 @@
-/// Compact filter for `wc` — strips redundant paths and alignment padding.
-///
-/// Compression examples:
-/// - `wc file.py`     → `30L 96W 978B`
-/// - `wc -l file.py`  → `30`
-/// - `wc -w file.py`  → `96`
-/// - `wc -c file.py`  → `978`
-/// - `wc -l *.py`     → table with common path prefix stripped
+//! Compact filter for `wc` — strips redundant paths and alignment padding.
+//!
+//! Compression examples:
+//! - `wc file.py`     → `30L 96W 978B`
+//! - `wc -l file.py`  → `30`
+//! - `wc -w file.py`  → `96`
+//! - `wc -c file.py`  → `978`
+//! - `wc -l *.py`     → table with common path prefix stripped
+
 use crate::core::runner::{self, RunOptions};
-use crate::core::utils::resolved_command;
+use crate::core::shell::display_args;
+use crate::core::utils::{ChildArgExt, resolved_command};
 use anyhow::Result;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("wc");
-    for arg in args {
-        cmd.arg(arg);
-    }
+    cmd.child_args(args);
 
     if verbose > 0 {
         eprintln!("Running: wc {}", args.join(" "));
     }
 
     let mode = detect_mode(args);
+
+    // No file operands → wc reads from stdin. Forward rtk's stdin to the child
+    // so `cat file | rtk wc` counts the piped data instead of reporting zero.
+    let reads_stdin = !args.iter().any(|a| !a.starts_with('-'));
+    let opts = if reads_stdin {
+        RunOptions::stdout_only().inherit_stdin()
+    } else {
+        RunOptions::stdout_only()
+    };
+
     runner::run_filtered(
         cmd,
         "wc",
-        &args.join(" "),
+        &display_args(args),
         |stdout| filter_wc_output(stdout, &mode),
-        RunOptions::stdout_only(),
+        opts,
     )
 }
 

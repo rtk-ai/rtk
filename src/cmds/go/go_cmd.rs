@@ -1,8 +1,12 @@
 //! Filters Go command output — test results, build errors, vet warnings.
 
+use crate::core::guard::never_worse;
 use crate::core::runner;
+use crate::core::shell::{display_args, quote_word};
+use crate::core::stream::{CaptureResult, exec_capture, exec_capture_unguarded};
 use crate::core::tracking;
-use crate::core::utils::{exit_code_from_output, resolved_command, truncate};
+use crate::core::truncate::CAP_ERRORS;
+use crate::core::utils::{resolved_command, truncate};
 use crate::golangci_cmd;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -40,13 +44,25 @@ struct PackageResult {
     failed_tests: Vec<(String, Vec<String>)>, // (test_name, output_lines)
     package_failed: bool,                     // package-level failure (timeout, signal, etc.)
     package_fail_output: Vec<String>,         // output lines collected before the package fail
+    fuzz_summary: Option<String>,
+}
+
+fn forwarded_help(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
+    let mut forwarded = vec![OsString::from(subcommand)];
+    forwarded.extend(args.iter().map(OsString::from));
+    crate::core::runner::run_passthrough("go", &forwarded, verbose)
 }
 
 pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
+    if crate::core::runner::requests_help_args("go", args) {
+        return forwarded_help("test", args, verbose);
+    }
     let mut cmd = resolved_command("go");
     cmd.arg("test");
 
-    if !args.iter().any(|a| a == "-json") {
+    let skip_json = args.iter().any(|a| a == "-json" || a.starts_with("-bench"));
+
+    if !skip_json {
         cmd.arg("-json");
     }
 
@@ -55,19 +71,32 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     if verbose > 0 {
-        eprintln!("Running: go test -json {}", args.join(" "));
+        eprintln!(
+            "Running: go test {}{}",
+            if !skip_json { "-json " } else { "" },
+            args.join(" ")
+        );
     }
+
+    let filter: fn(&str) -> String = if skip_json {
+        |s: &str| s.to_string()
+    } else {
+        filter_go_test_json
+    };
 
     runner::run_filtered(
         cmd,
         "go test",
-        &args.join(" "),
-        filter_go_test_json,
+        &display_args(args),
+        filter,
         crate::core::runner::RunOptions::stdout_only().tee("go_test"),
     )
 }
 
 pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
+    if crate::core::runner::requests_help_args("go", args) {
+        return forwarded_help("build", args, verbose);
+    }
     let mut cmd = resolved_command("go");
     cmd.arg("build");
 
@@ -79,16 +108,19 @@ pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: go build {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_filtered_with_exit(
         cmd,
         "go build",
-        &args.join(" "),
-        filter_go_build,
+        &display_args(args),
+        filter_go_build_with_exit,
         crate::core::runner::RunOptions::with_tee("go_build"),
     )
 }
 
 pub fn run_vet(args: &[String], verbose: u8) -> Result<i32> {
+    if crate::core::runner::requests_help_args("go", args) {
+        return forwarded_help("vet", args, verbose);
+    }
     let mut cmd = resolved_command("go");
     cmd.arg("vet");
 
@@ -103,7 +135,7 @@ pub fn run_vet(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "go vet",
-        &args.join(" "),
+        &display_args(args),
         filter_go_vet,
         crate::core::runner::RunOptions::with_tee("go_vet"),
     )
@@ -135,44 +167,36 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
         eprintln!("Running: go {} ...", subcommand);
     }
 
-    let output = cmd
-        .output()
-        .with_context(|| format!("Failed to run go {}", subcommand))?;
+    let captured =
+        exec_capture(&mut cmd).with_context(|| format!("Failed to run go {}", subcommand))?;
+    let raw = format!("{}\n{}", captured.stdout, captured.stderr);
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    print!("{}", captured.stdout);
+    eprint!("{}", captured.stderr);
 
-    print!("{}", stdout);
-    eprint!("{}", stderr);
-
+    let label = format!("go {}", quote_word(&subcommand));
     timer.track(
-        &format!("go {}", subcommand),
-        &format!("rtk go {}", subcommand),
+        &label,
+        &format!("rtk {label}"),
         &raw,
         &raw, // No filtering for unsupported commands
     );
 
-    Ok(exit_code_from_output(&output, "go"))
+    Ok(captured.exit_code)
 }
 
 /// Detect golangci-lint major version when invoked via `go tool`.
 /// Returns 1 on any failure (safe fallback — v1 behaviour).
 fn detect_go_tool_golangci_version() -> u32 {
-    let output = resolved_command("go")
-        .arg("tool")
-        .arg("golangci-lint")
-        .arg("--version")
-        .output();
+    let mut cmd = resolved_command("go");
+    cmd.arg("tool").arg("golangci-lint").arg("--version");
 
-    match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            let version_text = if stdout.trim().is_empty() {
-                &*stderr
+    match exec_capture_unguarded(&mut cmd) {
+        Ok(captured) => {
+            let version_text = if captured.stdout.trim().is_empty() {
+                &captured.stderr
             } else {
-                &*stdout
+                &captured.stdout
             };
             golangci_cmd::parse_major_version(version_text)
         }
@@ -207,12 +231,11 @@ impl GoTool {
 
 /// If the first arg is `tool` identify if it is a tool we already handle.
 fn match_go_tool(args: &[OsString]) -> Option<(GoTool, &[OsString])> {
-    if args.first().map(|a| a == "tool").unwrap_or(false) {
-        if let Some(tool_arg) = args.get(1) {
-            if let Some(tool) = GoTool::from_name(&tool_arg.to_string_lossy()) {
-                return Some((tool, &args[2..]));
-            }
-        }
+    if args.first().map(|a| a == "tool").unwrap_or(false)
+        && let Some(tool_arg) = args.get(1)
+        && let Some(tool) = GoTool::from_name(&tool_arg.to_string_lossy())
+    {
+        return Some((tool, &args[2..]));
     }
     None
 }
@@ -251,12 +274,11 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         }
     }
 
-    let output = cmd
-        .output()
-        .context("Failed to run go tool golangci-lint")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let CaptureResult {
+        stdout,
+        stderr,
+        exit_code,
+    } = exec_capture(&mut cmd).context("Failed to run go tool golangci-lint")?;
     let raw = format!("{}\n{}", stdout, stderr);
 
     // v2 outputs JSON on first line + trailing text; v1 outputs just JSON
@@ -267,7 +289,8 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
     };
 
     let filtered = golangci_cmd::filter_golangci_json(json_output, version);
-    println!("{}", filtered);
+    let shown = never_worse(&raw, &filtered);
+    println!("{}", shown);
 
     if !stderr.trim().is_empty() && verbose > 0 {
         eprintln!("{}", stderr.trim());
@@ -277,17 +300,162 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         "go tool golangci-lint",
         "rtk go tool golangci-lint",
         &raw,
-        &filtered,
+        shown,
     );
 
-    let exit_code = exit_code_from_output(&output, "go tool golangci-lint");
     // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
     // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL)
     Ok(if exit_code == 1 { 0 } else { exit_code })
 }
 
+fn is_pipe_test_action(action: &str) -> bool {
+    matches!(
+        action,
+        "start" | "run" | "pause" | "cont" | "pass" | "bench" | "fail" | "output" | "skip"
+    )
+}
+
+fn pipe_event(line: &str) -> Option<GoTestEvent> {
+    let event: GoTestEvent = serde_json::from_str(line).ok()?;
+    let supported = match event.action.as_str() {
+        "build-output" => event.import_path.is_some() && event.output.is_some(),
+        "build-fail" => event.import_path.is_some(),
+        action => is_pipe_test_action(action) && (action != "output" || event.output.is_some()),
+    };
+    if supported
+        && is_pipe_test_action(&event.action)
+        && event.package.is_none()
+        && event.test.is_none()
+        && event.output.is_none()
+    {
+        // Package-less lifecycle records can contain just Action/Time/Elapsed.
+        // Unknown fields on a metadata-only log must not lose their diagnostics
+        // merely because the log uses the same verb or timestamp as test2json.
+        let fields: serde_json::Map<String, serde_json::Value> = serde_json::from_str(line).ok()?;
+        if fields
+            .keys()
+            .any(|key| !matches!(key.as_str(), "Action" | "Time" | "Elapsed"))
+        {
+            return None;
+        }
+    }
+    supported.then_some(event)
+}
+
+fn pipe_test_evidence(event: &GoTestEvent) -> bool {
+    // test2json may omit both Package and Time. Bare lifecycle records are
+    // accepted within a stream, but a lone {"Action":"pass"} is not evidence.
+    is_pipe_test_action(&event.action)
+        && (event.package.is_some()
+            || event.test.is_some()
+            || event.time.is_some()
+            || event.output.is_some()
+            || event.elapsed.is_some())
+}
+
+fn pipe_event_line(index: usize, line: &str) -> &str {
+    if index == 0 {
+        line.strip_prefix('\u{feff}').unwrap_or(line).trim()
+    } else {
+        line.trim()
+    }
+}
+
+/// Auto-detect only a leading Go stream, not events quoted inside other text.
+/// Cold-cache downloads may precede events; arbitrary prose, Markdown fences and
+/// diff headers must instead keep the whole input on the lossless fallback path.
+/// Build events alone are not a test report and must retain their diagnostics.
+pub(crate) fn is_go_test_json(input: &str) -> bool {
+    for (index, line) in input.lines().enumerate() {
+        let line = pipe_event_line(index, line);
+        if line.is_empty() || line.starts_with("go: downloading ") {
+            continue;
+        }
+        let Some(event) = pipe_event(line) else {
+            return false;
+        };
+        if pipe_test_evidence(&event) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Reduce piped test events while retaining unrelated or unrecognized records.
+/// This adapter deliberately leaves the runner's reducer and completeness
+/// semantics unchanged; a partial stream still reports only the events seen.
+pub(crate) fn filter_go_test_pipe(input: &str) -> String {
+    let records: Vec<_> = input
+        .split_inclusive('\n')
+        .enumerate()
+        .map(|(index, raw)| {
+            let line = pipe_event_line(index, raw);
+            (raw, line, pipe_event(line))
+        })
+        .collect();
+    if !records
+        .iter()
+        .any(|(_, _, event)| event.as_ref().is_some_and(pipe_test_evidence))
+    {
+        return input.to_string();
+    }
+
+    // The reducer renders build output only for a matching package-level fail.
+    // Unmatched build records must not disappear beside otherwise valid tests.
+    let mut failed_packages = std::collections::HashSet::new();
+    let repeated_build_failure = records
+        .iter()
+        .filter_map(|(_, _, event)| event.as_ref())
+        .filter(|event| {
+            event.action == "fail" && event.test.is_none() && event.failed_build.is_some()
+        })
+        .any(|event| !failed_packages.insert(event.package.as_deref().unwrap_or("unknown")));
+    let mut represented_builds: HashMap<_, _> = records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, _, event))| event.as_ref().map(|event| (index, event)))
+        .filter(|(_, event)| event.action == "fail" && event.test.is_none())
+        .filter_map(|(index, event)| event.failed_build.as_deref().map(|path| (path, index)))
+        .collect();
+    // A later build failure for the same package can replace earlier errors in
+    // the reducer. Retain all build records when that representation is lossy.
+    if repeated_build_failure {
+        represented_builds.clear();
+    }
+    let mut events = String::new();
+    let mut residual = String::new();
+    let mut has_residual = false;
+    for (index, (raw, line, event)) in records.iter().enumerate() {
+        let consumed = event.as_ref().is_some_and(|event| {
+            if matches!(event.action.as_str(), "build-output" | "build-fail") {
+                event.import_path.as_deref().is_some_and(|path| {
+                    represented_builds
+                        .get(path)
+                        .is_some_and(|fail_index| index < *fail_index)
+                })
+            } else {
+                true
+            }
+        });
+        if consumed {
+            events.push_str(line);
+            events.push('\n');
+        } else {
+            // This also keeps CRLF and an unterminated final fragment intact.
+            residual.push_str(raw);
+            has_residual |= !line.is_empty();
+        }
+    }
+    let mut shown = filter_go_test_json(&events);
+    if has_residual {
+        shown.push('\n');
+        shown.push_str(&residual);
+    }
+    shown
+}
+
 /// Parse go test -json output (NDJSON format)
-fn filter_go_test_json(output: &str) -> String {
+pub(crate) fn filter_go_test_json(output: &str) -> String {
     let mut packages: HashMap<String, PackageResult> = HashMap::new();
     let mut current_test_output: HashMap<(String, String), Vec<String>> = HashMap::new(); // (package, test) -> outputs
     let mut build_output: HashMap<String, Vec<String>> = HashMap::new(); // import_path -> error lines
@@ -329,10 +497,8 @@ fn filter_go_test_json(output: &str) -> String {
         let pkg_result = packages.entry(package.clone()).or_default();
 
         match event.action.as_str() {
-            "pass" => {
-                if event.test.is_some() {
-                    pkg_result.pass += 1;
-                }
+            "pass" if event.test.is_some() => {
+                pkg_result.pass += 1;
             }
             "fail" => {
                 if let Some(test) = &event.test {
@@ -347,10 +513,10 @@ fn filter_go_test_json(output: &str) -> String {
                     // Package-level build failure
                     pkg_result.build_failed = true;
                     // Collect build errors from the import path
-                    if let Some(import_path) = &event.failed_build {
-                        if let Some(errors) = build_output.remove(import_path) {
-                            pkg_result.build_errors = errors;
-                        }
+                    if let Some(import_path) = &event.failed_build
+                        && let Some(errors) = build_output.remove(import_path)
+                    {
+                        pkg_result.build_errors = errors;
                     }
                 } else {
                     // Package-level failure without a specific test or build error
@@ -358,14 +524,16 @@ fn filter_go_test_json(output: &str) -> String {
                     pkg_result.package_failed = true;
                 }
             }
-            "skip" => {
-                if event.test.is_some() {
-                    pkg_result.skip += 1;
-                }
+            "skip" if event.test.is_some() => {
+                pkg_result.skip += 1;
             }
             "output" => {
                 if let Some(output_text) = &event.output {
                     if let Some(test) = &event.test {
+                        // Keep the package's last fuzz progress line: Go prints the final stats there
+                        if output_text.starts_with("fuzz: elapsed:") {
+                            pkg_result.fuzz_summary = Some(output_text.trim_end().to_string());
+                        }
                         // Collect output for current test
                         let key = (package.clone(), test.clone());
                         current_test_output
@@ -405,6 +573,14 @@ fn filter_go_test_json(output: &str) -> String {
         return "Go test: No tests found".to_string();
     }
 
+    let total_fuzz = packages
+        .values()
+        .filter(|p| p.fuzz_summary.is_some())
+        .count();
+    if !has_failures && total_fuzz > 0 {
+        return format_fuzz_summary(&packages, total_pass, total_fuzz);
+    }
+
     if !has_failures {
         return format!(
             "Go test: {} passed in {} packages",
@@ -422,7 +598,6 @@ fn filter_go_test_json(output: &str) -> String {
         result.push_str(&format!(", {} skipped", total_skip));
     }
     result.push_str(&format!(" in {} packages\n", total_packages));
-    result.push_str("═══════════════════════════════════════\n");
 
     // Show package-level failures first (timeouts, signals, panics).
     // Skip packages that already have individual test-level failures — those are displayed
@@ -487,6 +662,32 @@ fn filter_go_test_json(output: &str) -> String {
     result.trim().to_string()
 }
 
+fn format_fuzz_summary(
+    packages: &HashMap<String, PackageResult>,
+    total_pass: usize,
+    total_fuzz: usize,
+) -> String {
+    let mut result = format!(
+        "Go test: {} passed, {} fuzz in {} packages\n",
+        total_pass,
+        total_fuzz,
+        packages.len()
+    );
+    let mut fuzzed: Vec<(&String, &String)> = packages
+        .iter()
+        .filter_map(|(pkg, r)| r.fuzz_summary.as_ref().map(|s| (pkg, s)))
+        .collect();
+    fuzzed.sort();
+    for (package, summary) in fuzzed {
+        result.push_str(&format!(
+            "{}\n  {}\n",
+            compact_package_name(package),
+            summary
+        ));
+    }
+    result.trim().to_string()
+}
+
 fn select_go_test_failure_lines(outputs: &[String]) -> Vec<String> {
     let mut relevant = Vec::new();
     let mut keep_next_context_line = false;
@@ -518,15 +719,15 @@ fn select_go_test_failure_lines(outputs: &[String]) -> Vec<String> {
         }
     }
 
-    if relevant.is_empty() {
-        if let Some(line) = outputs.iter().map(|line| line.trim()).find(|line| {
+    if relevant.is_empty()
+        && let Some(line) = outputs.iter().map(|line| line.trim()).find(|line| {
             !line.is_empty()
                 && !line.starts_with("=== RUN")
                 && !line.starts_with("--- FAIL")
                 && !line.starts_with("--- PASS")
-        }) {
-            relevant.push(line.to_string());
-        }
+        })
+    {
+        relevant.push(line.to_string());
     }
 
     relevant
@@ -561,7 +762,11 @@ fn is_go_test_failure_line(line: &str) -> bool {
 }
 
 /// Filter go build output - show only errors
-fn filter_go_build(output: &str) -> String {
+pub(crate) fn filter_go_build(output: &str) -> String {
+    filter_go_build_with_exit(output, 0)
+}
+
+fn filter_go_build_with_exit(output: &str, exit_code: i32) -> String {
     let mut errors: Vec<String> = Vec::new();
 
     for line in output.lines() {
@@ -572,19 +777,63 @@ fn filter_go_build(output: &str) -> String {
     }
 
     if errors.is_empty() {
-        return "Go build: Success".to_string();
+        return if exit_code == 0 {
+            "Go build: Success".to_string()
+        } else {
+            format_go_build_failure(output, exit_code)
+        };
     }
 
     let mut result = String::new();
     result.push_str(&format!("Go build: {} errors\n", errors.len()));
-    result.push_str("═══════════════════════════════════════\n");
 
-    for (i, error) in errors.iter().take(20).enumerate() {
+    const MAX_GO_BUILD_ERRORS: usize = CAP_ERRORS;
+    for (i, error) in errors.iter().take(MAX_GO_BUILD_ERRORS).enumerate() {
         result.push_str(&format!("{}. {}\n", i + 1, truncate(error, 120)));
     }
 
-    if errors.len() > 20 {
-        result.push_str(&format!("\n... +{} more errors\n", errors.len() - 20));
+    if errors.len() > MAX_GO_BUILD_ERRORS {
+        result.push_str(&format!(
+            "\n… +{} more errors\n",
+            errors.len() - MAX_GO_BUILD_ERRORS
+        ));
+        let all_errors = errors.join("\n");
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_errors, "go-build", MAX_GO_BUILD_ERRORS + 1)
+        {
+            result.push_str(&format!("  {}\n", hint));
+        }
+    }
+
+    result.trim().to_string()
+}
+
+fn format_go_build_failure(output: &str, exit_code: i32) -> String {
+    let lines: Vec<String> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    if lines.is_empty() {
+        return format!("Go build: failed (exit {})", exit_code);
+    }
+
+    let mut result = String::new();
+    result.push_str(&format!("Go build: failed (exit {})\n", exit_code));
+    result.push_str("═══════════════════════════════════════\n");
+
+    const MAX_GO_BUILD_ERRORS: usize = CAP_ERRORS;
+    for (i, line) in lines.iter().take(MAX_GO_BUILD_ERRORS).enumerate() {
+        result.push_str(&format!("{}. {}\n", i + 1, truncate(line, 120)));
+    }
+
+    if lines.len() > MAX_GO_BUILD_ERRORS {
+        result.push_str(&format!(
+            "\n… +{} more output lines\n",
+            lines.len() - MAX_GO_BUILD_ERRORS
+        ));
     }
 
     result.trim().to_string()
@@ -614,9 +863,7 @@ fn is_go_build_error_line(line: &str) -> bool {
 
     // Canonical compiler/config error locations: file:line:col: ...
     let is_go_config_location = !lower.starts_with("go: ")
-        && (lower.contains("go.mod:")
-            || lower.contains("go.work:")
-            || lower.contains("go.sum:"));
+        && (lower.contains("go.mod:") || lower.contains("go.work:") || lower.contains("go.sum:"));
     if trimmed.contains(".go:") || is_go_config_location {
         return true;
     }
@@ -634,6 +881,7 @@ fn is_go_build_error_line(line: &str) -> bool {
         "go: build failed",
         "go: error ",
         "error: ",
+        "pattern ",
         "go: updates to go.mod needed",
         "go: inconsistent vendoring",
         "no go files in ",
@@ -666,14 +914,23 @@ fn filter_go_vet(output: &str) -> String {
 
     let mut result = String::new();
     result.push_str(&format!("Go vet: {} issues\n", issues.len()));
-    result.push_str("═══════════════════════════════════════\n");
 
-    for (i, issue) in issues.iter().take(20).enumerate() {
+    const MAX_GO_VET_ISSUES: usize = CAP_ERRORS;
+    for (i, issue) in issues.iter().take(MAX_GO_VET_ISSUES).enumerate() {
         result.push_str(&format!("{}. {}\n", i + 1, truncate(issue, 120)));
     }
 
-    if issues.len() > 20 {
-        result.push_str(&format!("\n... +{} more issues\n", issues.len() - 20));
+    if issues.len() > MAX_GO_VET_ISSUES {
+        result.push_str(&format!(
+            "\n… +{} more issues\n",
+            issues.len() - MAX_GO_VET_ISSUES
+        ));
+        let all_issues = issues.join("\n");
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_issues, "go-vet", MAX_GO_VET_ISSUES + 1)
+        {
+            result.push_str(&format!("  {}\n", hint));
+        }
     }
 
     result.trim().to_string()
@@ -692,6 +949,29 @@ fn compact_package_name(package: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_detection_requires_leading_stream_evidence() {
+        let event = r#"{"Action":"pass","Package":"example.com/proj","Test":"TestOK"}"#;
+        for prefix in [
+            "",
+            "\u{feff}",
+            " \r\n",
+            "go: downloading example.com/dep v1.0.0\n",
+        ] {
+            assert!(is_go_test_json(&format!("{prefix}{event}")));
+        }
+        for prefix in [
+            "diff --git a/report b/report\n ",
+            "```json\n",
+            "# Notes\n\n",
+            "Diagnostic example:\n",
+        ] {
+            assert!(!is_go_test_json(&format!("{prefix}{event}")));
+        }
+        assert!(!is_go_test_json("go: downloading example.com/dep v1.0.0\n"));
+        assert!(!is_go_test_json(r#"{"Action":"start"}"#));
+    }
 
     #[test]
     fn test_filter_go_test_all_pass() {
@@ -883,9 +1163,7 @@ go: downloading golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2"#;
     #[test]
     fn test_is_go_build_error_line_recognizes_real_compiler_errors() {
         assert!(is_go_build_error_line("undefined: missingFunc"));
-        assert!(is_go_build_error_line(
-            "cannot find package \"foo/bar\""
-        ));
+        assert!(is_go_build_error_line("cannot find package \"foo/bar\""));
         assert!(is_go_build_error_line(
             "found packages a (a.go) and b (b.go) in /tmp/rtk-go-build-probe-mix"
         ));
@@ -969,9 +1247,33 @@ go: cannot load module missing listed in go.work file: open missing/go.mod: no s
 
         let result = filter_go_build(output);
         assert!(result.contains("3 errors"));
-        assert!(result.contains("go.mod file not found in current directory or any parent directory"));
+        assert!(
+            result.contains("go.mod file not found in current directory or any parent directory")
+        );
         assert!(result.contains("no Go files in /tmp/example"));
         assert!(result.contains("go: cannot load module missing listed in go.work file"));
+    }
+
+    #[test]
+    fn test_filter_go_build_preserves_package_pattern_errors() {
+        let output = r#"pattern ./...: directory prefix . does not contain main module or its selected dependencies
+pattern ./...: directory prefix . does not contain modules listed in go.work or their selected dependencies"#;
+
+        let result = filter_go_build(output);
+        assert!(result.contains("2 errors"));
+        assert!(result.contains("does not contain main module"));
+        assert!(result.contains("does not contain modules listed in go.work"));
+        assert!(!result.contains("Success"));
+    }
+
+    #[test]
+    fn test_filter_go_build_nonzero_exit_never_reports_success() {
+        let output = "opaque go build failure from stderr";
+
+        let result = filter_go_build_with_exit(output, 1);
+        assert!(result.contains("Go build: failed (exit 1)"));
+        assert!(result.contains(output));
+        assert!(!result.contains("Success"));
     }
 
     #[test]
@@ -1054,5 +1356,96 @@ utils.go:15:5: unreachable code"#;
         assert!(!has_golangci_format_flag(&os(&["run", "./..."])));
         assert!(!has_golangci_format_flag(&os(&[])));
         assert!(!has_golangci_format_flag(&os(&["--fix"])));
+    }
+
+    #[test]
+    fn test_filter_go_test_fuzz_keeps_last_elapsed_line() {
+        let output = r#"{"Action":"start","Package":"example.com/foo"}
+{"Action":"run","Package":"example.com/foo","Test":"FuzzBar"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzBar","Output":"=== RUN   FuzzBar\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzBar","Output":"fuzz: elapsed: 0s, gathering baseline coverage: 0/6 completed\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzBar","Output":"fuzz: elapsed: 3s, execs: 224325 (74749/sec), new interesting: 0 (total: 6)\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzBar","Output":"fuzz: elapsed: 10s, execs: 842077 (78542/sec), new interesting: 0 (total: 6)\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzBar","Output":"--- PASS: FuzzBar (10.10s)\n"}
+{"Action":"pass","Package":"example.com/foo","Test":"FuzzBar","Elapsed":10.1}
+{"Action":"output","Package":"example.com/foo","Output":"PASS\n"}
+{"Action":"pass","Package":"example.com/foo","Elapsed":10.414}"#;
+
+        let result = filter_go_test_json(output);
+
+        assert_eq!(
+            result,
+            "Go test: 1 passed, 1 fuzz in 1 packages\nfoo\n  fuzz: elapsed: 10s, execs: 842077 (78542/sec), new interesting: 0 (total: 6)"
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_fuzz_with_unit_tests() {
+        let output = r#"{"Action":"pass","Package":"example.com/foo","Test":"TestUnit","Elapsed":0.01}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzBar","Output":"fuzz: elapsed: 3s, execs: 100000 (33333/sec), new interesting: 1 (total: 5)\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzBar","Output":"fuzz: elapsed: 5s, execs: 200000 (40000/sec), new interesting: 2 (total: 6)\n"}
+{"Action":"pass","Package":"example.com/foo","Test":"FuzzBar","Elapsed":5.0}
+{"Action":"pass","Package":"example.com/foo","Elapsed":5.1}"#;
+
+        let result = filter_go_test_json(output);
+
+        assert!(result.starts_with("Go test: 2 passed, 1 fuzz in 1 packages"));
+        assert!(result.contains("execs: 200000"));
+        assert!(!result.contains("execs: 100000"));
+    }
+
+    #[test]
+    fn test_filter_go_test_failing_fuzz_reports_failure_not_fuzz_summary() {
+        let output = r#"{"Action":"start","Package":"example.com/foo"}
+{"Action":"run","Package":"example.com/foo","Test":"FuzzRev"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"=== RUN   FuzzRev\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"fuzz: elapsed: 0s, gathering baseline coverage: 0/3 completed\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"fuzz: elapsed: 0s, execs: 1234 (12345/sec), new interesting: 1 (total: 4)\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"--- FAIL: FuzzRev (0.11s)\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"    --- FAIL: FuzzRev (0.00s)\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"        rev_test.go:17: Reverse produced invalid UTF-8 string \"\\x9c\"\n"}
+{"Action":"fail","Package":"example.com/foo","Test":"FuzzRev","Elapsed":0.11}
+{"Action":"output","Package":"example.com/foo","Output":"FAIL\n"}
+{"Action":"fail","Package":"example.com/foo","Elapsed":0.12}"#;
+
+        let result = filter_go_test_json(output);
+
+        assert!(
+            result.starts_with("Go test: 0 passed, 1 failed"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("Reverse produced invalid UTF-8"),
+            "got: {}",
+            result
+        );
+        assert!(!result.contains("fuzz in"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_go_test_fuzz_package_failure_reports_failure_not_fuzz_summary() {
+        // TestMain exits non-zero after a green fuzz run: no test-level `fail`, only the package one
+        let output = r#"{"Action":"start","Package":"example.com/foo"}
+{"Action":"run","Package":"example.com/foo","Test":"FuzzRev"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"fuzz: elapsed: 3s, execs: 199077 (66340/sec), new interesting: 0 (total: 59)\n"}
+{"Action":"output","Package":"example.com/foo","Test":"FuzzRev","Output":"fuzz: elapsed: 4s, execs: 199077 (0/sec), new interesting: 0 (total: 59)\n"}
+{"Action":"pass","Package":"example.com/foo","Test":"FuzzRev","Elapsed":4.0}
+{"Action":"output","Package":"example.com/foo","Output":"PASS\n"}
+{"Action":"output","Package":"example.com/foo","Output":"teardown failed\n"}
+{"Action":"output","Package":"example.com/foo","Output":"exit status 3\n"}
+{"Action":"output","Package":"example.com/foo","Output":"FAIL\texample.com/foo\t4.052s\n"}
+{"Action":"fail","Package":"example.com/foo","Elapsed":4.05}"#;
+
+        let result = filter_go_test_json(output);
+
+        assert!(
+            result.starts_with("Go test: 1 passed, 1 failed in 1 packages"),
+            "got: {}",
+            result
+        );
+        assert!(result.contains("foo [FAIL]"), "got: {}", result);
+        assert!(result.contains("teardown failed"), "got: {}", result);
+        assert!(!result.contains("fuzz in"), "got: {}", result);
     }
 }

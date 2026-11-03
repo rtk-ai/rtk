@@ -1,0 +1,59 @@
+[filters.pulumi-preview]
+description = "Compact Pulumi preview output"
+match_command = "^pulumi\\s+preview(\\s|$)"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Previewing update",
+  "^View in Browser",
+  "^View Live:",
+  "^Duration:",
+  "^Permalink:",
+  "^\\s*Type\\s+Name\\s+",
+  "^Loading policy packs",
+  "^@ Previewing update",
+  "^More information at:",
+  "^Use `pulumi ",
+  "^\\s{4,}at\\s+\\S+\\s*\\(",
+  "^\\s{4,}at\\s+/",
+  "^\\s+at\\s+processTicksAndRejections",
+  "^\\s+promise:\\s+Promise",
+  "^\\s+\\[Circular",
+  "^\\s*<ref\\s+\\*\\d",
+  "^\\s+pulumi:pulumi:Stack\\s+\\S+\\s+running\\s*$",
+  "^\\s+\\S+\\s+\\S+\\s+\\d+\\s+errors?\\s*$",
+  "^\\s+\\S+\\s+\\S+(?:\\s+\\S+)?\\s+\\d+\\s+errors?\\s*$",
+]
+on_empty = "pulumi preview: no changes"
+
+[[tests.pulumi-preview]]
+name = "strips header, url and duration noise"
+input = """
+Previewing update (dev)
+
+View in Browser (Ctrl+O): https://app.pulumi.com/org/my-proj/dev/previews/abc123
+
+     Type                          Name              Plan
+ +   pulumi:pulumi:Stack           my-proj-dev       create
+ +   └─ aws:s3:Bucket              my-bucket         create
+
+Resources:
+    + 2 to create
+
+Duration: 3s
+"""
+expected = """ +   pulumi:pulumi:Stack           my-proj-dev       create
+ +   └─ aws:s3:Bucket              my-bucket         create
+Resources:
+    + 2 to create"""
+
+[[tests.pulumi-preview]]
+name = "on_empty when only noise lines present"
+input = """
+Previewing update (dev)
+
+View in Browser (Ctrl+O): https://app.pulumi.com/org/my-proj/dev/previews/abc123
+
+Duration: 1s
+"""
+expected = "pulumi preview: no changes"

@@ -1,0 +1,21 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/home/user/.claude/projects/example-project/00000000-0000-0000-0000-000000000000.jsonl",
+  "cwd": "/home/user/project",
+  "prompt_id": "00000000-0000-0000-0000-000000000000",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "python3 -c \"print('warning: unused import in module_x\\n'*40, end='')\""
+  },
+  "tool_response": {
+    "stdout": "warning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x\nwarning: unused import in module_x",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false
+  },
+  "tool_use_id": "toolu_016zudphZrudpDBXVR3vAnaD",
+  "duration_ms": 45
+}

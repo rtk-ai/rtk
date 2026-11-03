@@ -1,0 +1,1520 @@
+use anyhow::{Context, Result};
+use std::borrow::Cow;
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+
+#[cfg(test)]
+use regex::Regex;
+
+/// Read `reader` line by line, decoding each line through the console code
+/// page and falling back to lossy UTF-8 (invalid bytes become U+FFFD) instead
+/// of erroring.
+///
+/// `BufRead::lines()` returns `Err` for a non-UTF-8 line, and callers
+/// commonly chain `.map_while(Result::ok)` to skip bad lines — but
+/// `map_while` stops at the *first* `None`, so one invalid-UTF-8 line (e.g.
+/// OEM/ANSI bytes from a non-English-locale Windows tool) silently discards
+/// every line after it too, not just the bad one. This reads raw bytes and
+/// never fails on the source encoding, so a garbled line still surfaces
+/// instead of vanishing along with everything downstream of it.
+///
+/// The OEM/ANSI lines this guards against are exactly what
+/// [`decode_process_output`](super::utils::decode_process_output) exists to
+/// read, so the streamed path decodes them the same way the captured path
+/// does rather than going straight to U+FFFD.
+fn read_lines_lossy(reader: impl Read) -> impl Iterator<Item = String> {
+    BufReader::new(reader).split(b'\n').filter_map(|res| {
+        let mut buf = match res {
+            Ok(buf) => buf,
+            Err(e) => {
+                eprintln!("rtk: stream read error: {}", e);
+                return None;
+            }
+        };
+        if buf.last() == Some(&b'\r') {
+            buf.pop();
+        }
+        Some(super::utils::decode_process_output(&buf))
+    })
+}
+
+pub trait StreamFilter {
+    fn feed_line(&mut self, line: &str) -> Option<String>;
+    fn flush(&mut self) -> String;
+    fn on_exit(&mut self, _exit_code: i32, _raw: &str) -> Option<String> {
+        None
+    }
+}
+
+pub trait BlockHandler {
+    /// Rewrite a raw line before it is matched or emitted — the place to
+    /// strip ANSI escapes for tools that colour by default. Identity unless
+    /// a handler opts in, so the rest of the pipeline sees raw bytes.
+    fn normalize_line<'a>(&self, line: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(line)
+    }
+    fn should_skip(&mut self, line: &str) -> bool;
+    fn is_block_start(&mut self, line: &str) -> bool;
+    fn is_block_continuation(&mut self, line: &str, block: &[String]) -> bool;
+    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String>;
+}
+
+pub struct BlockStreamFilter<H: BlockHandler> {
+    handler: H,
+    in_block: bool,
+    current_block: Vec<String>,
+    blocks_emitted: usize,
+}
+
+impl<H: BlockHandler> BlockStreamFilter<H> {
+    pub fn new(handler: H) -> Self {
+        Self {
+            handler,
+            in_block: false,
+            current_block: Vec::new(),
+            blocks_emitted: 0,
+        }
+    }
+
+    fn emit_block(&mut self) -> Option<String> {
+        if self.current_block.is_empty() {
+            return None;
+        }
+        let block = self.current_block.join("\n");
+        self.current_block.clear();
+        self.blocks_emitted += 1;
+        Some(format!("{}\n", block))
+    }
+}
+
+impl<H: BlockHandler> StreamFilter for BlockStreamFilter<H> {
+    fn feed_line(&mut self, line: &str) -> Option<String> {
+        let line = self.handler.normalize_line(line);
+        let line = line.as_ref();
+        if self.handler.should_skip(line) {
+            return None;
+        }
+
+        if self.handler.is_block_start(line) {
+            let prev = self.emit_block();
+            self.current_block.push(line.to_string());
+            self.in_block = true;
+            prev
+        } else if self.in_block {
+            if self
+                .handler
+                .is_block_continuation(line, &self.current_block)
+            {
+                self.current_block.push(line.to_string());
+                None
+            } else {
+                self.in_block = false;
+                self.emit_block()
+            }
+        } else {
+            None
+        }
+    }
+
+    fn flush(&mut self) -> String {
+        self.emit_block().unwrap_or_default()
+    }
+
+    fn on_exit(&mut self, exit_code: i32, raw: &str) -> Option<String> {
+        self.handler.format_summary(exit_code, raw)
+    }
+}
+
+/// Counterpart to [`BlockHandler`] for line-oriented streams.
+///
+/// Default behaviour is KEEP — every line is emitted unchanged. Implementors
+/// opt in to dropping noise via [`LineHandler::should_skip`] and may capture
+/// state for the final summary via [`LineHandler::observe_line`].
+pub trait LineHandler {
+    fn should_skip(&mut self, _line: &str) -> bool {
+        false
+    }
+
+    fn observe_line(&mut self, _line: &str) {}
+
+    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String>;
+}
+
+pub struct LineStreamFilter<H: LineHandler> {
+    handler: H,
+}
+
+impl<H: LineHandler> LineStreamFilter<H> {
+    pub fn new(handler: H) -> Self {
+        Self { handler }
+    }
+}
+
+impl<H: LineHandler> StreamFilter for LineStreamFilter<H> {
+    fn feed_line(&mut self, line: &str) -> Option<String> {
+        if self.handler.should_skip(line) {
+            return None;
+        }
+        self.handler.observe_line(line);
+        Some(format!("{}\n", line))
+    }
+
+    fn flush(&mut self) -> String {
+        String::new()
+    }
+
+    fn on_exit(&mut self, exit_code: i32, raw: &str) -> Option<String> {
+        self.handler.format_summary(exit_code, raw)
+    }
+}
+
+#[cfg(test)] // available for command modules; currently used in tests only
+pub struct RegexBlockFilter {
+    start_re: Regex,
+    skip_prefixes: Vec<String>,
+    tool_name: String,
+    block_count: usize,
+}
+
+#[cfg(test)]
+impl RegexBlockFilter {
+    pub fn new(tool_name: &str, start_pattern: &str) -> Self {
+        Self {
+            start_re: Regex::new(start_pattern).unwrap_or_else(|e| {
+                panic!("RegexBlockFilter: bad pattern '{}': {}", start_pattern, e)
+            }),
+            skip_prefixes: Vec::new(),
+            tool_name: tool_name.to_string(),
+            block_count: 0,
+        }
+    }
+
+    pub fn skip_prefix(mut self, prefix: &str) -> Self {
+        self.skip_prefixes.push(prefix.to_string());
+        self
+    }
+
+    pub fn skip_prefixes(mut self, prefixes: &[&str]) -> Self {
+        self.skip_prefixes
+            .extend(prefixes.iter().map(|s| s.to_string()));
+        self
+    }
+}
+
+#[cfg(test)]
+impl BlockHandler for RegexBlockFilter {
+    fn should_skip(&mut self, line: &str) -> bool {
+        self.skip_prefixes.iter().any(|p| line.starts_with(p))
+    }
+
+    fn is_block_start(&mut self, line: &str) -> bool {
+        if self.start_re.is_match(line) {
+            self.block_count += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
+        line.starts_with(' ') || line.starts_with('\t')
+    }
+
+    fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+        if self.block_count == 0 {
+            Some(format!("{}: no errors found\n", self.tool_name))
+        } else {
+            Some(format!(
+                "{}: {} blocks in output\n",
+                self.tool_name, self.block_count
+            ))
+        }
+    }
+}
+
+pub trait StdinFilter: Send {
+    fn feed_line(&mut self, line: &str) -> Option<String>;
+    fn flush(&mut self) -> String;
+}
+
+pub enum FilterMode<'a> {
+    Streaming(Box<dyn StreamFilter + 'a>),
+    #[allow(dead_code)]
+    Buffered(Box<dyn Fn(&str) -> String + 'a>),
+    CaptureOnly,
+    Passthrough,
+}
+
+pub enum StdinMode {
+    Inherit,
+    #[allow(dead_code)] // future API: stdin filtering for interactive commands
+    Filter(Box<dyn StdinFilter + Send>),
+    Null,
+}
+
+pub struct StreamResult {
+    pub exit_code: i32,
+    pub raw: String,
+    pub raw_stdout: String,
+    pub raw_stderr: String,
+    pub filtered: String,
+}
+
+impl StreamResult {
+    #[cfg(test)]
+    pub fn success(&self) -> bool {
+        self.exit_code == 0
+    }
+}
+
+// #2375
+#[cfg(unix)]
+mod signal_relay {
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    const POLL: Duration = Duration::from_millis(25);
+    const KILL_GRACE: Duration = Duration::from_millis(750);
+    const EXIT_GRACE: Duration = Duration::from_millis(750);
+
+    static CHILD_PID: AtomicU32 = AtomicU32::new(0);
+    static RELAYED: AtomicI32 = AtomicI32::new(0);
+    static FINISHED: AtomicBool = AtomicBool::new(false);
+
+    #[allow(unsafe_code)]
+    unsafe extern "C" fn relay(sig: libc::c_int) {
+        let pid = CHILD_PID.load(Ordering::SeqCst);
+        if pid == 0 || RELAYED.swap(sig, Ordering::SeqCst) != 0 {
+            // nosemgrep: unsafe-block
+            unsafe {
+                libc::signal(sig, libc::SIG_DFL);
+                libc::raise(sig);
+            }
+            return;
+        }
+        // nosemgrep: unsafe-block
+        unsafe {
+            libc::kill(pid as libc::pid_t, sig);
+        }
+    }
+
+    fn escalate(pid: u32) {
+        thread::sleep(KILL_GRACE);
+        if FINISHED.load(Ordering::SeqCst) {
+            return;
+        }
+        #[allow(unsafe_code)]
+        // nosemgrep: unsafe-block
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+        thread::sleep(EXIT_GRACE);
+        if FINISHED.load(Ordering::SeqCst) {
+            return;
+        }
+        let sig = RELAYED.load(Ordering::SeqCst);
+        #[allow(unsafe_code)]
+        // nosemgrep: unsafe-block
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+
+    pub fn relayed() -> Option<libc::c_int> {
+        match RELAYED.load(Ordering::SeqCst) {
+            0 => None,
+            sig => Some(sig),
+        }
+    }
+
+    pub struct Relay;
+
+    impl Relay {
+        pub fn install(pid: u32) -> Self {
+            CHILD_PID.store(pid, Ordering::SeqCst);
+            RELAYED.store(0, Ordering::SeqCst);
+            FINISHED.store(false, Ordering::SeqCst);
+            #[allow(unsafe_code)]
+            // nosemgrep: unsafe-block
+            unsafe {
+                for sig in [libc::SIGINT, libc::SIGTERM] {
+                    let previous = libc::signal(sig, relay as *const () as libc::sighandler_t);
+                    if previous == libc::SIG_IGN {
+                        libc::signal(sig, libc::SIG_IGN);
+                    }
+                }
+            }
+            thread::spawn(move || {
+                while !FINISHED.load(Ordering::SeqCst) {
+                    if RELAYED.load(Ordering::SeqCst) != 0 {
+                        escalate(pid);
+                        return;
+                    }
+                    thread::sleep(POLL);
+                }
+            });
+            Relay
+        }
+    }
+
+    impl Drop for Relay {
+        fn drop(&mut self) {
+            FINISHED.store(true, Ordering::SeqCst);
+            CHILD_PID.store(0, Ordering::SeqCst);
+            #[allow(unsafe_code)]
+            // nosemgrep: unsafe-block
+            unsafe {
+                for sig in [libc::SIGINT, libc::SIGTERM] {
+                    if libc::signal(sig, libc::SIG_DFL) == libc::SIG_IGN {
+                        libc::signal(sig, libc::SIG_IGN);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+mod signal_relay {
+    pub struct Relay;
+
+    impl Relay {
+        pub fn install(_pid: u32) -> Self {
+            Relay
+        }
+    }
+}
+
+// #2375
+#[cfg(unix)]
+pub fn die_by_relayed_signal() {
+    let Some(sig) = signal_relay::relayed() else {
+        return;
+    };
+    #[allow(unsafe_code)]
+    // nosemgrep: unsafe-block
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+#[cfg(not(unix))]
+pub fn die_by_relayed_signal() {}
+
+pub fn status_to_exit_code(status: std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    1
+}
+
+// ISSUE #897: ChildGuard RAII prevents zombie processes that caused kernel panic
+pub const RAW_CAP: usize = 10_485_760; // 10 MiB
+
+pub fn run_streaming(
+    cmd: &mut Command,
+    stdin_mode: StdinMode,
+    stdout_mode: FilterMode<'_>,
+) -> Result<StreamResult> {
+    if matches!(stdout_mode, FilterMode::Passthrough) {
+        match &stdin_mode {
+            StdinMode::Inherit => {
+                cmd.stdin(Stdio::inherit());
+            }
+            _ => {
+                cmd.stdin(Stdio::null());
+            }
+        };
+        cmd.stdout(Stdio::inherit());
+        cmd.stderr(Stdio::inherit());
+        let status = cmd.status().context("Failed to spawn process")?;
+        return Ok(StreamResult {
+            exit_code: status_to_exit_code(status),
+            raw: String::new(),
+            raw_stdout: String::new(),
+            raw_stderr: String::new(),
+            filtered: String::new(),
+        });
+    }
+
+    match &stdin_mode {
+        StdinMode::Inherit => {
+            cmd.stdin(Stdio::inherit());
+        }
+        StdinMode::Filter(_) | StdinMode::Null => {
+            cmd.stdin(Stdio::piped());
+        }
+    }
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            self.0.wait().ok();
+        }
+    }
+
+    let is_streaming = matches!(stdout_mode, FilterMode::Streaming(_));
+
+    let mut child = ChildGuard(cmd.spawn().context("Failed to spawn process")?);
+    let _signal_relay = signal_relay::Relay::install(child.0.id());
+
+    let stdin_thread: Option<std::thread::JoinHandle<()>> = match stdin_mode {
+        StdinMode::Filter(mut filter) => {
+            let child_stdin = child.0.stdin.take().context("No child stdin handle")?;
+            Some(std::thread::spawn(move || {
+                let mut writer = BufWriter::new(child_stdin);
+                let stdin_handle = io::stdin();
+                for line in read_lines_lossy(stdin_handle.lock()) {
+                    if let Some(out) = filter.feed_line(&line)
+                        && writeln!(writer, "{}", out).is_err()
+                    {
+                        break;
+                    }
+                }
+                let tail = filter.flush();
+                if !tail.is_empty() {
+                    write!(writer, "{}", tail).ok();
+                }
+            }))
+        }
+        StdinMode::Null => {
+            child.0.stdin.take();
+            None
+        }
+        StdinMode::Inherit => None,
+    };
+
+    let stdout = child.0.stdout.take().context("No child stdout handle")?;
+    let stderr = child.0.stderr.take().context("No child stderr handle")?;
+    let mut raw_stdout = String::new();
+    let mut raw_stderr = String::new();
+    let mut filtered = String::new();
+    let mut capped_out = false;
+    let mut capped_err = false;
+    let mut saved_filter: Option<Box<dyn StreamFilter + '_>> = None;
+    let mut filter_fd_is_stderr = false;
+
+    if is_streaming {
+        enum StreamLine {
+            Stdout(String),
+            Stderr(String),
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let tx_out = tx.clone();
+        let stdout_thread = std::thread::spawn(move || {
+            for line in read_lines_lossy(stdout) {
+                if tx_out.send(StreamLine::Stdout(line)).is_err() {
+                    break;
+                }
+            }
+        });
+        let tx_err = tx;
+        let stderr_thread = std::thread::spawn(move || {
+            for line in read_lines_lossy(stderr) {
+                if tx_err.send(StreamLine::Stderr(line)).is_err() {
+                    break;
+                }
+            }
+        });
+
+        if let FilterMode::Streaming(mut filter) = stdout_mode {
+            let stdout_handle = io::stdout();
+            let mut out = stdout_handle.lock();
+            let stderr_handle = io::stderr();
+            let mut err_out = stderr_handle.lock();
+
+            for msg in rx {
+                let (line, is_stderr) = match msg {
+                    StreamLine::Stderr(l) => (l, true),
+                    StreamLine::Stdout(l) => (l, false),
+                };
+                if is_stderr {
+                    if !capped_err {
+                        if raw_stderr.len() + line.len() < RAW_CAP {
+                            raw_stderr.push_str(&line);
+                            raw_stderr.push('\n');
+                        } else {
+                            capped_err = true;
+                            eprintln!("[rtk] warning: stderr exceeds 10 MiB — capture truncated");
+                        }
+                    }
+                } else if !capped_out {
+                    if raw_stdout.len() + line.len() < RAW_CAP {
+                        raw_stdout.push_str(&line);
+                        raw_stdout.push('\n');
+                    } else {
+                        capped_out = true;
+                        eprintln!("[rtk] warning: stdout exceeds 10 MiB — filter input truncated");
+                    }
+                }
+                filter_fd_is_stderr = is_stderr;
+                if let Some(output) = filter.feed_line(&line) {
+                    filtered.push_str(&output);
+                    let dest: &mut dyn Write = if is_stderr { &mut err_out } else { &mut out };
+                    match write!(dest, "{}", output) {
+                        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => break,
+                        Err(e) => return Err(e.into()),
+                        Ok(_) => {}
+                    }
+                }
+            }
+            let tail = filter.flush();
+            filtered.push_str(&tail);
+            let flush_dest: &mut dyn Write = if filter_fd_is_stderr {
+                &mut err_out
+            } else {
+                &mut out
+            };
+            match write!(flush_dest, "{}", tail) {
+                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
+                Err(e) => return Err(e.into()),
+                Ok(_) => {}
+            }
+            saved_filter = Some(filter);
+        }
+
+        stdout_thread.join().ok();
+        stderr_thread.join().ok();
+    } else {
+        let stderr_thread = std::thread::spawn(move || -> String {
+            let mut raw_err = String::new();
+            let mut capped = false;
+            for line in read_lines_lossy(stderr) {
+                if raw_err.len() + line.len() < RAW_CAP {
+                    raw_err.push_str(&line);
+                    raw_err.push('\n');
+                } else if !capped {
+                    capped = true;
+                }
+            }
+            raw_err
+        });
+
+        {
+            let stdout_handle = io::stdout();
+            let mut out = stdout_handle.lock();
+
+            match stdout_mode {
+                FilterMode::Passthrough => unreachable!("handled by early-return above"),
+                FilterMode::Streaming(_) => unreachable!("handled by is_streaming branch"),
+                FilterMode::Buffered(filter_fn) => {
+                    for line in read_lines_lossy(stdout) {
+                        if raw_stdout.len() + line.len() < RAW_CAP {
+                            raw_stdout.push_str(&line);
+                            raw_stdout.push('\n');
+                        } else if !capped_out {
+                            capped_out = true;
+                            eprintln!(
+                                "[rtk] warning: output exceeds 10 MiB — filter input truncated"
+                            );
+                        }
+                    }
+                    filtered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        filter_fn(&raw_stdout)
+                    }))
+                    .unwrap_or_else(|_| {
+                        eprintln!("[rtk] warning: filter panicked — passing through raw output");
+                        raw_stdout.clone()
+                    });
+                    match write!(out, "{}", filtered) {
+                        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
+                        Err(e) => return Err(e.into()),
+                        Ok(_) => {}
+                    }
+                }
+                FilterMode::CaptureOnly => {
+                    for line in read_lines_lossy(stdout) {
+                        if raw_stdout.len() + line.len() < RAW_CAP {
+                            raw_stdout.push_str(&line);
+                            raw_stdout.push('\n');
+                        } else if !capped_out {
+                            capped_out = true;
+                            eprintln!(
+                                "[rtk] warning: output exceeds 10 MiB — filter input truncated"
+                            );
+                        }
+                    }
+                    filtered = raw_stdout.clone();
+                }
+            }
+        }
+
+        raw_stderr = stderr_thread.join().unwrap_or_else(|e| {
+            eprintln!("[rtk] warning: stderr reader thread panicked: {:?}", e);
+            String::new()
+        });
+    }
+    if let Some(t) = stdin_thread {
+        t.join().ok();
+    }
+
+    let status = child.0.wait().context("Failed to wait for child")?;
+    let exit_code = status_to_exit_code(status);
+    let raw = format!("{}{}", raw_stdout, raw_stderr);
+
+    if let Some(mut f) = saved_filter
+        && let Some(post) = f.on_exit(exit_code, &raw)
+    {
+        filtered.push_str(&post);
+        let mut dest: Box<dyn Write> = if filter_fd_is_stderr {
+            Box::new(io::stderr().lock())
+        } else {
+            Box::new(io::stdout().lock())
+        };
+        match write!(dest, "{}", post) {
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
+            Err(e) => return Err(e.into()),
+            Ok(_) => {}
+        }
+    }
+
+    Ok(StreamResult {
+        exit_code,
+        raw,
+        raw_stdout,
+        raw_stderr,
+        filtered,
+    })
+}
+
+pub struct CaptureResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+}
+
+impl CaptureResult {
+    pub fn success(&self) -> bool {
+        self.exit_code == 0
+    }
+
+    pub fn combined(&self) -> String {
+        format!("{}{}", self.stdout, self.stderr)
+    }
+}
+
+pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
+    cmd.stdin(Stdio::null());
+    show_usage_if_asked(cmd)?;
+    capture(cmd)
+}
+
+/// Like [`exec_capture`] but inherits stdin so a wrapped engine can read a piped stdin, and
+/// without the usage guard: its callers pass the caller's argv through verbatim or decide on
+/// it first.
+pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
+    cmd.stdin(Stdio::inherit());
+    capture(cmd)
+}
+
+/// Buffered capture with verbatim decoded streams, stdin and cancellation relay.
+///
+/// Unlike the line-oriented streaming runner, this preserves CRLF and a missing
+/// final newline and does not cap either stream. The caller must emit the result,
+/// flush its output, then call [`die_by_relayed_signal`], as the shared runner does.
+pub fn exec_capture_stdin_with_relay(cmd: &mut Command) -> Result<CaptureResult> {
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = cmd.spawn().context("Failed to spawn process")?;
+    let _relay = signal_relay::Relay::install(child.id());
+    let output = child
+        .wait_with_output()
+        .context("Failed to capture process output")?;
+    Ok(CaptureResult {
+        stdout: super::utils::decode_process_output(&output.stdout),
+        stderr: super::utils::decode_process_output(&output.stderr),
+        exit_code: status_to_exit_code(output.status),
+    })
+}
+
+/// Like [`exec_capture`] without the usage guard, for an argv whose `--help`, `--version` or
+/// `-h` is not the caller asking the tool for its usage: a probe RTK runs for itself, or a
+/// command whose flags RTK does not read. A caller that has already answered the usage
+/// question on the caller's own argv uses it too.
+pub fn exec_capture_unguarded(cmd: &mut Command) -> Result<CaptureResult> {
+    cmd.stdin(Stdio::null());
+    capture(cmd)
+}
+
+/// A usage page is not the output a filter reads: handed one, a filter built for the tool's
+/// normal output reports an empty run, which is how `pnpm outdated --help` became
+/// "48 outdated packages" and `jest --help` lost 24 KB of its 26 (#4198). Show it as the
+/// tool printed it and end with the tool's own code: there is no captured output to hand
+/// back, and an empty capture would get a summary written under it.
+fn show_usage_if_asked(cmd: &mut Command) -> Result<()> {
+    if !crate::core::runner::requests_help(cmd) {
+        return Ok(());
+    }
+    let program = cmd.get_program().to_string_lossy().into_owned();
+    let status = cmd
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| format!("Failed to execute {program}"))?;
+    std::process::exit(crate::core::utils::exit_code_from_status(&status, &program));
+}
+
+/// Run `cmd` to completion, decode what it wrote, and report the exit code.
+///
+/// A process killed by a signal has no exit code of its own, and returning
+/// only the synthesized `128 + signal` hides why it died. `exit_code_from_output`
+/// announces that on stderr, so callers moving here from a hand-rolled
+/// `.output()` keep the diagnostic instead of losing it. The program name is
+/// used as the label so no call site has to pass one.
+fn capture(cmd: &mut Command) -> Result<CaptureResult> {
+    let raw = capture_raw(cmd)?;
+    Ok(CaptureResult {
+        stdout: super::utils::decode_process_output(&raw.stdout),
+        stderr: super::utils::decode_process_output(&raw.stderr),
+        exit_code: raw.exit_code,
+    })
+}
+
+/// Run `cmd` to completion and return its raw bytes plus a signal-aware exit code.
+/// The single spot that turns an `ExitStatus` into a code via
+/// [`exit_code_from_output`](super::utils::exit_code_from_output) — so the
+/// `process terminated by signal N` diagnostic is emitted uniformly whether the
+/// caller decodes the bytes ([`capture`]) or keeps them raw ([`exec_capture_bytes`]),
+/// instead of the raw path silently dropping it.
+fn capture_raw(cmd: &mut Command) -> Result<CaptureBytes> {
+    let program = cmd.get_program().to_string_lossy().into_owned();
+    let output = cmd.output().context("Failed to execute command")?;
+    let exit_code = super::utils::exit_code_from_output(&output, &program);
+    Ok(CaptureBytes {
+        stdout: output.stdout,
+        stderr: output.stderr,
+        exit_code,
+    })
+}
+
+/// Raw-byte capture result, for callers that must control decoding themselves —
+/// e.g. non-UTF-8 output that [`exec_capture`]'s `from_utf8_lossy` would corrupt.
+pub struct CaptureBytes {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit_code: i32,
+}
+
+impl CaptureBytes {
+    pub fn success(&self) -> bool {
+        self.exit_code == 0
+    }
+}
+
+/// Like [`exec_capture`] but returns raw bytes so the caller decides how to decode.
+pub fn exec_capture_bytes(cmd: &mut Command) -> Result<CaptureBytes> {
+    cmd.stdin(Stdio::null());
+    capture_raw(cmd)
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn test_read_lines_lossy_preserves_lines_after_invalid_utf8() {
+        // Line 2 contains a lone 0xE3 byte (the cp850 case from the bug report).
+        // `BufRead::lines().map_while(Result::ok)` would stop at that Err and
+        // silently lose line 3 as well — not just the bad byte.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"ERRO A: ascii\n");
+        data.extend_from_slice(&[b'E', b'R', b'R', b'O', b' ', b'B', b':', b' ', 0xE3, b'\n']);
+        data.extend_from_slice(b"ERRO C: ascii again\n");
+
+        let lines: Vec<String> = read_lines_lossy(data.as_slice()).collect();
+        assert_eq!(lines.len(), 3, "got: {:?}", lines);
+        assert_eq!(lines[0], "ERRO A: ascii");
+        assert!(lines[1].starts_with("ERRO B: "), "got: {:?}", lines[1]);
+        assert!(lines[1].contains('\u{FFFD}'), "got: {:?}", lines[1]);
+        assert_eq!(lines[2], "ERRO C: ascii again");
+    }
+
+    #[test]
+    fn test_read_lines_lossy_strips_crlf() {
+        let lines: Vec<String> = read_lines_lossy(&b"a\r\nb\n"[..]).collect();
+        assert_eq!(lines, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn test_read_lines_lossy_no_trailing_newline() {
+        let lines: Vec<String> = read_lines_lossy(&b"only line"[..]).collect();
+        assert_eq!(lines, vec!["only line".to_string()]);
+    }
+
+    #[test]
+    fn test_read_lines_lossy_empty_input() {
+        let lines: Vec<String> = read_lines_lossy(&b""[..]).collect();
+        assert!(lines.is_empty());
+    }
+
+    /// A `Read` that yields some good lines, then a genuine I/O error --
+    /// distinct from clean EOF (`Ok(0)`). Before this fix, `Ok(0) | Err(_)`
+    /// treated both the same way, silently truncating output on a real read
+    /// failure instead of surfacing it.
+    struct FailingReader {
+        data: std::io::Cursor<Vec<u8>>,
+        failed: bool,
+    }
+
+    impl Read for FailingReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.data.position() as usize >= self.data.get_ref().len() {
+                if !self.failed {
+                    self.failed = true;
+                    return Err(io::Error::other("simulated read failure"));
+                }
+                return Ok(0);
+            }
+            std::io::Read::read(&mut self.data, buf)
+        }
+    }
+
+    #[test]
+    fn test_read_lines_lossy_stops_on_io_error_without_panicking() {
+        let reader = FailingReader {
+            data: std::io::Cursor::new(b"line one\nline two\n".to_vec()),
+            failed: false,
+        };
+        // The two good lines are still yielded; the simulated failure after
+        // them must not panic or hang -- it just ends the iterator, same as
+        // clean EOF would, but via the Err(_) arm instead of Ok(0).
+        let lines: Vec<String> = read_lines_lossy(reader).collect();
+        assert_eq!(lines, vec!["line one".to_string(), "line two".to_string()]);
+    }
+
+    struct LineFilter<F: FnMut(&str) -> Option<String>> {
+        f: F,
+    }
+
+    impl<F: FnMut(&str) -> Option<String>> LineFilter<F> {
+        pub fn new(f: F) -> Self {
+            Self { f }
+        }
+    }
+
+    impl<F: FnMut(&str) -> Option<String>> StreamFilter for LineFilter<F> {
+        fn feed_line(&mut self, line: &str) -> Option<String> {
+            (self.f)(line)
+        }
+
+        fn flush(&mut self) -> String {
+            String::new()
+        }
+    }
+
+    #[test]
+    fn test_exit_code_zero() {
+        let status = Command::new("true").status().unwrap();
+        assert_eq!(status_to_exit_code(status), 0);
+    }
+
+    #[test]
+    fn test_exit_code_nonzero() {
+        let status = Command::new("false").status().unwrap();
+        assert_eq!(status_to_exit_code(status), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_exit_code_signal_kill() {
+        let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+        child.kill().unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(status_to_exit_code(status), 137);
+    }
+
+    #[test]
+    fn test_exec_capture_decodes_and_reports_exit_code() {
+        let captured = exec_capture(&mut Command::new("false")).expect("spawn");
+        assert_eq!(captured.exit_code, 1);
+        assert!(!captured.success());
+    }
+
+    /// A signal-killed child keeps the `128 + signal` code that
+    /// `exit_code_from_output` reports, so callers that moved off a hand-rolled
+    /// `.output()` neither lose the code nor the stderr diagnostic with it.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_capture_reports_signal_exit_code() {
+        // `kill -TERM $$` makes the shell terminate itself by signal 15.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("kill -TERM $$");
+        let captured = exec_capture(&mut cmd).expect("spawn");
+        assert_eq!(captured.exit_code, 128 + 15);
+    }
+
+    #[test]
+    fn test_line_filter_passes_lines() {
+        let mut f = LineFilter::new(|l| Some(format!("{}\n", l.to_uppercase())));
+        assert_eq!(f.feed_line("hello"), Some("HELLO\n".to_string()));
+    }
+
+    #[test]
+    fn test_line_filter_drops_lines() {
+        let mut f = LineFilter::new(|l| {
+            if l.starts_with('#') {
+                None
+            } else {
+                Some(l.to_string())
+            }
+        });
+        assert_eq!(f.feed_line("# comment"), None);
+        assert_eq!(f.feed_line("code"), Some("code".to_string()));
+    }
+
+    #[test]
+    fn test_line_filter_flush_empty() {
+        let mut f = LineFilter::new(|l| Some(l.to_string()));
+        assert_eq!(f.flush(), String::new());
+    }
+
+    #[test]
+    fn test_stream_result_success() {
+        let r = StreamResult {
+            exit_code: 0,
+            raw: String::new(),
+            raw_stdout: String::new(),
+            raw_stderr: String::new(),
+            filtered: String::new(),
+        };
+        assert!(r.success());
+    }
+
+    #[test]
+    fn test_stream_result_failure() {
+        let r = StreamResult {
+            exit_code: 1,
+            raw: String::new(),
+            raw_stdout: String::new(),
+            raw_stderr: String::new(),
+            filtered: String::new(),
+        };
+        assert!(!r.success());
+    }
+
+    #[test]
+    fn test_stream_result_signal_not_success() {
+        let r = StreamResult {
+            exit_code: 137,
+            raw: String::new(),
+            raw_stdout: String::new(),
+            raw_stderr: String::new(),
+            filtered: String::new(),
+        };
+        assert!(!r.success());
+    }
+
+    #[test]
+    fn test_run_streaming_passthrough_echo() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("hello");
+        let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
+        assert_eq!(result.exit_code, 0);
+        // Passthrough inherits TTY — raw/filtered are empty
+        assert!(result.raw.is_empty());
+    }
+
+    #[test]
+    fn test_run_streaming_exit_code_preserved() {
+        // nosemgrep: interpreter-execution
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 42"]);
+        let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
+        assert_eq!(result.exit_code, 42);
+    }
+
+    #[test]
+    fn test_run_streaming_exit_code_zero() {
+        let mut cmd = Command::new("true");
+        let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(result.success());
+    }
+
+    #[test]
+    fn test_run_streaming_exit_code_one() {
+        let mut cmd = Command::new("false");
+        let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
+        assert_eq!(result.exit_code, 1);
+        assert!(!result.success());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_run_streaming_streaming_filter_drops_lines() {
+        let mut cmd = Command::new("printf");
+        cmd.arg("a\nb\nc\n");
+        let filter = LineFilter::new(|l| {
+            if l == "b" {
+                None
+            } else {
+                Some(format!("{}\n", l))
+            }
+        });
+        let result = run_streaming(
+            &mut cmd,
+            StdinMode::Null,
+            FilterMode::Streaming(Box::new(filter)),
+        )
+        .unwrap();
+        assert!(result.filtered.contains('a'));
+        assert!(!result.filtered.contains('b'));
+        assert!(result.filtered.contains('c'));
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_run_streaming_buffered_filter() {
+        let mut cmd = Command::new("printf");
+        cmd.arg("line1\nline2\nline3\n");
+        let result = run_streaming(
+            &mut cmd,
+            StdinMode::Null,
+            FilterMode::Buffered(Box::new(|s: &str| s.to_uppercase())),
+        )
+        .unwrap();
+        assert!(result.filtered.contains("LINE1"));
+        assert!(result.filtered.contains("LINE2"));
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn test_run_streaming_raw_cap_at_10mb() {
+        // nosemgrep: interpreter-execution
+        let mut cmd = Command::new("sh");
+        // ~11 MiB of 80-char lines (fast: fewer lines than `yes | head -6M`)
+        cmd.args([
+            "-c",
+            "dd if=/dev/zero bs=1024 count=11264 2>/dev/null | tr '\\0' 'a' | fold -w 80",
+        ]);
+        let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
+        assert!(
+            result.raw.len() <= 10_485_760 + 100,
+            "raw should be capped at ~10 MiB, got {} bytes",
+            result.raw.len()
+        );
+        assert!(
+            result.raw.len() > 1_000_000,
+            "Should have captured significant data"
+        );
+    }
+
+    #[test]
+    fn test_run_streaming_stderr_cap_at_10mb() {
+        // nosemgrep: interpreter-execution
+        let mut cmd = Command::new("sh");
+        // ~11 MiB on stderr, nothing on stdout
+        cmd.args([
+            "-c",
+            "dd if=/dev/zero bs=1024 count=11264 2>/dev/null | tr '\\0' 'a' | fold -w 80 1>&2",
+        ]);
+        let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
+        // raw = raw_stdout + raw_stderr; stdout is empty so raw ≈ stderr size
+        assert!(
+            result.raw.len() <= RAW_CAP + 200,
+            "stderr in raw should be capped at ~10 MiB, got {} bytes",
+            result.raw.len()
+        );
+    }
+
+    #[test]
+    fn test_child_guard_prevents_zombie() {
+        let mut cmd = Command::new("true");
+        let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().exit_code, 0);
+    }
+
+    #[test]
+    fn test_run_streaming_null_stdin_cat() {
+        let mut cmd = Command::new("cat");
+        let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn test_run_streaming_raw_contains_stdout() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("test_output_xyz");
+        let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
+        assert!(result.raw.contains("test_output_xyz"));
+    }
+
+    #[test]
+    fn test_run_streaming_capture_only_filtered_equals_raw() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("check_equality");
+        let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
+        assert_eq!(result.filtered.trim(), result.raw_stdout.trim());
+    }
+
+    #[test]
+    fn test_exec_capture_success() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("hello_capture");
+        let result = exec_capture(&mut cmd).unwrap();
+        assert!(result.success());
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("hello_capture"));
+    }
+
+    #[test]
+    fn test_exec_capture_failure() {
+        let mut cmd = Command::new("false");
+        let result = exec_capture(&mut cmd).unwrap();
+        assert!(!result.success());
+        assert_eq!(result.exit_code, 1);
+    }
+
+    #[test]
+    fn test_exec_capture_stderr() {
+        // nosemgrep: interpreter-execution
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo err_msg >&2"]);
+        let result = exec_capture(&mut cmd).unwrap();
+        assert!(result.stderr.contains("err_msg"));
+    }
+
+    #[test]
+    fn test_exec_capture_combined() {
+        // nosemgrep: interpreter-execution
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo out_msg; echo err_msg >&2"]);
+        let result = exec_capture(&mut cmd).unwrap();
+        let combined = result.combined();
+        assert!(combined.contains("out_msg"));
+        assert!(combined.contains("err_msg"));
+    }
+
+    #[test]
+    fn test_capture_result_combined_empty() {
+        let r = CaptureResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
+        assert_eq!(r.combined(), "");
+    }
+
+    pub fn run_block_filter(filter: &mut dyn StreamFilter, input: &str, exit_code: i32) -> String {
+        let mut output = String::new();
+        for line in input.lines() {
+            if let Some(s) = filter.feed_line(line) {
+                output.push_str(&s);
+            }
+        }
+        output.push_str(&filter.flush());
+        if let Some(post) = filter.on_exit(exit_code, input) {
+            output.push_str(&post);
+        }
+        output
+    }
+
+    struct UpperHandler;
+
+    impl BlockHandler for UpperHandler {
+        fn normalize_line<'a>(&self, line: &'a str) -> Cow<'a, str> {
+            Cow::Owned(line.to_uppercase())
+        }
+        fn should_skip(&mut self, _line: &str) -> bool {
+            false
+        }
+        fn is_block_start(&mut self, line: &str) -> bool {
+            line.starts_with("ERR")
+        }
+        fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
+            line.starts_with("  ")
+        }
+        fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn block_handler_normalize_line_feeds_matching_and_emission() {
+        // Both the match and the emitted block see the normalized line.
+        let mut f = BlockStreamFilter::new(UpperHandler);
+        let out = run_block_filter(&mut f, "err: one\n  detail\nnoise\n", 0);
+        assert_eq!(out, "ERR: ONE\n  DETAIL\n");
+    }
+
+    struct TestHandler;
+
+    impl BlockHandler for TestHandler {
+        fn should_skip(&mut self, line: &str) -> bool {
+            line.starts_with("SKIP")
+        }
+        fn is_block_start(&mut self, line: &str) -> bool {
+            line.starts_with("ERROR")
+        }
+        fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
+            line.starts_with("  ")
+        }
+        fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+            Some("DONE\n".to_string())
+        }
+    }
+
+    #[test]
+    fn test_block_filter_emits_blocks() {
+        let mut f = BlockStreamFilter::new(TestHandler);
+        let input = "SKIP noise\nERROR first\n  detail1\nnon-block\nERROR second\n  detail2\n";
+        let result = run_block_filter(&mut f, input, 0);
+        assert!(result.contains("ERROR first\n  detail1"), "got: {}", result);
+        assert!(
+            result.contains("ERROR second\n  detail2"),
+            "got: {}",
+            result
+        );
+        assert!(!result.contains("SKIP"), "got: {}", result);
+        assert!(result.ends_with("DONE\n"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_block_filter_no_blocks() {
+        let mut f = BlockStreamFilter::new(TestHandler);
+        let result = run_block_filter(&mut f, "nothing here\njust text\n", 0);
+        assert_eq!(result, "DONE\n");
+    }
+
+    #[test]
+    fn test_regex_block_filter_emits_blocks() {
+        let handler = RegexBlockFilter::new("test", r"^error\[");
+        let mut f = BlockStreamFilter::new(handler);
+        let input = "ok line\nerror[E0308]: mismatched types\n  expected `u32`\nok again\nerror[E0599]: no method\n  help: try\n";
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(
+            result.contains("error[E0308]: mismatched types\n  expected `u32`"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("error[E0599]: no method\n  help: try"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("test: 2 blocks in output"),
+            "got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_regex_block_filter_skip_prefix() {
+        let handler = RegexBlockFilter::new("test", r"^error").skip_prefix("warning:");
+        let mut f = BlockStreamFilter::new(handler);
+        let input = "warning: unused var\nerror: bad type\n  detail\nwarning: dead code\n";
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(result.contains("error: bad type"), "got: {}", result);
+        assert!(!result.contains("warning:"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_regex_block_filter_no_blocks() {
+        let handler = RegexBlockFilter::new("mytest", r"^FAIL");
+        let mut f = BlockStreamFilter::new(handler);
+        let result = run_block_filter(&mut f, "all passed\nok\n", 0);
+        assert_eq!(result, "mytest: no errors found\n");
+    }
+
+    #[test]
+    fn test_regex_block_filter_indent_continuation() {
+        let handler = RegexBlockFilter::new("test", r"^ERR");
+        let mut f = BlockStreamFilter::new(handler);
+        let input = "ERR space indent\n  two spaces\n\ttab indent\nnon-indent\n";
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(
+            result.contains("ERR space indent\n  two spaces\n\ttab indent"),
+            "got: {}",
+            result
+        );
+        assert!(!result.contains("non-indent"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_regex_block_filter_multiple_skip_prefixes() {
+        let handler =
+            RegexBlockFilter::new("test", r"^error").skip_prefixes(&["note:", "warning:", "help:"]);
+        let mut f = BlockStreamFilter::new(handler);
+        let input = "note: see docs\nwarning: unused\nhelp: try this\nerror: fatal\n  details\n";
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(!result.contains("note:"), "got: {}", result);
+        assert!(!result.contains("warning:"), "got: {}", result);
+        assert!(!result.contains("help:"), "got: {}", result);
+        assert!(
+            result.contains("error: fatal\n  details"),
+            "got: {}",
+            result
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_streaming_filters_both_fds_and_routes_to_correct_fd() {
+        // nosemgrep: interpreter-execution
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo 'error[E0308]: type mismatch'; echo '   Compiling foo v1.0' >&2; echo '   Downloading bar v2.0' >&2; echo '   Finished dev' >&2; echo 'real error on stderr' >&2"]);
+
+        struct CargoLikeHandler;
+        impl BlockHandler for CargoLikeHandler {
+            fn should_skip(&mut self, line: &str) -> bool {
+                let trimmed = line.trim_start();
+                trimmed.starts_with("Compiling")
+                    || trimmed.starts_with("Downloading")
+                    || trimmed.starts_with("Finished")
+            }
+            fn is_block_start(&mut self, line: &str) -> bool {
+                line.starts_with("error")
+            }
+            fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
+                line.starts_with(' ')
+            }
+            fn format_summary(&self, _: i32, _: &str) -> Option<String> {
+                None
+            }
+        }
+
+        let filter = BlockStreamFilter::new(CargoLikeHandler);
+        let result = run_streaming(
+            &mut cmd,
+            StdinMode::Null,
+            FilterMode::Streaming(Box::new(filter)),
+        )
+        .unwrap();
+
+        assert!(
+            result.filtered.contains("error[E0308]"),
+            "filtered should contain stdout errors, got: {}",
+            result.filtered
+        );
+        assert!(
+            !result.filtered.contains("Compiling"),
+            "cargo noise should be filtered out, got: {}",
+            result.filtered
+        );
+        assert!(
+            !result.filtered.contains("Downloading"),
+            "cargo noise should be filtered out, got: {}",
+            result.filtered
+        );
+        assert!(
+            result.raw_stderr.contains("Compiling"),
+            "raw_stderr should capture all stderr lines"
+        );
+        assert!(
+            result.raw_stderr.contains("real error on stderr"),
+            "raw_stderr should capture all stderr lines"
+        );
+    }
+
+    struct CountingLineHandler {
+        observed: Vec<String>,
+        skip_prefixes: Vec<String>,
+        summary_tag: &'static str,
+    }
+
+    impl LineHandler for CountingLineHandler {
+        fn should_skip(&mut self, line: &str) -> bool {
+            self.skip_prefixes.iter().any(|p| line.starts_with(p))
+        }
+
+        fn observe_line(&mut self, line: &str) {
+            self.observed.push(line.to_string());
+        }
+
+        fn format_summary(&self, exit_code: i32, _raw: &str) -> Option<String> {
+            Some(format!(
+                "{}: {} kept, exit={}\n",
+                self.summary_tag,
+                self.observed.len(),
+                exit_code
+            ))
+        }
+    }
+
+    fn run_line_filter(filter: &mut dyn StreamFilter, input: &str, exit_code: i32) -> String {
+        let mut out = String::new();
+        for line in input.lines() {
+            if let Some(s) = filter.feed_line(line) {
+                out.push_str(&s);
+            }
+        }
+        out.push_str(&filter.flush());
+        if let Some(post) = filter.on_exit(exit_code, input) {
+            out.push_str(&post);
+        }
+        out
+    }
+
+    #[test]
+    fn test_line_filter_defaults_keep_all() {
+        struct DefaultHandler;
+        impl LineHandler for DefaultHandler {
+            fn format_summary(&self, _: i32, _: &str) -> Option<String> {
+                None
+            }
+        }
+        let mut f = LineStreamFilter::new(DefaultHandler);
+        let result = run_line_filter(&mut f, "a\nb\nc\n", 0);
+        assert_eq!(result, "a\nb\nc\n");
+    }
+
+    #[test]
+    fn test_line_filter_skip_drops_matching_lines() {
+        let handler = CountingLineHandler {
+            observed: Vec::new(),
+            skip_prefixes: vec!["NOISE:".to_string()],
+            summary_tag: "demo",
+        };
+        let mut f = LineStreamFilter::new(handler);
+        let input = "NOISE: progress 10%\nkeep me\nNOISE: progress 90%\nalso keep\n";
+        let result = run_line_filter(&mut f, input, 0);
+        assert!(!result.contains("NOISE:"), "got: {}", result);
+        assert!(result.contains("keep me\n"));
+        assert!(result.contains("also keep\n"));
+        assert!(result.contains("demo: 2 kept, exit=0\n"));
+    }
+
+    #[test]
+    fn test_line_filter_summary_propagates_exit_code() {
+        let handler = CountingLineHandler {
+            observed: Vec::new(),
+            skip_prefixes: Vec::new(),
+            summary_tag: "demo",
+        };
+        let mut f = LineStreamFilter::new(handler);
+        let result = run_line_filter(&mut f, "one\n", 42);
+        assert!(result.contains("exit=42"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_line_filter_observe_only_called_for_kept_lines() {
+        let handler = CountingLineHandler {
+            observed: Vec::new(),
+            skip_prefixes: vec!["DROP".to_string()],
+            summary_tag: "demo",
+        };
+        let mut f = LineStreamFilter::new(handler);
+        let result = run_line_filter(&mut f, "DROP a\nDROP b\nkeep\n", 0);
+        // Only "keep" was observed, so summary says "1 kept"
+        assert!(result.contains("demo: 1 kept"), "got: {}", result);
+    }
+}

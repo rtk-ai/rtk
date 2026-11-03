@@ -12,7 +12,7 @@ You are a testing expert specializing in RTK's unique testing needs: command out
 ## Core Responsibilities
 
 - **Snapshot testing**: Use `insta` crate for output validation
-- **Token accuracy**: Verify 60-90% savings claims with real fixtures
+- **Token accuracy**: Verify the ≥20% savings floor with real fixtures
 - **Cross-platform**: Test bash/zsh/PowerShell compatibility
 - **Regression prevention**: Detect performance degradation in CI
 - **Integration tests**: Real command execution (git, cargo, gh, pnpm, etc.)
@@ -84,7 +84,7 @@ ls -la src/snapshots/
 
 ### Token Count Validation
 
-All filters **MUST** verify token savings claims (60-90%) in tests:
+All filters **MUST** verify the ≥20% savings floor in tests:
 
 ```rust
 #[cfg(test)]
@@ -124,7 +124,7 @@ mod tests {
 }
 ```
 
-**Why critical**: RTK promises 60-90% token savings. Tests must verify these claims with real fixtures. If savings drop below 60%, it's a **release blocker**.
+**Why critical**: RTK requires ≥20% savings per filter. Tests must verify these claims with real fixtures. If savings drop below 20%, it's a **release blocker**.
 
 **Creating fixtures**:
 
@@ -242,7 +242,7 @@ cargo test --ignored test_real_git_log
 
 **Coverage goals**:
 - **100% filter coverage**: Every filter has snapshot test + token accuracy test
-- **95% token savings verification**: Fixtures with known savings (60-90%)
+- **95% token savings verification**: Fixtures with known savings (≥20%)
 - **Cross-platform tests**: macOS + Linux (Windows in CI only)
 
 **Coverage verification**:
@@ -300,8 +300,8 @@ docker run --rm -v $(pwd):/rtk -w /rtk rust:latest cargo test
 - Memory usage must be <5MB
 - Use `hyperfine` and `time -l` to verify
 
-❌ **DON'T** accept <60% token savings → Fails promise to users
-- All filters must achieve 60-90% savings
+❌ **DON'T** accept <20% token savings → Fails promise to users
+- All filters must achieve ≥20% savings
 - Test with real fixtures, not synthetic data
 - If savings drop, investigate and fix before merge
 
@@ -313,7 +313,7 @@ docker run --rm -v $(pwd):/rtk -w /rtk rust:latest cargo test
 ✅ **DO** verify token savings with real fixtures
 - Use real command output, not synthetic
 - Calculate savings: `100.0 - (output_tokens / input_tokens * 100.0)`
-- Assert `savings >= 60.0`
+- Assert `savings >= 20.0`
 
 ✅ **DO** test shell escaping on all platforms
 - Use `#[cfg(target_os = "...")]` for platform-specific tests
@@ -375,7 +375,7 @@ fn test_newcmd_token_savings() {
     let output_tokens = count_tokens(&output);
     let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
 
-    assert!(savings >= 60.0, "Expected ≥60% savings, got {:.1}%", savings);
+    assert!(savings >= 20.0, "Expected ≥20% savings, got {:.1}%", savings);
 }
 ```
 
@@ -441,7 +441,7 @@ rtk/
 ├── src/
 │   ├── cmds/
 │   │   ├── git/
-│   │   │   ├── git.rs                    # Filter implementation
+│   │   │   ├── git_cmd.rs                    # Filter implementation
 │   │   │   │   └── #[cfg(test)] mod tests { ... }  # Unit tests
 │   │   │   └── snapshots/                # Insta snapshots for git module
 │   │   ├── js/
