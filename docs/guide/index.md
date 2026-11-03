@@ -44,6 +44,7 @@ Dozens of commands across all major ecosystems — Git, Cargo/Rust, JavaScript, 
 1. **[Installation](./getting-started/installation.md)** — Install RTK and verify you have the right package
 2. **[Quick Start](./getting-started/quick-start.md)** — Connect to your AI assistant in 5 minutes
 3. **[Supported Agents](./getting-started/supported-agents.md)** — Claude Code, Cursor, Copilot, Gemini, and more
+4. **[Claude Desktop](./getting-started/claude-desktop.md)** — RTK in Claude Desktop (Cowork), three steps
 
 ## Measure your savings
 

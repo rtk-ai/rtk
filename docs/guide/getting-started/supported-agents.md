@@ -46,6 +46,7 @@ Agent runs "cargo test"
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rust binary (`PreToolUse` plugin) | Yes |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
+| Claude Desktop (Cowork) | Plugin (`PreToolUse`/`PostToolUse` hooks in the task workspace) | Yes |
 
 Agents that rewrite transparently receive the awareness file selected by `awareness.level` in
 `config.toml` (`default` says nothing about RTK). Rules-file agents cannot rewrite, so the agent
@@ -317,6 +318,10 @@ rtk init -g --agent vibe --uninstall
 ```
 
 Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any other user-declared hooks in `hooks.toml` are preserved byte-for-byte. `hooks.toml` is removed only when the RTK entry was the sole content.
+
+### Claude Desktop (Cowork)
+
+RTK comes as a plugin: in Claude, open **Customize › Plugins › Add › Add marketplace**, enter `rtk-ai/claude-plugins`, install **rtk**, then quit and reopen Claude Desktop. Type `/rtk-setup` in a task once. See [Claude Desktop](claude-desktop.md).
 
 ## Integration tiers explained
 
