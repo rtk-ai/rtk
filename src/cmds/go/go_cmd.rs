@@ -205,13 +205,11 @@ fn detect_go_tool_golangci_version() -> u32 {
 }
 
 fn has_golangci_format_flag(args: &[OsString]) -> bool {
-    args.iter().any(|a| {
-        let s = a.to_string_lossy();
-        s == "--out-format"
-            || s.starts_with("--out-format=")
-            || s == "--output.json.path"
-            || s.starts_with("--output.json.path=")
-    })
+    let string_args: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    golangci_cmd::has_output_flag(&string_args)
 }
 
 /// Known `go tool` subcommands that RTK provides filtered output for.
@@ -281,15 +279,12 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
     } = exec_capture(&mut cmd).context("Failed to run go tool golangci-lint")?;
     let raw = format!("{}\n{}", stdout, stderr);
 
-    // v2 outputs JSON on first line + trailing text; v1 outputs just JSON
-    let json_output = if version >= 2 {
-        stdout.lines().next().unwrap_or("")
+    let filtered = golangci_cmd::filter_golangci_output(&stdout, version, has_format);
+    let shown = if has_format {
+        filtered.as_str()
     } else {
-        &*stdout
+        never_worse(&raw, &filtered)
     };
-
-    let filtered = golangci_cmd::filter_golangci_json(json_output, version);
-    let shown = never_worse(&raw, &filtered);
     println!("{}", shown);
 
     if !stderr.trim().is_empty() && verbose > 0 {
@@ -1356,6 +1351,23 @@ utils.go:15:5: unreachable code"#;
         assert!(!has_golangci_format_flag(&os(&["run", "./..."])));
         assert!(!has_golangci_format_flag(&os(&[])));
         assert!(!has_golangci_format_flag(&os(&["--fix"])));
+        assert!(!has_golangci_format_flag(&os(&[
+            "--output.sarif.path=report.sarif"
+        ])));
+    }
+
+    #[test]
+    fn test_has_golangci_format_flag_non_json_stdout_sinks() {
+        assert!(has_golangci_format_flag(&os(&[
+            "--output.sarif.path=stdout"
+        ])));
+        assert!(has_golangci_format_flag(&os(&[
+            "--output.tab.path",
+            "stdout"
+        ])));
+        assert!(has_golangci_format_flag(&os(&[
+            "--output.checkstyle.path=stdout"
+        ])));
     }
 
     #[test]
