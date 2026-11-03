@@ -1,0 +1,57 @@
+{
+  "manifest_version": "0.3",
+  "name": "rtk-desktop",
+  "display_name": "RTK",
+  "version": "0.0.0-dev",
+  "description": "RTK's service on your computer for Claude Desktop: your RTK pipelines, Laya labels, and the gains of your tasks.",
+  "author": {
+    "name": "rtk-ai",
+    "url": "https://www.rtk-ai.app"
+  },
+  "homepage": "https://www.rtk-ai.app",
+  "icon": "icon.png",
+  "license": "Apache-2.0",
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/index.mjs"
+      ],
+      "env": {}
+    }
+  },
+  "tools": [
+    {
+      "name": "rtk_task_setup",
+      "description": "Delivers the user's RTK pipelines and Laya labels to a task"
+    },
+    {
+      "name": "rtk_gain",
+      "description": "RTK gains: this task and this computer"
+    },
+    {
+      "name": "rtk_pipelines",
+      "description": "Manage and browse RTK pipelines"
+    },
+    {
+      "name": "rtk_laya",
+      "description": "Laya classifier status"
+    },
+    {
+      "name": "rtk_status",
+      "description": "Setup checklist for /rtk-setup"
+    }
+  ],
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  }
+}

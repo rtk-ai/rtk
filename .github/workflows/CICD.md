@@ -138,3 +138,19 @@ Trigger: workflow_dispatch
      Homebrew       badge only
      latest tag
 ```
+
+## Claude Desktop plugin (release.yml `desktop-plugin`, ci.yml `desktop-plugin`)
+
+The plugin in `desktop-plugin/` ships as `rtk-desktop-plugin-<version>.zip` on every release, built from the Linux musl `rtk` of that release:
+
+```
+release ──► desktop-plugin (continue-on-error)
+              ├─ test the service (node --test) and the hooks against the musl rtk
+              ├─ build.sh → rtk-desktop-plugin-<version>.zip
+              ├─ gh release upload (versioned zip + rtk-desktop-plugin.zip) + checksums.txt lines
+              ├─ stable release: push the plugin into rtk-ai/claude-plugins (token from the GitHub App)
+              └─ on failure: error annotation, issue "Claude Desktop plugin build failed"
+                 (opened, or commented when one is open), release Discord channel
+```
+
+It runs after `release` and never blocks it: a red plugin job leaves the rtk release complete and `update-latest-tag` unaffected, but the alerts mean it has to be fixed before the next release. On pull requests, ci.yml runs the same tests and a build (with a gnu `rtk`) only when the PR touches `desktop-plugin/` or these workflows.

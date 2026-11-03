@@ -1,0 +1,7 @@
+dist/
+.rtk-musl/
+plugin/runtime/
+plugin/desktop/*.mcpb
+plugin/LICENSE
+plugin/LICENSE-ENGINE
+__pycache__/
