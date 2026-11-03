@@ -175,6 +175,16 @@ const CASES: &[Case] = &[
         native_args: &["diff", "--help"],
     },
     Case {
+        rtk_args: &["git", "ls-tree", "--help"],
+        tool: "git",
+        native_args: &["ls-tree", "--help"],
+    },
+    Case {
+        rtk_args: &["git", "ls-tree", "-h"],
+        tool: "git",
+        native_args: &["ls-tree", "-h"],
+    },
+    Case {
         rtk_args: &["go", "vet", "-h"],
         tool: "go",
         native_args: &["vet", "-h"],
@@ -528,8 +538,18 @@ fn a_tools_own_dash_h_is_still_filtered() {
     std::fs::write(dir.join("one.txt"), "x\n").expect("write");
     std::fs::write(dir.join("two.txt"), "y\n").expect("write");
     let path = dir.to_string_lossy().into_owned();
+    let wide = common::tempdir();
+    for n in 0..60 {
+        std::fs::write(
+            wide.path()
+                .join(format!("module_with_a_long_name_{n:02}.rs")),
+            "z\n",
+        )
+        .expect("write");
+    }
+    let wide_path = wide.path().to_string_lossy().into_owned();
 
-    for (tool, args) in [("ls", vec!["-h", &path]), ("tree", vec!["-h", &path])] {
+    for (tool, args) in [("ls", vec!["-h", &wide_path]), ("tree", vec!["-h", &path])] {
         let Some(native) = on_path(tool) else {
             continue;
         };
@@ -548,6 +568,21 @@ fn a_tools_own_dash_h_is_still_filtered() {
             args.join(" ")
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn ls_dash_h_prints_what_ls_prints_where_compacting_costs_more() {
+    let Some(native) = on_path("ls") else { return };
+    let tmp = common::tempdir();
+    std::fs::write(tmp.path().join("one.txt"), "x\n").expect("write");
+    std::fs::write(tmp.path().join("two.txt"), "y\n").expect("write");
+    let path = tmp.path().to_string_lossy().into_owned();
+    let args = ["-h", path.as_str()];
+    let mine = run_rtk(&[&["ls"][..], &args].concat());
+    let theirs = run(&native, &args);
+    assert_eq!(mine.code, theirs.code);
+    assert_eq!(mine.text, theirs.text);
 }
 
 /// RTK's own commands keep their help: releasing everything would satisfy the checks

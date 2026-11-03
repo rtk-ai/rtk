@@ -1,0 +1,6 @@
+{"ImportPath":"example.com/rtk-round2/broken","Action":"build-output","Output":"# example.com/rtk-round2/broken\n"}
+{"ImportPath":"example.com/rtk-round2/broken","Action":"build-output","Output":"broken/b.go:3:23: undefined: missing\n"}
+{"ImportPath":"example.com/rtk-round2/broken","Action":"build-fail"}
+{"Time":"2026-10-30T21:29:28.455437583-07:00","Action":"start","Package":"example.com/rtk-round2/broken"}
+{"Time":"2026-10-30T21:29:28.455629342-07:00","Action":"output","Package":"example.com/rtk-round2/broken","Output":"FAIL\texample.com/rtk-round2/broken [build failed]\n","OutputType":"frame"}
+{"Time":"2026-10-30T21:29:28.455643103-07:00","Action":"fail","Package":"example.com/rtk-round2/broken","Elapsed":0,"FailedBuild":"example.com/rtk-round2/broken"}

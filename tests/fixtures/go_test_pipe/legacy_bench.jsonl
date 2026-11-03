@@ -1,0 +1,13 @@
+{"Time":"2026-10-21T09:01:16.23891815-07:00","Action":"start","Package":"example.com/rtk-pipe-fixture/cases"}
+{"Time":"2026-10-21T09:01:16.241562932-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Output":"goos: linux\n"}
+{"Time":"2026-10-21T09:01:16.24160818-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Output":"goarch: amd64\n"}
+{"Time":"2026-10-21T09:01:16.241610924-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Output":"pkg: example.com/rtk-pipe-fixture/cases\n"}
+{"Time":"2026-10-21T09:01:16.24161494-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Output":"cpu: AMD EPYC 9V74 80-Core Processor                \n"}
+{"Time":"2026-10-21T09:01:16.241620739-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Output":"BenchmarkLogged-9   \t"}
+{"Time":"2026-10-21T09:01:16.241624264-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Output":"       1\t     21532 ns/op\n"}
+{"Time":"2026-10-21T09:01:16.241629643-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"BenchmarkLogged-9","Output":"--- BENCH: BenchmarkLogged-9\n"}
+{"Time":"2026-10-21T09:01:16.241632056-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"BenchmarkLogged-9","Output":"    capture_test.go:10: captured benchmark log\n"}
+{"Time":"2026-10-21T09:01:16.24163432-07:00","Action":"bench","Package":"example.com/rtk-pipe-fixture/cases","Test":"BenchmarkLogged-9"}
+{"Time":"2026-10-21T09:01:16.241636072-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Output":"PASS\n"}
+{"Time":"2026-10-21T09:01:16.241778227-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Output":"ok  \texample.com/rtk-pipe-fixture/cases\t0.003s\n"}
+{"Time":"2026-10-21T09:01:16.241799599-07:00","Action":"pass","Package":"example.com/rtk-pipe-fixture/cases","Elapsed":0.003}
