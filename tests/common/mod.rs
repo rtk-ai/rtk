@@ -61,6 +61,12 @@ pub fn isolate_git(cmd: &mut Command) {
     scratch::isolate_git(cmd);
 }
 
+/// A temporary directory of the test's own under the scratch directory, so
+/// concurrent runs never share one. Keep the `TempDir` alive for the test.
+pub fn tempdir() -> tempfile::TempDir {
+    scratch::tempdir()
+}
+
 /// A throwaway git repository with one commit, which works with no user git
 /// configuration at all. Keep the `TempDir` alive for the test.
 pub fn temp_git_repo() -> tempfile::TempDir {

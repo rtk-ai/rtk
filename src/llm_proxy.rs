@@ -398,7 +398,6 @@ pub struct ProxyPipelineRow {
 /// pipeline whose name the proxy never stamps (the daemon runs the user-scope
 /// pipeline). Named for the daemon's own pipeline so the card labels it
 /// honestly rather than claiming the project pipeline's name.
-#[cfg(feature = "engine")]
 pub fn read_gain_summary_as_pipeline() -> Option<ProxyPipelineRow> {
     let s = read_gain_summary()?;
     if s.total_requests == 0 {
@@ -500,6 +499,13 @@ fn binary_candidates() -> Vec<PathBuf> {
         out.push(found);
     }
     out
+}
+
+/// Whether the daemon binary is installed where `rtk llm-proxy start` looks
+/// for it (next to `rtk`, or on PATH).
+#[cfg(feature = "engine")]
+pub fn binary_available() -> bool {
+    binary_candidates().iter().any(|p| p.is_file())
 }
 
 /// Locate the daemon binary, or explain how to get one.

@@ -76,11 +76,15 @@ Declining leaves everything alone: *"Skipped — enable later with `rtk init -g`
 
 If you already have the base URL set but nothing restarting the daemon, re-running `rtk init -g` asks only the persistence question.
 
+The question is only asked when the daemon can actually run: the `rtk-proxy` binary is installed (next to `rtk` or on `PATH`) or an rtk-proxy already answers on `127.0.0.1:8080`. Otherwise init says the proxy was not offered and leaves `settings.json` alone. `rtk init -g --uninstall` removes the `env.ANTHROPIC_BASE_URL` this flow wrote, when it still points at the RTK daemon; a base URL aimed anywhere else is kept.
+
 #### What the SessionStart hook actually does
 
-It does **not** do the redirection — that is the `settings.json` entry above. The hook is a *keep-alive*: when a session whose `ANTHROPIC_BASE_URL` points at a loopback address finds nothing listening there, it runs `rtk llm-proxy start`.
+It does **not** do the redirection — that is the `settings.json` entry above. The hook is a *keep-alive*: when a session whose `ANTHROPIC_BASE_URL` points at a loopback address finds nothing listening there, it runs `rtk llm-proxy start`. For a `localhost` URL it checks both `127.0.0.1` and `[::1]`.
 
-It reports through `systemMessage`, which is user-visible and never enters model context — RTK spends no tokens configuring itself. Every failure path stays silent rather than disrupting the session.
+If a listener at that address does not identify as RTK at `/health`, the hook never starts a daemon over it. It warns when `env.ANTHROPIC_BASE_URL` in `settings.json` or `RTK_PROXY_BIND` names that address, because the listener could be another service taking the requests or a hung RTK daemon, and the hook cannot tell which. With neither set, the hook treats the listener as your own gateway and stays silent. After starting a daemon, the hook still verifies the RTK identity before reporting that it started successfully.
+
+It reports through `systemMessage`, which is user-visible and never enters model context — RTK spends no tokens configuring itself. A problem is at most a warning; the hook never disrupts the session.
 
 This route only exists on harnesses that *have* a SessionStart hook, which is why the next one matters.
 

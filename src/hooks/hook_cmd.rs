@@ -4,7 +4,7 @@
 //! corrupts the JSON protocol (Claude Code bug #4669 silently disables the hook).
 
 use super::constants::PRE_TOOL_USE_KEY;
-use super::decision::{self, HookDecision};
+use super::decision::{self, AskOwner, HookDecision};
 use super::permissions::{self, PermissionVerdict};
 use super::permissions_opencode;
 use anyhow::{Context, Result};
@@ -234,18 +234,48 @@ fn heal_legacy_hook_file(path: &std::path::Path) -> bool {
         .is_ok()
 }
 
-/// The decision every hook applies -- [`decision::decide_for_agent`] -- plus the
-/// recall bookkeeping the hook path performs for any command it does not deny.
-fn decide_from_verdict(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
+/// The decision every hook applies -- [`decision::decide_for_agent_at`] -- plus
+/// the recall bookkeeping the hook path performs for any command it does not
+/// deny. `cwd` is the payload's working directory when the host reports one
+/// (only the Claude Code hook does; see #3864).
+///
+/// `deny_rules` says whether RTK can show that nothing in a wrapped script
+/// could escape a deny rule. Only Claude Code's own hook can
+/// ([`decide_claude_hook_action`]); every other caller passes
+/// [`permissions::DenyRules::Unattested`] and therefore never wraps.
+fn decide_from_verdict(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    deny_rules: permissions::DenyRules,
+    cwd: Option<&str>,
+) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
     }
     crate::hooks::rewrite_cmd::track_tee_read(cmd);
-    decision::decide_for_agent(cmd, verdict)
+    decision::decide_for_agent_at(cmd, verdict, deny_rules, cwd)
 }
 
-fn decide_hook_action(cmd: &str, host: permissions::Host) -> HookDecision {
-    decide_from_verdict(cmd, permissions::check_command_for(cmd, host))
+fn decide_hook_action(cmd: &str, host: permissions::Host, cwd: Option<&str>) -> HookDecision {
+    decide_from_verdict(
+        cmd,
+        permissions::check_command_for(cmd, host),
+        permissions::DenyRules::Unattested,
+        cwd,
+    )
+}
+
+/// [`decide_hook_action`] for Claude Code's own hook, the one host whose
+/// settings RTK reads and whose hook asks explicitly for a wrap. Copilot
+/// shares `Host::Claude` for its verdict but judges the returned command
+/// itself, so it keeps [`decide_hook_action`].
+fn decide_claude_hook_action(cmd: &str, cwd: Option<&str>) -> HookDecision {
+    let permissions = permissions::check_claude_hook_command(cmd);
+    if permissions.verdict == PermissionVerdict::Deny {
+        return HookDecision::Deny;
+    }
+    crate::hooks::rewrite_cmd::track_tee_read(cmd);
+    decision::decide_for_claude_hook_at(cmd, &permissions, cwd)
 }
 
 fn handle_vscode(cmd: &str, input: &Value) -> Result<()> {
@@ -257,7 +287,7 @@ fn handle_vscode(cmd: &str, input: &Value) -> Result<()> {
 
 fn vscode_response(cmd: &str, input: &Value) -> Option<Value> {
     vscode_response_from_decision(
-        decide_hook_action(cmd, permissions::Host::Claude),
+        decide_hook_action(cmd, permissions::Host::Claude, None),
         cmd,
         input,
     )
@@ -283,7 +313,7 @@ fn vscode_response_from_decision(
         }
         HookDecision::Defer => return None,
         HookDecision::AllowRewrite(r) => (r, true),
-        HookDecision::AskRewrite(r) => (r, false),
+        HookDecision::AskRewrite(r, _) => (r, false),
     };
 
     audit_log("rewrite", cmd, &rewritten);
@@ -303,9 +333,10 @@ fn handle_copilot_cli(cmd: &str, args: &Value) -> Result<()> {
 }
 
 fn handle_copilot_ide(cmd: &str) -> Result<()> {
-    if let Some(response) =
-        copilot_ide_response_from_decision(decide_hook_action(cmd, permissions::Host::Claude), cmd)
-    {
+    if let Some(response) = copilot_ide_response_from_decision(
+        decide_hook_action(cmd, permissions::Host::Claude, None),
+        cmd,
+    ) {
         let _ = writeln!(io::stdout(), "{response}");
     }
     Ok(())
@@ -318,7 +349,7 @@ fn copilot_ide_response_from_decision(decision: HookDecision, cmd: &str) -> Opti
             audit_log("deny", cmd, "");
             "Blocked by RTK permission rule".to_string()
         }
-        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => {
+        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten, _) => {
             audit_log("rewrite", cmd, &rewritten);
             format!("RTK token optimization: re-run this command as `{rewritten}` instead.")
         }
@@ -333,7 +364,7 @@ fn copilot_ide_response_from_decision(decision: HookDecision, cmd: &str) -> Opti
 fn copilot_cli_response(cmd: &str, args: &Value) -> Option<Value> {
     copilot_cli_response_from_decision(
         args,
-        decide_hook_action(cmd, permissions::Host::Claude),
+        decide_hook_action(cmd, permissions::Host::Claude, None),
         cmd,
     )
 }
@@ -350,7 +381,7 @@ fn copilot_cli_response_from_decision(
         }
         HookDecision::Defer => return None,
         HookDecision::AllowRewrite(r) => (r, true),
-        HookDecision::AskRewrite(r) => (r, false),
+        HookDecision::AskRewrite(r, _) => (r, false),
     };
 
     audit_log("rewrite", cmd, &rewritten);
@@ -387,7 +418,7 @@ pub fn run_gemini() -> Result<()> {
 /// duplicate test copy.
 fn run_gemini_inner(input: &str) -> serde_json::Result<String> {
     run_gemini_inner_impl(input, |cmd| {
-        decide_hook_action(cmd, permissions::Host::Gemini)
+        decide_hook_action(cmd, permissions::Host::Gemini, None)
     })
 }
 
@@ -406,6 +437,8 @@ fn run_gemini_inner_with_rules(
         decide_from_verdict(
             cmd,
             permissions::check_command_with_rules(cmd, deny, ask, allow),
+            permissions::DenyRules::Unattested,
+            None,
         )
     })
 }
@@ -438,7 +471,7 @@ fn run_gemini_inner_impl(
             audit_log("rewrite", cmd, rewritten);
             gemini_json("allow", Some(rewritten))
         }
-        HookDecision::AskRewrite(ref rewritten) => {
+        HookDecision::AskRewrite(ref rewritten, _) => {
             audit_log("ask", cmd, rewritten);
             gemini_json("ask_user", Some(rewritten))
         }
@@ -496,12 +529,12 @@ fn run_antigravity_inner(input: &str) -> Value {
         return json!({ "decision": "allow" });
     }
 
-    match decide_hook_action(cmd, permissions::Host::Antigravity) {
+    match decide_hook_action(cmd, permissions::Host::Antigravity, None) {
         HookDecision::Deny => json!({
             "decision": "deny",
             "reason": "Blocked by RTK permission rule"
         }),
-        HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten) => {
+        HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten, _) => {
             audit_log("rewrite", cmd, rewritten);
             json!({
                 "decision": "allow",
@@ -556,12 +589,12 @@ fn run_vibe_inner(input: &str) -> Option<String> {
         return None;
     }
 
-    match decide_hook_action(cmd, permissions::Host::Vibe) {
+    match decide_hook_action(cmd, permissions::Host::Vibe, None) {
         HookDecision::Deny => {
             audit_log("deny", cmd, "");
             Some(r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string())
         }
-        HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten) => {
+        HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten, _) => {
             audit_log("rewrite", cmd, rewritten);
             Some(vibe_rewrite_json(rewritten))
         }
@@ -677,7 +710,8 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         None => return PayloadAction::Ignore,
     };
 
-    process_claude_payload_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Claude))
+    let cwd = v.get("cwd").and_then(Value::as_str);
+    process_claude_payload_from_decision(v, cmd, decide_claude_hook_action(cmd, cwd))
 }
 
 /// Pure core of `process_claude_payload`, taking the hook decision directly so the
@@ -689,7 +723,7 @@ fn process_claude_payload_from_decision(
     cmd: &str,
     decision: HookDecision,
 ) -> PayloadAction {
-    let (rewritten, allow) = match decision {
+    let (rewritten, permission_decision, outcome) = match decision {
         HookDecision::Deny => {
             return PayloadAction::Skip {
                 decision: HookOutcome::Deny,
@@ -704,19 +738,18 @@ fn process_claude_payload_from_decision(
                 cmd: cmd.to_string(),
             };
         }
-        HookDecision::AllowRewrite(r) => (r, true),
-        HookDecision::AskRewrite(r) => (r, false),
+        HookDecision::AllowRewrite(r) => (r, Some("allow"), HookOutcome::Allow),
+        HookDecision::AskRewrite(r, AskOwner::Host) => (r, None, HookOutcome::Ask),
+        // The host would judge the command RTK built, not the parts inside it
+        // (a fish wrap is one `rtk run` command), so the hook asks itself.
+        HookDecision::AskRewrite(r, AskOwner::Hook) => (r, Some("ask"), HookOutcome::Ask),
     };
 
     PayloadAction::Rewrite {
         cmd: cmd.to_string(),
-        output: pre_tool_use_rewrite_output(v, &rewritten, allow.then_some("allow")),
+        output: pre_tool_use_rewrite_output(v, &rewritten, permission_decision),
         rewritten,
-        decision: if allow {
-            HookOutcome::Allow
-        } else {
-            HookOutcome::Ask
-        },
+        decision: outcome,
     }
 }
 
@@ -859,8 +892,8 @@ fn process_trae_payload(v: &Value) -> Option<TraeRewrite> {
         .pointer("/tool_input/command")
         .and_then(Value::as_str)
         .filter(|command| !command.is_empty())?;
-    let rewritten = match decide_hook_action(command, permissions::Host::Trae) {
-        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => rewritten,
+    let rewritten = match decide_hook_action(command, permissions::Host::Trae, None) {
+        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten, _) => rewritten,
         HookDecision::Deny | HookDecision::Defer => return None,
     };
 
@@ -960,7 +993,11 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
         };
     }
 
-    process_codex_payload_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Codex))
+    process_codex_payload_from_decision(
+        v,
+        cmd,
+        decide_hook_action(cmd, permissions::Host::Codex, None),
+    )
 }
 
 fn process_codex_payload_from_decision(
@@ -970,7 +1007,7 @@ fn process_codex_payload_from_decision(
 ) -> PayloadAction {
     let (rewritten, outcome) = match decision {
         HookDecision::AllowRewrite(rewritten) => (rewritten, HookOutcome::Allow),
-        HookDecision::AskRewrite(rewritten) => (rewritten, HookOutcome::Ask),
+        HookDecision::AskRewrite(rewritten, _) => (rewritten, HookOutcome::Ask),
         HookDecision::Deny => {
             return PayloadAction::Skip {
                 decision: HookOutcome::Deny,
@@ -1086,12 +1123,12 @@ pub fn run_cursor() -> Result<()> {
         }
     };
 
-    let output = match decide_hook_action(&cmd, permissions::Host::Cursor) {
+    let output = match decide_hook_action(&cmd, permissions::Host::Cursor, None) {
         HookDecision::AllowRewrite(rewritten) => {
             audit_log("rewrite", &cmd, &rewritten);
             cursor_allow(&rewritten)
         }
-        HookDecision::AskRewrite(rewritten) => {
+        HookDecision::AskRewrite(rewritten, _) => {
             audit_log("ask", &cmd, &rewritten);
             cursor_ask(&rewritten)
         }
@@ -1152,9 +1189,9 @@ fn run_cursor_inner_with_rules(
     };
 
     let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
-    match decide_from_verdict(&cmd, verdict) {
+    match decide_from_verdict(&cmd, verdict, permissions::DenyRules::Unattested, None) {
         HookDecision::AllowRewrite(rewritten) => cursor_allow(&rewritten),
-        HookDecision::AskRewrite(rewritten) => cursor_ask(&rewritten),
+        HookDecision::AskRewrite(rewritten, _) => cursor_ask(&rewritten),
         _ => "{}".to_string(),
     }
 }
@@ -1168,7 +1205,11 @@ fn run_cursor_inner_with_rules(
 
 fn process_droid_payload(v: &Value) -> Option<Value> {
     let cmd = droid_execute_command(v)?;
-    droid_response_from_decision(v, cmd, decide_hook_action(cmd, permissions::Host::Droid))
+    droid_response_from_decision(
+        v,
+        cmd,
+        decide_hook_action(cmd, permissions::Host::Droid, None),
+    )
 }
 
 /// Extract the shell command when the payload targets Droid's Execute tool.
@@ -1200,7 +1241,7 @@ fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) ->
             return None;
         }
         HookDecision::Defer => return None,
-        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => r,
+        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r, _) => r,
     };
 
     audit_log("rewrite", cmd, &rewritten);
@@ -1246,7 +1287,11 @@ fn opencode_answer(cmd: &str, rules: &[permissions_opencode::Rule]) -> Value {
         return json!({});
     }
     let before = permissions_opencode::check_command_with_opencode_rules(cmd, rules);
-    let rewritten = match decide_from_verdict(cmd, before) {
+    // OpenCode re-evaluates its own patterns against whatever RTK returns, so
+    // the rule set read here is advisory rather than enforced — hence
+    // `Unattested`, and no fish script is wrapped for this host.
+    let rewritten = match decide_from_verdict(cmd, before, permissions::DenyRules::Unattested, None)
+    {
         // OpenCode denies the typed command itself; a rewrite could only
         // un-match the deny rule.
         HookDecision::Deny => {
@@ -1254,7 +1299,7 @@ fn opencode_answer(cmd: &str, rules: &[permissions_opencode::Rule]) -> Value {
             return json!({});
         }
         HookDecision::Defer => return json!({}),
-        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => r,
+        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r, _) => r,
     };
 
     let after = permissions_opencode::check_command_with_opencode_rules(&rewritten, rules);
@@ -1315,7 +1360,12 @@ fn run_droid_inner_with_rules(
     let v: Value = droid_payload(input).ok().flatten()?;
     let cmd = droid_execute_command(&v)?;
     let verdict = permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules);
-    droid_response_from_decision(&v, cmd, decide_from_verdict(cmd, verdict)).map(|o| o.to_string())
+    droid_response_from_decision(
+        &v,
+        cmd,
+        decide_from_verdict(cmd, verdict, permissions::DenyRules::Unattested, None),
+    )
+    .map(|o| o.to_string())
 }
 
 #[cfg(test)]
@@ -1454,7 +1504,7 @@ mod tests {
         });
         for decision in [
             HookDecision::AllowRewrite("rtk git status".into()),
-            HookDecision::AskRewrite("rtk git status".into()),
+            HookDecision::AskRewrite("rtk git status".into(), AskOwner::Host),
         ] {
             let response = vscode_response_from_decision(decision, "git status", &input).unwrap();
             let mut expected = input["tool_input"].clone();
@@ -1486,7 +1536,7 @@ mod tests {
         // Copilot CLI 1.0.66+ treats it as authoritative and forces a blocking
         // dialog with no "remember" option on every rewritten command.
         let r = vscode_response_from_decision(
-            HookDecision::AskRewrite("rtk cargo test".into()),
+            HookDecision::AskRewrite("rtk cargo test".into(), AskOwner::Host),
             "cargo test",
             &vscode_input("Bash", "cargo test"),
         )
@@ -1543,7 +1593,7 @@ mod tests {
         // Copilot CLI 1.0.66+ forced-prompt bug from #3037.
         let r = copilot_cli_response_from_decision(
             &cli_args("cargo test"),
-            HookDecision::AskRewrite("rtk cargo test".into()),
+            HookDecision::AskRewrite("rtk cargo test".into(), AskOwner::Host),
             "cargo test",
         )
         .unwrap();
@@ -1595,7 +1645,7 @@ mod tests {
     #[test]
     fn test_copilot_ide_rewrite_returns_deny_with_suggestion() {
         let response = copilot_ide_response_from_decision(
-            HookDecision::AskRewrite("rtk git status".into()),
+            HookDecision::AskRewrite("rtk git status".into(), AskOwner::Host),
             "git status",
         )
         .unwrap();
@@ -1683,7 +1733,7 @@ mod tests {
         });
         let r = copilot_cli_response_from_decision(
             &args,
-            HookDecision::AskRewrite("rtk cargo install ripgrep".into()),
+            HookDecision::AskRewrite("rtk cargo install ripgrep".into(), AskOwner::Host),
             "cargo install ripgrep",
         )
         .unwrap();
@@ -1701,7 +1751,11 @@ mod tests {
             &[],
             &["Bash(git:*)".to_string()],
         );
-        copilot_cli_response_from_decision(&cli_args(cmd), decide_from_verdict(cmd, verdict), cmd)
+        copilot_cli_response_from_decision(
+            &cli_args(cmd),
+            decide_from_verdict(cmd, verdict, permissions::DenyRules::NoneConfigured, None),
+            cmd,
+        )
     }
 
     #[test]
@@ -1811,6 +1865,25 @@ mod tests {
             Some("rtk git status".into())
         );
         assert_eq!(rewrite_command_no_prefixes("cat <<EOF", &[]), None);
+    }
+
+    /// #3864: the Claude hook feeds the payload cwd into the decision, so a
+    /// git command from inside a managed worktree is left to Claude Code.
+    #[test]
+    fn test_claude_payload_cwd_in_worktree_skips_git_rewrite() {
+        let v = claude_payload_with_ids(
+            "git status",
+            "sess-1",
+            "toolu_01ABC",
+            "/repo/.claude/worktrees/feat-x",
+        );
+        assert!(matches!(
+            process_claude_payload(&v),
+            PayloadAction::Skip {
+                decision: HookOutcome::Defer,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1976,11 +2049,56 @@ mod tests {
         match process_claude_payload_from_decision(
             &v,
             "git status",
-            HookDecision::AskRewrite("rtk git status".to_string()),
+            HookDecision::AskRewrite("rtk git status".to_string(), AskOwner::Host),
         ) {
             PayloadAction::Rewrite { decision, .. } => assert_eq!(decision, HookOutcome::Ask),
             other => {
                 panic!("expected Rewrite, got a different PayloadAction variant instead: {other:?}")
+            }
+        }
+    }
+
+    /// A wrap RTK built asks explicitly, since the host would only judge the
+    /// `rtk run` command, and is logged as an ask. The same text as an
+    /// ordinary ask leaves the decision to the host.
+    #[test]
+    fn test_process_claude_payload_decision_fish_wrap_asks_explicitly() {
+        let cmd = "test -d src; and git status";
+        let wrapped = "rtk run --shell fish -c 'test -d src; and git status'";
+        let v = claude_input_value(cmd);
+        for (decision, expected) in [
+            (
+                HookDecision::AskRewrite(wrapped.to_string(), AskOwner::Hook),
+                Some("ask"),
+            ),
+            (
+                HookDecision::AskRewrite(wrapped.to_string(), AskOwner::Host),
+                None,
+            ),
+        ] {
+            match process_claude_payload_from_decision(&v, cmd, decision) {
+                PayloadAction::Rewrite {
+                    decision,
+                    output,
+                    rewritten,
+                    ..
+                } => {
+                    assert_eq!(decision, HookOutcome::Ask, "{expected:?}");
+                    assert_eq!(rewritten, wrapped);
+                    assert_eq!(
+                        output
+                            .pointer("/hookSpecificOutput/updatedInput/command")
+                            .and_then(Value::as_str),
+                        Some(wrapped)
+                    );
+                    assert_eq!(
+                        output
+                            .pointer("/hookSpecificOutput/permissionDecision")
+                            .and_then(Value::as_str),
+                        expected
+                    );
+                }
+                other => panic!("expected Rewrite, got {other:?}"),
             }
         }
     }
@@ -2255,8 +2373,13 @@ mod tests {
             (PermissionVerdict::Ask, HookOutcome::Ask),
             (PermissionVerdict::Allow, HookOutcome::Allow),
         ] {
-            let decision =
-                super::super::decision::decide_with_params("git status", verdict, &[], &[]);
+            let decision = super::super::decision::decide_with_params(
+                "git status",
+                verdict,
+                &[],
+                &[],
+                permissions::DenyRules::NoneConfigured,
+            );
             let PayloadAction::Rewrite {
                 output, decision, ..
             } = process_codex_payload_from_decision(&input, "git status", decision)
@@ -2279,6 +2402,7 @@ mod tests {
             PermissionVerdict::Deny,
             &[],
             &[],
+            permissions::DenyRules::NoneConfigured,
         );
         assert!(matches!(
             process_codex_payload_from_decision(&input, "git status", denied),
@@ -2837,7 +2961,7 @@ mod tests {
         allow: &[String],
     ) -> HookDecision {
         let verdict = permissions::check_command_with_rules(cmd, deny, ask, allow);
-        decide_from_verdict(cmd, verdict)
+        decide_from_verdict(cmd, verdict, permissions::DenyRules::Unattested, None)
     }
 
     fn all_allowed() -> Vec<String> {
@@ -2856,7 +2980,7 @@ mod tests {
     fn test_decide_ask_for_default_verdict() {
         assert!(matches!(
             decide_with_rules("git status", &[], &[], &[]),
-            HookDecision::AskRewrite(_)
+            HookDecision::AskRewrite(_, AskOwner::Host)
         ));
     }
 
@@ -2899,6 +3023,29 @@ mod tests {
     }
 
     #[test]
+    fn test_decide_leaves_folded_ls_tree_to_git_where_its_lines_are_read() {
+        assert!(matches!(
+            decide_with_rules("git ls-tree -r --name-only HEAD", &[], &[], &all_allowed()),
+            HookDecision::AllowRewrite(ref r) if r == "rtk git ls-tree -r --name-only HEAD"
+        ));
+        for cmd in [
+            "git ls-tree -r --name-only HEAD > files.txt",
+            "git ls-tree -r --name-only HEAD | head -5",
+            "git ls-tree -r --name-only HEAD | cat",
+            "for f in $(git ls-tree -r --name-only HEAD); do echo \"$f\"; done",
+            "git ls-tree -r --name-only HEAD | while read f; do echo \"$f\"; done",
+        ] {
+            assert!(
+                matches!(
+                    decide_with_rules(cmd, &[], &[], &all_allowed()),
+                    HookDecision::Defer
+                ),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
     fn test_decide_allow_for_fd_dup_redirect() {
         assert!(matches!(
             decide_with_rules("git status 2>&1", &[], &[], &all_allowed()),
@@ -2914,7 +3061,7 @@ mod tests {
                 r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string()
             }
             HookDecision::AllowRewrite(r) => gemini_json("allow", Some(&r)),
-            HookDecision::AskRewrite(r) => gemini_json("ask_user", Some(&r)),
+            HookDecision::AskRewrite(r, _) => gemini_json("ask_user", Some(&r)),
             HookDecision::Defer => gemini_json("ask_user", None),
         }
     }
@@ -3408,7 +3555,12 @@ mod tests {
         let verdict = permissions::check_command_with_rules(command, &[], &[], &["*".to_string()]);
         let response = copilot_cli_response_from_decision(
             &cli_args(command),
-            decide_from_verdict(command, verdict),
+            decide_from_verdict(
+                command,
+                verdict,
+                permissions::DenyRules::NoneConfigured,
+                None,
+            ),
             command,
         )
         .expect("wrapper rewrite expected");
@@ -3492,7 +3644,7 @@ mod tests {
             &[],
             &all_allowed(),
         ) {
-            HookDecision::AskRewrite(rewritten) => {
+            HookDecision::AskRewrite(rewritten, AskOwner::Host) => {
                 assert_eq!(
                     rewritten,
                     r#"bash -c "rtk read foo --head-lines 10 && rtk grep -R bar .""#

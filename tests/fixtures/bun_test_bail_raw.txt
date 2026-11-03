@@ -1,0 +1,19 @@
+bun test v1.3.14 (0d9b296a)
+
+mixed.test.ts:
+1 | import { expect, test, describe } from "bun:test";
+2 | import { add, shape } from "./src/math";
+3 | 
+4 | describe("math", () => {
+5 |   test("adds", () => { expect(add(1, 2)).toBe(3); });
+6 |   test("wrong sum", () => { expect(add(1, 2)).toBe(5); });
+                                                  ^
+error: expect(received).toBe(expected)
+
+Expected: 5
+Received: 3
+
+      at <anonymous> (/home/user/project/mixed.test.ts:6:47)
+(fail) math > wrong sum [0.08ms]
+Ran 2 tests across 1 file. [15.00ms]
+Bailed out after 1 failure

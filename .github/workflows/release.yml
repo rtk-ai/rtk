@@ -138,7 +138,7 @@ jobs:
           cd ../../..
 
       - name: Upload rtk-oss artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rtk-oss-${{ matrix.target }}
           path: rtk-oss-${{ matrix.target }}.${{ matrix.archive }}
@@ -182,7 +182,7 @@ jobs:
           cd ../../..
 
       - name: Upload rtk-proxy artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rtk-proxy-${{ matrix.target }}
           path: rtk-proxy-${{ matrix.target }}.${{ matrix.archive }}
@@ -217,7 +217,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -232,7 +232,7 @@ jobs:
           RTK_TELEMETRY_TOKEN: ${{ secrets.RTK_TELEMETRY_TOKEN }}
 
       - name: Upload DEB
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rtk-oss-deb
           path: target/debian/*.deb
@@ -243,7 +243,7 @@ jobs:
     container: fedora:latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install dependencies
         run: |
@@ -262,7 +262,7 @@ jobs:
         run: cargo generate-rpm --variant oss
 
       - name: Upload RPM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rtk-oss-rpm
           path: target/generate-rpm/*.rpm
@@ -302,7 +302,7 @@ jobs:
     needs: [build, build-deb, build-rpm, build-deb-oss, build-rpm-oss]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         id: app-token
         with:
           client-id: ${{ secrets.APP_CLIENT_ID }}

@@ -526,6 +526,26 @@ fn resolve_hermes_home_from_env(
     )
 }
 
+/// Returns true if Hermes RTK plugin is installed or enabled in config.yaml.
+pub fn is_configured() -> bool {
+    let Ok(hermes_home) = resolve_hermes_home() else {
+        return false;
+    };
+    let plugin_dir = hermes_plugin_dir(&hermes_home);
+    if plugin_dir.join(HERMES_PLUGIN_INIT_FILE).is_file() {
+        return true;
+    }
+    let config_path = hermes_home.join("config.yaml");
+    if let Ok(content) = fs::read_to_string(&config_path)
+        && content
+            .lines()
+            .any(|l| is_yaml_list_item_named(l, HERMES_PLUGIN_NAME))
+    {
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
