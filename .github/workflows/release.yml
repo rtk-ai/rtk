@@ -402,7 +402,9 @@ jobs:
         run: RTK_BIN="$PWD/musl/bin/rtk" python3 desktop-plugin/test_hooks.py
 
       - name: Build the plugin zip
-        run: sh desktop-plugin/build.sh --version "${{ steps.version.outputs.version }}" --rtk musl/bin/rtk --out desktop-plugin/dist
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: sh desktop-plugin/build.sh --version "$VERSION" --rtk musl/bin/rtk --out desktop-plugin/dist
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -456,7 +458,10 @@ jobs:
             echo "::warning::no token for $MARKETPLACE_REPO (is the GitHub App installed on it?): the marketplace was not updated"
             exit 0
           fi
-          git clone --quiet --depth 1 "https://x-access-token:${TOKEN}@github.com/${MARKETPLACE_REPO}.git" marketplace
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          git clone --quiet --depth 1 "https://github.com/${MARKETPLACE_REPO}.git" marketplace
+
           rm -rf marketplace/plugins/rtk
           mkdir -p marketplace/plugins marketplace/.claude-plugin
           cp -R desktop-plugin/dist/rtk marketplace/plugins/rtk

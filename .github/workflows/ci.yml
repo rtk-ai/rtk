@@ -333,8 +333,11 @@ jobs:
 
       - name: Touched by this PR?
         id: touched
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          if git diff --name-only "origin/${{ github.base_ref }}...HEAD" | grep -qE '^(desktop-plugin/|\.github/workflows/(ci|release)\.yml$)'; then
+          if git diff --name-only "origin/${BASE_REF}...HEAD" | grep -qE '^(desktop-plugin/|\.github/workflows/(ci|release)\.yml$)'; then
+
             echo "yes=true" >> $GITHUB_OUTPUT
           else
             echo "yes=false" >> $GITHUB_OUTPUT
