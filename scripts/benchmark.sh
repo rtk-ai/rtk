@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -e
 
+# cargo prints no colour into a pipe, which is how agents read it.
+export CARGO_TERM_COLOR=never
+
 # Use local release build if available, otherwise fall back to installed rtk
 if [ -f "./target/release/rtk" ]; then
   RTK="$(cd "$(dirname ./target/release/rtk)" && pwd)/$(basename ./target/release/rtk)"
@@ -41,6 +44,12 @@ GOOD_TESTS=0
 FAIL_TESTS=0
 WARN_TESTS=0
 NEGATIVE_TESTS=0
+
+# bench runs the raw side first, so a first build's compile output would land on
+# that side alone and read as savings. Building first gives both sides the same target.
+precompile() {
+  "$@" > /dev/null 2>&1 || echo "⚠️  precompile failed: $*" >&2
+}
 
 bench() {
   local name="$1"
@@ -176,7 +185,7 @@ bench "ls multi" "ls -la src/ scripts/" "$RTK ls src/ scripts/"
 # ===================
 if command -v tree &>/dev/null; then
   section "tree"
-  bench "tree" "tree -L 2" "$RTK tree -L 2"
+  bench "tree" "tree -L 2 -I target" "$RTK tree -L 2"
   bench "tree src/" "tree src/ -L 2" "$RTK tree src/ -L 2"
 else
   echo ""
@@ -197,8 +206,8 @@ bench "read -n" "cat -n src/lib.rs" "$RTK read src/lib.rs -n"
 # find
 # ===================
 section "find"
-bench "find *" "find . -type f" "$RTK find '*'"
-bench "find *.rs" "find . -name '*.rs' -type f" "$RTK find '*.rs'"
+bench "find *" "find . -not -path './target/*' -not -path './.git/*' -type f" "$RTK find '*'"
+bench "find *.rs" "find . -not -path './target/*' -not -path './.git/*' -name '*.rs' -type f" "$RTK find '*.rs'"
 # `rtk find --max N` caps how many names are DISPLAYED but still scans and
 # summarizes the whole tree, so the honest baseline is the full `find` a user
 # would otherwise read, not a `head -N`-truncated slice — that measures a
@@ -343,6 +352,7 @@ bench "env -f PATH" "env | grep PATH" "$RTK env -f PATH"
 # ===================
 section "err"
 if command -v cargo &>/dev/null; then
+  precompile cargo build
   bench "err cargo build" "cargo build 2>&1 || true" "$RTK err cargo build 2>&1"
 else
   echo "⏭️  err cargo build (cargo not in PATH, skipped)"
@@ -353,6 +363,7 @@ fi
 # ===================
 section "test"
 if command -v cargo &>/dev/null; then
+  precompile cargo test --no-run
   bench "test cargo test" "cargo test 2>&1 || true" "$RTK test cargo test 2>&1"
 else
   echo "⏭️  test cargo test (cargo not in PATH, skipped)"
@@ -401,9 +412,13 @@ fi
 # ===================
 section "cargo"
 if command -v cargo &>/dev/null; then
+  precompile cargo build
   bench "cargo build" "cargo build 2>&1 || true" "$RTK cargo build 2>&1"
+  precompile cargo test --no-run
   bench "cargo test" "cargo test 2>&1 || true" "$RTK cargo test 2>&1"
+  precompile cargo clippy
   bench "cargo clippy" "cargo clippy 2>&1 || true" "$RTK cargo clippy 2>&1"
+  precompile cargo check
   bench "cargo check" "cargo check 2>&1 || true" "$RTK cargo check 2>&1"
 else
   echo "⏭️  cargo build/test/clippy/check (cargo not in PATH, skipped)"
