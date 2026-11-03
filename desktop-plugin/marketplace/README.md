@@ -12,4 +12,5 @@ Updates come by themselves. Guide: [Claude Desktop](https://www.rtk-ai.app/guide
 
 ## What is inside
 
-`plugins/rtk/` is the plugin exactly as released with rtk, including the `rtk` that runs in the task workspace. The plugin is Apache-2.0; RTK's engine inside it is BUSL-1.1 (`LICENSE-ENGINE`), free to use.
+Only the listing: `marketplace.json` points at the plugin zip of the latest rtk release, with its sha256, so installing downloads that one file from the [releases](https://github.com/rtk-ai/rtk/releases). The plugin is Apache-2.0; RTK's engine inside it is BUSL-1.1 (`LICENSE-ENGINE`), free to use.
+

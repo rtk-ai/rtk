@@ -452,22 +452,32 @@ jobs:
           TOKEN: ${{ steps.marketplace-token.outputs.token }}
           APP_SLUG: ${{ steps.marketplace-token.outputs.app-slug }}
           VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          REPO: ${{ github.repository }}
           MARKETPLACE_REPO: rtk-ai/claude-plugins
         run: |
           if [ -z "$TOKEN" ]; then
             echo "::warning::no token for $MARKETPLACE_REPO (is the GitHub App installed on it?): the marketplace was not updated"
             exit 0
           fi
+          ZIP="desktop-plugin/dist/rtk-desktop-plugin-$VERSION.zip"
+          SHA=$(sha256sum "$ZIP" | cut -d' ' -f1)
+          URL="https://github.com/$REPO/releases/download/$TAG/rtk-desktop-plugin-$VERSION.zip"
+          for i in 1 2 3 4 5 6; do
+            curl -sSfL --max-time 120 -o downloaded.zip "$URL" && break
+            sleep 10
+          done
+          [ "$(sha256sum downloaded.zip | cut -d' ' -f1)" = "$SHA" ] || { echo "::error::$URL does not serve the zip that was built, the marketplace was not updated"; exit 1; }
           export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
           export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
           git clone --quiet --depth 1 "https://github.com/${MARKETPLACE_REPO}.git" marketplace
-
-          rm -rf marketplace/plugins/rtk
-          mkdir -p marketplace/plugins marketplace/.claude-plugin
-          cp -R desktop-plugin/dist/rtk marketplace/plugins/rtk
-          cp desktop-plugin/marketplace/marketplace.json marketplace/.claude-plugin/marketplace.json
+          mkdir -p marketplace/.claude-plugin
+          sed -e "s|__VERSION__|$VERSION|g" -e "s|__TAG__|$TAG|g" -e "s|__SHA256__|$SHA|g" desktop-plugin/marketplace/marketplace.json > marketplace/.claude-plugin/marketplace.json
+          python3 -c 'import json, sys; json.load(open(sys.argv[1]))' marketplace/.claude-plugin/marketplace.json
           cp desktop-plugin/marketplace/README.md marketplace/README.md
           cd marketplace
+          git rm -r --quiet --ignore-unmatch plugins
+
           bot="${APP_SLUG:-rtk-release-bot}[bot]"
           bot_id=$(GH_TOKEN="$TOKEN" gh api "/users/${bot}" --jq .id 2>/dev/null || true)
           git config user.name "$bot"
