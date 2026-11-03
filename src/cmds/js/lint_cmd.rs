@@ -59,6 +59,28 @@ fn is_python_linter(linter: &str) -> bool {
     matches!(linter, "ruff" | "pylint" | "mypy" | "flake8" | "sqlfluff")
 }
 
+/// Check if an argument names a known linter binary rather than a bare target
+/// directory/file operand (such as `src` or `dev-slots` after `npx eslint <dir>`
+/// is rewritten to `rtk lint <dir>`).
+fn is_known_linter(arg: &str) -> bool {
+    matches!(
+        arg,
+        "eslint"
+            | "biome"
+            | "oxlint"
+            | "stylelint"
+            | "tslint"
+            | "standard"
+            | "jshint"
+            | "xo"
+            | "markdownlint"
+            | "markdownlint-cli"
+            | "markdownlint-cli2"
+            | "commitlint"
+            | "htmlhint"
+    ) || is_python_linter(arg)
+}
+
 /// Strip package manager prefixes (npx, bunx, pnpm, pnpm exec, yarn) from args.
 /// Returns the number of args to skip.
 fn strip_pm_prefix(args: &[String]) -> usize {
@@ -89,7 +111,8 @@ fn detect_linter(args: &[String]) -> (&str, bool) {
     let is_path_or_flag = args.is_empty()
         || args[0].starts_with('-')
         || args[0].contains('/')
-        || args[0].contains('.');
+        || args[0].contains('.')
+        || !is_known_linter(&args[0]);
 
     if is_path_or_flag {
         ("eslint", false)
@@ -699,6 +722,19 @@ mod tests {
         let (linter, explicit) = detect_linter(&args);
         assert_eq!(linter, "eslint");
         assert!(!explicit);
+    }
+
+    #[test]
+    fn test_detect_linter_default_on_bare_directory_name() {
+        // `npx eslint dev-slots` and `eslint src` rewrite to `rtk lint dev-slots`
+        // / `rtk lint src`; bare directory names without `/` or `.` must still
+        // be treated as paths for eslint rather than as linter package names (#4963).
+        for dir in ["dev-slots", "src", "packages", "apps"] {
+            let args: Vec<String> = vec![dir.into()];
+            let (linter, explicit) = detect_linter(&args);
+            assert_eq!(linter, "eslint", "failed for bare path {dir}");
+            assert!(!explicit, "bare path {dir} should not be marked explicit");
+        }
     }
 
     #[test]
