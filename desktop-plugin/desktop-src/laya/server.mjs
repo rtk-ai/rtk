@@ -27,8 +27,9 @@ const server = createServer((req, res) => {
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ model: result.model, answers, usage: result.usage }));
     } catch (e) {
+      console.error("laya: request failed", e);
       res.statusCode = 400;
-      res.end(JSON.stringify({ error: String(e?.message ?? e) }));
+      res.end(JSON.stringify({ error: "Bad request" }));
     }
   });
 });
