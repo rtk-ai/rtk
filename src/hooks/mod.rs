@@ -30,9 +30,24 @@ fn is_rtk_binary(binary: &str) -> bool {
 }
 
 fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
-    // Strip only shell boundary whitespace; CR stays visible to preserve rejection.
-    let command = command.trim_matches(|character| matches!(character, ' ' | '\t' | '\n'));
-    let tokens = crate::discover::lexer::tokenize_with_newlines(command);
+    let mut tokens = crate::discover::lexer::tokenize_with_newlines(command);
+    // Ignore only literal LF operator tokens at the command's boundaries.
+    // Inspecting the source byte keeps CRLF and LF inside quotes or escapes
+    // visible to the ownership guard.
+    while tokens.first().is_some_and(|token| {
+        matches!(token.kind, crate::discover::lexer::TokenKind::Operator)
+            && token.value == "\n"
+            && command.as_bytes().get(token.offset) == Some(&b'\n')
+    }) {
+        tokens.remove(0);
+    }
+    while tokens.last().is_some_and(|token| {
+        matches!(token.kind, crate::discover::lexer::TokenKind::Operator)
+            && token.value == "\n"
+            && command.as_bytes().get(token.offset) == Some(&b'\n')
+    }) {
+        tokens.pop();
+    }
     if tokens.iter().any(|token| match token.kind {
         crate::discover::lexer::TokenKind::Operator
         | crate::discover::lexer::TokenKind::Pipe(_)

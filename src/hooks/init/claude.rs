@@ -1147,6 +1147,9 @@ mod tests {
             "/usr/local/bin/rtk hook claude\nmy-audit",
             "/usr/local/bin/rtk hook claude\r\n",
             "/usr/local/bin/rtk hook claude\r",
+            "/usr/local/bin/rtk hook claude\\ ",
+            "/usr/local/bin/rtk hook \"claude\n",
+            "/usr/local/bin/rtk hook 'claude\n",
             " \t/usr/local/bin/rtk hook claude\r\n\t ",
             " \t/usr/local/bin/rtk hook claude\r\t ",
         ] {
@@ -1161,6 +1164,7 @@ mod tests {
             "\n/usr/local/bin/rtk hook claude",
             " \n/usr/local/bin/rtk hook claude\n ",
             "\t\n/usr/local/bin/rtk hook claude\n\t",
+            "${HOME}/.local/bin/rtk hook claude",
         ] {
             assert!(
                 is_claude_hook_command(command),

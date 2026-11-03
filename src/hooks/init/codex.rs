@@ -999,6 +999,7 @@ mod tests {
         assert!(is_codex_hook_command(
             "\"C:\\Program Files\\rtk.exe\" hook codex"
         ));
+        assert!(is_codex_hook_command("rtk hook codex\n"));
     }
 
     #[test]
