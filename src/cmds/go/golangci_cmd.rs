@@ -5,7 +5,7 @@ use crate::core::args_utils;
 use crate::core::config;
 use crate::core::runner;
 use crate::core::shell::display_args;
-use crate::core::stream::exec_capture;
+use crate::core::stream::exec_capture_unguarded;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
@@ -181,7 +181,7 @@ pub(crate) fn detect_major_version() -> u32 {
     let mut cmd = resolved_command("golangci-lint");
     cmd.arg("--version");
 
-    match exec_capture(&mut cmd) {
+    match exec_capture_unguarded(&mut cmd) {
         Ok(r) => {
             let version_text = if r.stdout.trim().is_empty() {
                 &r.stderr

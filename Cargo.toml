@@ -87,13 +87,13 @@ which = "8"
 # sources the static view reads (core::tracking + the llm-proxy's own DB).
 # Opt-in, not on the hot startup path -- doesn't affect the <10ms budget.
 ratatui = "0.29"
-crossterm = "0.28"
+crossterm = "0.29"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_System_Console",
     "Win32_Globalization",
 ] }

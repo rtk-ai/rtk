@@ -1,0 +1,13 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________________________ test_frames __________________________________
+test_lib.py:5: in test_frames
+    assert_frame_equal((3, 2), (3, 4))
+mylib/checks.py:3: in assert_frame_equal
+    raise AssertionError(
+E   AssertionError: DataFrame are different
+E   
+E   DataFrame shape mismatch
+E   [left]:  (3, 2)
+E   [right]: (3, 4)
+1 failed in 0.02s

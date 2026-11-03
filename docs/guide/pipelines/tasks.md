@@ -74,7 +74,7 @@ An upstream is a model endpoint, shared by tasks and [judges](./conditions.md#ju
 | `model` | the model name |
 | `base_url` | optional — any compatible endpoint |
 | `api_key_env` | the environment variable holding the key. Omit it for the provider's conventional variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), which `validate` names for you. A literal `api_key = "…"` does not load (E015) |
-| `api_key_command` | or run a command and take its stdout (keychain, vault) — the same shape as Claude Code's `apiKeyHelper`; an upstream with one is never reported as needing auth |
+| `api_key_command` | or run a command and take its stdout (keychain, vault) — the same shape as Claude Code's `apiKeyHelper`. It runs through `sh` on Linux/macOS and `cmd` on Windows, so a command written for Git Bash needs rewriting there, or an explicit `bash -c "…"`. An upstream with one is never reported as needing auth |
 | `timeout_secs` | default 30; set it lower for anything on the hook path |
 
 `rtk pipeline validate`, `rtk trust` and `rtk init` print `auth needed: export VAR=...` for any key that is unset.

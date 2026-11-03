@@ -1,5 +1,10 @@
 # Core Infrastructure
 
+`stream::exec_capture_stdin_with_relay` is an opt-in buffered capture for filters
+that must preserve both decoded streams without line-ending normalization or
+stderr caps. It uses the existing cancellation relay; callers flush output and
+tracking before calling `stream::die_by_relayed_signal`.
+
 > See also [docs/contributing/TECHNICAL.md](../../docs/contributing/TECHNICAL.md) for the full architecture overview
 
 ## Scope
