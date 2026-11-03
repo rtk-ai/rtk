@@ -97,20 +97,61 @@ fn install_failure_with_stderr_keeps_stderr_only() {
 }
 
 #[test]
-fn list_json_failure_on_stdout_is_shown() {
+fn install_failure_real_scoped_404_is_shown() {
+    // Real pnpm 10 stdout for the #2023 shape: `%2F` in the URL, U+2009 padding.
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/pnpm_install_fetch_404_scoped_raw.txt");
+    let temp = tempfile::tempdir().expect("tempdir");
+    fake_pnpm(temp.path(), &format!("cat '{}'\nexit 1", fixture.display()));
+
+    let output = run_rtk(temp.path(), &["pnpm", "install"]);
+    let stdout = text(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(1), "exit code must propagate");
+    assert!(stdout.contains("ERR_PNPM_FETCH_404"), "got: {stdout:?}");
+    assert!(stdout.contains("@ferr079-nope%2Fpkg-zz"), "got: {stdout:?}");
+    assert!(!stdout.contains("Progress:"), "got: {stdout:?}");
+}
+
+#[test]
+fn install_failure_with_blank_stderr_shows_stdout_reason() {
+    // stderr holding only a newline carries no reason: stdout must be shown.
     let temp = tempfile::tempdir().expect("tempdir");
     fake_pnpm(
         temp.path(),
-        r#"echo '{"error":{"code":"ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND","message":"No package.json found"}}'
-exit 1"#,
+        "echo 'ERR_PNPM_FETCH_404 GET https://registry.npmjs.org/@a%2Fb: Not Found - 404'\n\
+         echo >&2\n\
+         exit 1",
+    );
+
+    let output = run_rtk(temp.path(), &["pnpm", "install"]);
+    let stdout = text(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(1), "exit code must propagate");
+    assert!(stdout.contains("ERR_PNPM_FETCH_404"), "got: {stdout:?}");
+}
+
+#[test]
+fn list_failure_from_a_wrapper_shows_every_stdout_line() {
+    // pnpm reports list errors on stderr; a wrapper may refuse on stdout (#4858).
+    // Every line is the reason, including the ones without an error keyword.
+    let temp = tempfile::tempdir().expect("tempdir");
+    fake_pnpm(
+        temp.path(),
+        "echo 'BLOCKED by policy: pnpm list is not allowed here'\n\
+         echo '  ask an admin to allow it in .policy.yml'\n\
+         echo 'ERR_POLICY_DENIED'\n\
+         exit 1",
     );
 
     let output = run_rtk(temp.path(), &["pnpm", "list"]);
     let stdout = text(&output.stdout);
 
     assert_eq!(output.status.code(), Some(1), "exit code must propagate");
+    assert!(stdout.contains("BLOCKED by policy"), "got: {stdout:?}");
     assert!(
-        stdout.contains("ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND"),
+        stdout.contains("  ask an admin to allow it in .policy.yml"),
         "got: {stdout:?}"
     );
+    assert!(stdout.contains("ERR_POLICY_DENIED"), "got: {stdout:?}");
 }
