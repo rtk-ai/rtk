@@ -10,27 +10,33 @@ function multiline(body, literal) {
   const s = body.replace(/^\r?\n/, "");
   if (literal) return s;
   let out = "";
-  const joined = s.replace(/\\\r?\n[ \t\r\n]*/g, "");
-  for (let i = 0; i < joined.length; i++) {
-    const c = joined[i];
-    if (c === "\\" && i + 1 < joined.length) out += c + joined[++i];
-    else if (c === '"') out += '\\"';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "\\") {
+      const trim = /^[ \t]*(\r?\n[ \t\r\n]*|$)/.exec(s.slice(i + 1));
+      if (trim) { i += trim[0].length; continue; }
+      out += c + s[++i];
+    } else if (c === '"') out += '\\"';
     else if (c === "\n") out += "\\n";
     else if (c === "\r") out += "\\r";
     else if (c === "\t") out += "\\t";
     else out += c;
   }
-  try { return JSON.parse(`"${out}"`); } catch { return joined; }
+  try { return JSON.parse(`"${out}"`); } catch { return s; }
 }
+
 
 export function logicalLines(text) {
   const lines = [];
   const n = text.length;
-  let cur = "", i = 0;
+  let cur = "", i = 0, depth = 0;
   while (i < n) {
     const c = text[i];
     if (c === "#") { while (i < n && text[i] !== "\n") i++; continue; }
-    if (c === "\n") { lines.push(cur); cur = ""; i++; continue; }
+    if (c === "\n") { if (depth > 0) { cur += " "; i++; continue; } lines.push(cur); cur = ""; i++; continue; }
+    if (c === "[") depth++;
+    else if (c === "]" && depth > 0) depth--;
+
     const q3 = text.startsWith('"""', i) ? '"""' : text.startsWith("'''", i) ? "'''" : null;
     if (q3) {
       const end = text.indexOf(q3, i + 3);

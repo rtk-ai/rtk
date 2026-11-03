@@ -19,6 +19,8 @@ export function validRecord(rec) {
 }
 
 export const cell = (s) => String(s ?? "").replace(/[|\r\n]+/g, " ").trim();
+export const num = (x) => (typeof x === "number" && Number.isFinite(x) ? x : Number(x) || 0);
+const obj = (x) => (x && typeof x === "object" && !Array.isArray(x) ? x : {});
 
 export function recordTask(store, rec) {
   if (!validRecord(rec)) return false;
@@ -30,11 +32,11 @@ export function recordTask(store, rec) {
 export function allTasks(store) {
   const out = [];
   for (const r of readTasks(store).values()) {
-    const c = r.compression || {}, d = r.device || {}, cost = r.cost || {};
-    out.push({ sid: r.sid, at: r.at, commands: (c.commands || 0) + (d.outputs || 0), saved: (c.saved || 0) + (d.saved || 0), kept: (r.delegation || {}).kept || 0,
-      helpers_usd: cost.helpers_usd || 0, main_usd: cost.main_usd || 0, rules: Object.values(r.rules || {}).reduce((a, b) => a + b, 0), helpers: ((r.delegation || {}).helpers || []).length });
+    const c = obj(r.compression), d = obj(r.device), cost = obj(r.cost), dl = obj(r.delegation);
+    out.push({ sid: r.sid, at: String(r.at || ""), commands: num(c.commands) + num(d.outputs), saved: num(c.saved) + num(d.saved), kept: num(dl.kept),
+      helpers_usd: num(cost.helpers_usd), main_usd: num(cost.main_usd), rules: Object.values(obj(r.rules)).reduce((a, b) => a + num(b), 0), helpers: Array.isArray(dl.helpers) ? dl.helpers.length : 0 });
   }
-  return out.sort((a, b) => (a.at || "").localeCompare(b.at || ""));
+  return out.sort((a, b) => a.at.localeCompare(b.at));
 }
 
 export function localGain(rtkPath) {
@@ -52,20 +54,20 @@ export const count = (n) => Number(n || 0).toLocaleString("en-US");
 const table = (header, rows) => [`| | ${header} |`, "|---|---|", ...rows.map(([a, b]) => `| ${a} | ${b} |`)].join("\n");
 
 export function taskText(rec) {
-  const c = rec.compression || {}, d = rec.device || {}, dl = rec.delegation || {}, cost = rec.cost || {};
+  const c = obj(rec.compression), d = obj(rec.device), dl = obj(rec.delegation), cost = obj(rec.cost);
   const rows = [];
-  const saved = (c.saved || 0) + (d.saved || 0), cmds = (c.commands || 0) + (d.outputs || 0);
-  rows.push(["🗜️ Compression", `${cmds} commands, **~${fmt(saved)} tokens saved**` + (d.outputs ? ` (${c.commands || 0} in the workspace, ${d.outputs} from the connected folder)` : "")]);
-  const helpers = dl.helpers || [];
+  const saved = num(c.saved) + num(d.saved), cmds = num(c.commands) + num(d.outputs);
+  rows.push(["🗜️ Compression", `${cmds} commands, **~${fmt(saved)} tokens saved**` + (num(d.outputs) ? ` (${num(c.commands)} in the workspace, ${num(d.outputs)} from the connected folder)` : "")]);
+  const helpers = (Array.isArray(dl.helpers) ? dl.helpers : []).filter((h) => h && typeof h === "object" && !Array.isArray(h));
   if (!helpers.length) rows.push(["🤝 Delegation", "none"]);
   helpers.forEach((h, i) => rows.push([i ? "" : "🤝 Delegation",
-    `${cell(h.type)} on ${cell(h.model)} read ~${fmt(h.read || 0)}${h.wrote ? `, produced ~${fmt(h.wrote)}` : ""}, reported ~${fmt(h.report || 0)}: **~${fmt(h.kept || 0)} tokens kept out of the main context**, helper cost ${usd(Number(h.usd) || 0)}`]));
-  const spent = Object.entries(cost.by_model || {}).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
-  if (spent.length) rows.push(["💵 Cost", spent.map(([m, v]) => `${cell(m)} ${usd(Number(v) || 0)}`).join(", ") + " (API list prices, estimate)"]);
-  const rules = Object.entries(rec.rules || {});
-  if (rules.length) rows.push(["📏 Rules", rules.map(([r, n]) => `${cell(r)} ×${Number(n) || 0}`).join(", ")]);
+    `${cell(h.type)} on ${cell(h.model)} read ~${fmt(num(h.read))}${num(h.wrote) ? `, produced ~${fmt(num(h.wrote))}` : ""}, reported ~${fmt(num(h.report))}: **~${fmt(num(h.kept))} tokens kept out of the main context**, helper cost ${usd(num(h.usd))}`]));
+  const spent = Object.entries(obj(cost.by_model)).map(([m, v]) => [m, num(v)]).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  if (spent.length) rows.push(["💵 Cost", spent.map(([m, v]) => `${cell(m)} ${usd(v)}`).join(", ") + " (API list prices, estimate)"]);
+  const rules = Object.entries(obj(rec.rules));
+  if (rules.length) rows.push(["📏 Rules", rules.map(([r, n]) => `${cell(r)} ×${num(n)}`).join(", ")]);
   const ctx = [rec.off ? "pipelines off" : `pipelines: ${(Array.isArray(rec.pipelines) ? rec.pipelines : []).map(cell).join(", ") || "none"}`];
-  const laya = Object.entries(rec.laya || {});
+  const laya = Object.entries(obj(rec.laya));
   if (laya.length) ctx.push("Laya: " + laya.map(([q, a]) => `${cell(q)}=${cell(a)}`).join(", "));
 
   return table(`This task · ${ctx.join(" · ")}`, rows);
@@ -78,7 +80,8 @@ export function gainText(tasks, local, rtk, rec) {
     : rtk ? `rtk ${rtk.version} at ${rtk.path} did not answer \`rtk gain --format json\`` : "rtk is not installed here, so no history"]];
   if (!tasks.length) rows.push(["Desktop tasks", "none recorded yet"]);
   else {
-    const sum = (k) => tasks.reduce((a, t) => a + (t[k] || 0), 0);
+    const sum = (k) => tasks.reduce((a, t) => a + num(t[k]), 0);
+
     const helpers = sum("helpers"), withHelpers = tasks.filter((t) => t.kept > 0).length;
     rows.push(["Desktop tasks", `${tasks.length} since ${tasks[0].at || "?"}: **~${fmt(sum("saved"))} tokens compressed** over ${sum("commands")} commands`]);
     if (withHelpers) rows.push(["Delegation", `${withHelpers} tasks, ${helpers} helpers: **~${fmt(sum("kept"))} tokens kept out of the main model's context**; helpers ${usd(sum("helpers_usd"))} against ${usd(sum("main_usd"))} for the main model (API list prices, estimates)`]);

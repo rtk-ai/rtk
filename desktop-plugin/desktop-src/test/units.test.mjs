@@ -94,6 +94,10 @@ test("toml reader handles comments, multi-line strings, quoted names and arrays"
     'name = "demo" # trailing',
     "tags = [\"a, b\", \"c#d\", 'e']   # commas and hashes inside strings",
     "nested = [[1, 2], [3]]",
+    "multi = [",
+    '  "one", # first',
+    "  'two',",
+    "]",
     "n = 1_000",
     "neg = -2.5",
     '[classifier."kind"]',
@@ -117,6 +121,8 @@ test("toml reader handles comments, multi-line strings, quoted names and arrays"
   assert.equal(sec.pipeline.name, "demo");
   assert.deepEqual(sec.pipeline.tags, ["a, b", "c#d", "e"]);
   assert.deepEqual(sec.pipeline.nested, [[1, 2], [3]]);
+  assert.deepEqual(sec.pipeline.multi, ["one", "two"]);
+
   assert.equal(sec.pipeline.n, 1000);
   assert.equal(sec.pipeline.neg, -2.5);
   assert.equal(sec["classifier.kind"].question, "choice");
@@ -186,7 +192,8 @@ test("records are bounded and table cells are flattened", () => {
   assert.ok(!validRecord({ v: 1, sid: "a", pad: "x".repeat(70000) }));
   assert.ok(!validRecord([1]));
   assert.equal(cell("a|b\nc"), "a b c");
-  const text = taskText({ v: 1, sid: "a", pipelines: ["p|q"], laya: { "k|": "v\n" }, delegation: { helpers: [{ type: "Explore|x", model: "haiku\n5.5", read: 1, kept: 1, usd: "nope" }] }, rules: { "r|s": 2 } });
+  const text = taskText({ v: 1, sid: "a", pipelines: ["p|q"], laya: { "k|": "v\n" }, delegation: { helpers: [null, 3, [1], { type: "Explore|x", model: "haiku\n5.5", read: 1, kept: 1, usd: "nope" }] }, rules: { "r|s": 2 }, compression: "junk", cost: { by_model: "junk" } });
+
   assert.ok(!/\|q|Explore\|x|haiku\n|k\||r\|s/.test(text), text);
   assert.match(text, /pipelines: p q · Laya: k=v \|/);
 
