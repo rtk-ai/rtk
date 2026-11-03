@@ -2000,10 +2000,17 @@ fn rewrite_segment_inner(
 
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
     // semantics than rtk read or no equivalent at all. Only `-n` (line numbers)
-    // maps correctly to `rtk read -n`. Skip rewrite for any other flag.
-    if let Some(cmd_args) = cmd_part.strip_prefix("cat ") {
+    // on a single concrete file maps to `rtk read -n` (`cat -n a b` numbers
+    // continuously across files while `rtk read -n` restarts at 1 per file).
+    if let Some(cmd_args) = strip_absolute_path(cmd_part).strip_prefix("cat ") {
         let args = cmd_args.trim_start();
-        if args.starts_with('-') && !args.starts_with("-n ") && !args.starts_with("-n\t") {
+        if let Some(rest) = args.strip_prefix("-n") {
+            if !rest.starts_with([' ', '\t']) || !is_single_file_operand(rest.trim()) {
+                return None;
+            }
+        } else if args.starts_with('-')
+            || shell_split(args).iter().any(|tok| tok.starts_with('-'))
+        {
             return None;
         }
     }
@@ -3962,11 +3969,17 @@ mod tests {
 
     #[test]
     fn test_rewrite_cat_with_compatible_flags() {
-        // cat -n (line numbers) maps to rtk read -n — allow rewrite
+        // cat -n (line numbers) on a single concrete file maps to rtk read -n
         assert_eq!(
             rewrite_command_no_prefixes("cat -n file.txt", &[]),
             Some("rtk read -n file.txt".into())
         );
+        // Multi-file or expansion forms must stay with native `cat -n` because
+        // `cat -n` numbers continuously across files while `rtk read -n`
+        // restarts at 1 for each file without printing headers.
+        assert_eq!(rewrite_command_no_prefixes("cat -n a.txt b.txt", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("cat -n *.txt", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("cat a.txt -n", &[]), None);
     }
 
     #[test]
