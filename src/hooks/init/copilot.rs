@@ -32,6 +32,55 @@ pub(crate) const COPILOT_HOOK_JSON: &str = r#"{
 }
 "#;
 
+pub(crate) const COPILOT_POSTHOOK_JSON: &str = r#"{
+  "version": 1,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "rtk hook copilot",
+        "cwd": ".",
+        "timeout": 5
+      }
+    ],
+    "PostToolUse": [
+      {
+        "type": "command",
+        "command": "rtk hook copilot",
+        "cwd": ".",
+        "timeout": 5
+      }
+    ]
+  }
+}
+"#;
+
+pub(crate) fn copilot_hook_json(include_posthook: bool) -> &'static str {
+    if include_posthook {
+        COPILOT_POSTHOOK_JSON
+    } else {
+        COPILOT_HOOK_JSON
+    }
+}
+
+#[cfg(feature = "engine")]
+fn copilot_wants_posthook(global: bool) -> bool {
+    let loaded = if global {
+        crate::core::pipeline_config::load_user_scope()
+    } else {
+        crate::core::pipeline_config::load()
+    };
+    loaded.resolved.events_used().contains(&(
+        rtk_engine::pipeline::SiteKind::Hook,
+        rtk_engine::block::Event::AfterTool,
+    ))
+}
+
+#[cfg(not(feature = "engine"))]
+fn copilot_wants_posthook(_global: bool) -> bool {
+    false
+}
+
 const COPILOT_INSTRUCTIONS: &str = r#"<!-- rtk-instructions v2 -->
 # RTK — Token-Optimized CLI
 
@@ -101,7 +150,8 @@ fn run_copilot_at(base: &Path, ctx: InitContext) -> Result<()> {
 
     // 2. Write hook config (only reached if the upsert above succeeded).
     let hook_path = hooks_dir.join(COPILOT_HOOK_FILE);
-    write_if_changed(&hook_path, COPILOT_HOOK_JSON, "Copilot hook config", ctx)?;
+    let hook_json = copilot_hook_json(copilot_wants_posthook(false));
+    write_if_changed(&hook_path, hook_json, "Copilot hook config", ctx)?;
 
     if dry_run {
         print_dry_run_footer();
@@ -227,9 +277,10 @@ fn run_copilot_global_at(copilot_dir: &Path, ctx: InitContext) -> Result<()> {
     )?;
 
     let hook_path = hooks_dir.join(COPILOT_HOOK_FILE);
+    let hook_json = copilot_hook_json(copilot_wants_posthook(true));
     write_if_changed(
         &hook_path,
-        COPILOT_HOOK_JSON,
+        hook_json,
         "Copilot global hook config",
         ctx,
     )?;
@@ -848,6 +899,23 @@ mod tests {
             !hook_path.exists(),
             "Hook config must not be written when the upsert aborts: {}",
             hook_path.display()
+        );
+    }
+
+    #[test]
+    fn test_copilot_hook_json_registers_post_tool_use_when_enabled() {
+        let pre_only: serde_json::Value = serde_json::from_str(copilot_hook_json(false)).unwrap();
+        assert!(pre_only.pointer("/hooks/PreToolUse").is_some());
+        assert!(pre_only.pointer("/hooks/PostToolUse").is_none());
+
+        let with_post: serde_json::Value = serde_json::from_str(copilot_hook_json(true)).unwrap();
+        assert_eq!(
+            with_post.pointer("/hooks/PreToolUse/0/command"),
+            Some(&serde_json::json!("rtk hook copilot"))
+        );
+        assert_eq!(
+            with_post.pointer("/hooks/PostToolUse/0/command"),
+            Some(&serde_json::json!("rtk hook copilot"))
         );
     }
 }
