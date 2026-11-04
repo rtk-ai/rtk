@@ -1889,26 +1889,62 @@ fn mvn_binary(daemon: bool) -> &'static str {
         } else {
             "mvn"
         }
-    } else if Path::new("./mvnw").exists() {
+    } else if unix_wrapper_usable(Path::new("./mvnw")) {
         "./mvnw"
     } else {
         "mvn"
     }
 }
 
-fn new_mvn_command(args: &[String], daemon: bool) -> Command {
-    let mut cmd = if daemon {
-        resolved_command("mvnd")
-    } else if cfg!(windows) {
-        if Path::new(".\\mvnw.cmd").exists() {
-            Command::new(".\\mvnw.cmd")
-        } else {
-            resolved_command("mvn")
+/// A `./mvnw` that exists but cannot be spawned would fail the whole run with
+/// a bare ENOENT/EACCES, while `mvn` on PATH may work fine (rtk-ai/rtk#3357).
+fn unix_wrapper_usable(path: &Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    match unix_wrapper_defect(path) {
+        Some(defect) => {
+            eprintln!(
+                "rtk: {} {defect}, running mvn from PATH instead",
+                path.display()
+            );
+            false
         }
-    } else if Path::new("./mvnw").exists() {
-        Command::new("./mvnw")
-    } else {
-        resolved_command("mvn")
+        None => true,
+    }
+}
+
+#[cfg(unix)]
+fn unix_wrapper_defect(path: &Path) -> Option<&'static str> {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    if file.metadata().ok()?.permissions().mode() & 0o111 == 0 {
+        return Some("is not executable (chmod +x mvnw)");
+    }
+    let mut head = [0u8; 256];
+    let n = file.read(&mut head).ok()?;
+    let first_line = head[..n].split(|&b| b == b'\n').next()?;
+    // `#!/bin/sh\r` names an interpreter that does not exist, so exec fails
+    // with ENOENT. Typical of a Windows checkout used from WSL.
+    if first_line.starts_with(b"#!") && first_line.ends_with(b"\r") {
+        return Some("has CRLF line endings (dos2unix mvnw)");
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn unix_wrapper_defect(_path: &Path) -> Option<&'static str> {
+    None
+}
+
+/// Wrappers stay string literals for semgrep's `dynamic-command-execution`.
+fn new_mvn_command(args: &[String], tool: &str) -> Command {
+    let mut cmd = match tool {
+        "./mvnw" => Command::new("./mvnw"),
+        ".\\mvnw.cmd" => Command::new(".\\mvnw.cmd"),
+        _ => resolved_command(tool),
     };
     cmd.args(args);
     cmd
@@ -1937,28 +1973,28 @@ fn run_tool(args: &[String], daemon: bool, verbose: u8) -> Result<i32> {
             runner::run_passthrough(tool, &osargs, verbose)
         }
         MvnRoute::Quiet => runner::run_filtered(
-            new_mvn_command(args, daemon),
+            new_mvn_command(args, tool),
             tool,
             &args_display,
             |raw: &str| filter_quiet(raw, daemon),
             RunOptions::with_tee("mvn_quiet"),
         ),
         MvnRoute::Filtered(MvnPhase::Test) => runner::run_filtered(
-            new_mvn_command(args, daemon),
+            new_mvn_command(args, tool),
             tool,
             &args_display,
             move |raw: &str| filter_surefire(raw, daemon),
             RunOptions::with_tee("mvn_test"),
         ),
         MvnRoute::Filtered(MvnPhase::Compile) => runner::run_filtered(
-            new_mvn_command(args, daemon),
+            new_mvn_command(args, tool),
             tool,
             &args_display,
             move |raw: &str| filter_compile(raw, daemon),
             RunOptions::with_tee("mvn_compile"),
         ),
         MvnRoute::Filtered(MvnPhase::Package) => runner::run_filtered(
-            new_mvn_command(args, daemon),
+            new_mvn_command(args, tool),
             tool,
             &args_display,
             move |raw: &str| filter_package(raw, daemon),
@@ -2744,13 +2780,13 @@ mod tests {
     fn mvnd_shares_argument_handling_and_argv() {
         let args = s(["test", "-f", "pom.xml"]);
         assert_eq!(route(&args), MvnRoute::Filtered(MvnPhase::Test));
-        for daemon in [false, true] {
-            let cmd = new_mvn_command(&args, daemon);
+        for tool in ["mvn", "mvnd", "./mvnw"] {
+            let cmd = new_mvn_command(&args, tool);
             let argv: Vec<String> = cmd
                 .get_args()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect();
-            assert_eq!(argv, args, "daemon={daemon}");
+            assert_eq!(argv, args, "tool={tool}");
         }
         assert_eq!(mvn_binary(true), "mvnd");
     }
@@ -2762,6 +2798,48 @@ mod tests {
     #[test]
     fn mvnd_binary_is_never_the_wrapper() {
         assert_eq!(mvn_binary(true), "mvnd");
+    }
+
+    #[cfg(unix)]
+    fn write_wrapper(dir: &Path, body: &str, mode: u32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("mvnw");
+        std::fs::write(&path, body).expect("write mvnw");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("chmod mvnw");
+        path
+    }
+
+    /// rtk-ai/rtk#3357: a wrapper that exists but cannot be spawned (CRLF
+    /// shebang from a Windows checkout, or no execute bit) must not be
+    /// picked over `mvn` on PATH.
+    #[cfg(unix)]
+    #[test]
+    fn unrunnable_wrapper_is_skipped() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let cases = [
+            ("#!/bin/sh\r\nexit 0\r\n", 0o755, "CRLF"),
+            ("#!/bin/sh\nexit 0\n", 0o644, "not executable"),
+        ];
+        for (body, mode, defect) in cases {
+            let path = write_wrapper(dir.path(), body, mode);
+            assert!(
+                Command::new(&path).status().is_err(),
+                "{defect}: the wrapper should fail to spawn"
+            );
+            assert!(unix_wrapper_defect(&path).expect("defect").contains(defect));
+            assert!(!unix_wrapper_usable(&path), "{defect}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runnable_wrapper_is_kept() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = write_wrapper(dir.path(), "#!/bin/sh\nexit 0\n", 0o755);
+        assert!(Command::new(&path).status().expect("spawn mvnw").success());
+        assert_eq!(unix_wrapper_defect(&path), None);
+        assert!(unix_wrapper_usable(&path));
+        assert!(!unix_wrapper_usable(&dir.path().join("missing")));
     }
 
     // ── Maven Daemon fixtures ────────────────────────────────────────────────
