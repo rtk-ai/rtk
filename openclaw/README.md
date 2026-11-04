@@ -98,9 +98,12 @@ Everything that `rtk rewrite` supports (30+ commands). See the [full command lis
 
 Handled by `rtk rewrite` guards:
 - Commands already using `rtk`
-- Piped commands (`|`, `&&`, `;`)
-- Heredocs (`<<`)
+- Heredocs (`<<`) and command substitution (`$(())
 - Commands without an RTK filter
+
+Compound commands (`|`, `&&`, `;`) **are** rewritten segment by segment; see
+"Compound splitting" in `src/discover/README.md` for the guards that leave a
+whole line untouched (heredocs, `$((`, shell keywords).
 
 ## License
 
