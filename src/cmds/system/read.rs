@@ -76,8 +76,19 @@ pub fn run(
         timer.track(&cat_label(file), "rtk read", &window, &window);
         return Ok(());
     }
-    let content = String::from_utf8(bytes)
-        .with_context(|| format!("Failed to decode file: {}", file.display()))?;
+    let content = match String::from_utf8(bytes) {
+        Ok(content) => content,
+        Err(err) => {
+            let raw = non_utf8_passthrough(err.as_bytes(), head_lines, tail_lines, line_numbers);
+            io::stdout()
+                .lock()
+                .write_all(&raw)
+                .context("Failed to write raw bytes")?;
+            let raw = String::from_utf8_lossy(&raw);
+            timer.track(&cat_label(file), "rtk read", &raw, &raw);
+            return Ok(());
+        }
+    };
 
     // Detect language from extension
     let lang = file
@@ -179,7 +190,19 @@ pub fn run_stdin(
         timer.track("cat - (stdin)", "rtk read -", &window, &window);
         return Ok(());
     }
-    let content = String::from_utf8(bytes).context("Failed to decode stdin")?;
+    let content = match String::from_utf8(bytes) {
+        Ok(content) => content,
+        Err(err) => {
+            let raw = non_utf8_passthrough(err.as_bytes(), head_lines, tail_lines, line_numbers);
+            io::stdout()
+                .lock()
+                .write_all(&raw)
+                .context("Failed to write raw bytes")?;
+            let raw = String::from_utf8_lossy(&raw);
+            timer.track("cat - (stdin)", "rtk read -", &raw, &raw);
+            return Ok(());
+        }
+    };
 
     // No file extension, so use Unknown language
     let lang = Language::Unknown;
@@ -424,6 +447,34 @@ fn raw_byte_window(
     }
     byte_line_window(content, head_lines, tail_lines)
         .or_else(|| max_lines.is_none().then_some(content))
+}
+
+/// Input that is not valid UTF-8 cannot go through a filter or `--max-lines`, so it passes
+/// through raw instead of failing: still cut to a head or tail window, and numbered as
+/// `format_with_line_numbers` would number it, with every other byte left as it was.
+fn non_utf8_passthrough(
+    content: &[u8],
+    head_lines: Option<usize>,
+    tail_lines: Option<usize>,
+    line_numbers: bool,
+) -> Vec<u8> {
+    let window = byte_line_window(content, head_lines, tail_lines).unwrap_or(content);
+    if !line_numbers || window.is_empty() {
+        return window.to_vec();
+    }
+    let lines: Vec<&[u8]> = window
+        .strip_suffix(b"\n")
+        .unwrap_or(window)
+        .split(|&byte| byte == b'\n')
+        .collect();
+    let width = lines.len().to_string().len();
+    let mut out = Vec::with_capacity(window.len() + lines.len() * (width + 2));
+    for (i, line) in lines.iter().enumerate() {
+        out.extend_from_slice(format!("{:>width$}\t", i + 1, width = width).as_bytes());
+        out.extend_from_slice(line);
+        out.push(b'\n');
+    }
+    out
 }
 
 fn byte_line_window(
@@ -830,6 +881,24 @@ fn main() {{
             raw_byte_window(input, FilterLevel::None, None, None, Some(1), false),
             Some(&b"charlie\n"[..])
         );
+    }
+
+    /// `cat -n` on a file with one Latin-1 byte numbers it like any other file; the paths that
+    /// need text pass it through raw instead of failing on the decode (#4065).
+    #[test]
+    fn test_non_utf8_passthrough_numbers_lines_byte_exact() {
+        let input: &[u8] = b"caf\xe9\nok\n";
+        assert_eq!(
+            non_utf8_passthrough(input, None, None, true),
+            b"1\tcaf\xe9\n2\tok\n"
+        );
+        assert_eq!(non_utf8_passthrough(input, None, None, false), input);
+        assert_eq!(non_utf8_passthrough(input, None, Some(1), true), b"1\tok\n");
+        assert_eq!(
+            non_utf8_passthrough(b"a\nb\xe9", Some(5), None, true),
+            b"1\ta\n2\tb\xe9\n"
+        );
+        assert!(non_utf8_passthrough(b"", None, None, true).is_empty());
     }
 
     #[test]
