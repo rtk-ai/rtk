@@ -204,16 +204,6 @@ fn detect_go_tool_golangci_version() -> u32 {
     }
 }
 
-fn has_golangci_format_flag(args: &[OsString]) -> bool {
-    args.iter().any(|a| {
-        let s = a.to_string_lossy();
-        s == "--out-format"
-            || s.starts_with("--out-format=")
-            || s == "--output.json.path"
-            || s.starts_with("--output.json.path=")
-    })
-}
-
 /// Known `go tool` subcommands that RTK provides filtered output for.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum GoTool {
@@ -256,10 +246,17 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
 
     let version = detect_go_tool_golangci_version();
 
+    // The shared argument helpers operate on String arguments.
+    let string_args: Vec<String> = args
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+
+    let has_format = golangci_cmd::has_output_flag(&string_args);
+    let stdout_report = golangci_cmd::has_stdout_output_flag(&string_args);
+
     let mut cmd = resolved_command("go");
     cmd.arg("tool").arg("golangci-lint");
-
-    let has_format = has_golangci_format_flag(args);
 
     // Remove an existing leading "run" to avoid duplicating the subcommand.
     let args = strip_leading_golangci_run(args);
@@ -279,11 +276,10 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
     }
 
     if verbose > 0 {
-        if version >= 2 {
-            eprintln!("Running: go tool golangci-lint run --output.json.path stdout");
-        } else {
-            eprintln!("Running: go tool golangci-lint run --out-format=json");
-        }
+        eprintln!(
+            "Running: go tool golangci-lint run {}",
+            string_args.join(" ")
+        );
     }
 
     let CaptureResult {
@@ -291,18 +287,31 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         stderr,
         exit_code,
     } = exec_capture(&mut cmd).context("Failed to run go tool golangci-lint")?;
+
     let raw = format!("{}\n{}", stdout, stderr);
 
-    // v2 outputs JSON on first line + trailing text; v1 outputs just JSON
-    let json_output = if version >= 2 {
-        stdout.lines().next().unwrap_or("")
+    // A user-directed stdout report is not RTK's JSON output.
+    // Preserve it verbatim instead of trying to parse it as JSON.
+    let shown = if stdout_report {
+        stdout.clone()
     } else {
-        &*stdout
+        // v2 outputs JSON on the first line + trailing text; v1 outputs just JSON.
+        let json_output = if version >= 2 {
+            stdout.lines().next().unwrap_or("")
+        } else {
+            &stdout
+        };
+
+        let filtered = golangci_cmd::filter_golangci_json(json_output, version);
+        never_worse(&raw, &filtered).to_string()
     };
 
-    let filtered = golangci_cmd::filter_golangci_json(json_output, version);
-    let shown = never_worse(&raw, &filtered);
-    println!("{}", shown);
+    if stdout_report {
+        // Do not add or remove newlines from a user-requested report.
+        print!("{shown}");
+    } else {
+        println!("{shown}");
+    }
 
     if !stderr.trim().is_empty() && verbose > 0 {
         eprintln!("{}", stderr.trim());
@@ -312,14 +321,13 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         "go tool golangci-lint",
         "rtk go tool golangci-lint",
         &raw,
-        shown,
+        &shown,
     );
 
     // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
     // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL)
     Ok(if exit_code == 1 { 0 } else { exit_code })
 }
-
 /// Parse go test -json output (NDJSON format)
 pub(crate) fn filter_go_test_json(output: &str) -> String {
     let mut packages: HashMap<String, PackageResult> = HashMap::new();
@@ -1149,6 +1157,10 @@ utils.go:15:5: unreachable code"#;
         args.iter().map(OsString::from).collect()
     }
 
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_string()).collect()
+    }
+
     #[test]
     fn test_match_go_tool_golangci_lint() {
         let args = os(&["tool", "golangci-lint", "run", "./..."]);
@@ -1209,8 +1221,10 @@ utils.go:15:5: unreachable code"#;
 
     #[test]
     fn test_has_golangci_format_flag_v1() {
-        assert!(has_golangci_format_flag(&os(&["--out-format=json"])));
-        assert!(has_golangci_format_flag(&os(&[
+        assert!(golangci_cmd::has_output_flag(&strings(&[
+            "--out-format=json"
+        ])));
+        assert!(golangci_cmd::has_output_flag(&strings(&[
             "./...",
             "--out-format",
             "json"
@@ -1219,20 +1233,20 @@ utils.go:15:5: unreachable code"#;
 
     #[test]
     fn test_has_golangci_format_flag_v2() {
-        assert!(has_golangci_format_flag(&os(&[
+        assert!(golangci_cmd::has_output_flag(&strings(&[
             "--output.json.path",
             "stdout"
         ])));
-        assert!(has_golangci_format_flag(&os(&[
+        assert!(golangci_cmd::has_output_flag(&strings(&[
             "--output.json.path=stdout"
         ])));
     }
 
     #[test]
     fn test_has_golangci_format_flag_absent() {
-        assert!(!has_golangci_format_flag(&os(&["run", "./..."])));
-        assert!(!has_golangci_format_flag(&os(&[])));
-        assert!(!has_golangci_format_flag(&os(&["--fix"])));
+        assert!(!golangci_cmd::has_output_flag(&strings(&["run", "./..."])));
+        assert!(!golangci_cmd::has_output_flag(&strings(&[])));
+        assert!(!golangci_cmd::has_output_flag(&strings(&["--fix"])));
     }
 
     #[test]
