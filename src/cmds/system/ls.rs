@@ -427,9 +427,13 @@ fn compact_recursive(
 
     for section in raw.split("\n\n") {
         let mut lines = section.lines().peekable();
+        // A section header is the first line ending in ':' that is not a long-format entry, so a
+        // file operand named `file:` is not mistaken for one. Only the separator colon is removed.
         let header = lines
-            .next_if(|line| line.ends_with(':') && !line.starts_with("total "))
-            .map(|line| line.trim_end_matches(':'));
+            .next_if(|line| {
+                line.ends_with(':') && !line.starts_with("total ") && parse_ls_line(line).is_none()
+            })
+            .and_then(|line| line.strip_suffix(':'));
         let body: Vec<&str> = lines.collect();
         if header.is_none() && body.is_empty() {
             continue;
@@ -1519,6 +1523,51 @@ mod tests {
                    -rw-r--r--  1 user  staff    12 Jan  1 12:00 notes.md\n";
         let (entries, _parsed, _truncated, _filtered) = compact_recursive(raw, false, false);
         assert_eq!(entries, "src:\n  main.rs\n\nsrc/sub:\n  notes.md\n");
+    }
+
+    #[test]
+    fn test_compact_recursive_keeps_colons_in_directory_names() {
+        let raw = "dir::\n\
+                   total 8\n\
+                   -rw-r--r--  1 user  staff  0 Jan  1 12:00 q\n";
+        let (entries, _parsed, _truncated, _filtered) = compact_recursive(raw, false, true);
+        assert_eq!(entries, "dir::\n  644  q  0B\n");
+    }
+
+    #[test]
+    fn test_compact_recursive_file_operand_ending_in_colon_is_an_entry() {
+        let raw = "-rw-r--r--  1 user  staff  1234 Jan  1 12:00 file:\n\
+                   \n\
+                   src:\n\
+                   total 8\n\
+                   -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n";
+        let (entries, parsed, _truncated, _filtered) = compact_recursive(raw, false, true);
+        assert_eq!(entries, "644  file:  1.2K\n\nsrc:\n  644  main.rs  1.2K\n");
+        assert_eq!(parsed, 2);
+    }
+
+    #[test]
+    fn test_plan_recognises_recursive_flag() {
+        assert!(plan_of(&["-R"]).recursive);
+        assert!(plan_of(&["-laR"]).recursive);
+        assert!(plan_of(&["--recursive"]).recursive);
+        assert!(!plan_of(&["-la"]).recursive);
+    }
+
+    #[test]
+    fn test_render_recursive_long_listing_indents_entries_under_headers() {
+        let raw = "src:\n\
+                   total 8\n\
+                   -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n\
+                   \n\
+                   src/sub:\n\
+                   total 8\n\
+                   -rw-r--r--  1 user  staff    12 Jan  1 12:00 notes.md\n";
+        let out = render(raw, None, false, true, true, 0);
+        assert_eq!(
+            out,
+            "src:\n  644  main.rs  1.2K\n\nsrc/sub:\n  644  notes.md  12B\n"
+        );
     }
 
     #[test]
