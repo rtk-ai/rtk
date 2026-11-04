@@ -161,7 +161,6 @@ fn shell_gate(v: &Value) -> bool {
                     verdict,
                     rewrite,
                     &excluded,
-                    &transparent,
                     crate::core::utils::tool_exists,
                 )
             {
@@ -212,7 +211,6 @@ fn swappable(
     verdict: permissions::PermissionVerdict,
     rewrite: HookDecision,
     excluded: &[String],
-    transparent: &[String],
     program_exists: impl Fn(&str) -> bool,
 ) -> bool {
     use crate::discover::registry;
@@ -232,7 +230,6 @@ fn swappable(
                 && !runs_rtk(cmd)
                 && !cmd.contains(['\n', '\r', '\\'])
                 && !registry::chain_mentions_excluded(cmd, excluded)
-                && registry::rewrite_command(cmd, &[], transparent).is_none()
                 && sh_can_run(cmd, program_exists)
         }
     }
@@ -319,7 +316,7 @@ mod tests {
             permissions::DenyRules::Unattested,
         );
         let rewrite = decision::suppress_identity(cmd, rewrite);
-        swappable(cmd, verdict, rewrite, excluded, &[], |_| true)
+        swappable(cmd, verdict, rewrite, excluded, |_| true)
     }
 
     #[test]
@@ -402,7 +399,7 @@ mod tests {
                     permissions::DenyRules::Unattested,
                 ),
             );
-            swappable(cmd, PermissionVerdict::Allow, rewrite, &[], &[], |_| false)
+            swappable(cmd, PermissionVerdict::Allow, rewrite, &[], |_| false)
         };
         assert!(!swap("mydeploy"));
         assert!(swap("git log -3"));
