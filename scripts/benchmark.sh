@@ -4,14 +4,25 @@ set -e
 # cargo prints no colour into a pipe, which is how agents read it.
 export CARGO_TERM_COLOR=never
 
-# Use local release build if available, otherwise fall back to installed rtk
-if [ -f "./target/release/rtk" ]; then
-  RTK="$(cd "$(dirname ./target/release/rtk)" && pwd)/$(basename ./target/release/rtk)"
+# RTK_BIN names the binary to measure. Otherwise use the local release build if
+# available, and fall back to the installed rtk.
+if [ -n "${RTK_BIN:-}" ]; then
+  if [ ! -f "$RTK_BIN" ] || [ ! -x "$RTK_BIN" ]; then
+    echo "Error: RTK_BIN=$RTK_BIN is not a path to an executable file."
+    exit 1
+  fi
+  RTK="$RTK_BIN"
+elif [ -f "./target/release/rtk" ]; then
+  RTK="./target/release/rtk"
 elif command -v rtk &> /dev/null; then
   RTK="$(command -v rtk)"
 else
-  echo "Error: rtk not found. Run 'cargo build --release' or install rtk."
+  echo "Error: rtk not found. Run 'cargo build --release', install rtk, or set RTK_BIN."
   exit 1
+fi
+# Absolute, since the benches change directory. `command -v` can name a shell function.
+if [[ "$RTK" == */* ]]; then
+  RTK="$(CDPATH= cd -- "$(dirname -- "$RTK")" && pwd)/$(basename -- "$RTK")"
 fi
 BENCH_DIR="$(pwd)/scripts/benchmark"
 RTK_ROOT="$(pwd)"
@@ -363,8 +374,8 @@ fi
 # ===================
 section "test"
 if command -v cargo &>/dev/null; then
-  precompile cargo test --no-run
-  bench "test cargo test" "cargo test 2>&1 || true" "$RTK test cargo test 2>&1"
+  precompile cargo test --lib --no-run
+  bench "test cargo test" "cargo test --lib 2>&1 || true" "$RTK test cargo test --lib 2>&1"
 else
   echo "⏭️  test cargo test (cargo not in PATH, skipped)"
 fi
@@ -414,8 +425,8 @@ section "cargo"
 if command -v cargo &>/dev/null; then
   precompile cargo build
   bench "cargo build" "cargo build 2>&1 || true" "$RTK cargo build 2>&1"
-  precompile cargo test --no-run
-  bench "cargo test" "cargo test 2>&1 || true" "$RTK cargo test 2>&1"
+  precompile cargo test --lib --no-run
+  bench "cargo test" "cargo test --lib 2>&1 || true" "$RTK cargo test --lib 2>&1"
   precompile cargo clippy
   bench "cargo clippy" "cargo clippy 2>&1 || true" "$RTK cargo clippy 2>&1"
   precompile cargo check
