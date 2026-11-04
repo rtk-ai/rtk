@@ -490,6 +490,7 @@ mod tests {
             "echo $((1 + 2))",
             "./run-suite.sh \\\n --fast",
             "./a.sh\n./b.sh",
+            "./run-suite.sh 'a\\nb'",
         ] {
             assert!(!decide(cmd, PermissionVerdict::Allow, &[]), "{cmd}");
         }
@@ -613,6 +614,7 @@ mod tests {
             "./run-suite.sh <<<hello",
             "./run-suite.sh <<< 'abc'",
             "grep x <<<\"$d\"",
+            "./run-suite.sh <</dev/null",
             "./run-suite.sh <<EOF\nx\nEOF",
             "./run-suite.sh <<-'EOF'\n\tx\nEOF",
         ] {
