@@ -83,15 +83,6 @@ pub(crate) fn ask_rule_applies(cmd: &str, host: Host, prefixes: &[String]) -> bo
     ask_rule_decides(cmd, &deny_rules, &ask_rules, &allow_rules, prefixes)
 }
 
-/// Whether an allow rule names this command as written.
-#[cfg(feature = "engine")]
-pub(crate) fn allow_rule_matches(cmd: &str, host: Host) -> bool {
-    let (_, _, allow_rules) = load_rules_for(host);
-    allow_rules
-        .iter()
-        .any(|pattern| command_matches_pattern(cmd, pattern))
-}
-
 #[cfg(feature = "engine")]
 fn ask_rule_decides(
     cmd: &str,

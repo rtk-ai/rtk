@@ -155,8 +155,7 @@ fn shell_gate(v: &Value) -> bool {
             let rewrite =
                 decision::decide_for_agent(cmd, verdict, permissions::DenyRules::Unattested);
             let unfiltered = matches!(rewrite, HookDecision::Defer);
-            let rtk_allowed = permissions::allow_rule_matches(&command, permissions::Host::Claude);
-            if !keeps_the_agents_check(verdict, unfiltered, rtk_allowed)
+            if !keeps_the_agents_check(verdict, unfiltered)
                 || !swappable(
                     cmd,
                     verdict,
@@ -180,18 +179,8 @@ fn shell_gate(v: &Value) -> bool {
     }
 }
 
-fn keeps_the_agents_check(
-    verdict: permissions::PermissionVerdict,
-    unfiltered: bool,
-    rtk_allowed: bool,
-) -> bool {
-    use permissions::PermissionVerdict;
-    !unfiltered
-        || match verdict {
-            PermissionVerdict::Allow => true,
-            PermissionVerdict::Ask => false,
-            _ => !rtk_allowed,
-        }
+fn keeps_the_agents_check(verdict: permissions::PermissionVerdict, unfiltered: bool) -> bool {
+    !unfiltered || !matches!(verdict, permissions::PermissionVerdict::Ask)
 }
 
 fn swap_decision(
@@ -446,17 +435,16 @@ mod tests {
     #[test]
     fn an_unfiltered_command_stays_as_typed_when_the_swap_would_hide_it_from_a_rule() {
         use PermissionVerdict::{Allow, Ask, Default};
-        assert!(!keeps_the_agents_check(Ask, true, false));
-        assert!(!keeps_the_agents_check(Default, true, true));
-        assert!(keeps_the_agents_check(Default, true, false));
-        assert!(keeps_the_agents_check(Allow, true, true));
+        assert!(!keeps_the_agents_check(Ask, true));
+        assert!(keeps_the_agents_check(Default, true));
+        assert!(keeps_the_agents_check(Allow, true));
     }
 
     #[test]
     fn a_filtered_command_swaps_as_before_whatever_the_rules() {
         use PermissionVerdict::{Allow, Ask, Default};
         for verdict in [Allow, Ask, Default] {
-            assert!(keeps_the_agents_check(verdict, false, true));
+            assert!(keeps_the_agents_check(verdict, false));
         }
     }
 
