@@ -18,7 +18,7 @@ jobs:
     name: test presence
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 50
       - name: Check filter modules have tests
@@ -30,7 +30,7 @@ jobs:
     name: fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -41,27 +41,115 @@ jobs:
     needs: fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets
+        # `proxy/` is not a workspace member (it would break
+        # `cargo install --git`), so it gets its own job below. Here
+        # --workspace covers `rtk` + `engine`; a bare `cargo clippy` would
+        # never lint the daemon.
+      - run: cargo clippy --workspace --all-targets
+
+  rustdoc:
+    name: rustdoc
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps
 
   # ─── Parallel gates (all need code to compile) ───
 
+  # `proxy/` is not a workspace member -- a second binary-bearing package
+  # breaks `cargo install --git`, the command every README prints. So the
+  # daemon gets its own lint and test job here; --workspace above covers only
+  # `rtk` + `engine`.
+  proxy:
+    name: proxy (lint + test)
+    runs-on: ubuntu-latest
+    needs: clippy
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --manifest-path proxy/Cargo.toml --all --check
+      - run: cargo clippy --manifest-path proxy/Cargo.toml --all-targets
+      - run: cargo test --manifest-path proxy/Cargo.toml
+
+  # The Apache-2.0 edition. Two things must hold: it builds and passes its own
+  # tests, and its dependency graph contains no BUSL crate. The purity check is
+  # what stops the feature rotting -- without it the first ungated
+  # `rtk_engine::` call breaks the oss build and nobody notices until a release.
+  oss:
+    name: oss edition (build + purity)
+    runs-on: ubuntu-latest
+    needs: clippy
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --no-default-features --all-targets
+      - run: cargo test --no-default-features
+      # Match the crate-name column, not the whole line: the checkout path
+      # can contain 'rtk-engine', which would match every line's path and
+      # fail a clean tree.
+      - name: No BUSL crate in the Apache-2.0 edition
+        run: |
+          crates=$(cargo tree -p rtk --no-default-features -e normal --prefix none | awk '{print $1}' | sort -u)
+          if printf '%s\n' "$crates" | grep -qx 'rtk-engine'; then
+            echo "::error::rtk-engine reached the Apache-2.0 edition's dependency graph"
+            cargo tree -p rtk --no-default-features -e normal | grep -nE '(^|[^a-z-])rtk-engine v'
+            exit 1
+          fi
+          echo "Apache-2.0 edition links no BUSL crate."
+
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.os }}${{ matrix.target && format(', {0}', matrix.target) || '' }})
     needs: clippy
     runs-on: ${{ matrix.os }}
+    env:
+      # An explicit target on every leg keeps the run command the same. It also puts
+      # each leg in cross mode, where RUSTFLAGS no longer reach build scripts or proc-macros.
+      CARGO_BUILD_TARGET: ${{ matrix.target || 'host-tuple' }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+          - os: windows-latest
+          # Links with MinGW's ld, which link.exe's `/STACK:` spelling breaks (see build.rs).
+          # The runner's host stays msvc, so build.rs also runs with host != target.
+          - os: windows-latest
+            target: x86_64-pc-windows-gnu
+          - os: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      # The fish-script wrap is skipped without a resolvable `fish`, so without
+      # this step `tests/fish_wrap_test.rs` asserts only the disabled path and
+      # the feature's own code never runs on any runner. Windows has no wrap to
+      # exercise: it is disabled there by design.
+      - name: Install fish (wrap coverage)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fish
+      - name: Install fish (wrap coverage)
+        if: runner.os == 'macOS'
+        run: brew install fish
+        # `--all` is `--workspace`: `rtk` + `engine`. `proxy/` is tested in
+        # its own job, since it is not a member.
       - run: cargo test --all
 
   security:
@@ -69,7 +157,7 @@ jobs:
     needs: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -160,7 +248,7 @@ jobs:
       - name: Clippy security lints
         run: |
           echo "### Clippy Security Lints" >> $GITHUB_STEP_SUMMARY
-          if cargo clippy --all-targets -- -W clippy::unwrap_used -W clippy::panic -W clippy::expect_used 2>&1 | tee clippy.log | grep -E "warning:|error:"; then
+          if cargo clippy --workspace --all-targets -- -W clippy::unwrap_used -W clippy::panic -W clippy::expect_used 2>&1 | tee clippy.log | grep -E "warning:|error:"; then
             echo "Security-related lints triggered:" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             grep -E "warning:|error:" clippy.log | head -20 >> $GITHUB_STEP_SUMMARY
@@ -192,17 +280,21 @@ jobs:
     container:
       image: semgrep/semgrep
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - run: semgrep scan --config .semgrep.yml --baseline-commit ${{ github.event.pull_request.base.sha }} --error
+      # `--error` alone fails on any finding at any severity, so the rules
+      # below .semgrep.yml's "non-blocking, flag for review" divider would block too.
+      # Gate on ERROR; report WARNING without failing, as that divider promises.
+      - run: semgrep scan --config .semgrep.yml --baseline-commit ${{ github.event.pull_request.base.sha }} --severity ERROR --error
+      - run: semgrep scan --config .semgrep.yml --baseline-commit ${{ github.event.pull_request.base.sha }} --severity WARNING || true
 
   benchmark:
     name: benchmark
     needs: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -212,18 +304,18 @@ jobs:
         run: cargo build --release
 
       - name: Install system tools
-        run: sudo apt-get install -y tree
+        run: sudo apt-get install -y tree ripgrep
 
       - name: Install Python tools
         run: pip install ruff pytest mypy
 
       - name: Install Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: "stable"
 
       - name: Install Go tools
-        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
 
       - name: Run benchmark
         run: ./scripts/benchmark.sh
@@ -235,18 +327,32 @@ jobs:
     if: github.base_ref == 'develop'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
+      # `gh pr diff` uses the diff media type, which GitHub refuses with HTTP
+      # 406 above 20,000 lines -- and this job is advisory, so a large PR must
+      # not fail it. The files API has no such ceiling, so fall back to
+      # per-file patches and carry on with whatever context is available.
       - name: Gather PR context
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PR_NUM=${{ github.event.pull_request.number }}
-          gh pr diff "$PR_NUM" --name-only > changed_files.txt
-          gh pr diff "$PR_NUM" | head -c 12000 > diff.txt
-          gh pr view "$PR_NUM" --json title,body --jq '"PR Title: \(.title)\nPR Description: \(.body)"' > pr_info.txt
+          gh pr view "$PR_NUM" --json title,body \
+            --jq '"PR Title: \(.title)\nPR Description: \(.body)"' > pr_info.txt
+
+          if gh pr diff "$PR_NUM" --name-only > changed_files.txt 2>/dev/null; then
+            gh pr diff "$PR_NUM" | head -c 12000 > diff.txt
+          else
+            echo "::notice::diff too large for the diff API - using the files API"
+            gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUM}/files" --paginate \
+              --jq '.[].filename' > changed_files.txt
+            gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUM}/files" --paginate \
+              --jq '.[] | select(.patch != null) | "--- \(.filename)\n\(.patch)"' \
+              | head -c 12000 > diff.txt
+          fi
 
       - name: Build prompt files
         run: |

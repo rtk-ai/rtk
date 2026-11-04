@@ -1,0 +1,66 @@
+diff -ru "./ lead.txt" "../new/ lead.txt"
+--- "./ lead.txt"	2026-09-07 08:49:51.325932400 -0400
++++ "../new/ lead.txt"	2026-09-07 08:49:51.368656700 -0400
+@@ -1 +1 @@
+-one
++two
+diff -ru ./$'dollar.txt ../new/$'dollar.txt
+--- ./$'dollar.txt	2026-09-07 08:49:51.328329800 -0400
++++ ../new/$'dollar.txt	2026-09-07 08:49:51.369171400 -0400
+@@ -1 +1 @@
+-one
++two
+diff -ru ./a/ina.txt ../new/a/ina.txt
+--- ./a/ina.txt	2026-09-07 08:49:51.327315600 -0400
++++ ../new/a/ina.txt	2026-09-07 08:49:51.369171400 -0400
+@@ -1 +1 @@
+-one
++two
+diff -ru "./a and b and c.txt" "../new/a and b and c.txt"
+--- "./a and b and c.txt"	2026-09-07 08:49:51.324932200 -0400
++++ "../new/a and b and c.txt"	2026-09-07 08:49:51.368154200 -0400
+@@ -1 +1 @@
+-one
++two
+Binary files './a and b.bin' and '../new/a and b.bin' differ
+diff -ru "./and/x and y.txt" "../new/and/x and y.txt"
+--- "./and/x and y.txt"	2026-09-07 08:49:51.327817400 -0400
++++ "../new/and/x and y.txt"	2026-09-07 08:49:51.369171400 -0400
+@@ -1 +1 @@
+-one
++two
+diff -ru ./b/inb.txt ../new/b/inb.txt
+--- ./b/inb.txt	2026-09-07 08:49:51.326932400 -0400
++++ ../new/b/inb.txt	2026-09-07 08:49:51.368656700 -0400
+@@ -1 +1 @@
+-one
++two
+Binary files './caf'$'\303\251''.bin' and '../new/caf'$'\303\251''.bin' differ
+Only in .: 'caf'$'\303\251''.only'
+diff -ru "./caf\303\251.txt" "../new/caf\303\251.txt"
+--- "./caf\303\251.txt"	2026-09-07 08:49:51.325932400 -0400
++++ "../new/caf\303\251.txt"	2026-09-07 08:49:51.368656700 -0400
+@@ -1 +1 @@
+-one
++two
+Binary files "./it's.bin" and "../new/it's.bin" differ
+Only in ../new: "it's.only"
+diff -ru ./it's.txt ../new/it's.txt
+--- ./it's.txt	2026-09-07 08:49:51.323885200 -0400
++++ ../new/it's.txt	2026-09-07 08:49:51.368154200 -0400
+@@ -1 +1 @@
+-one
++two
+diff -ru "./sp ace.txt" "../new/sp ace.txt"
+--- "./sp ace.txt"	2026-09-07 08:49:51.325932400 -0400
++++ "../new/sp ace.txt"	2026-09-07 08:49:51.368154200 -0400
+@@ -1 +1 @@
+-one
++two
+Only in './x b': 'only and me.txt'
+diff -ru "./x b/y.txt" "../new/x b/y.txt"
+--- "./x b/y.txt"	2026-09-07 08:49:51.327315600 -0400
++++ "../new/x b/y.txt"	2026-09-07 08:49:51.369171400 -0400
+@@ -1 +1 @@
+-one
++two

@@ -1,0 +1,17 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________________________ test_deep ___________________________________
+test_deep.py:14: in test_deep
+    verify()
+test_deep.py:10: in verify
+    check(fetch())
+test_deep.py:2: in check
+    assert status == {"code": 200, "body": "ok"}, "bad status"
+E   AssertionError: bad status
+E   assert {'code': 500, 'body': 'err'} == {'code': 200, 'body': 'ok'}
+E     
+E     Differing items:
+E     {'code': 500} != {'code': 200}
+E     {'body': 'err'} != {'body': 'ok'}
+E     Use -v to get more diff
+1 failed in 0.01s

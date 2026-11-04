@@ -2,6 +2,7 @@
 
 use crate::core::args_utils;
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
 use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{join_with_overflow, resolved_command, truncate};
@@ -96,13 +97,11 @@ impl BlockHandler for CargoBuildHandler {
         !(line.trim().is_empty() && block.len() > 3)
     }
 
-    fn format_summary(&self, exit_code: i32, _raw: &str) -> Option<String> {
+    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String> {
         if self.error_count == 0 && self.warnings == 0 && exit_code == 0 {
-            return Some(cargo_build_success_line(
-                self.compiled,
-                self.finished_line.as_deref(),
-                self.label,
-            ));
+            let summary =
+                cargo_build_success_line(self.compiled, self.finished_line.as_deref(), self.label);
+            return Some(crate::core::guard::never_worse(raw, &summary).to_string());
         }
         // The streamed path only runs for non-json build/check; error blocks are
         // emitted live, so the summary carries no rendered diagnostics.
@@ -136,6 +135,64 @@ impl CargoTestHandler {
             summary_lines: Vec::new(),
             has_compile_errors: false,
         }
+    }
+
+    /// Compacted `cargo test` summary, before the never-worse guard.
+    fn compute_test_summary(&self, raw: &str) -> Option<String> {
+        if self.summary_lines.is_empty() {
+            let json = extract_json_diagnostics(raw);
+            if self.has_compile_errors || !json.errors.is_empty() {
+                // Content-based (exit 0): a real compile error yields "cargo test: N
+                // errors"; a bare "could not compile" leaves the raw tail fallback.
+                let build_filtered = filter_cargo_build_labeled(raw, "test", 0);
+                if build_filtered.contains("cargo test:") {
+                    return Some(format!("{}\n", build_filtered));
+                }
+                // Fallback: last 5 meaningful lines
+                let meaningful: Vec<&str> = raw
+                    .lines()
+                    .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("Compiling"))
+                    .collect();
+                let last5: Vec<&str> = meaningful.iter().rev().take(5).rev().copied().collect();
+                return Some(format!("{}\n", last5.join("\n")));
+            }
+        }
+
+        // No failures emitted — aggregate pass results
+        let mut aggregated: Option<AggregatedTestResult> = None;
+        let mut all_parsed = true;
+
+        for line in &self.summary_lines {
+            if let Some(parsed) = AggregatedTestResult::parse_line(line) {
+                if let Some(ref mut agg) = aggregated {
+                    agg.merge(&parsed);
+                } else {
+                    aggregated = Some(parsed);
+                }
+            } else {
+                all_parsed = false;
+                break;
+            }
+        }
+
+        if all_parsed
+            && let Some(agg) = aggregated
+            && agg.suites > 0
+        {
+            return Some(format!("{}\n", agg.format_compact()));
+        }
+
+        // Fallback: show raw summary lines
+        if !self.summary_lines.is_empty() {
+            let mut s = String::new();
+            for line in &self.summary_lines {
+                s.push_str(line);
+                s.push('\n');
+            }
+            return Some(s);
+        }
+
+        None
     }
 }
 
@@ -195,61 +252,12 @@ impl BlockHandler for CargoTestHandler {
     }
 
     fn format_summary(&self, _exit_code: i32, raw: &str) -> Option<String> {
-        if self.summary_lines.is_empty() {
-            let json = extract_json_diagnostics(raw);
-            if self.has_compile_errors || !json.errors.is_empty() {
-                // Content-based (exit 0): a real compile error yields "cargo test: N
-                // errors"; a bare "could not compile" leaves the raw tail fallback.
-                let build_filtered = filter_cargo_build_labeled(raw, "test", 0);
-                if build_filtered.contains("cargo test:") {
-                    return Some(format!("{}\n", build_filtered));
-                }
-                // Fallback: last 5 meaningful lines
-                let meaningful: Vec<&str> = raw
-                    .lines()
-                    .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("Compiling"))
-                    .collect();
-                let last5: Vec<&str> = meaningful.iter().rev().take(5).rev().copied().collect();
-                return Some(format!("{}\n", last5.join("\n")));
-            }
-        }
-
-        // No failures emitted — aggregate pass results
-        let mut aggregated: Option<AggregatedTestResult> = None;
-        let mut all_parsed = true;
-
-        for line in &self.summary_lines {
-            if let Some(parsed) = AggregatedTestResult::parse_line(line) {
-                if let Some(ref mut agg) = aggregated {
-                    agg.merge(&parsed);
-                } else {
-                    aggregated = Some(parsed);
-                }
-            } else {
-                all_parsed = false;
-                break;
-            }
-        }
-
-        if all_parsed {
-            if let Some(agg) = aggregated {
-                if agg.suites > 0 {
-                    return Some(format!("{}\n", agg.format_compact()));
-                }
-            }
-        }
-
-        // Fallback: show raw summary lines
-        if !self.summary_lines.is_empty() {
-            let mut s = String::new();
-            for line in &self.summary_lines {
-                s.push_str(line);
-                s.push('\n');
-            }
-            return Some(s);
-        }
-
-        None
+        // Same never-worse guard as CargoBuildHandler (#3430 review): if the
+        // compacted summary ends up larger than the raw output (e.g. a tiny
+        // `cargo test` run), keep the raw output instead of "compacting" it
+        // into something bigger.
+        let summary = self.compute_test_summary(raw)?;
+        Some(crate::core::guard::never_worse(raw, &summary).to_string())
     }
 }
 
@@ -279,7 +287,7 @@ where
     runner::run_filtered(
         cmd,
         &format!("cargo {}", subcommand),
-        &restored_args.join(" "),
+        &display_args(&restored_args),
         filter_fn,
         runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
     )
@@ -311,7 +319,7 @@ where
     runner::run_filtered_with_exit(
         cmd,
         &format!("cargo {}", subcommand),
-        &restored_args.join(" "),
+        &display_args(&restored_args),
         filter_fn,
         runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
     )
@@ -338,7 +346,7 @@ fn run_cargo_streamed(
     runner::run_streamed(
         cmd,
         &format!("cargo {}", subcommand),
-        &restored_args.join(" "),
+        &display_args(&restored_args),
         filter,
         runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
     )
@@ -350,10 +358,10 @@ fn has_json_message_format(args: &[String]) -> bool {
     while let Some(arg) = iter.next() {
         if let Some(val) = arg.strip_prefix("--message-format=") {
             json = val.contains("json");
-        } else if arg == "--message-format" {
-            if let Some(val) = iter.next() {
-                json = val.contains("json");
-            }
+        } else if arg == "--message-format"
+            && let Some(val) = iter.next()
+        {
+            json = val.contains("json");
         }
     }
     json
@@ -369,7 +377,9 @@ fn run_build(args: &[String], verbose: u8) -> Result<i32> {
         "build",
         args,
         verbose,
-        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label("build"))),
+        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
+            "build",
+        ))),
     )
 }
 
@@ -403,7 +413,9 @@ fn run_check(args: &[String], verbose: u8) -> Result<i32> {
         "check",
         args,
         verbose,
-        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label("check"))),
+        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
+            "check",
+        ))),
     )
 }
 
@@ -618,10 +630,31 @@ fn flush_failure_block(header: &mut String, body: &mut Vec<String>, failures: &m
     body.clear();
 }
 
+/// A nextest status line without the `TRY n ` prefix nextest puts on each attempt of a retried test.
+fn nextest_status(trimmed: &str) -> &str {
+    match trimmed.strip_prefix("TRY ") {
+        Some(rest) => rest
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .trim_start(),
+        None => trimmed,
+    }
+}
+
+/// The test a nextest status line or failure block names, e.g. `fx tests::hang` in
+/// `TRY 1 TMT [   2.003s] (───) fx tests::hang`. The `(1/2)` counter changes between attempts.
+fn nextest_test_name(block: &str) -> &str {
+    let line = block.lines().next().unwrap_or_default();
+    let name = line.split_once(']').map_or(line, |(_, rest)| rest).trim();
+    name.strip_prefix('(')
+        .and_then(|rest| rest.split_once(") "))
+        .map_or(name, |(_, name)| name)
+}
+
 /// Filter cargo nextest output - show failures + compact summary
 fn filter_cargo_nextest(output: &str) -> String {
+    // nextest annotates `passed` in place, e.g. `2 passed (1 slow), 1 failed`
     let summary_re = regex::Regex::new(
-        r"Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run:\s+(\d+) passed(?:,\s+(\d+) failed)?(?:,\s+(\d+) skipped)?"
+        r"Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run:\s+(\d+) passed(?:\s+\([^)]*\))?(?:,\s+(\d+) failed)?(?:,\s+(\d+) exec failed)?(?:,\s+(\d+) timed out)?(?:,\s+(\d+) skipped)?"
     ).expect("invalid nextest summary regex");
 
     let starting_re = regex::Regex::new(r"Starting \d+ tests? across (\d+) binar(?:y|ies)")
@@ -662,16 +695,23 @@ fn filter_cargo_nextest(output: &str) -> String {
 
         // Parse binary count from Starting line
         if trimmed.starts_with("Starting") {
-            if let Some(caps) = starting_re.captures(trimmed) {
-                if let Some(m) = caps.get(1) {
-                    binaries = m.as_str().parse().unwrap_or(0);
-                }
+            if let Some(caps) = starting_re.captures(trimmed)
+                && let Some(m) = caps.get(1)
+            {
+                binaries = m.as_str().parse().unwrap_or(0);
             }
             continue;
         }
 
-        // Strip PASS lines
-        if trimmed.starts_with("PASS") {
+        // A retried attempt reads `TRY 2 FAIL [...]`, a timeout `TIMEOUT [...]`, or `TRY 2 TMT [...]`
+        // when it is retried
+        let status = nextest_status(trimmed);
+        let is_failure = status.starts_with("FAIL")
+            || status.starts_with("TIMEOUT")
+            || status.starts_with("TMT");
+
+        if is_failure || status.starts_with("PASS") {
+            // Close previous failure block if any
             if in_failure_block {
                 flush_failure_block(
                     &mut current_failure_header,
@@ -680,21 +720,14 @@ fn filter_cargo_nextest(output: &str) -> String {
                 );
                 in_failure_block = false;
             }
-            continue;
-        }
-
-        // Detect FAIL lines
-        if trimmed.starts_with("FAIL") {
-            // Close previous failure block if any
-            if in_failure_block {
-                flush_failure_block(
-                    &mut current_failure_header,
-                    &mut current_failure_body,
-                    &mut failures,
-                );
+            // Only the last attempt of a test counts. Attempts of different tests interleave,
+            // so earlier ones are found by name, not by being the block still open.
+            let name = nextest_test_name(trimmed);
+            failures.retain(|block| nextest_test_name(block) != name);
+            if is_failure {
+                current_failure_header = trimmed.to_string();
+                in_failure_block = true;
             }
-            current_failure_header = trimmed.to_string();
-            in_failure_block = true;
             continue;
         }
 
@@ -750,8 +783,16 @@ fn filter_cargo_nextest(output: &str) -> String {
             .get(4)
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(0);
-        let skipped: u32 = caps
+        let exec_failed: u32 = caps
             .get(5)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
+        let timed_out: u32 = caps
+            .get(6)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
+        let skipped: u32 = caps
+            .get(7)
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(0);
 
@@ -761,7 +802,7 @@ fn filter_cargo_nextest(output: &str) -> String {
             Ordering::Less => String::new(),
         };
 
-        if failed == 0 {
+        if failed + exec_failed + timed_out == 0 {
             // All pass - compact single line
             let mut parts = vec![format!("{} passed", passed)];
             if skipped > 0 {
@@ -790,6 +831,12 @@ fn filter_cargo_nextest(output: &str) -> String {
         let mut summary_parts = vec![format!("{} passed", passed)];
         if failed > 0 {
             summary_parts.push(format!("{} failed", failed));
+        }
+        if exec_failed > 0 {
+            summary_parts.push(format!("{} exec failed", exec_failed));
+        }
+        if timed_out > 0 {
+            summary_parts.push(format!("{} timed out", timed_out));
         }
         if skipped > 0 {
             summary_parts.push(format!("{} skipped", skipped));
@@ -877,7 +924,11 @@ fn extract_json_diagnostics(raw: &str) -> JsonDiagnostics {
             continue;
         }
         if let Some(rendered) = msg.rendered {
-            bucket.push(crate::core::utils::strip_ansi(&rendered).trim_end().to_string());
+            bucket.push(
+                crate::core::utils::strip_ansi(&rendered)
+                    .trim_end()
+                    .to_string(),
+            );
         } else if !msg.message.is_empty() {
             bucket.push(msg.message);
         }
@@ -885,7 +936,11 @@ fn extract_json_diagnostics(raw: &str) -> JsonDiagnostics {
     JsonDiagnostics { errors, warnings }
 }
 
-fn merge_diag_counts(error_count: usize, warnings: usize, json: &JsonDiagnostics) -> (usize, usize) {
+fn merge_diag_counts(
+    error_count: usize,
+    warnings: usize,
+    json: &JsonDiagnostics,
+) -> (usize, usize) {
     (
         error_count.max(json.errors.len()),
         warnings.max(json.warnings.len()),
@@ -988,7 +1043,9 @@ fn filter_cargo_build_labeled(output: &str, label: &'static str, exit_code: i32)
     let (errors, warnings) = merge_diag_counts(handler.error_count, handler.warnings, &json);
 
     if errors == 0 && warnings == 0 && exit_code == 0 {
-        return cargo_build_success_line(handler.compiled, handler.finished_line.as_deref(), label);
+        let summary =
+            cargo_build_success_line(handler.compiled, handler.finished_line.as_deref(), label);
+        return crate::core::guard::never_worse(output, &summary).to_string();
     }
 
     let mut result =
@@ -1187,12 +1244,11 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
         }
 
         // If all lines parsed successfully and we have at least one suite, return compact format
-        if all_parsed {
-            if let Some(agg) = aggregated {
-                if agg.suites > 0 {
-                    return agg.format_compact();
-                }
-            }
+        if all_parsed
+            && let Some(agg) = aggregated
+            && agg.suites > 0
+        {
+            return agg.format_compact();
         }
 
         // Fallback: use original behavior if regex failed
@@ -1209,7 +1265,10 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
             result.push_str(&format!("{}. {}\n", i + 1, truncate(failure, 200)));
         }
         if failures.len() > MAX_FAILURES {
-            result.push_str(&format!("\n… +{} more failures\n", failures.len() - MAX_FAILURES));
+            result.push_str(&format!(
+                "\n… +{} more failures\n",
+                failures.len() - MAX_FAILURES
+            ));
             let all_failures = failures.join("\n\n");
             if let Some(hint) =
                 crate::core::tee::force_tee_hint(&all_failures, "cargo-test-failures")
@@ -1383,8 +1442,7 @@ fn filter_cargo_clippy(output: &str) -> String {
                 .map(|b| b.join("\n"))
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            if let Some(hint) =
-                crate::core::tee::force_tee_hint(&all_blocks, "cargo-clippy-errors")
+            if let Some(hint) = crate::core::tee::force_tee_hint(&all_blocks, "cargo-clippy-errors")
             {
                 result.push_str(&format!("  {}\n", hint));
             }
@@ -1437,6 +1495,9 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    const TINY_BUILD_SUCCESS_OUTPUT: &str =
+        "    Finished dev [unoptimized + debuginfo] target(s) in 0.01s\n";
+
     use super::*;
     use crate::core::args_utils::restore_double_dash_with_raw;
 
@@ -1555,6 +1616,42 @@ mod tests {
         let result = filter_cargo_build(output);
         assert!(result.contains("cargo build"));
         assert!(result.contains("3 crates compiled"));
+    }
+
+    #[test]
+    fn test_filter_cargo_build_success_uses_raw_when_summary_is_larger() {
+        let output = TINY_BUILD_SUCCESS_OUTPUT;
+        let result = filter_cargo_build(output);
+        assert_eq!(result, output);
+    }
+
+    #[test]
+    fn test_cargo_test_summary_uses_raw_when_summary_is_larger() {
+        // A one-line compile failure is already minimal: prefixing it with the
+        // "cargo test: N errors, ..." header emits more tokens than the raw
+        // output, so the never-worse guard must keep the raw output.
+        const CARGO_COMPILE_FAILURE_EXIT_CODE: i32 = 101;
+        let raw = "error[E0433]: failed to resolve: use of undeclared type `Foo`\n";
+
+        let mut handler = CargoTestHandler::new();
+        for line in raw.lines() {
+            handler.should_skip(line);
+        }
+
+        let unguarded = handler
+            .compute_test_summary(raw)
+            .expect("compile failure yields a summary");
+        assert!(
+            unguarded.len() > raw.len(),
+            "expected the compacted summary to be larger than the raw output, got {:?}",
+            unguarded
+        );
+        assert_eq!(
+            handler
+                .format_summary(CARGO_COMPILE_FAILURE_EXIT_CODE, raw)
+                .as_deref(),
+            Some(raw)
+        );
     }
 
     #[test]
@@ -2195,6 +2292,392 @@ error: test run failed
     }
 
     #[test]
+    fn test_filter_cargo_nextest_timeout_is_a_failure() {
+        let output = r#"    Starting 2 tests across 1 binary (5 tests skipped)
+        PASS [   0.001s] (1/2) fx tests::pass_fast
+     TIMEOUT [   2.002s] (2/2) fx tests::hang
+
+  stdout ───
+
+    running 1 test
+
+────────────────────────────
+     Summary [   2.004s] 2 tests run: 1 passed, 1 timed out, 5 skipped
+     TIMEOUT [   2.002s] (2/2) fx tests::hang
+error: test run failed
+"#;
+        let result = filter_cargo_nextest(output);
+        assert!(
+            result.contains("TIMEOUT [   2.002s] (2/2) fx tests::hang"),
+            "should show the timed-out test: {}",
+            result
+        );
+        assert!(
+            result.contains("1 passed, 1 timed out, 5 skipped"),
+            "should count the timeout: {}",
+            result
+        );
+        assert_eq!(result.matches("TIMEOUT [").count(), 1, "{}", result);
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_retried_failure_keeps_details() {
+        let output = r#"    Starting 2 tests across 1 binary (5 tests skipped)
+        PASS [   0.001s] (1/2) fx tests::pass_fast
+  TRY 1 FAIL [   0.003s] (2/2) fx tests::fail_fast
+
+  stderr ───
+
+    thread 'tests::fail_fast' panicked at src/lib.rs:9:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+
+  RETRY 2/3 [         ] (2/2) fx tests::fail_fast
+  TRY 3 FAIL [   0.003s] (2/2) fx tests::fail_fast
+
+  stderr ───
+
+    thread 'tests::fail_fast' panicked at src/lib.rs:9:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+
+────────────────────────────
+     Summary [   0.013s] 2 tests run: 1 passed, 1 failed, 5 skipped
+  TRY 3 FAIL [   0.003s] (2/2) fx tests::fail_fast
+error: test run failed
+"#;
+        let result = filter_cargo_nextest(output);
+        assert!(
+            result.contains("TRY 3 FAIL [   0.003s] (2/2) fx tests::fail_fast"),
+            "should name the failing test: {}",
+            result
+        );
+        assert!(
+            result.contains("assertion `left == right` failed"),
+            "should keep the panic message: {}",
+            result
+        );
+        assert!(
+            result.contains("1 passed, 1 failed, 5 skipped"),
+            "should show summary: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_retried_timeout_keeps_name() {
+        let output = r#"────────────
+    Starting 2 tests across 1 binary (2 tests skipped)
+        PASS [   0.005s] (1/2) fx tests::pass_fast
+        SLOW [>  1.000s] (───) fx tests::hang
+TRY 1 TRMNTG [>  2.000s] (───) fx tests::hang
+   TRY 1 TMT [   2.003s] (───) fx tests::hang
+  stdout ───
+
+    running 1 test
+    hang stdout line
+
+    (test timed out)
+
+  TRY 2 SLOW [>  1.000s] (───) fx tests::hang
+TRY 2 TRMNTG [>  2.000s] (───) fx tests::hang
+   TRY 2 TMT [   2.004s] (2/2) fx tests::hang
+  stdout ───
+
+    running 1 test
+    hang stdout line
+
+    (test timed out)
+
+────────────
+     Summary [   4.010s] 2 tests run: 1 passed, 1 timed out, 2 skipped
+   TRY 2 TMT [   2.004s] (2/2) fx tests::hang
+error: test run failed
+"#;
+        let result = filter_cargo_nextest(output);
+        assert!(
+            result.contains("TRY 2 TMT [   2.004s] (2/2) fx tests::hang"),
+            "should name the timed-out test: {}",
+            result
+        );
+        assert!(
+            result.contains("(test timed out)"),
+            "should keep the output of the last attempt: {}",
+            result
+        );
+        assert!(!result.contains("TRY 1 TMT"), "{}", result);
+        assert!(
+            result.contains("1 passed, 1 timed out, 2 skipped"),
+            "should count the timeout: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_passed_on_retry_is_not_a_failure() {
+        // The flaky attempt's block is not the open one when `TRY 2 PASS` arrives, fail_fast's is
+        let output = r#"────────────
+    Starting 2 tests across 1 binary (2 tests skipped)
+  TRY 1 FAIL [   0.004s] (───) fx tests::flaky
+  stdout ───
+
+    running 1 test
+    test tests::flaky ... FAILED
+
+    failures:
+
+    failures:
+        tests::flaky
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::flaky' (229) panicked at src/lib.rs:23:13:
+    flaky first attempt
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 1 FAIL [   0.004s] (───) fx tests::fail_fast
+  stdout ───
+
+    running 1 test
+    fail_fast stdout line
+    test tests::fail_fast ... FAILED
+
+    failures:
+
+    failures:
+        tests::fail_fast
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::fail_fast' (230) panicked at src/lib.rs:9:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 PASS [   0.005s] (1/2) fx tests::flaky
+  TRY 2 FAIL [   0.005s] (───) fx tests::fail_fast
+  stdout ───
+
+    running 1 test
+    fail_fast stdout line
+    test tests::fail_fast ... FAILED
+
+    failures:
+
+    failures:
+        tests::fail_fast
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::fail_fast' (234) panicked at src/lib.rs:9:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 3 FAIL [   0.005s] (2/2) fx tests::fail_fast
+  stdout ───
+
+    running 1 test
+    fail_fast stdout line
+    test tests::fail_fast ... FAILED
+
+    failures:
+
+    failures:
+        tests::fail_fast
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::fail_fast' (236) panicked at src/lib.rs:9:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.017s] 2 tests run: 1 passed (1 flaky), 1 failed, 2 skipped
+   FLAKY 2/3 [   0.005s] (1/2) fx tests::flaky
+  TRY 3 FAIL [   0.005s] (2/2) fx tests::fail_fast
+error: test run failed
+"#;
+        let result = filter_cargo_nextest(output);
+        assert!(
+            !result.contains("tests::flaky"),
+            "a test that passed on retry is not a failure: {}",
+            result
+        );
+        assert!(!result.contains("flaky first attempt"), "{}", result);
+        assert!(
+            result.contains("TRY 3 FAIL [   0.005s] (2/2) fx tests::fail_fast"),
+            "should keep the test that kept failing: {}",
+            result
+        );
+        assert!(
+            result.contains("1 passed, 1 failed, 2 skipped"),
+            "should show summary: {}",
+            result
+        );
+        let savings = 100.0 - (result.len() as f64 / output.len() as f64) * 100.0;
+        assert!(savings >= 20.0, "savings below 20%: {savings:.1}%");
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_retries_keep_only_the_last_attempt() {
+        let output = r#"────────────
+    Starting 2 tests across 1 binary (2 tests skipped)
+        PASS [   0.005s] (1/2) fx tests::pass_fast
+  TRY 1 FAIL [   0.005s] (───) fx tests::fail_fast
+  stdout ───
+
+    running 1 test
+    fail_fast stdout line
+    test tests::fail_fast ... FAILED
+
+    failures:
+
+    failures:
+        tests::fail_fast
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::fail_fast' (152) panicked at src/lib.rs:9:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 FAIL [   0.005s] (───) fx tests::fail_fast
+  stdout ───
+
+    running 1 test
+    fail_fast stdout line
+    test tests::fail_fast ... FAILED
+
+    failures:
+
+    failures:
+        tests::fail_fast
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::fail_fast' (154) panicked at src/lib.rs:9:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 3 FAIL [   0.005s] (2/2) fx tests::fail_fast
+  stdout ───
+
+    running 1 test
+    fail_fast stdout line
+    test tests::fail_fast ... FAILED
+
+    failures:
+
+    failures:
+        tests::fail_fast
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::fail_fast' (156) panicked at src/lib.rs:9:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.017s] 2 tests run: 1 passed, 1 failed, 2 skipped
+  TRY 3 FAIL [   0.005s] (2/2) fx tests::fail_fast
+error: test run failed
+"#;
+        let result = filter_cargo_nextest(output);
+        assert!(
+            result.contains("TRY 3 FAIL [   0.005s] (2/2) fx tests::fail_fast"),
+            "should name the failing test: {}",
+            result
+        );
+        assert!(
+            result.contains("thread 'tests::fail_fast' (156) panicked"),
+            "should keep the last panic: {}",
+            result
+        );
+        assert_eq!(result.matches("panicked at").count(), 1, "{}", result);
+        assert_eq!(result.matches("TRY ").count(), 1, "{}", result);
+        let savings = 100.0 - (result.len() as f64 / output.len() as f64) * 100.0;
+        assert!(savings >= 20.0, "savings below 20%: {savings:.1}%");
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_retries_keep_each_failing_test() {
+        let output = r#"    Starting 2 tests across 1 binary (3 tests skipped)
+  TRY 1 FAIL [   0.004s] (───) fx tests::fail_fast
+  stderr ───
+
+    fail_fast attempt 1
+
+  TRY 1 FAIL [   0.004s] (───) fx tests::fail_other
+  stderr ───
+
+    fail_other attempt 1
+
+  TRY 2 FAIL [   0.004s] (1/2) fx tests::fail_other
+  stderr ───
+
+    fail_other attempt 2
+
+  TRY 2 FAIL [   0.005s] (2/2) fx tests::fail_fast
+  stderr ───
+
+    fail_fast attempt 2
+
+────────────
+     Summary [   0.017s] 2 tests run: 0 passed, 2 failed, 3 skipped
+  TRY 2 FAIL [   0.004s] (1/2) fx tests::fail_other
+  TRY 2 FAIL [   0.005s] (2/2) fx tests::fail_fast
+error: test run failed
+"#;
+        let result = filter_cargo_nextest(output);
+        assert!(result.contains("fail_other attempt 2"), "{}", result);
+        assert!(result.contains("fail_fast attempt 2"), "{}", result);
+        assert!(!result.contains("attempt 1"), "{}", result);
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_exec_failed_is_a_failure() {
+        // the summary line alone decides the verdict; its order is nextest's own
+        let output = r#"    Starting 1 test across 1 binary
+────────────────────────────
+     Summary [   0.005s] 1 test run: 0 passed, 1 exec failed
+error: test run failed
+"#;
+        let result = filter_cargo_nextest(output);
+        assert!(
+            result.contains("0 passed, 1 exec failed"),
+            "should count the exec failure instead of reporting a green run: {}",
+            result
+        );
+    }
+
+    #[test]
     fn test_filter_cargo_nextest_multiple_binaries() {
         let output = r#"    Starting 100 tests across 5 binaries
         PASS [   0.010s] (100/100) test_last
@@ -2286,6 +2769,74 @@ error: test run failed
     }
 
     #[test]
+    fn test_filter_cargo_nextest_slow_annotation_keeps_failed_and_skipped() {
+        // cargo-nextest 0.9.143 puts `(N slow)` directly after `passed` (#4420)
+        let output = r#"    Starting 3 tests across 1 binary (1 test skipped)
+        PASS [   0.004s] (1/3) scratch tests::passing
+        FAIL [   0.005s] (2/3) scratch tests::failing
+
+  stderr ───
+
+    thread 'tests::failing' panicked at src/lib.rs:14:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+
+        SLOW [>  1.000s] (───────) scratch tests::slow
+        PASS [   2.502s] (3/3) scratch tests::slow
+────────────
+     Summary [   2.503s] 3 tests run: 2 passed (1 slow), 1 failed, 1 skipped
+        FAIL [   0.005s] (2/3) scratch tests::failing
+error: test run failed
+"#;
+        let result = filter_cargo_nextest(output);
+        assert!(
+            result.contains("cargo nextest: 2 passed, 1 failed, 1 skipped"),
+            "should keep failed and skipped counts: {}",
+            result
+        );
+        assert!(
+            result.contains("FAIL [   0.005s] (2/3) scratch tests::failing"),
+            "should keep the failure block: {}",
+            result
+        );
+        assert!(
+            result.contains("panicked"),
+            "should keep failure stderr: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_slow_annotation_all_pass() {
+        let output = r#"    Starting 2 tests across 1 binary
+        PASS [   0.004s] (1/2) scratch tests::passing
+        PASS [   2.502s] (2/2) scratch tests::slow
+────────────
+     Summary [   2.503s] 2 tests run: 2 passed (1 slow), 0 skipped
+"#;
+        let result = filter_cargo_nextest(output);
+        assert_eq!(
+            result, "cargo nextest: 2 passed (1 binary, 2.503s)",
+            "got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_combined_annotation_keeps_failed_and_skipped() {
+        // cargo-nextest 0.9.143 with retries: `(1 slow, 1 flaky)` after `passed`
+        let output =
+            include_str!("../../../tests/fixtures/cargo_nextest_slow_flaky_failed_raw.txt");
+        let result = filter_cargo_nextest(output);
+        assert!(
+            result.contains("cargo nextest: 2 passed, 1 failed, 4 skipped (1 binary, 1.503s)"),
+            "should keep failed and skipped counts: {}",
+            result
+        );
+    }
+
+    #[test]
     fn test_filter_cargo_nextest_summary_regex_fallback() {
         let output = r#"    Starting 5 tests across 1 binary
         PASS [   0.005s] (5/5) test_last
@@ -2312,6 +2863,14 @@ error: test run failed
         assert!(result.contains("3 crates compiled"), "got: {}", result);
         assert!(result.contains("Finished"), "got: {}", result);
         assert!(!result.contains("Compiling"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_cargo_build_stream_success_uses_raw_when_summary_is_larger() {
+        let input = TINY_BUILD_SUCCESS_OUTPUT;
+        let mut f = BlockStreamFilter::new(CargoBuildHandler::with_label("build"));
+        let result = run_block_filter(&mut f, input, 0);
+        assert_eq!(result, input);
     }
 
     #[test]
@@ -2420,7 +2979,11 @@ error: aborting due to 1 previous error
         );
         let result = filter_cargo_clippy_json(input, 0);
         assert!(result.contains("unused variable"), "got: {}", result);
-        assert!(result.contains("cargo clippy: 0 errors, 1 warnings"), "got: {}", result);
+        assert!(
+            result.contains("cargo clippy: 0 errors, 1 warnings"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
@@ -2437,7 +3000,11 @@ error: aborting due to 1 previous error
             "a failed build must not be reported as compiled: {}",
             result
         );
-        assert!(result.contains("cargo build: failed (exit 101)"), "got: {}", result);
+        assert!(
+            result.contains("cargo build: failed (exit 101)"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
@@ -2489,7 +3056,6 @@ error: aborting due to 1 previous error
         );
     }
 
-
     #[test]
     fn test_extract_json_diagnostics_skips_generated_summary() {
         let output = concat!(
@@ -2501,7 +3067,11 @@ error: aborting due to 1 previous error
             "\n",
         );
         let json = extract_json_diagnostics(output);
-        assert_eq!(json.warnings.len(), 1, "generated summary must not inflate the count");
+        assert_eq!(
+            json.warnings.len(),
+            1,
+            "generated summary must not inflate the count"
+        );
         assert!(
             !json.warnings.iter().any(|w| w.contains("generated")),
             "the generated summary line must not appear in the output"
@@ -2518,7 +3088,11 @@ error: aborting due to 1 previous error
         );
         let json = extract_json_diagnostics(output);
         assert_eq!(json.errors.len(), 1, "an ICE must count as an error");
-        assert!(json.errors[0].contains("internal compiler error"), "got: {:?}", json.errors[0]);
+        assert!(
+            json.errors[0].contains("internal compiler error"),
+            "got: {:?}",
+            json.errors[0]
+        );
     }
 
     #[test]
@@ -2627,7 +3201,11 @@ error: aborting due to 1 previous error
 
         let result = filter_cargo_build(&output);
         let rendered = result.matches("error[E0308]").count();
-        assert_eq!(rendered, CAP_ERRORS, "json errors must be capped: {}", result);
+        assert_eq!(
+            rendered, CAP_ERRORS,
+            "json errors must be capped: {}",
+            result
+        );
         assert!(
             result.contains(&format!("… +{} more errors", total - CAP_ERRORS)),
             "expected overflow hint: {}",
@@ -2661,7 +3239,11 @@ error: aborting due to 1 previous error
 
         // The cap is what bounds the output, so assert it holds here too.
         let rendered = result.matches("error[E0308]").count();
-        assert_eq!(rendered, CAP_ERRORS, "json errors must be capped: {}", result);
+        assert_eq!(
+            rendered, CAP_ERRORS,
+            "json errors must be capped: {}",
+            result
+        );
         assert!(
             result.contains(&format!("… +{} more errors", total - CAP_ERRORS)),
             "expected overflow hint: {}",
@@ -2773,10 +3355,17 @@ error: could not compile `rtk` (test "repro_compile_fail") due to 1 previous err
         );
         let mut f = BlockStreamFilter::new(CargoTestHandler::new());
         let result = run_block_filter(&mut f, input, 101);
-        assert!(!result.trim().is_empty(), "json compile error must not be silent");
+        assert!(
+            !result.trim().is_empty(),
+            "json compile error must not be silent"
+        );
         assert!(result.contains("cargo test:"), "got: {}", result);
         assert!(result.contains("1 errors"), "got: {}", result);
-        assert!(result.contains("E0425"), "diagnostic must be surfaced: {}", result);
+        assert!(
+            result.contains("E0425"),
+            "diagnostic must be surfaced: {}",
+            result
+        );
     }
 
     #[test]

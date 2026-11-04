@@ -1,0 +1,20 @@
+45dd0c288113 change
+diff -r bc299d91c85a -r 45dd0c288113 bin.dat
+Binary file bin.dat has changed
+diff -r bc299d91c85a -r 45dd0c288113 f.txt
+--- a/f.txt	Mon Sep 07 13:10:32 2026 +0000
++++ b/f.txt	Mon Sep 07 13:10:32 2026 +0000
+@@ -1,1 +1,1 @@
+-a
++b
+diff -r bc299d91c85a -r 45dd0c288113 new.txt
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/new.txt	Mon Sep 07 13:10:32 2026 +0000
+@@ -0,0 +1,1 @@
++y
+diff -r bc299d91c85a -r 45dd0c288113 old.txt
+--- a/old.txt	Mon Sep 07 13:10:32 2026 +0000
++++ /dev/null	Thu Jan 01 00:00:00 1970 +0000
+@@ -1,1 +0,0 @@
+-x
+

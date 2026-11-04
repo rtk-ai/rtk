@@ -1,0 +1,2 @@
+File g1/foo is a directory while file g2/foo is a regular file
+Only in g1: zzz

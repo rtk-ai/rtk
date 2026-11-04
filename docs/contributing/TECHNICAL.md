@@ -2,8 +2,8 @@
 
 > **Start here** for a guided tour of how RTK works end-to-end.
 >
-> - [CONTRIBUTING.md](../CONTRIBUTING.md) — Design philosophy, PR process, branch naming, testing requirements
-> - [ARCHITECTURE.md](ARCHITECTURE.md) — Deep reference: filtering taxonomy, performance benchmarks, architecture decisions
+> - [CONTRIBUTING.md](../../CONTRIBUTING.md) — Design philosophy, PR process, branch naming, testing requirements
+> - [ARCHITECTURE.md](ARCHITECTURE.md) — Deep reference: filtering taxonomy, performance targets, architecture decisions
 > - Each folder has its own `README.md` with implementation details and file descriptions
 
 ---
@@ -12,7 +12,7 @@
 
 LLM-powered coding agents (Claude Code, Copilot, Cursor, etc.) consume tokens for every CLI command output they process. Most command outputs contain boilerplate, progress bars, ANSI escape codes, and verbose formatting that wastes tokens without providing actionable information.
 
-RTK sits between the agent and the CLI, filtering outputs to keep only what matters. This cuts 60-90% of the bash output per command, reducing costs and increasing effective context window utilization. RTK is a single Rust binary with no runtime dependencies beyond the compiled binary itself, adding less than 10ms overhead per command.
+RTK sits between the agent and the CLI, filtering outputs to keep only what matters. This reduces the bash output per command, reducing costs and increasing effective context window utilization. RTK is a single Rust binary with no runtime dependencies beyond the compiled binary itself, adding less than 10ms overhead per command.
 
 Every percentage below measures **bash output**, which is one contributor to input tokens, themselves only part of a bill that also counts output tokens. RTK ships no tokenizer (`src/core/tracking.rs` estimates `bytes / 4`), so the ratios are reliable but the absolute token counts are approximate.
 
@@ -79,7 +79,7 @@ The user runs `rtk init` to set up hooks for their LLM agent. This:
 
 RTK supports 7 agents, each with its own installation mode. The hook scripts are embedded in the binary and written at install time.
 
-> **Details**: [`src/hooks/README.md`](../src/hooks/README.md) covers all installation modes, configuration files, and the uninstall flow.
+> **Details**: [`src/hooks/README.md`](../../src/hooks/README.md) covers all installation modes, configuration files, and the uninstall flow.
 
 ### 3.2 Hook Interception (Command Rewriting)
 
@@ -94,7 +94,7 @@ When an LLM agent runs a command (e.g., `git status`):
 
 All rewrite logic lives in Rust (`src/discover/registry.rs`). Hooks are thin delegates that handle agent-specific JSON formats.
 
-> **Details**: [`hooks/README.md`](../hooks/README.md) covers each agent's JSON format, the rewrite registry, compound command handling, and the `RTK_DISABLED` override.
+> **Details**: [`hooks/README.md`](../../hooks/README.md) covers each agent's JSON format, the rewrite registry, compound command handling, and the `RTK_DISABLED` override.
 
 #### Rewrite Pipeline
 
@@ -116,11 +116,21 @@ LLM Agent: "cargo fmt --all && cargo test 2>&1 | tail -20"
   v
 rewrite_cmd::run(cmd)                              [src/hooks/rewrite_cmd.rs]
   |  1. Load config → hooks.exclude_commands
-  |  2. check_command(cmd) → Deny → exit(2)
-  |  3. registry::rewrite_command(cmd, excluded)
+  |  2. permissions::check_command(cmd) → Deny → exit(2)
+  |  3. decision::decide — `rtk rewrite` never wraps a fish script
+  |     (permissions::DenyRules::Unattested: the delegates that call it do
+  |     not prompt on exit 3, and OpenClaw matches its own exec checks
+  |     against the returned string); registry::rewrite_command(cmd, excluded)
   |     → None → exit(1)          (no RTK equivalent, passthrough)
   |     → Some + Allow → print, exit(0)
   |     → Some + Ask   → print, exit(3)
+  |  4. ApprovalOwner::from_env() — RTK_REWRITE_HOST names the calling
+  |     delegate. For one that gates the rewritten command itself
+  |     (OpenClaw), a Default ask renders as exit(0) instead of exit(3); an
+  |     explicit Ask rule still exits 3 so the host can prompt. A fish wrap
+  |     never reaches here: only `rtk hook claude` emits one, and it carries
+  |     its own `permissionDecision: ask`. Deny and passthrough are untouched,
+  |     so this never relaxes a deny or drops an explicit ask.
   |
   v
 rewrite_command(cmd, excluded)                     [src/discover/registry.rs]
@@ -143,8 +153,10 @@ rewrite_compound(cmd, excluded)                    [src/discover/registry.rs]
   |
   |  Step 2 — Split on operators, rewrite each segment
   |  Operator (&&, ||, ;) → rewrite both sides
-  |  Pipe (|) → keep producers/intermediate stages raw
-  |             rewrite only a pipeline-safe final stage
+  |  Pipe (|) → keep intermediate stages raw
+  |             rewrite a pipeline-safe final stage, or the
+  |             producer when its rule allows it and all
+  |             consumers are display-only
   |  Stderr pipe (|&) → keep the complete pipeline raw
   |  Shellism (&) → rewrite both sides (background)
   |
@@ -164,7 +176,7 @@ rewrite_segment(seg, excluded)                     [src/discover/registry.rs]
   |  Step 4 — Already RTK → return as-is
   |
   |  Step 5 — Special cases (short-circuit before classification)
-  |  head -N / --lines=N → rewrite_line_range() → "rtk read file --max-lines N"
+  |  head -N / -n N / --lines[= ]N / bare → rewrite_line_range() → "rtk read file --head-lines N"
   |  tail -N / -n N / --lines N → rewrite_line_range() → "rtk read file --tail-lines N"
   |  head/tail with unsupported flag (-c, -f) → None (skip rewrite)
   |  cat with incompatible flag (-A, -v, -e) → None (skip rewrite)
@@ -208,6 +220,7 @@ LLM Agent executes rewritten command
 Key design decisions:
 - **Lexer-based tokenization**: A single-pass state machine (`lexer.rs`) handles all shell constructs (quotes, escapes, redirects, operators). Used for both compound splitting and redirect stripping.
 - **Segment-level rewriting**: Compound commands are split by operators, each segment rewritten independently. Bash recombines them at execution time.
+- **Conservative shell-wrapper recursion**: Only exact quoted `sh|bash|zsh|fish -c` wrappers enter one level of inner rewriting. The parser hands back byte ranges instead of a decoded script, so the wrapper's own bytes are never re-quoted, and it reports the shell it matched so the script is attested under that shell's grammar rather than under bash's.
 - **Pipe semantics**: Producers and intermediate stages of `|` remain raw. Only an argument-safe final stage whose rule has `pipeline_final_safe` may be rewritten; initially this is limited to ordinary `grep` and `rg` invocations. Search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. `|&` is recognized separately and its complete pipeline stays raw.
 - **Double env prefix handling**: `classify_command()` strips env prefixes to match the underlying command against rules. `rewrite_segment()` extracts the same prefix separately to re-prepend it to the rewritten command.
 - **Fallback contract**: If any segment fails to match, it stays raw. `rewrite_command()` returns `None` only when zero segments were rewritten.
@@ -240,7 +253,7 @@ Each filter module follows the same pattern:
 5. Track token savings to SQLite
 6. Propagate exit code
 
-> **Details**: [`src/cmds/README.md`](../src/cmds/README.md) covers the common pattern, ecosystem organization, cross-command dependencies, and how to add new filters.
+> **Details**: [`src/cmds/README.md`](../../src/cmds/README.md) covers the common pattern, ecosystem organization, cross-command dependencies, and how to add new filters.
 
 ### 3.5 Fallback Path
 
@@ -261,7 +274,7 @@ Command received
                  -> No:  Passthrough (inherit stdio, track 0% reduction)
 ```
 
-> **Details**: [`src/core/README.md`](../src/core/README.md) covers the TOML filter engine, filter pipeline stages, and trust-gated project filters.
+> **Details**: [`src/core/README.md`](../../src/core/README.md) covers the TOML filter engine, filter pipeline stages, and trust-gated project filters.
 
 ### 3.6 Token Tracking
 
@@ -274,19 +287,19 @@ Every command execution records metrics to SQLite (`~/.local/share/rtk/tracking.
 
 Analytics commands (`rtk gain`, `rtk cc-economics`, `rtk session`) query this database to produce dashboards and ROI reports.
 
-> **Details**: [`src/analytics/README.md`](../src/analytics/README.md) covers the analytics modules, and [`src/core/README.md`](../src/core/README.md) covers the tracking database schema.
+> **Details**: [`src/analytics/README.md`](../../src/analytics/README.md) covers the analytics modules, and [`src/core/README.md`](../../src/core/README.md) covers the tracking database schema.
 
-### 3.7 Tee Recovery
+### 3.7 Output Recovery (recall store)
 
-On command failure (non-zero exit code):
+On command failure (non-zero exit code) — or when a filter truncates a long list:
 
-1. Raw unfiltered output is saved to `~/.local/share/rtk/tee/{epoch}_{slug}.log`
-2. A hint line is printed: `[full output: ~/.../tee/1234_cargo_test.log]`
-3. LLM agents can re-read the file instead of re-running the failed command
+1. Raw unfiltered output is stored in a content-addressed sqlite database (`~/.local/share/rtk/recall.db`, gzip, byte-faithful)
+2. A hint line is printed: `[full output: rtk recall 3f9c2a81d4e7b05a]` (failures) or `[+N hidden: rtk recall <hash>]` (truncated lists)
+3. LLM agents run `rtk recall <hash>` to get back exactly what was elided instead of re-running the command
 
-Tee is configurable (enabled/disabled, min size, max files, max file size) and never affects command output or exit code on failure.
+The mode is selectable via `rtk config recall <sqlite|tee|disabled>` — `tee` keeps the legacy per-file behavior (`~/.local/share/rtk/tee/{epoch}_{slug}.log`). Recovery never affects command output or exit code. `rtk gain --recalls` reports how often elided output is actually consulted, per filter.
 
-> **Details**: [`src/core/README.md`](../src/core/README.md) covers tee configuration and the rotation strategy.
+> **Details**: [`src/core/README.md`](../../src/core/README.md) covers the recall store, tee mode configuration, and the rotation strategy.
 
 ---
 
@@ -299,27 +312,27 @@ Start here, then drill down into each README for file-level details.
 | Directory | What it does | What you'll find in its README |
 |-----------|-------------|-------------------------------|
 | `main.rs` | CLI entry point, `Commands` enum, routing match | _(no README — read the file directly)_ |
-| [`core/`](../src/core/README.md) | Shared infrastructure | Tracking DB schema, config system, tee recovery, TOML filter engine, utility functions |
-| [`hooks/`](../src/hooks/README.md) | Hook system | Installation flow (`rtk init`), integrity verification, rewrite command, trust model |
-| [`analytics/`](../src/analytics/README.md) | Token savings analytics | `rtk gain` dashboard, Claude Code economics, ccusage parsing |
-| [`cmds/`](../src/cmds/README.md) | **Command filters (9 ecosystems)** | Common filter pattern, cross-command routing, token savings table, **links to each ecosystem** |
-| [`discover/`](../src/discover/README.md) | History analysis + rewrite registry | Rewrite patterns, session providers, compound command splitting |
-| [`learn/`](../src/learn/README.md) | CLI correction detection | Error classification, correction pair detection, rule generation |
-| [`parser/`](../src/parser/README.md) | Parser infrastructure | Canonical types (TestResult, LintResult, etc.), 3-tier format modes, migration guide |
-| [`filters/`](../src/filters/README.md) | TOML filter configs | TOML DSL syntax, 8-stage pipeline, inline testing, naming conventions |
+| [`core/`](../../src/core/README.md) | Shared infrastructure | Tracking DB schema, config system, tee recovery, TOML filter engine, utility functions |
+| [`hooks/`](../../src/hooks/README.md) | Hook system | Installation flow (`rtk init`), integrity verification, rewrite command, trust model |
+| [`analytics/`](../../src/analytics/README.md) | Token savings analytics | `rtk gain` dashboard, Claude Code economics, ccusage parsing |
+| [`cmds/`](../../src/cmds/README.md) | **Command filters (9 ecosystems)** | Common filter pattern, cross-command routing, token savings table, **links to each ecosystem** |
+| [`discover/`](../../src/discover/README.md) | History analysis + rewrite registry | Rewrite patterns, session providers, compound command splitting |
+| [`learn/`](../../src/learn/README.md) | CLI correction detection | Error classification, correction pair detection, rule generation |
+| [`parser/`](../../src/parser/README.md) | Parser infrastructure | Canonical types (TestResult, LintResult, etc.), 3-tier format modes, migration guide |
+| [`filters/`](../../src/filters/README.md) | TOML filter configs | TOML DSL syntax, 8-stage pipeline, inline testing, naming conventions |
 
 ### `hooks/` — Deployed hook artifacts (root directory)
 
 | Directory | Agent | What you'll find in its README |
 |-----------|-------|-------------------------------|
-| [`hooks/`](../hooks/README.md) | _(parent)_ | **All JSON formats**, rewrite registry overview, exit code contract, override controls |
-| [`claude/`](../hooks/claude/README.md) | Claude Code | Shell hook mechanism, `PreToolUse` JSON, test script |
-| [`copilot/`](../hooks/copilot/README.md) | GitHub Copilot | Rust binary hook, single `PreToolUse` schema shared by VS Code Chat and Copilot CLI |
-| [`cursor/`](../hooks/cursor/README.md) | Cursor IDE | Shell hook, empty JSON response requirement |
-| [`cline/`](../hooks/cline/README.md) | Cline / Roo Code | Rules file (prompt-level, no programmatic hook) |
-| [`windsurf/`](../hooks/windsurf/README.md) | Windsurf / Cascade | Rules file (workspace-scoped) |
-| [`codex/`](../hooks/codex/README.md) | OpenAI Codex CLI | Awareness document, AGENTS.md integration |
-| [`opencode/`](../hooks/opencode/README.md) | OpenCode | TypeScript plugin, zx library, in-place mutation |
+| [`hooks/`](../../hooks/README.md) | _(parent)_ | **All JSON formats**, rewrite registry overview, exit code contract, override controls |
+| [`claude/`](../../hooks/claude/README.md) | Claude Code | Shell hook mechanism, `PreToolUse` JSON, test script |
+| [`copilot/`](../../hooks/copilot/README.md) | GitHub Copilot | Rust binary hook, single `PreToolUse` schema shared by VS Code Chat and Copilot CLI |
+| [`cursor/`](../../hooks/cursor/README.md) | Cursor IDE | Shell hook, empty JSON response requirement |
+| [`cline/`](../../hooks/cline/README.md) | Cline / Roo Code | Rules file (prompt-level, no programmatic hook) |
+| [`windsurf/`](../../hooks/windsurf/README.md) | Windsurf / Cascade | Rules file (workspace-scoped) |
+| [`codex/`](../../hooks/codex/README.md) | OpenAI Codex CLI | Native `PreToolUse` processor, hooks.json registration, AGENTS.md awareness |
+| [`opencode/`](../../hooks/opencode/README.md) | OpenCode | TypeScript plugin, in-place mutation (OpenCode 2.0 and 1.x >= 1.18.29) |
 
 ---
 
@@ -336,10 +349,10 @@ RTK supports the following LLM agents through hook integrations:
 | Gemini CLI | Rust binary | `rtk hook gemini` reads JSON | Yes (`hookSpecificOutput`) |
 | Cline/Roo Code | Rules file | Prompt-level guidance | N/A (prompt) |
 | Windsurf | Rules file | Prompt-level guidance | N/A (prompt) |
-| Codex CLI | Awareness doc | AGENTS.md integration | N/A (prompt) |
-| OpenCode | TS plugin | `tool.execute.before` event | Yes (in-place mutation) |
+| Codex CLI | Rust binary | `rtk hook codex` reads JSON | Yes (`updatedInput`) |
+| OpenCode | TS plugin | execute.before (v2) / tool.execute.before (v1) | Yes (in-place mutation) |
 
-> **Details**: [`hooks/README.md`](../hooks/README.md) has the full JSON schemas for each agent. [`src/hooks/README.md`](../src/hooks/README.md) covers installation, integrity verification, and the rewrite command.
+> **Details**: [`hooks/README.md`](../../hooks/README.md) has the full JSON schemas for each agent. [`src/hooks/README.md`](../../src/hooks/README.md) covers installation, integrity verification, and the rewrite command.
 
 ---
 
@@ -347,15 +360,15 @@ RTK supports the following LLM agents through hook integrations:
 
 ### Rust Filters (cmds/**)
 
-Compiled filter modules for complex transformations, cutting 60-95% of the bash output.
+Compiled filter modules for complex transformations.
 
-> **Details**: [`src/cmds/README.md`](../src/cmds/README.md) and each ecosystem subdirectory README.
+> **Details**: [`src/cmds/README.md`](../../src/cmds/README.md) and each ecosystem subdirectory README.
 
 ### TOML DSL Filters (src/filters/*.toml)
 
 Declarative filters with an 8-stage pipeline: strip ANSI, regex replace, match output, strip/keep lines, truncate lines, head/tail, max lines, on-empty message. Loaded from three tiers: built-in (compiled), global (`~/.config/rtk/filters/`), project-local (`.rtk/filters/`, trust-gated).
 
-> **Details**: [`src/core/README.md`](../src/core/README.md) covers the TOML filter engine.
+> **Details**: [`src/core/README.md`](../../src/core/README.md) covers the TOML filter engine.
 
 ---
 
@@ -424,7 +437,7 @@ tests/
 - **Fixtures**: real command output in `tests/fixtures/`
 - **Integration tests**: `#[ignore]` attribute, run with `cargo test --ignored`
 
-> For testing requirements, pre-commit gate, and PR checklist, see [CONTRIBUTING.md — Testing](../CONTRIBUTING.md#testing).
+> For testing requirements, pre-commit gate, and PR checklist, see [CONTRIBUTING.md — Testing](../../CONTRIBUTING.md#testing).
 
 ---
 
