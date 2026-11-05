@@ -2,6 +2,7 @@
 
 use crate::cmds::python::sqlfluff_cmd;
 use crate::core::config;
+use crate::core::shell::{display_args, quote_program, with_args};
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_ERRORS, CAP_WARNINGS};
@@ -113,7 +114,8 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     // sqlfluff owns its own argv and its own rendering: routing, format-flag
     // detection and failure handling live in `sqlfluff_cmd::plan` so this entry
     // point and `rtk sqlfluff ...` cannot drift apart.
-    let sqlfluff = (linter == "sqlfluff").then(|| sqlfluff_cmd::plan(&effective_args[1..]));
+    let sqlfluff =
+        (linter == "sqlfluff").then(|| sqlfluff_cmd::plan_for_lint(&effective_args[1..]));
 
     // Python linter use resolved_command() directly (they're on PATH via pip/pipx)
     // JS linters use package_manager_exec (npx/pnpm exec)
@@ -233,16 +235,11 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     let hint = crate::core::tee::tee_and_hint(&raw, "lint", result.exit_code);
     let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
 
-    timer.track(
-        &format!("{} {}", linter, effective_args[start_idx..].join(" ")),
-        &format!(
-            "rtk lint {} {}",
-            linter,
-            effective_args[start_idx..].join(" ")
-        ),
-        &raw,
-        &shown,
+    let tracked = with_args(
+        &quote_program(linter),
+        &display_args(&effective_args[start_idx..]),
     );
+    timer.track(&tracked, &format!("rtk lint {tracked}"), &raw, &shown);
 
     if !result.success() {
         return Ok(result.exit_code);

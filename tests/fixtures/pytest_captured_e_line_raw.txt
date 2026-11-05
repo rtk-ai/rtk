@@ -1,0 +1,10 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________________________ test_noisy __________________________________
+test_cap.py:3: in test_noisy
+    assert 1 == 2, "Captured total mismatch"
+E   AssertionError: Captured total mismatch
+E   assert 1 == 2
+----------------------------- Captured stdout call -----------------------------
+E bad thing happened in stdout
+1 failed in 0.01s

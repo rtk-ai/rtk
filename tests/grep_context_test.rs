@@ -4,10 +4,12 @@
 
 use std::process::Command;
 
+mod common;
+
 /// grep/rg messages are localized; pin the locale so assertions on engine
 /// text hold in every contributor's shell.
 fn rtk() -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rtk"));
+    let mut cmd = common::rtk_command();
     cmd.env("LC_ALL", "C");
     cmd
 }

@@ -326,7 +326,33 @@ pub(super) fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
     Ok(removed)
 }
 
-#[cfg(test)]
+/// Returns true if Gemini CLI RTK hook is configured in settings.json.
+pub fn is_configured() -> bool {
+    let Ok(gemini_dir) = resolve_gemini_dir() else {
+        return false;
+    };
+    let settings_path = gemini_dir.join(SETTINGS_JSON);
+    if let Ok(content) = fs::read_to_string(&settings_path)
+        && let Ok(settings) = from_json_str::<serde_json::Value>(&content)
+    {
+        let before_tool_pointer = format!("/hooks/{}", BEFORE_TOOL_KEY);
+        if let Some(hooks) = settings.pointer(&before_tool_pointer)
+            && let Some(arr) = hooks.as_array()
+        {
+            return arr.iter().any(|h| {
+                let matcher = h.get("matcher").and_then(|m| m.as_str());
+                let matches_shell = matcher == Some("run_shell_command") || matcher == Some("*");
+                matches_shell
+                    && h.pointer("/hooks/0/command")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|c| c.contains("rtk"))
+            });
+        }
+    }
+    false
+}
+
+#[cfg(all(test, feature = "engine"))]
 mod tests {
     use super::*;
     use tempfile::TempDir;

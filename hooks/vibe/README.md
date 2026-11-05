@@ -1,6 +1,6 @@
 # Mistral Vibe Hooks
 
-> Part of [`hooks/`](../README.md) — see also [`src/hooks/`](../../src/hooks/README.md) for installation code
+> Part of [`hooks/`](../README.md)
 
 ## Specifics
 
@@ -15,5 +15,5 @@
 
 ## Notes
 
-- This directory intentionally holds only this README — the hook is a subcommand of the RTK binary (`rtk hook vibe`), not a standalone script or plugin file, so nothing is deployed here
+- The hook is a subcommand of the RTK binary (`rtk hook vibe`); no separate script or plugin file is installed
 - Vibe hook contract reference: https://docs.mistral.ai/vibe/code/cli/hooks

@@ -1,7 +1,10 @@
 //! Codex agent: hook install/uninstall helpers.
 
 use super::*;
-use crate::hooks::constants::{CODEX_DIR, CODEX_HOOK_COMMAND, HOOKS_JSON, PRE_TOOL_USE_KEY};
+use crate::core::user_dirs;
+use crate::hooks::constants::{
+    CLAUDE_PRE_MATCHER, CODEX_DIR, CODEX_HOOK_COMMAND, HOOKS_JSON, PRE_TOOL_USE_KEY,
+};
 use std::path::Component;
 
 /// The line that says an `RTK.md` is RTK's to rewrite and to remove.
@@ -319,7 +322,7 @@ fn resolve_symlink_components_within(path: &Path, budget: usize) -> Resolution {
 /// init runs can still move the write afterwards; the case it is built for is a repository
 /// that ships the links, which is settled before init starts.
 fn ensure_inside_project(path: &Path) -> Result<()> {
-    let root = std::env::current_dir().context("Failed to resolve the current directory")?;
+    let root = user_dirs::current_dir().context("Failed to resolve the current directory")?;
     ensure_inside_root(&root, path)
 }
 
@@ -443,7 +446,13 @@ fn lexically_normalized(path: &Path) -> PathBuf {
     normalized
 }
 
-pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UninstallCodexOutcome {
+    Clean,
+    HookRefused,
+}
+
+pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<UninstallCodexOutcome> {
     let InitContext { dry_run, .. } = ctx;
     let mut hook_left_in_place = None;
     let removed = if global {
@@ -455,7 +464,7 @@ pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
         // demonstrably where uninstall left them, and refusing to clean them because some
         // other path is a symlink leaves the user with artifacts and no command to remove
         // them -- `--global` acts on `~/.codex`, which is not where these are.
-        let hooks_json_path = Path::new(CODEX_DIR).join(HOOKS_JSON);
+        let hooks_json_path = user_dirs::in_working_dir(CODEX_DIR).join(HOOKS_JSON);
         let hooks_json_path = match ensure_inside_project(&hooks_json_path)
             .and_then(|()| ensure_inside_project(&backup_path_for(&hooks_json_path)))
         {
@@ -466,8 +475,8 @@ pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
             }
         };
         uninstall_codex_with_paths(
-            Path::new(AGENTS_MD),
-            Path::new(RTK_MD),
+            &user_dirs::in_working_dir(AGENTS_MD),
+            &user_dirs::in_working_dir(RTK_MD),
             RtkMdScope::ProjectRoot,
             hooks_json_path,
             &[RTK_MD_REF],
@@ -480,7 +489,11 @@ pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
         codex_uninstall_report(&removed, hook_left_in_place.as_ref(), dry_run)
     );
 
-    Ok(())
+    if hook_left_in_place.is_some() {
+        Ok(UninstallCodexOutcome::HookRefused)
+    } else {
+        Ok(UninstallCodexOutcome::Clean)
+    }
 }
 
 /// Everything `rtk init --codex --uninstall` says it did, as one block.
@@ -512,7 +525,9 @@ fn codex_uninstall_report(
     if let Some(error) = unchecked_hook {
         report.push_str(&format!(
             "\n  Not checked: the Codex hook in {}, which may still be registered:",
-            Path::new(CODEX_DIR).join(HOOKS_JSON).display()
+            user_dirs::in_working_dir(CODEX_DIR)
+                .join(HOOKS_JSON)
+                .display()
         ));
         for line in error.to_string().lines() {
             report.push_str(&format!("\n    {line}"));
@@ -543,9 +558,9 @@ pub(super) fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
         )
     } else {
         let paths = (
-            PathBuf::from(AGENTS_MD),
-            PathBuf::from(RTK_MD),
-            PathBuf::from(CODEX_DIR).join(HOOKS_JSON),
+            user_dirs::in_working_dir(AGENTS_MD),
+            user_dirs::in_working_dir(RTK_MD),
+            user_dirs::in_working_dir(CODEX_DIR).join(HOOKS_JSON),
         );
         // Only the hook path. A symlinked `AGENTS.md` or `RTK.md` may be the user's own
         // arrangement, which `atomic_write` preserves deliberately, or may have come with a
@@ -696,8 +711,8 @@ pub(super) fn run_codex_mode_with_paths(
 
 fn resolve_codex_dir() -> Result<PathBuf> {
     resolve_codex_dir_from(
-        std::env::var_os("CODEX_HOME").map(PathBuf::from),
-        dirs::home_dir(),
+        user_dirs::env_path("CODEX_HOME").map(PathBuf::from),
+        user_dirs::home(),
     )
 }
 
@@ -723,9 +738,9 @@ pub(super) fn show_codex_config() -> Result<()> {
     let global_rtk_md = codex_dir.join(RTK_MD);
     let global_hooks_json = codex_dir.join(HOOKS_JSON);
     let global_rtk_md_ref = codex_rtk_md_ref(&codex_dir);
-    let local_agents_md = PathBuf::from(AGENTS_MD);
-    let local_rtk_md = PathBuf::from(RTK_MD);
-    let local_hooks_json = PathBuf::from(CODEX_DIR).join(HOOKS_JSON);
+    let local_agents_md = user_dirs::in_working_dir(AGENTS_MD);
+    let local_rtk_md = user_dirs::in_working_dir(RTK_MD);
+    let local_hooks_json = user_dirs::in_working_dir(CODEX_DIR).join(HOOKS_JSON);
 
     println!("rtk Configuration (Codex CLI):\n");
 
@@ -917,7 +932,12 @@ fn patch_codex_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
         return Ok(false);
     }
 
-    insert_hook_entry(&mut root, CODEX_HOOK_COMMAND)?;
+    insert_hook_entry(
+        &mut root,
+        PRE_TOOL_USE_KEY,
+        CLAUDE_PRE_MATCHER,
+        CODEX_HOOK_COMMAND,
+    )?;
 
     if !dry_run && let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| {
@@ -976,9 +996,24 @@ fn is_codex_hook_command(command: &str) -> bool {
     crate::hooks::is_rtk_hook_command(command, "codex")
 }
 
+/// Returns true if Codex RTK hook is configured.
+pub fn is_configured() -> bool {
+    let Ok(codex_dir) = resolve_codex_dir() else {
+        return false;
+    };
+    let hooks_json = codex_dir.join(HOOKS_JSON);
+    if let Ok(content) = fs::read_to_string(&hooks_json)
+        && let Ok(root) = from_json_str::<serde_json::Value>(&content)
+    {
+        return codex_hook_already_present(&root);
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::test_isolation;
     use tempfile::TempDir;
 
     #[test]
@@ -1261,17 +1296,12 @@ mod tests {
 
     #[test]
     fn test_local_codex_install_can_be_uninstalled() {
-        let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let temp = TempDir::new().unwrap();
-        let original_cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
+        let temp = test_isolation::tempdir();
+        let _entered = test_isolation::enter(temp.path());
 
-        fs::write(AGENTS_MD, "# Team rules\n").unwrap();
+        fs::write(temp.path().join(AGENTS_MD), "# Team rules\n").unwrap();
         run_codex_mode(false, InitContext::default()).unwrap();
-        let uninstall_result = uninstall_codex(false, InitContext::default());
-
-        std::env::set_current_dir(original_cwd).unwrap();
-        uninstall_result.unwrap();
+        uninstall_codex(false, InitContext::default()).unwrap();
 
         assert!(!temp.path().join(RTK_MD).exists());
         assert!(!codex_hook_already_present(
@@ -1375,24 +1405,6 @@ mod tests {
         assert!(!is_rtk_authored_md("my own notes about rtk\n"));
         assert!(!is_rtk_authored_md(""));
 
-        // The payloads v0.49.0 and the builds after it wrote with nothing claiming them.
-        // Should the awareness text ever be reworded, these assertions go rather than gaining
-        // a digest: every file written from then on carries the ownership line instead.
-        for payload in [
-            RTK_AWARENESS_DEFAULT,
-            RTK_AWARENESS_HIGH,
-            RTK_AWARENESS_FULL,
-        ] {
-            let remedy = "the awareness text was reworded: delete these two assertions rather \
-                          than adding a digest for the new wording -- every file written from \
-                          then on carries the ownership line, so nothing needs recognising by \
-                          content";
-            assert!(is_rtk_authored_md(payload), "{remedy}");
-            assert!(
-                is_rtk_authored_md(&payload.replace('\n', "\r\n")),
-                "{remedy}"
-            );
-        }
         // A line of spaces is not content: the claim is on the first line that is.
         assert!(is_rtk_authored_md(&format!(
             "   \n{RTK_MD_OWNED_HEADER}\n\npayload\n"
@@ -1606,7 +1618,7 @@ mod tests {
     fn test_project_scoped_write_refuses_to_leave_the_project() {
         use std::os::unix::fs::symlink;
 
-        let project = TempDir::new().expect("project");
+        let project = test_isolation::tempdir();
         let elsewhere = TempDir::new().expect("elsewhere");
         let hooks_json = Path::new(CODEX_DIR).join(HOOKS_JSON);
 
@@ -1635,7 +1647,7 @@ mod tests {
     fn test_the_backup_destination_must_stay_inside_the_project_too() {
         use std::os::unix::fs::symlink;
 
-        let project = TempDir::new().expect("project");
+        let project = test_isolation::tempdir();
         let elsewhere = TempDir::new().expect("elsewhere");
         let hooks_json = Path::new(CODEX_DIR).join(HOOKS_JSON);
         let backup = backup_path_for(&hooks_json);
@@ -1665,7 +1677,7 @@ mod tests {
     fn test_a_symlink_chain_is_followed_past_its_first_hop() {
         use std::os::unix::fs::symlink;
 
-        let project = TempDir::new().expect("project");
+        let project = test_isolation::tempdir();
         let elsewhere = TempDir::new().expect("elsewhere");
         let backup = backup_path_for(&Path::new(CODEX_DIR).join(HOOKS_JSON));
 
@@ -1913,7 +1925,7 @@ mod tests {
     fn test_the_containment_walk_accepts_in_project_chains_and_stops_on_cycles() {
         use std::os::unix::fs::symlink;
 
-        let project = TempDir::new().expect("project");
+        let project = test_isolation::tempdir();
         fs::create_dir(project.path().join(CODEX_DIR)).expect("mkdir");
         fs::create_dir(project.path().join("shared")).expect("mkdir");
 
@@ -1936,7 +1948,7 @@ mod tests {
     fn test_a_symlinked_ancestor_is_resolved_even_while_it_dangles() {
         use std::os::unix::fs::symlink;
 
-        let project = TempDir::new().expect("project");
+        let project = test_isolation::tempdir();
         let elsewhere = TempDir::new().expect("elsewhere");
         symlink(
             elsewhere.path().join("codex"),
@@ -1957,7 +1969,7 @@ mod tests {
     fn test_a_parent_hop_past_a_missing_component_is_folded_before_comparing() {
         use std::os::unix::fs::symlink;
 
-        let project = TempDir::new().expect("project");
+        let project = test_isolation::tempdir();
         let backup = backup_path_for(&Path::new(CODEX_DIR).join(HOOKS_JSON));
         fs::create_dir(project.path().join(CODEX_DIR)).expect("mkdir");
         symlink("gone/../../../stolen.json", project.path().join(&backup)).expect("symlink");
@@ -1975,7 +1987,7 @@ mod tests {
     fn test_a_link_sitting_outside_is_refused_even_when_it_points_back_in() {
         use std::os::unix::fs::symlink;
 
-        let project = TempDir::new().expect("project");
+        let project = test_isolation::tempdir();
         let elsewhere = TempDir::new().expect("elsewhere");
         symlink(elsewhere.path(), project.path().join(CODEX_DIR)).expect(".codex");
         symlink(
@@ -1994,11 +2006,11 @@ mod tests {
     /// without `--global` must not treat the project root as a directory RTK owns.
     #[test]
     fn test_project_install_moves_a_user_authored_rtk_md_aside_rather_than_claiming_it() {
-        let project = TempDir::new().expect("project");
+        let project = test_isolation::tempdir();
         let rtk_md = project.path().join(RTK_MD);
         fs::write(&rtk_md, "my own notes\n").expect("write");
 
-        let _cwd = CwdGuard::enter(project.path());
+        let _entered = test_isolation::enter(project.path());
         run_codex_mode(false, InitContext::default()).expect("install");
 
         assert_eq!(
@@ -2013,11 +2025,11 @@ mod tests {
     /// RTK never wrote.
     #[test]
     fn test_project_uninstall_keeps_a_user_authored_rtk_md() {
-        let project = TempDir::new().expect("project");
+        let project = test_isolation::tempdir();
         let rtk_md = project.path().join(RTK_MD);
         fs::write(&rtk_md, "my own notes\n").expect("write");
 
-        let _cwd = CwdGuard::enter(project.path());
+        let _entered = test_isolation::enter(project.path());
         uninstall_codex(false, InitContext::default()).expect("uninstall");
 
         assert_eq!(
@@ -2035,7 +2047,7 @@ mod tests {
     fn test_uninstall_refuses_a_backup_sibling_that_leaves_the_project() {
         use std::os::unix::fs::symlink;
 
-        let project = TempDir::new().expect("project");
+        let project = test_isolation::tempdir();
         let elsewhere = TempDir::new().expect("elsewhere");
         let codex_dir = project.path().join(CODEX_DIR);
         fs::create_dir(&codex_dir).expect("mkdir");
@@ -2050,9 +2062,10 @@ mod tests {
         )
         .expect("symlink");
 
-        let _cwd = CwdGuard::enter(project.path());
-        uninstall_codex(false, InitContext::default())
+        let _entered = test_isolation::enter(project.path());
+        let outcome = uninstall_codex(false, InitContext::default())
             .expect("uninstall still reports what it did");
+        assert!(matches!(outcome, UninstallCodexOutcome::HookRefused));
 
         assert!(
             !elsewhere.path().join("stolen.json").exists(),
@@ -2127,11 +2140,11 @@ mod tests {
     fn test_install_refuses_a_project_whose_codex_dir_leaves_it() {
         use std::os::unix::fs::symlink;
 
-        let project = TempDir::new().expect("project");
+        let project = test_isolation::tempdir();
         let elsewhere = TempDir::new().expect("elsewhere");
         symlink(elsewhere.path(), project.path().join(CODEX_DIR)).expect("symlink");
 
-        let _cwd = CwdGuard::enter(project.path());
+        let _entered = test_isolation::enter(project.path());
         let result = run_codex_mode(false, InitContext::default());
 
         let error = result.expect_err("install must refuse rather than half-configure");
@@ -2154,7 +2167,7 @@ mod tests {
     fn test_install_refuses_a_backup_sibling_that_leaves_the_project() {
         use std::os::unix::fs::symlink;
 
-        let project = TempDir::new().expect("project");
+        let project = test_isolation::tempdir();
         let elsewhere = TempDir::new().expect("elsewhere");
         let codex_dir = project.path().join(CODEX_DIR);
         fs::create_dir(&codex_dir).expect("mkdir");
@@ -2165,7 +2178,7 @@ mod tests {
         )
         .expect("symlink");
 
-        let _cwd = CwdGuard::enter(project.path());
+        let _entered = test_isolation::enter(project.path());
         let result = run_codex_mode(false, InitContext::default());
 
         let error = result.expect_err("install must refuse");
@@ -2183,7 +2196,7 @@ mod tests {
     fn test_uninstall_leaves_a_hooks_file_that_sits_outside_the_project_alone() {
         use std::os::unix::fs::symlink;
 
-        let project = TempDir::new().expect("project");
+        let project = test_isolation::tempdir();
         let elsewhere = TempDir::new().expect("elsewhere");
         let registered = format!(
             "{{\"hooks\":{{\"{PRE_TOOL_USE_KEY}\":[{{\"matcher\":\"Bash\",\"hooks\":[{{\"type\":\"command\",\"command\":\"{CODEX_HOOK_COMMAND}\"}}]}}]}}}}"
@@ -2202,10 +2215,13 @@ mod tests {
         )
         .expect("RTK.md");
 
-        let _cwd = CwdGuard::enter(project.path());
-        let result = uninstall_codex(false, InitContext::default());
+        let _entered = test_isolation::enter(project.path());
+        let outcome = uninstall_codex(false, InitContext::default());
 
-        result.expect("uninstall still cleans the project");
+        assert!(matches!(
+            outcome.expect("uninstall still cleans the project"),
+            UninstallCodexOutcome::HookRefused
+        ));
         assert_eq!(
             fs::read_to_string(elsewhere.path().join(HOOKS_JSON)).expect("read"),
             registered,

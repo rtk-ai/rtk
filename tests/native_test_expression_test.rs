@@ -7,12 +7,13 @@
 //! arm fails here instead of shipping.
 
 use std::path::Path;
-use std::process::Command;
 
 use tempfile::TempDir;
 
+mod common;
+
 fn exit_code(cwd: &Path, args: &[&str]) -> i32 {
-    Command::new(env!("CARGO_BIN_EXE_rtk"))
+    common::rtk_command()
         .env("LC_ALL", "C")
         .env("HOME", cwd.join("home"))
         .args(args)

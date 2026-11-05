@@ -1,5 +1,6 @@
 //! Data types for reporting which commands RTK can and cannot optimize.
 
+use crate::core::user_dirs;
 use crate::hooks::constants::{
     COPILOT_HOOK_FILE, CURSOR_DIR, GITHUB_DIR, HERMES_DIR, HERMES_PLUGIN_MANIFEST_FILE,
     HERMES_PLUGIN_NAME, HERMES_PLUGINS_SUBDIR, HOOKS_SUBDIR, REWRITE_HOOK_FILE,
@@ -57,11 +58,11 @@ pub struct AgentIntegrationStatus {
 
 impl AgentIntegrationStatus {
     pub fn detect() -> Self {
-        let mut status = dirs::home_dir()
+        let mut status = user_dirs::home()
             .map(|home| Self::detect_from_home(&home))
             .unwrap_or_default();
         // Copilot is project-scoped (.github/hooks/), unlike the home-based agents.
-        status.copilot_hook_installed = std::env::current_dir()
+        status.copilot_hook_installed = user_dirs::working_dir()
             .map(|cwd| Self::copilot_hook_installed_in(&cwd))
             .unwrap_or(false);
         status

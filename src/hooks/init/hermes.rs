@@ -1,6 +1,7 @@
 //! Hermes agent: hook install/uninstall helpers.
 
 use super::*;
+use crate::core::user_dirs;
 use crate::hooks::constants::{
     HERMES_DIR, HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
     HERMES_PLUGINS_SUBDIR,
@@ -510,7 +511,7 @@ fn normalized_yaml_scalar(value: &str) -> Option<String> {
 }
 
 fn resolve_hermes_home() -> Result<PathBuf> {
-    resolve_hermes_home_from_env(dirs::home_dir(), std::env::var_os("HERMES_HOME"))
+    resolve_hermes_home_from_env(user_dirs::home(), user_dirs::env_path("HERMES_HOME"))
 }
 
 fn resolve_hermes_home_from_env(
@@ -523,6 +524,26 @@ fn resolve_hermes_home_from_env(
         HERMES_DIR,
         "Cannot determine Hermes home directory. Set $HERMES_HOME or $HOME.",
     )
+}
+
+/// Returns true if Hermes RTK plugin is installed or enabled in config.yaml.
+pub fn is_configured() -> bool {
+    let Ok(hermes_home) = resolve_hermes_home() else {
+        return false;
+    };
+    let plugin_dir = hermes_plugin_dir(&hermes_home);
+    if plugin_dir.join(HERMES_PLUGIN_INIT_FILE).is_file() {
+        return true;
+    }
+    let config_path = hermes_home.join("config.yaml");
+    if let Ok(content) = fs::read_to_string(&config_path)
+        && content
+            .lines()
+            .any(|l| is_yaml_list_item_named(l, HERMES_PLUGIN_NAME))
+    {
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]

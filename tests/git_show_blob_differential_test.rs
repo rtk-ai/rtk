@@ -7,7 +7,8 @@
 //!
 //! This test is the standing guarantee that no misroute class is hiding. It builds a
 //! hermetic git repo with objects of every relevant type, then — with a FIXED seed so CI
-//! is deterministic — generates hundreds of `git show <random flags> <arg>` invocations
+//! is deterministic — generates hundreds of `git show <random flags> <arg>` invocations,
+//! runs each distinct one once (rtk's answer depends only on its argv in this fixed repo),
 //! and checks rtk's CLASSIFICATION (did it window? pass through? render a commit-diff?)
 //! against ground truth from `git cat-file -t`. It asserts:
 //! - 0 misroutes: rtk never windows anything git does not call a `blob`;
@@ -21,12 +22,14 @@
 //! It shells out to the real `git` and the built `rtk` binary, matching the repo's other
 //! integration tests (e.g. `diff_byte_accuracy_test.rs`).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const RTK_BIN: &str = env!("CARGO_BIN_EXE_rtk");
+mod common;
 
-/// Number of fuzz iterations. Seeded, so this is deterministic across runs/CI.
+/// Number of invocations drawn; the repeats among them are run once. Seeded, so this is
+/// deterministic across runs/CI.
 const ITERATIONS: usize = 600;
 /// Fixed seed — change only intentionally.
 const SEED: u64 = 0x5DEE_CE66_D3A1_2B4F;
@@ -58,16 +61,13 @@ impl Rng {
 
 /// Env that isolates git and rtk from the developer's real config/identity/home.
 fn isolate(cmd: &mut Command, home: &Path) {
+    common::isolate_git(cmd);
     cmd.env("HOME", home)
-        .env("GIT_CONFIG_GLOBAL", home.join("nonexistent-global"))
-        .env("GIT_CONFIG_SYSTEM", home.join("nonexistent-system"))
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@example.com")
         .env("GIT_COMMITTER_NAME", "t")
         .env("GIT_COMMITTER_EMAIL", "t@example.com")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE");
+        .env("GIT_TERMINAL_PROMPT", "0");
 }
 
 fn git(repo: &Path, home: &Path, args: &[&str]) -> Output {
@@ -101,7 +101,7 @@ fn cat_file_type(repo: &Path, home: &Path, arg: &str) -> Option<String> {
 }
 
 fn rtk_show(repo: &Path, home: &Path, args: &[&str]) -> Output {
-    let mut cmd = Command::new(RTK_BIN);
+    let mut cmd = common::rtk_command();
     cmd.arg("git").arg("show").args(args).current_dir(repo);
     isolate(&mut cmd, home);
     cmd.output().expect("run rtk git show")
@@ -188,7 +188,7 @@ fn was_windowed(out: &Output) -> bool {
 }
 
 /// The object categories the fuzzer draws from, with their expected classification.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
     /// Large valid-UTF-8 blob → MUST window.
     LargeUtf8,
@@ -339,18 +339,6 @@ fn git_show_blob_classification_differential() {
     let repo = setup_repo();
     let (path, home) = (repo.path.as_path(), repo.home.as_path());
 
-    // Sanity-check the fixtures against ground truth before fuzzing.
-    assert_eq!(
-        cat_file_type(path, home, "HEAD:large.txt").as_deref(),
-        Some("blob")
-    );
-    assert_eq!(
-        cat_file_type(path, home, "HEAD:dir").as_deref(),
-        Some("tree")
-    );
-    assert_eq!(cat_file_type(path, home, "HEAD").as_deref(), Some("commit"));
-    assert_eq!(cat_file_type(path, home, "HEAD:does-not-exist.txt"), None);
-
     let kinds = [
         Kind::LargeUtf8,
         Kind::Small,
@@ -365,20 +353,46 @@ fn git_show_blob_classification_differential() {
         Kind::PathspecLargeUtf8,
     ];
 
+    // The draws repeat (the flag pools are small) and every process costs tens of
+    // milliseconds on Windows, so each distinct invocation runs once.
     let mut rng = Rng(SEED);
+    let mut invocations: Vec<(Kind, Vec<String>)> = Vec::new();
+    for _ in 0..ITERATIONS {
+        let kind = *rng.pick(&kinds);
+        let invocation = (kind, build_invocation(&mut rng, kind));
+        if !invocations.contains(&invocation) {
+            invocations.push(invocation);
+        }
+    }
+
+    // Ground truth per object, from `git cat-file -t`.
+    let mut truths: HashMap<&str, Option<String>> = HashMap::new();
+    for &kind in &kinds {
+        let object = kind_object(kind);
+        truths
+            .entry(object)
+            .or_insert_with(|| cat_file_type(path, home, object));
+    }
+
+    // Sanity-check the fixtures against ground truth before fuzzing.
+    assert_eq!(truths["HEAD:large.txt"].as_deref(), Some("blob"));
+    assert_eq!(truths["HEAD:dir"].as_deref(), Some("tree"));
+    assert_eq!(truths["HEAD"].as_deref(), Some("commit"));
+    assert_eq!(truths["HEAD:does-not-exist.txt"], None);
+    let mut plain_shows: HashMap<&str, Vec<u8>> = HashMap::new();
+
     // Collect failures instead of panicking mid-loop, so the incidence is measured
     // across ALL invocations (KuSh: a measured incidence is what proves no class hides).
     let mut misroutes: Vec<String> = Vec::new();
     let mut silent_losses: Vec<String> = Vec::new();
     let mut fidelity_breaks: Vec<String> = Vec::new();
 
-    for _ in 0..ITERATIONS {
-        let kind = *rng.pick(&kinds);
-        let args = build_invocation(&mut rng, kind);
+    for (kind, args) in &invocations {
+        let kind = *kind;
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let object = kind_object(kind);
-        let truth = cat_file_type(path, home, object); // ground truth for the object
+        let truth = &truths[object];
         let out = rtk_show(path, home, &arg_refs);
         let windowed = was_windowed(&out);
 
@@ -410,13 +424,15 @@ fn git_show_blob_classification_differential() {
                     !windowed,
                     "small/latin1/utf16 blobs must not window: {args:?}"
                 );
-                let plain = git(path, home, &["show", object]);
-                if out.stdout != plain.stdout {
+                let plain = plain_shows
+                    .entry(object)
+                    .or_insert_with(|| git(path, home, &["show", object]).stdout);
+                if out.stdout != *plain {
                     fidelity_breaks.push(format!(
                         "`git show {}` differs from git (rtk {} vs git {} bytes)",
                         args.join(" "),
                         out.stdout.len(),
-                        plain.stdout.len()
+                        plain.len()
                     ));
                 }
             }
@@ -481,7 +497,8 @@ fn git_show_blob_classification_differential() {
 
     // Report incidence (KuSh: the fuzzer establishes there are no other classes hiding).
     eprintln!(
-        "differential fuzzer: {ITERATIONS} invocations — misroutes={}, silent_losses={}, fidelity_breaks={}",
+        "differential fuzzer: {} distinct of {ITERATIONS} drawn invocations — misroutes={}, silent_losses={}, fidelity_breaks={}",
+        invocations.len(),
         misroutes.len(),
         silent_losses.len(),
         fidelity_breaks.len()
@@ -559,7 +576,7 @@ fn windowed_blob_hint_command_returns_the_rest() {
 
     let words = split_hint_words(recall);
     assert_eq!(words.first().map(String::as_str), Some("rtk"), "{hint}");
-    let mut cmd = Command::new(RTK_BIN);
+    let mut cmd = common::rtk_command();
     cmd.args(&words[1..]).current_dir(path);
     isolate(&mut cmd, home);
     let recalled = cmd.output().expect("run the hint's own command");
@@ -655,7 +672,7 @@ fn cluster_flag_before_blob_windows_and_recovers_byte_exact() {
     // The hint points at the blob arg alone — verify it names `HEAD:large.txt`, not the
     // `x:y` pickaxe value that the old walker mistook for the object.
     assert!(
-        shown.contains("'HEAD:large.txt'"),
+        shown.contains("show HEAD:large.txt | tail"),
         "hint must target the real blob arg, not the flag value"
     );
 

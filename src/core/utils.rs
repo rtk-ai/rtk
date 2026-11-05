@@ -5,16 +5,17 @@
 //! - Text truncation
 //! - Command execution with error context
 
+#[cfg(test)]
+use crate::core::test_isolation;
+use crate::core::user_dirs;
+use crate::core::user_env;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use regex::Regex;
 use serde_json::Value;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::LazyLock;
-use std::sync::OnceLock;
 
 /// Compute `days` ago from now, clamped instead of panicking on overflow.
 ///
@@ -35,46 +36,13 @@ pub fn days_ago_cutoff(days: u64) -> DateTime<Utc> {
         .unwrap_or(DateTime::<Utc>::MIN_UTC)
 }
 
-/// Truncates a string to `max_len` characters, appending `...` if needed.
-///
-/// # Arguments
-/// * `s` - The string to truncate
-/// * `max_len` - Maximum length before truncation (minimum 3 to include "...")
-///
-/// # Examples
-/// ```
-/// use rtk::utils::truncate;
-/// assert_eq!(truncate("hello world", 8), "hello...");
-/// assert_eq!(truncate("hi", 10), "hi");
-/// ```
-pub fn truncate(s: &str, max_len: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max_len {
-        s.to_string()
-    } else if max_len < 3 {
-        // If max_len is too small, just return "..."
-        "...".to_string()
-    } else {
-        format!("{}...", s.chars().take(max_len - 3).collect::<String>())
-    }
-}
+pub use rtk_text::{strip_ansi, truncate};
 
-/// Strip ANSI escape codes (colors, styles) from a string.
-///
-/// # Arguments
-/// * `text` - Text potentially containing ANSI escape codes
-///
-/// # Examples
-/// ```
-/// use rtk::utils::strip_ansi;
-/// let colored = "\x1b[31mError\x1b[0m";
-/// assert_eq!(strip_ansi(colored), "Error");
-/// ```
-pub fn strip_ansi(text: &str) -> String {
-    static ANSI_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap());
-
-    ANSI_RE.replace_all(text, "").to_string()
+pub fn sanitize_for_terminal(text: &str) -> String {
+    strip_ansi(text)
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .collect()
 }
 
 /// Strip one or more leading UTF-8 BOMs (`EF BB BF`, sometimes doubled),
@@ -185,7 +153,7 @@ pub fn format_cpt(cpt: f64) -> String {
 /// ```
 /// use rtk::utils::join_with_overflow;
 /// let items = vec!["a".to_string(), "b".to_string()];
-/// assert_eq!(join_with_overflow(&items, 5, 3, "items"), "a\nb\n... +2 more items");
+/// assert_eq!(join_with_overflow(&items, 5, 3, "items"), "a\nb\n… +2 more items");
 /// assert_eq!(join_with_overflow(&items, 2, 3, "items"), "a\nb");
 /// ```
 pub fn join_with_overflow(items: &[String], total: usize, max: usize, label: &str) -> String {
@@ -281,20 +249,19 @@ pub fn fallback_tail(output: &str, label: &str, n: usize) -> String {
 }
 
 /// Create a directory owner-only (0700 on Unix), tightening one that already exists.
-/// Serializes tests across modules that mutate process-global recall env vars
-/// (`RTK_RECALL`, `RTK_TEE`): a static declared inside one test module is not
-/// shared with other modules, so those tests would not actually serialize.
-#[cfg(test)]
-pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 pub fn create_private_dir(path: &std::path::Path) -> std::io::Result<()> {
     fs::create_dir_all(path)?;
     set_owner_only(path, 0o700);
     Ok(())
 }
 
-/// Restrict an existing file to owner-only access (0600 on Unix).
+/// Restrict an existing file to owner-only access (0600 on Unix). A path that
+/// is not a regular file (RTK_DB_PATH pointed at a directory) is left alone —
+/// 0600 on a directory makes it untraversable, bricking it for its owner.
 pub fn restrict_file(path: &std::path::Path) {
+    if std::fs::metadata(path).is_ok_and(|m| !m.is_file()) {
+        return;
+    }
     set_owner_only(path, 0o600);
 }
 
@@ -356,6 +323,28 @@ fn set_owner_only(path: &std::path::Path, mode: u32) {
 #[cfg(not(unix))]
 fn set_owner_only(_path: &std::path::Path, _mode: u32) {}
 
+#[cfg(all(test, unix))]
+mod owner_only_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn restrict_file_never_chmods_a_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let before = std::fs::metadata(dir.path())
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        super::restrict_file(dir.path());
+        let after = std::fs::metadata(dir.path())
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(before, after, "directory permissions must be untouched");
+    }
+}
+
 /// Build a Command for Ruby tools, auto-detecting bundle exec.
 /// Uses `bundle exec <tool>` when a Gemfile exists (transitive deps like rake
 /// won't appear in the Gemfile but still need bundler for version isolation).
@@ -386,7 +375,7 @@ pub fn count_tokens(text: &str) -> usize {
 /// ```
 #[allow(dead_code)]
 pub fn detect_package_manager() -> &'static str {
-    detect_package_manager_in(std::path::Path::new("."))
+    detect_package_manager_in(&user_dirs::in_working_dir("."))
 }
 
 /// Lockfile detection against an explicit directory, so callers (and tests) do
@@ -612,8 +601,14 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
 ///
 /// # Returns
 /// A `Command` configured with the resolved binary path.
+///
+/// In a test build a `git` command comes isolated as
+/// `test_isolation::isolate_git_config` does it, so a test that runs rtk's own
+/// git in-process neither obeys the developer's configuration nor an exported
+/// `GIT_DIR` or `GIT_INDEX_FILE` — which git sets inside a pre-commit hook.
 pub fn resolved_command(name: &str) -> Command {
-    match resolve_binary(name) {
+    #[allow(unused_mut)]
+    let mut cmd = match resolve_binary(name) {
         Ok(path) => Command::new(path),
         Err(e) => {
             // On Windows, resolution failure likely means a .CMD/.BAT wrapper
@@ -628,7 +623,14 @@ pub fn resolved_command(name: &str) -> Command {
 
             Command::new(name)
         }
+    };
+    #[cfg(test)]
+    {
+        if name == "git" {
+            test_isolation::isolate_git_config(&mut cmd);
+        }
     }
+    cmd
 }
 
 /// Return Composer bin directories in precedence order.
@@ -640,14 +642,22 @@ pub fn composer_bin_dirs() -> Vec<PathBuf> {
     // Resolution depends only on the process's env + cwd composer.json, both
     // constant for a single rtk invocation. The rewrite hot path queries this
     // several times per command segment, so read the file once and cache.
-    static CACHE: OnceLock<Vec<PathBuf>> = OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let env_bin_dir = std::env::var("COMPOSER_BIN_DIR").ok();
-            let composer_json = fs::read_to_string("composer.json").ok();
-            composer_bin_dirs_from(env_bin_dir.as_deref(), composer_json.as_deref())
-        })
-        .clone()
+    //
+    // In a test build both belong to the calling test, so nothing is cached.
+    let resolve = || {
+        let env_bin_dir = user_env::var("COMPOSER_BIN_DIR");
+        let composer_json = fs::read_to_string(user_dirs::in_working_dir("composer.json")).ok();
+        composer_bin_dirs_from(env_bin_dir.as_deref(), composer_json.as_deref())
+    };
+    #[cfg(not(test))]
+    {
+        static CACHE: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+        CACHE.get_or_init(resolve).clone()
+    }
+    #[cfg(test)]
+    {
+        resolve()
+    }
 }
 
 pub fn composer_tool_paths(tool: &str) -> Vec<PathBuf> {
@@ -868,7 +878,7 @@ fn output_codepage() -> Option<u16> {
 /// characters that the previous lossy conversion produced.
 #[cfg(windows)]
 fn output_codepage() -> Option<u16> {
-    static CODEPAGE: OnceLock<Option<u16>> = OnceLock::new();
+    static CODEPAGE: std::sync::OnceLock<Option<u16>> = std::sync::OnceLock::new();
     *CODEPAGE.get_or_init(|| {
         #[allow(unsafe_code)]
         // nosemgrep: unsafe-block — read-only Win32 APIs, no memory or thread safety risk
@@ -887,6 +897,15 @@ fn output_codepage() -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_for_terminal_strips_escape_bytes_but_keeps_layout() {
+        let hostile = "error at line 3:\n  message = \"\u{1b}[31mred\u{1b}[0m\"\tend";
+        let clean = sanitize_for_terminal(hostile);
+        assert!(!clean.contains('\u{1b}'), "{clean:?}");
+        assert!(clean.contains("red"));
+        assert!(clean.contains('\n') && clean.contains('\t'));
+    }
 
     #[test]
     fn test_strip_leading_bom_helper() {

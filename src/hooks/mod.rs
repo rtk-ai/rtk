@@ -13,7 +13,14 @@ pub mod hook_cmd;
 pub mod init;
 pub mod integrity;
 pub mod permissions;
+pub mod permissions_opencode;
+#[deny(clippy::print_stdout, clippy::print_stderr)]
+#[cfg(feature = "engine")]
+pub mod posthook;
 pub mod rewrite_cmd;
+#[deny(clippy::print_stdout, clippy::print_stderr)]
+#[cfg(feature = "engine")]
+pub mod session_start;
 pub mod trust;
 pub mod verify_cmd;
 
@@ -33,6 +40,19 @@ fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
 
 pub fn is_claude_hook_command(command: &str) -> bool {
     is_rtk_hook_command(command, "claude")
+}
+
+#[cfg(feature = "engine")]
+static HOOK_AGENT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+#[cfg(feature = "engine")]
+pub(crate) fn set_hook_agent(agent: &str) {
+    let _ = HOOK_AGENT.set(Some(agent.to_string()));
+}
+
+#[cfg(feature = "engine")]
+pub(crate) fn hook_agent() -> Option<String> {
+    HOOK_AGENT.get().cloned().flatten()
 }
 
 #[cfg(test)]

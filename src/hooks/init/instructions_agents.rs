@@ -1,6 +1,7 @@
 //! Instruction-only agents: configured by writing an instructions file, no hook installed.
 
 use super::*;
+use crate::core::user_dirs;
 
 /// Agents without a command hook must prefix `rtk` themselves, which only the `full` level
 /// teaches, so they always receive `RTK_AWARENESS_FULL`. This prints the one-line note that
@@ -120,7 +121,7 @@ pub(super) fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
 // Kilo Code support
 
 pub fn run_kilocode_mode(ctx: InitContext) -> Result<()> {
-    run_kilocode_mode_at(&std::env::current_dir()?, ctx)
+    run_kilocode_mode_at(&user_dirs::current_dir()?, ctx)
 }
 
 fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
@@ -186,7 +187,7 @@ fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
 // inject an RTK instructions block into AGENTS.md — same mechanism as Codex.
 
 pub fn run_kimi_mode(ctx: InitContext) -> Result<()> {
-    run_kimi_mode_at(&std::env::current_dir()?, ctx)
+    run_kimi_mode_at(&user_dirs::current_dir()?, ctx)
 }
 
 fn run_kimi_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
