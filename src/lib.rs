@@ -1932,22 +1932,6 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         parse_error.exit();
     }
 
-    // `rtk test` deliberately shadows the POSIX `test` binary, so it cannot join
-    // that list — but a misused `--shell` is RTK's own flag, not something to
-    // hand to `test`. Without this, `rtk test --shell` execs the real `test`
-    // with no arguments and exits 0, silently ignoring the request (#4125).
-    //
-    // Scoped to `test` alone: `--shell` is a flag other tools carry too, and an
-    // argv-wide scan would refuse to run `just --shell bash` or
-    // `hyperfine --shell=none` — including the spellings the hook itself emits.
-    if args[0] == "test"
-        && args
-            .iter()
-            .any(|arg| arg == "--shell" || arg.starts_with("--shell="))
-    {
-        parse_error.exit();
-    }
-
     // Fallbacks execute tools too, including TOML filters and typed commands
     // whose native arguments clap rejects. Keep meta diagnostics above the gate.
     hooks::integrity::runtime_check()?;

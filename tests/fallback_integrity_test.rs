@@ -13,6 +13,7 @@ fn run(root: &Path, args: &[&str]) -> Output {
         .env("HOME", root)
         .env("CLAUDE_CONFIG_DIR", root.join(".claude"))
         .env("PATH", root.join("bin"))
+        .env("RTK_CONFIG_DIR", root.join("config"))
         .env("CALLED", root.join("called"))
         .args(args)
         .output()
@@ -24,6 +25,7 @@ fn sandbox(state: &str) -> tempfile::TempDir {
     let root = dir.path();
     std::fs::create_dir(root.join("bin")).expect("write isolated fixture");
     for tool in [
+        "claude",
         "make",
         "terraform",
         "yadm",
@@ -103,10 +105,61 @@ fn fallback_preserves_meta_diagnostics_and_root_help() {
         assert!(out.status.success(), "{args:?}");
         assert!(!String::from_utf8_lossy(&out.stderr).contains("hook integrity check FAILED"));
     }
-    for args in [&["gain", "--badtypo"][..], &["test", "--shell"]] {
+    for args in [&["gain", "--badtypo"][..], &["test", "--shell"], &[]] {
         let out = run(dir.path(), args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");
         assert!(!String::from_utf8_lossy(&out.stderr).contains("hook integrity check FAILED"));
     }
     assert!(!dir.path().join("called").exists());
+}
+
+#[test]
+fn fallback_propagates_invalid_baseline_errors() {
+    let dir = sandbox("no-baseline");
+    std::fs::write(
+        dir.path().join(".claude/hooks/.rtk-hook.sha256"),
+        "not a hash",
+    )
+    .unwrap();
+    let out = run(dir.path(), &["make", "all"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Invalid hash format"));
+    assert!(!dir.path().join("called").exists());
+}
+
+#[test]
+fn fallback_checks_integrity_before_agent_dispatch() {
+    let dir = sandbox("tampered");
+    let out = run(dir.path(), &["claude", "-p", "x"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("hook integrity check FAILED"));
+    assert!(!dir.path().join("called").exists());
+}
+
+#[test]
+#[cfg(feature = "engine")]
+fn fallback_checks_integrity_before_task_dispatch() {
+    for state in ["verified", "tampered"] {
+        let dir = sandbox(state);
+        std::fs::create_dir(dir.path().join("config")).unwrap();
+        std::fs::write(
+            dir.path().join("config/pipeline.toml"),
+            "[task.bulk-sum]\nkind = \"digest\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("f.txt"), "fixture input").unwrap();
+        let out = run(dir.path(), &["bulk-sum", "f.txt"]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{state}: {stderr}");
+        assert_eq!(
+            stderr.contains("hook integrity check FAILED"),
+            state == "tampered",
+            "{stderr}"
+        );
+        assert_eq!(
+            stderr.contains("has no upstream"),
+            state == "verified",
+            "{stderr}"
+        );
+    }
 }
