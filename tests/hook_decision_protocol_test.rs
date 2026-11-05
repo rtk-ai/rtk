@@ -280,6 +280,26 @@ impl Sandbox {
 mod rewrite_exit_codes {
     use super::Sandbox;
 
+    /// Claude Code does not read `*:*` as every command, so RTK must not
+    /// auto-approve under it; `git:*` it does read.
+    #[test]
+    fn a_colon_spelled_catch_all_approves_nothing() {
+        let hook_decision = |sb: &Sandbox| {
+            let stdout = sb.hook_claude("git status");
+            let v: serde_json::Value = serde_json::from_str(&stdout).expect("hook emitted JSON");
+            v.pointer("/hookSpecificOutput/permissionDecision")
+                .and_then(|d| d.as_str())
+                .map(str::to_owned)
+        };
+        let sb = Sandbox::with_rules(&[], &[], &["*:*"]);
+        assert_eq!(sb.rewrite("git status").0, 3);
+        assert_eq!(hook_decision(&sb), None);
+
+        let sb = Sandbox::with_rules(&[], &[], &["git:*"]);
+        assert_eq!(sb.rewrite("git status").0, 0);
+        assert_eq!(hook_decision(&sb).as_deref(), Some("allow"));
+    }
+
     #[test]
     fn allow_rule_exits_zero_with_the_rewrite() {
         let sb = Sandbox::with_rules(&[], &[], &["git status"]);
