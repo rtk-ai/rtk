@@ -8,10 +8,10 @@ use std::sync::LazyLock;
 
 use super::lexer::{
     ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer, coalesce_words,
-    contains_unattestable_construct_in, is_crlf_at, redirect_has_file_target, shell_split,
-    split_on_operators, tokenize, tokenize_with_newlines,
+    contains_unattestable_construct_in, first_plain_word, is_crlf_at, redirect_has_file_target,
+    shell_split, split_on_operators, tokenize, tokenize_with_newlines,
 };
-use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
+use super::rules::{IGNORED_PREFIXES, IGNORED_WORDS, RULES, RtkRule};
 use super::shell_wrapper::parse_shell_wrapper;
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
@@ -183,6 +183,11 @@ struct GolangciRunParts<'a> {
     run_segment: &'a str,
 }
 
+/// Whether the command's first word, as the lexer reads it, is in `IGNORED_WORDS`.
+fn first_word_is_ignored(cmd: &str) -> bool {
+    first_plain_word(cmd).is_some_and(|word| IGNORED_WORDS.contains(&word))
+}
+
 /// Classify a single (already-split) command.
 pub fn classify_command(cmd: &str) -> Classification {
     let trimmed = cmd.trim();
@@ -191,15 +196,12 @@ pub fn classify_command(cmd: &str) -> Classification {
     }
 
     // Check ignored
-    for exact in IGNORED_EXACT {
-        if trimmed == *exact {
-            return Classification::Ignored;
-        }
-    }
-    for prefix in IGNORED_PREFIXES {
-        if trimmed.starts_with(prefix) {
-            return Classification::Ignored;
-        }
+    if IGNORED_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+        || first_word_is_ignored(trimmed)
+    {
+        return Classification::Ignored;
     }
 
     // Strip env prefixes (env VAR=val, VAR=val); sudo is left untouched (#146)
@@ -3259,6 +3261,48 @@ mod tests {
     }
 
     #[test]
+    fn test_ignored_word_is_read_as_a_whole_word() {
+        for cmd in [
+            "sleep",
+            "wait\t1",
+            "echo\ta",
+            "pwd)",
+            "true>f",
+            "wait&",
+            "then\ngit status",
+            "pwd\r\ngit status",
+            "done < f",
+        ] {
+            assert_eq!(classify_command(cmd), Classification::Ignored, "{cmd:?}");
+        }
+        for cmd in [
+            "truecrypt x",
+            "falsey",
+            "waitress-serve x",
+            "wait-for-it x",
+            "pwdx 1",
+            "rm$x file",
+            "test*",
+        ] {
+            assert!(
+                matches!(classify_command(cmd), Classification::Unsupported { .. }),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ignored_prefix_is_compared_as_written() {
+        for cmd in ["python3 -cprint(1)", "node -e 1", "rtk git status"] {
+            assert_eq!(classify_command(cmd), Classification::Ignored, "{cmd:?}");
+        }
+        assert!(matches!(
+            classify_command("rtk\tgit status"),
+            Classification::Unsupported { .. }
+        ));
+    }
+
+    #[test]
     fn test_classify_cd_ignored() {
         assert_eq!(classify_command("cd /tmp"), Classification::Ignored);
     }
@@ -3397,7 +3441,7 @@ mod tests {
     #[test]
     fn test_classify_find_not_blocked_by_fi() {
         // Regression: "fi" in IGNORED_PREFIXES used to shadow "find" commands
-        // because "find".starts_with("fi") is true. "fi" should only match exactly.
+        // because "find".starts_with("fi") is true. "fi" only matches as a whole word.
         assert_eq!(
             classify_command("find . -name foo"),
             Classification::Supported {
