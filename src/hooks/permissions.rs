@@ -4,8 +4,8 @@ use super::constants::{
 };
 use super::init::resolve_claude_dir;
 use crate::core::cmdline::lexer::{
-    TooComplex, every_reading, join_continuations, split_for_permissions, split_for_wrappers,
-    squeeze_blanks,
+    TooComplex, every_reading, join_continuations, joined_or_as_written, split_for_permissions,
+    split_for_wrappers, squeeze_blanks,
 };
 use crate::core::user_dirs;
 use crate::core::user_env;
@@ -857,8 +857,7 @@ pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
     // word byte, never a space.
     let cmd_norm = squeeze_blanks(cmd);
     // A rule spelled across a continuation names what bash would join it into.
-    let joined_pattern = join_continuations(pattern);
-    let pattern_norm = squeeze_blanks(joined_pattern.as_deref().unwrap_or(pattern));
+    let pattern_norm = squeeze_blanks(&joined_or_as_written(pattern));
     let cmd = cmd_norm.as_str();
     let pattern = pattern_norm.as_str();
 

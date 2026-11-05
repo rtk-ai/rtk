@@ -34,8 +34,8 @@ impl RtkStatus {
 pub struct SupportedEntry {
     pub command: String,
     pub count: usize,
-    /// How many of `count` were sized by the category average rather than by a
-    /// measured output. See `SupportedBucket::estimated_occurrences`.
+    /// How many of `count` were estimated from category averages rather than taking a
+    /// measured output whole. See `SupportedBucket::estimated_occurrences`.
     pub estimated_occurrences: usize,
     pub rtk_equivalent: &'static str,
     pub category: &'static str,
@@ -347,10 +347,12 @@ fn append_estimate_note(out: &mut String, entries: &[SupportedEntry]) {
         return;
     }
     if estimated == total {
-        out.push_str("  every figure above is a per-category average, not a measured output\n");
+        out.push_str(
+            "  every figure above is estimated from per-category averages, not measured\n",
+        );
     } else {
         out.push_str(&format!(
-            "  {estimated} of {total} sized by per-category average, the rest measured\n"
+            "  {estimated} of {total} estimated from per-category averages, the rest measured\n"
         ));
     }
 }
@@ -479,11 +481,11 @@ mod tests {
 
         let output = format_text(&report, 20, false);
         assert!(
-            output.contains("4 of 10 sized by per-category average"),
+            output.contains("4 of 10 estimated from per-category averages"),
             "a mixed table says how much of it was averaged, got:\n{output}"
         );
         assert!(
-            output.contains("every figure above is a per-category average"),
+            output.contains("every figure above is estimated from per-category averages"),
             "a wholly averaged table says so outright, got:\n{output}"
         );
     }
