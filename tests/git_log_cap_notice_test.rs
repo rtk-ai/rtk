@@ -35,12 +35,34 @@ fn isolate(cmd: &mut Command, home: &Path) {
 }
 
 fn git_ok(repo: &Path, home: &Path, args: &[&str]) {
+    git_ok_with_stdin(repo, home, args, "");
+}
+
+/// [`git_ok`] with `input` on git's stdin.
+fn git_ok_with_stdin(repo: &Path, home: &Path, args: &[&str], input: &str) {
+    use std::io::Write;
+    use std::process::Stdio;
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(repo);
     cmd.args(["-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"]);
+    // Every commit otherwise spawns `git maintenance run --auto`, a third process per
+    // commit for histories too small to need it.
+    cmd.args(["-c", "maintenance.auto=false"]);
     cmd.args(args);
     isolate(&mut cmd, home);
-    let out = cmd.output().expect("run git");
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn git");
+    // A write error means git exited early; its stderr below says why.
+    let _ = child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(input.as_bytes());
+    let out = child.wait_with_output().expect("wait for git");
     assert!(
         out.status.success(),
         "git {args:?} failed: {}",
@@ -75,8 +97,10 @@ fn repo_with_messages(commits: usize, message: impl Fn(usize) -> Vec<String>) ->
     repo_committing(commits, |_| vec!["f.txt".to_string()], message)
 }
 
-/// A history whose commit `i` writes the files `files(i)` and carries the message paragraphs
-/// `message(i)`, one `-m` each.
+/// A history whose commit `i` writes `content {i}` to the files `files(i)` and carries the
+/// message paragraphs `message(i)`, recorded as `git commit -m` records them, then checked
+/// out. One `git fast-import` writes every commit, since each process costs tens of
+/// milliseconds on Windows.
 fn repo_committing(
     commits: usize,
     files: impl Fn(usize) -> Vec<String>,
@@ -88,25 +112,71 @@ fn repo_committing(
     std::fs::create_dir_all(&path).expect("mkdir repo");
     std::fs::create_dir_all(&home).expect("mkdir home");
     git_ok(&path, &home, &["init", "-q", "-b", "main"]);
+
+    // Stamped now, as `git commit` would: the default format prints relative dates.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after 1970")
+        .as_secs();
+    let mut stream = String::new();
     for i in 0..commits {
-        for file in files(i) {
-            let target = path.join(&file);
-            std::fs::create_dir_all(target.parent().expect("parent")).expect("mkdir");
-            std::fs::write(target, format!("content {i}\n")).expect("write");
+        let message = commit_message(&message(i));
+        assert!(
+            !message.is_empty(),
+            "commit {i}: git commit refuses an empty message"
+        );
+        stream.push_str(&format!(
+            "commit refs/heads/main\n\
+             author t <t@example.com> {now} +0000\n\
+             committer t <t@example.com> {now} +0000\n\
+             data {}\n{message}\n",
+            message.len()
+        ));
+        let content = format!("content {i}\n");
+        let files = files(i);
+        assert!(
+            !files.is_empty(),
+            "commit {i}: git commit refuses an empty change"
+        );
+        for file in files {
+            stream.push_str(&format!(
+                "M 100644 inline {file}\ndata {}\n{content}\n",
+                content.len()
+            ));
         }
-        git_ok(&path, &home, &["add", "-A"]);
-        let paragraphs = message(i);
-        let mut args = vec!["commit", "-q"];
-        for paragraph in &paragraphs {
-            args.extend(["-m", paragraph.as_str()]);
-        }
-        git_ok(&path, &home, &args);
+    }
+    if commits > 0 {
+        stream.push_str("done\n");
+        git_ok_with_stdin(&path, &home, &["fast-import", "--quiet", "--done"], &stream);
+        git_ok(&path, &home, &["reset", "-q", "--hard"]);
     }
     Repo {
         _dir: dir,
         path,
         home,
     }
+}
+
+/// The message `git commit -m p1 -m p2 …` records: the paragraphs a blank line apart, then
+/// git's default cleanup for a message it does not edit -- trailing whitespace dropped, runs
+/// of blank lines collapsed, none at either end.
+fn commit_message(paragraphs: &[String]) -> String {
+    let mut message = String::new();
+    let mut blank_pending = false;
+    for line in paragraphs.join("\n\n").split('\n') {
+        let line = line.trim_end_matches([' ', '\t', '\r']);
+        if line.is_empty() {
+            blank_pending = !message.is_empty();
+            continue;
+        }
+        if blank_pending {
+            message.push('\n');
+            blank_pending = false;
+        }
+        message.push_str(line);
+        message.push('\n');
+    }
+    message
 }
 
 /// Every output shape that once swallowed the notice.

@@ -825,6 +825,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn auto_detection_requires_leading_stream_evidence() {
+        let event = r#"{"Action":"pass","Package":"example.com/proj","Test":"TestOK"}"#;
+        for prefix in [
+            "",
+            "\u{feff}",
+            " \r\n",
+            "go: downloading example.com/dep v1.0.0\n",
+        ] {
+            assert!(is_go_test_json(&format!("{prefix}{event}")));
+        }
+        for prefix in [
+            "diff --git a/report b/report\n ",
+            "```json\n",
+            "# Notes\n\n",
+            "Diagnostic example:\n",
+        ] {
+            assert!(!is_go_test_json(&format!("{prefix}{event}")));
+        }
+        assert!(!is_go_test_json("go: downloading example.com/dep v1.0.0\n"));
+        assert!(!is_go_test_json(r#"{"Action":"start"}"#));
+    }
+
+    #[test]
     fn test_filter_go_test_all_pass() {
         let output = r#"{"Time":"2024-01-01T10:00:00Z","Action":"run","Package":"example.com/foo","Test":"TestBar"}
 {"Time":"2024-01-01T10:00:01Z","Action":"output","Package":"example.com/foo","Test":"TestBar","Output":"=== RUN   TestBar\n"}

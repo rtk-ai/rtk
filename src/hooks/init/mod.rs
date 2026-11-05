@@ -285,7 +285,12 @@ pub(super) const RTK_INSTRUCTIONS: &str = r##"<!-- rtk-instructions v2 -->
 
 ## Golden Rule
 
-**Always prefix commands with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes through unchanged. This means RTK is always safe to use.
+**Prefix external programs with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes the program through unchanged. This is safe for programs you would run from `PATH`.
+
+Do not prefix shell builtins or keywords — `test`, `[`, `read`, `cd`, `echo`,
+`export`, `eval`, `source`, `printf`. Commands such as `test`, `read`, and
+`env` also have RTK subcommands with different meanings; invoke the native
+command directly when you need it.
 
 **Important**: Even in command chains with `&&`, use `rtk`:
 ```bash
@@ -897,7 +902,7 @@ fn report_pipeline_health() {
 /// config channel (settings.json `env`); everyone else keeps the manual
 /// export line from `rtk llm-proxy start --env`.
 /// The base URL the global settings point Claude Code at, if any.
-fn proxy_env_target() -> Option<String> {
+pub(super) fn proxy_env_target() -> Option<String> {
     let dir = resolve_claude_dir().ok()?;
     let content = fs::read_to_string(dir.join(SETTINGS_JSON)).ok()?;
     let root: serde_json::Value = from_json_str(strip_leading_bom(&content)).ok()?;
@@ -2475,10 +2480,64 @@ level = "high"
 
     #[test]
     fn test_awareness_activation_rule_only_in_full() {
-        const ACTIVATION: &str = "Prefix every shell command with `rtk`";
+        const ACTIVATION: &str = "Prefix external programs with `rtk`";
         assert!(!RTK_AWARENESS_DEFAULT.contains(ACTIVATION));
         assert!(!RTK_AWARENESS_HIGH.contains(ACTIVATION));
         assert!(RTK_AWARENESS_FULL.contains(ACTIVATION));
+    }
+
+    /// The prefix rule every payload that teaches it must carry: scoped to external programs,
+    /// naming the same builtins and RTK-shadowed names, and without the old promise that the
+    /// prefix is safe on anything. Shared with the Copilot payload's test so the three stay in
+    /// sync.
+    pub(super) fn assert_prefix_rule_spares_builtins(name: &str, content: &str) {
+        assert!(
+            content.contains("Prefix external programs with `rtk`"),
+            "{name} must scope the prefix rule to external programs"
+        );
+        let start = content
+            .find("Do not prefix shell builtins or keywords")
+            .unwrap_or_else(|| panic!("{name} must exclude shell builtins from the prefix rule"));
+        let paragraph = &content[start..];
+        let paragraph = &paragraph[..paragraph.find("\n\n").unwrap_or_else(|| {
+            panic!("{name}: the exclusion paragraph must end with a blank line")
+        })];
+        // The list itself is the first sentence; `env` is named in it or in the next one.
+        let list = &paragraph[..paragraph.find('.').unwrap_or(paragraph.len())];
+        for builtin in [
+            "test", "[", "read", "cd", "echo", "export", "eval", "source", "printf",
+        ] {
+            assert!(
+                list.contains(&format!("`{builtin}`")),
+                "{name} must list `{builtin}` among the commands left unprefixed"
+            );
+        }
+        assert!(
+            paragraph.contains("`env`"),
+            "{name} must name `env` in the paragraph that leaves commands unprefixed"
+        );
+        let words = content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        for promise in [
+            "always prefix shell commands with `rtk`",
+            "always prefix commands with `rtk`",
+            "prefix every shell command with `rtk`",
+            "always safe",
+        ] {
+            assert!(
+                !words.contains(promise),
+                "{name} must not promise that every shell command is safe to prefix: {promise:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_guidance_excludes_shell_builtins_from_prefix_rule() {
+        assert_prefix_rule_spares_builtins("awareness-full", RTK_AWARENESS_FULL);
+        assert_prefix_rule_spares_builtins("legacy", RTK_INSTRUCTIONS);
     }
 
     #[test]
