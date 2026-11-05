@@ -1,6 +1,6 @@
 [package]
 name = "rtk-plugin"
-version = "0.49.0"
+version = "1.1.0"
 edition = "2021"
 rust-version = "1.91"
 authors = ["RTK AI Labs"]
