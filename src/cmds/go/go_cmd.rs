@@ -1,6 +1,5 @@
 //! Filters Go command output — test results, build errors, vet warnings.
 
-use crate::core::arg_tokenizer::{self, TokenKind};
 use crate::core::guard::never_worse;
 use crate::core::runner;
 use crate::core::shell::{display_args, quote_word};
@@ -205,17 +204,6 @@ fn detect_go_tool_golangci_version() -> u32 {
     }
 }
 
-fn has_golangci_format_flag(args: &[OsString]) -> bool {
-    args.iter().any(|a| {
-        let s = a.to_string_lossy();
-        s == "--out-format"
-            || s.starts_with("--out-format=")
-            || s == "--output.json.path"
-            || s.starts_with("--output.json.path=")
-    })
-}
-
-/// Known `go tool` subcommands that RTK provides filtered output for.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum GoTool {
     GolangciLint,
@@ -244,43 +232,30 @@ fn match_go_tool(args: &[OsString]) -> Option<(GoTool, &[OsString])> {
 /// Run `go tool golangci-lint` and filter its output via the golangci JSON filter.
 /// Reusing parts of golangci_cmd.
 fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
-    let first_arg = args.first().map(|arg| arg.to_string_lossy());
-    let tokens = arg_tokenizer::tokenize(first_arg.as_slice());
-    let args = match tokens.first() {
-        Some(token) if token.kind == TokenKind::Positional && token.text == "run" => {
-            &args[token.source_index + 1..]
+    let invocation = match golangci_cmd::classify_go_tool_invocation(args) {
+        golangci_cmd::Invocation::FilteredRun(invocation) => invocation,
+        golangci_cmd::Invocation::Passthrough => {
+            let mut tool_args = vec![OsString::from("tool"), OsString::from("golangci-lint")];
+            tool_args.extend_from_slice(args);
+            return runner::run_passthrough("go", &tool_args, verbose);
         }
-        _ => args,
     };
     let timer = tracking::TimedExecution::start();
-
     let version = detect_go_tool_golangci_version();
+    let filtered_args = golangci_cmd::build_filtered_args(&invocation, version);
 
     let mut cmd = resolved_command("go");
-    cmd.arg("tool").arg("golangci-lint");
-
-    let has_format = has_golangci_format_flag(args);
-
-    if !has_format {
-        if version >= 2 {
-            cmd.arg("run").arg("--output.json.path").arg("stdout");
-        } else {
-            cmd.arg("run").arg("--out-format=json");
-        }
-    } else {
-        cmd.arg("run");
-    }
-
-    for arg in args {
-        cmd.arg(arg);
-    }
+    cmd.arg("tool").arg("golangci-lint").args(&filtered_args);
 
     if verbose > 0 {
-        if version >= 2 {
-            eprintln!("Running: go tool golangci-lint run --output.json.path stdout");
-        } else {
-            eprintln!("Running: go tool golangci-lint run --out-format=json");
-        }
+        let text_args: Vec<_> = filtered_args
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect();
+        eprintln!(
+            "Running: go tool golangci-lint {}",
+            display_args(&text_args)
+        );
     }
 
     let CaptureResult {
@@ -1168,34 +1143,6 @@ utils.go:15:5: unreachable code"#;
         assert!(match_go_tool(&os(&["tool"])).is_none());
         assert!(match_go_tool(&os(&["test", "./..."])).is_none());
         assert!(match_go_tool(&os(&[])).is_none());
-    }
-
-    #[test]
-    fn test_has_golangci_format_flag_v1() {
-        assert!(has_golangci_format_flag(&os(&["--out-format=json"])));
-        assert!(has_golangci_format_flag(&os(&[
-            "./...",
-            "--out-format",
-            "json"
-        ])));
-    }
-
-    #[test]
-    fn test_has_golangci_format_flag_v2() {
-        assert!(has_golangci_format_flag(&os(&[
-            "--output.json.path",
-            "stdout"
-        ])));
-        assert!(has_golangci_format_flag(&os(&[
-            "--output.json.path=stdout"
-        ])));
-    }
-
-    #[test]
-    fn test_has_golangci_format_flag_absent() {
-        assert!(!has_golangci_format_flag(&os(&["run", "./..."])));
-        assert!(!has_golangci_format_flag(&os(&[])));
-        assert!(!has_golangci_format_flag(&os(&["--fix"])));
     }
 
     #[test]
