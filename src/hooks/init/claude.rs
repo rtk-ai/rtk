@@ -1,7 +1,6 @@
 //! Claude Code: the default `rtk init` flow -- settings.json hook registration, RTK.md and
 //! CLAUDE.md patching, legacy-hook migration -- plus the `--claude-md` injection mode.
 
-use super::opencode::{ensure_opencode_plugin_installed, prepare_opencode_plugin_path};
 use super::*;
 use crate::core::user_dirs;
 use crate::hooks::constants::{
@@ -10,20 +9,11 @@ use crate::hooks::constants::{
 };
 
 /// Legacy mode (--claude-md): inject the full RTK_INSTRUCTIONS block into CLAUDE.md.
-pub(super) fn run_claude_md_mode(
-    global: bool,
-    install_opencode: bool,
-    ctx: InitContext,
-) -> Result<()> {
-    run_claude_md_mode_with(global, install_opencode, RTK_INSTRUCTIONS, ctx)
+pub(super) fn run_claude_md_mode(global: bool, ctx: InitContext) -> Result<()> {
+    run_claude_md_mode_with(global, RTK_INSTRUCTIONS, ctx)
 }
 
-fn run_claude_md_mode_with(
-    global: bool,
-    install_opencode: bool,
-    block: &str,
-    ctx: InitContext,
-) -> Result<()> {
+fn run_claude_md_mode_with(global: bool, block: &str, ctx: InitContext) -> Result<()> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
@@ -51,18 +41,6 @@ fn run_claude_md_mode_with(
     };
 
     let action = write_rtk_block(&path, block, "rtk instructions", recovery_cmd, ctx)?;
-
-    // Runs before the Unchanged return so that re-running restores a deleted plugin.
-    if global && install_opencode {
-        let opencode_plugin_path = prepare_opencode_plugin_path()?;
-        let installed = ensure_opencode_plugin_installed(&opencode_plugin_path, ctx)?;
-        if !dry_run && installed {
-            println!(
-                "[ok] OpenCode plugin installed: {}",
-                opencode_plugin_path.display()
-            );
-        }
-    }
 
     if matches!(action, RtkBlockUpsert::Unchanged) {
         return Ok(());
@@ -661,7 +639,7 @@ pub(super) fn hook_already_present(
 pub(super) fn run_default_mode(
     global: bool,
     patch_mode: PatchMode,
-    install_opencode: bool,
+    opencode_plugin: Option<&Path>,
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
@@ -669,12 +647,7 @@ pub(super) fn run_default_mode(
         // Local init: inject the awareness block into CLAUDE.md + generate
         // project-local filters template. The legacy full-instruction block
         // stays behind the explicit --claude-md opt-in.
-        run_claude_md_mode_with(
-            false,
-            install_opencode,
-            &rtk_block(&instructions_body(ctx.awareness)),
-            ctx,
-        )?;
+        run_claude_md_mode_with(false, &rtk_block(&instructions_body(ctx.awareness)), ctx)?;
         generate_project_filters_template(ctx)?;
         if !dry_run {
             print_project_scope_footer();
@@ -695,13 +668,6 @@ pub(super) fn run_default_mode(
         println!("[dry-run] awareness level: {}", ctx.awareness);
     }
 
-    let opencode_plugin_path = if install_opencode {
-        let path = prepare_opencode_plugin_path()?;
-        ensure_opencode_plugin_installed(&path, ctx)?.then_some(path)
-    } else {
-        None
-    };
-
     // 3. Patch CLAUDE.md (add @RTK.md, migrate if needed)
     let migrated = patch_claude_md(&claude_md_path, ctx)?;
 
@@ -714,7 +680,7 @@ pub(super) fn run_default_mode(
             rtk_md_path.display(),
             ctx.awareness
         );
-        if let Some(path) = &opencode_plugin_path {
+        if let Some(path) = opencode_plugin {
             println!("  OpenCode:  {}", path.display());
         }
         println!("  CLAUDE.md: @RTK.md reference added");
@@ -734,7 +700,7 @@ pub(super) fn run_default_mode(
     let patch_result = patch_settings_json_command(
         CLAUDE_HOOK_COMMAND,
         patch_mode,
-        opencode_plugin_path.is_some(),
+        opencode_plugin.is_some(),
         ctx,
         HookInstallScope::UserGlobal,
     )?;
@@ -756,7 +722,7 @@ pub(super) fn run_default_mode(
             }
             PatchResult::AlreadyPresent => {
                 println!("\n  settings.json: hook already present");
-                if opencode_plugin_path.is_some() {
+                if opencode_plugin.is_some() {
                     println!("  Restart Claude Code and OpenCode. Test with: git status");
                 } else {
                     println!("  Restart Claude Code. Test with: git status");
@@ -928,7 +894,7 @@ pub(super) fn remove_legacy_hook_entries_from_json(root: &mut serde_json::Value)
 pub(super) fn run_hook_only_mode(
     global: bool,
     patch_mode: PatchMode,
-    install_opencode: bool,
+    opencode_plugin: Option<&Path>,
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
@@ -941,17 +907,10 @@ pub(super) fn run_hook_only_mode(
     // Migrate old hook script if present
     migrate_old_hook_script(ctx);
 
-    let opencode_plugin_path = if install_opencode {
-        let path = prepare_opencode_plugin_path()?;
-        ensure_opencode_plugin_installed(&path, ctx)?.then_some(path)
-    } else {
-        None
-    };
-
     if !dry_run {
         println!("\nRTK hook registered (hook-only mode).\n");
         println!("  Command: {}", CLAUDE_HOOK_COMMAND);
-        if let Some(path) = &opencode_plugin_path {
+        if let Some(path) = opencode_plugin {
             println!("  OpenCode: {}", path.display());
         }
         println!(
@@ -963,7 +922,7 @@ pub(super) fn run_hook_only_mode(
     let patch_result = patch_settings_json_command(
         CLAUDE_HOOK_COMMAND,
         patch_mode,
-        opencode_plugin_path.is_some(),
+        opencode_plugin.is_some(),
         ctx,
         HookInstallScope::UserGlobal,
     )?;
@@ -985,7 +944,7 @@ pub(super) fn run_hook_only_mode(
             }
             PatchResult::AlreadyPresent => {
                 println!("\n  settings.json: hook already present");
-                if opencode_plugin_path.is_some() {
+                if opencode_plugin.is_some() {
                     println!("  Restart Claude Code and OpenCode. Test with: git status");
                 } else {
                     println!("  Restart Claude Code. Test with: git status");
@@ -1005,6 +964,70 @@ pub(super) fn run_hook_only_mode(
     }
 
     Ok(())
+}
+
+/// Detailed hook status for Claude Code (used by `rtk discover` and warning coordinator).
+pub fn hook_status() -> crate::hooks::hook_check::HookStatus {
+    let Ok(claude_dir) = resolve_claude_dir() else {
+        return crate::hooks::hook_check::HookStatus::Ok;
+    };
+    if !claude_dir.exists() {
+        return crate::hooks::hook_check::HookStatus::Ok;
+    }
+
+    // Check for new binary command in settings.json first
+    if binary_hook_registered(&claude_dir) {
+        // If old script file still exists alongside new command, report Outdated
+        // (migration not complete — user should run `rtk init -g` to clean up)
+        let old_hook = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+        if old_hook.exists() {
+            return crate::hooks::hook_check::HookStatus::Outdated;
+        }
+        return crate::hooks::hook_check::HookStatus::Ok;
+    }
+
+    // Fall back to legacy script file check
+    let hook_path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+    if !hook_path.exists() {
+        return crate::hooks::hook_check::HookStatus::Missing;
+    }
+    let Ok(content) = fs::read_to_string(&hook_path) else {
+        return crate::hooks::hook_check::HookStatus::Outdated; // exists but unreadable — treat as needs-update
+    };
+    if crate::hooks::hook_check::parse_hook_version(&content)
+        >= crate::hooks::hook_check::CURRENT_HOOK_VERSION
+    {
+        crate::hooks::hook_check::HookStatus::Ok
+    } else {
+        crate::hooks::hook_check::HookStatus::Outdated
+    }
+}
+
+/// Check if the native binary command is registered in settings.json
+fn binary_hook_registered(claude_dir: &Path) -> bool {
+    let settings_path = claude_dir.join(SETTINGS_JSON);
+    let content = match fs::read_to_string(&settings_path) {
+        Ok(c) if !c.trim().is_empty() => c,
+        _ => return false,
+    };
+    let root: serde_json::Value = match from_json_str(&content) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let pre_tool_use = match root
+        .get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+    pre_tool_use
+        .iter()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(crate::hooks::is_claude_hook_command)
 }
 
 #[cfg(test)]
@@ -1436,7 +1459,7 @@ mod tests {
     fn test_global_default_mode_creates_artifacts() {
         let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
-            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+            run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
 
             assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
             assert!(
@@ -1551,7 +1574,7 @@ mod tests {
     fn test_global_default_mode_creates_missing_claude_dir() {
         let tmp = test_isolation::tempdir();
         with_missing_claude_dir_override(&tmp, |claude_dir| {
-            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+            run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
 
             assert!(
                 claude_dir.exists(),
@@ -1565,33 +1588,6 @@ mod tests {
             assert!(
                 claude_dir.join(SETTINGS_JSON).exists(),
                 "settings.json must be created"
-            );
-        });
-    }
-
-    /// `--opencode` is installed after RTK.md. A missing Claude dir must not
-    /// abort before that install.
-    #[test]
-    fn test_global_opencode_installs_when_claude_dir_missing() {
-        use crate::hooks::constants::{OPENCODE_PLUGIN_FILE, PLUGIN_SUBDIR};
-
-        let tmp = test_isolation::tempdir();
-        with_missing_claude_dir_override(&tmp, |claude_dir| {
-            run_default_mode(true, PatchMode::Auto, true, InitContext::default()).unwrap();
-
-            assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
-            let plugin = super::super::opencode::resolve_opencode_dir()
-                .expect("opencode dir resolves in a test build")
-                .join(PLUGIN_SUBDIR)
-                .join(OPENCODE_PLUGIN_FILE);
-            assert!(
-                plugin.starts_with(tmp.path()),
-                "the plugin must land in this test's own directory, not {}",
-                plugin.display()
-            );
-            assert!(
-                plugin.exists(),
-                "OpenCode plugin must be installed when ~/.claude was missing"
             );
         });
     }
@@ -1809,7 +1805,7 @@ mod tests {
     fn test_global_uninstall_removes_artifacts() {
         let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
-            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+            run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
             uninstall(
                 true,
                 false,
@@ -1843,8 +1839,8 @@ mod tests {
             Some(tmp.path().join("rtk-config")),
             || {
                 with_claude_dir_override(&tmp, |claude_dir| {
-                    run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
-                    run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+                    run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
+                    run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
 
                     let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
                     let count = settings.matches(CLAUDE_HOOK_COMMAND).count();
@@ -1862,7 +1858,7 @@ mod tests {
         let tmp = test_isolation::tempdir();
         let _entered = test_isolation::enter(tmp.path());
 
-        let result = run_default_mode(false, PatchMode::Auto, false, InitContext::default());
+        let result = run_default_mode(false, PatchMode::Auto, None, InitContext::default());
 
         result.unwrap();
         assert!(
@@ -1879,7 +1875,7 @@ mod tests {
     fn test_global_hook_only_mode_creates_settings() {
         let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
-            run_hook_only_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+            run_hook_only_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
 
             assert!(
                 !claude_dir.join(RTK_MD).exists(),
@@ -1897,7 +1893,7 @@ mod tests {
     fn test_global_hook_only_mode_creates_missing_claude_dir() {
         let tmp = test_isolation::tempdir();
         with_missing_claude_dir_override(&tmp, |claude_dir| {
-            run_hook_only_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+            run_hook_only_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
 
             assert!(
                 claude_dir.exists(),
@@ -1923,7 +1919,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             };
-            run_default_mode(true, PatchMode::Auto, false, dry).unwrap();
+            run_default_mode(true, PatchMode::Auto, None, dry).unwrap();
 
             assert!(
                 !claude_dir.join(RTK_MD).exists(),
@@ -1948,7 +1944,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             };
-            run_default_mode(true, PatchMode::Auto, false, dry).unwrap();
+            run_default_mode(true, PatchMode::Auto, None, dry).unwrap();
 
             assert!(
                 !claude_dir.exists(),
@@ -1962,7 +1958,7 @@ mod tests {
         let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             // Stage a real install first
-            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+            run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
             assert!(claude_dir.join(RTK_MD).exists());
             assert!(claude_dir.join(SETTINGS_JSON).exists());
 
@@ -2099,14 +2095,14 @@ mod tests {
     fn test_upgrade_from_claude_md_to_hook_mode() {
         let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
-            run_claude_md_mode(true, false, InitContext::default()).unwrap();
+            run_claude_md_mode(true, InitContext::default()).unwrap();
             let claude_md_content = fs::read_to_string(claude_dir.join(CLAUDE_MD)).unwrap();
             assert!(
                 claude_md_content.contains(RTK_BLOCK_START),
                 "pre-condition: old block must exist"
             );
 
-            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+            run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
 
             assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
             let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
@@ -2142,7 +2138,7 @@ mod tests {
             );
             fs::write(&claude_md, &malformed).unwrap();
 
-            let result = run_claude_md_mode(true, false, InitContext::default());
+            let result = run_claude_md_mode(true, InitContext::default());
 
             assert!(
                 result.is_err(),
@@ -2151,6 +2147,202 @@ mod tests {
 
             let after = fs::read_to_string(&claude_md).unwrap();
             assert_eq!(after, malformed, "File must not be modified when malformed");
+        });
+    }
+
+    #[test]
+    fn test_binary_hook_registered_accepts_absolute_rtk_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            tmp.path().join(SETTINGS_JSON),
+            r#"{
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/opt/homebrew/bin/rtk hook claude",
+                            "timeout": 5
+                        }]
+                    }]
+                }
+            }"#,
+        )
+        .expect("write settings");
+
+        assert!(binary_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_hook_status_dangling_script_in_settings_is_missing() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            fs::write(
+                claude_dir.join(SETTINGS_JSON),
+                r#"{
+                    "hooks": {
+                        "PreToolUse": [{
+                            "matcher": "Bash",
+                            "hooks": [{
+                                "type": "command",
+                                "command": "~/.claude/hooks/rtk-rewrite.sh"
+                            }]
+                        }]
+                    }
+                }"#,
+            )
+            .expect("write settings");
+
+            assert_eq!(
+                hook_status(),
+                crate::hooks::hook_check::HookStatus::Missing,
+                "settings.json pointing at deleted rtk-rewrite.sh must report Missing"
+            );
+        });
+    }
+
+    #[test]
+    fn test_hook_status_binary_hook_with_leftover_script_is_outdated() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let hooks_dir = claude_dir.join(HOOKS_SUBDIR);
+            fs::create_dir_all(&hooks_dir).expect("create hooks dir");
+            fs::write(
+                hooks_dir.join(REWRITE_HOOK_FILE),
+                format!(
+                    "#!/usr/bin/env bash\n# rtk-hook-version: {}\n",
+                    crate::hooks::hook_check::CURRENT_HOOK_VERSION
+                ),
+            )
+            .expect("write leftover script");
+            fs::write(
+                claude_dir.join(SETTINGS_JSON),
+                r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]}}"#,
+            )
+            .expect("write settings");
+
+            assert_eq!(
+                hook_status(),
+                crate::hooks::hook_check::HookStatus::Outdated,
+                "a leftover legacy script next to the binary hook means migration is unfinished"
+            );
+        });
+    }
+
+    #[test]
+    fn test_hook_status_v4_script_in_settings_is_ok() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let hooks_dir = claude_dir.join(HOOKS_SUBDIR);
+            fs::create_dir_all(&hooks_dir).expect("create hooks dir");
+            fs::write(
+                hooks_dir.join(REWRITE_HOOK_FILE),
+                "#!/usr/bin/env bash\n# rtk-hook-version: 4\n",
+            )
+            .expect("write v4 script");
+            fs::write(
+                claude_dir.join(SETTINGS_JSON),
+                r#"{
+                    "hooks": {
+                        "PreToolUse": [{
+                            "matcher": "Bash",
+                            "hooks": [{
+                                "type": "command",
+                                "command": "~/.claude/hooks/rtk-rewrite.sh"
+                            }]
+                        }]
+                    }
+                }"#,
+            )
+            .expect("write settings");
+
+            assert_eq!(
+                hook_status(),
+                crate::hooks::hook_check::HookStatus::Ok,
+                "registered v4 script must report Ok, not Outdated"
+            );
+        });
+    }
+
+    #[test]
+    fn test_hook_status_post_tool_use_only_is_missing() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            fs::write(
+                claude_dir.join(SETTINGS_JSON),
+                r#"{
+                    "hooks": {
+                        "PostToolUse": [{
+                            "matcher": "Bash",
+                            "hooks": [{
+                                "type": "command",
+                                "command": "rtk hook claude"
+                            }]
+                        }]
+                    }
+                }"#,
+            )
+            .expect("write settings");
+
+            assert_eq!(
+                hook_status(),
+                crate::hooks::hook_check::HookStatus::Missing,
+                "PostToolUse-only entry must report Missing"
+            );
+        });
+    }
+
+    #[test]
+    fn test_hook_status_unreadable_script_is_outdated() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let hook_path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+            fs::create_dir_all(hook_path.parent().unwrap()).expect("create hooks dir");
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::write(&hook_path, "#!/usr/bin/env bash\n# rtk-hook-version: 4\n")
+                    .expect("write script");
+                let mut perms = fs::metadata(&hook_path).expect("meta").permissions();
+                perms.set_mode(0o000);
+                fs::set_permissions(&hook_path, perms.clone()).expect("chmod 000");
+
+                // If running as root in a container, mode 000 is bypassed; fall back to
+                // making the path a directory so read_to_string deterministically fails.
+                if fs::read_to_string(&hook_path).is_ok() {
+                    perms.set_mode(0o644);
+                    let _ = fs::set_permissions(&hook_path, perms);
+                    fs::remove_file(&hook_path).expect("remove file");
+                    fs::create_dir_all(&hook_path).expect("create dir at hook_path");
+                    assert_eq!(
+                        hook_status(),
+                        crate::hooks::hook_check::HookStatus::Outdated,
+                        "unreadable hook path must report Outdated"
+                    );
+                    return;
+                }
+
+                let status = hook_status();
+                perms.set_mode(0o644);
+                fs::set_permissions(&hook_path, perms).expect("restore chmod 644");
+                assert_eq!(
+                    status,
+                    crate::hooks::hook_check::HookStatus::Outdated,
+                    "unreadable script file must report Outdated"
+                );
+            }
+
+            #[cfg(not(unix))]
+            {
+                // On non-Unix, a directory at `hook_path` makes `exists()` true and `read_to_string()` Err.
+                fs::create_dir_all(&hook_path).expect("create dir at hook_path");
+                assert_eq!(
+                    hook_status(),
+                    crate::hooks::hook_check::HookStatus::Outdated,
+                    "unreadable hook path must report Outdated"
+                );
+            }
         });
     }
 }

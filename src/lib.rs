@@ -15,7 +15,7 @@ use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git_cmd, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
-    bun_cmd, deno_cmd, lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
+    bun_cmd, deno_cmd, lint_cmd, next_cmd, ng_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
     prisma_cmd, tsc_cmd, vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
@@ -651,6 +651,13 @@ enum Commands {
     /// TypeScript compiler with grouped error output
     Tsc {
         /// TypeScript compiler arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Angular build with compact tables; other commands pass through
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Ng {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1384,6 +1391,12 @@ enum GitCommands {
     /// Compact worktree listing
     Worktree {
         /// Git worktree arguments (add, remove, prune, or empty for list)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// List tree entries; plain path lists are folded by directory
+    LsTree {
+        /// Git ls-tree arguments (tree-ish, paths, flags)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2351,7 +2364,7 @@ fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
     uninstall_standard: UninstallStandard,
-) -> Result<()>
+) -> Result<i32>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
     UninstallStandard: FnOnce(
@@ -2363,18 +2376,23 @@ where
         bool,
         hooks::init::PatchMode,
         hooks::init::InitContext,
-    ) -> Result<()>,
+    ) -> Result<i32>,
 {
     if agent == Some(AgentTarget::Hermes) {
-        uninstall_hermes(ctx)
+        uninstall_hermes(ctx)?;
+        Ok(0)
     } else if agent == Some(AgentTarget::Trae) {
-        hooks::init::uninstall_trae_mode(global, ctx)
+        hooks::init::uninstall_trae_mode(global, ctx)?;
+        Ok(0)
     } else if agent == Some(AgentTarget::Antigravity) {
-        hooks::init::uninstall_antigravity_mode(global, ctx)
+        hooks::init::uninstall_antigravity_mode(global, ctx)?;
+        Ok(0)
     } else if agent == Some(AgentTarget::Droid) {
-        hooks::init::uninstall_droid(global, ctx)
+        hooks::init::uninstall_droid(global, ctx)?;
+        Ok(0)
     } else if agent == Some(AgentTarget::Vibe) {
-        hooks::init::uninstall_vibe(ctx)
+        hooks::init::uninstall_vibe(ctx)?;
+        Ok(0)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -2730,6 +2748,13 @@ fn run_cli() -> Result<i32> {
                 GitCommands::Other(args) => {
                     git_cmd::run_passthrough(&args, &global_args, cli.verbose)?
                 }
+                GitCommands::LsTree { args } => git_cmd::run(
+                    git_cmd::GitCommand::LsTree,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
             }
         }
 
@@ -3030,7 +3055,7 @@ fn run_cli() -> Result<i32> {
                     hooks::init::uninstall_copilot(ctx)?;
                 }
             } else if uninstall {
-                uninstall_init_dispatch(
+                return uninstall_init_dispatch(
                     agent,
                     global,
                     gemini,
@@ -3039,7 +3064,7 @@ fn run_cli() -> Result<i32> {
                     ctx,
                     hooks::init::uninstall_hermes,
                     hooks::init::uninstall_with_patch_mode,
-                )?;
+                );
             } else if gemini {
                 hooks::init::run_gemini(global, hook_only, patch_mode, ctx)?;
             } else if copilot {
@@ -3370,6 +3395,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Next { args } => next_cmd::run(&args, cli.verbose)?,
 
+        Commands::Ng { args } => ng_cmd::run(&args, cli.verbose)?,
+
         Commands::Lint { args } => lint_cmd::run(None, &args, cli.verbose)?,
 
         Commands::Prettier { args } => prettier_cmd::run(&args, cli.verbose)?,
@@ -3695,7 +3722,8 @@ fn run_cli() -> Result<i32> {
                     return Ok(2);
                 };
                 match path.decide(&raw) {
-                    HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => {
+                    HookDecision::AllowRewrite(rewritten)
+                    | HookDecision::AskRewrite(rewritten, _) => {
                         println!("{}", rewritten);
                         0
                     }
@@ -4057,6 +4085,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Prisma { .. }
             | Commands::Tsc { .. }
             | Commands::Next { .. }
+            | Commands::Ng { .. }
             | Commands::Lint { .. }
             | Commands::Prettier { .. }
             | Commands::Playwright { .. }
@@ -4434,7 +4463,7 @@ mod tests {
             },
             |_, _, _, _, _, _, _, _| {
                 standard_called.set(true);
-                Ok(())
+                Ok(0)
             },
         );
 
@@ -4495,7 +4524,7 @@ mod tests {
                 assert!(global);
                 assert!(omp);
                 assert_eq!(patch_mode, hooks::init::PatchMode::Auto);
-                Ok(())
+                Ok(0)
             },
         );
 
@@ -4660,6 +4689,7 @@ mod tests {
             "prisma",
             "tsc",
             "next",
+            "ng",
             "lint",
             "prettier",
             "playwright",
@@ -5694,6 +5724,25 @@ mod tests {
             code, 134,
             "rtk crashed with SIGABRT (exit 134) on broken pipe - SIGPIPE handler missing"
         );
+    }
+
+    #[test]
+    fn ng_native_flags_and_separator_reach_the_filter() {
+        for flags in [
+            vec!["build", "--help"],
+            vec!["build", "--verbose"],
+            vec!["build", "--watch"],
+            vec!["build", "--output-path", "dist folder"],
+            vec!["build", "--", "--help"],
+        ] {
+            let mut argv = vec!["rtk", "ng"];
+            argv.extend(flags.iter().copied());
+            let cli = Cli::try_parse_from(argv).unwrap();
+            match cli.command {
+                Commands::Ng { args } => assert_eq!(args, flags),
+                _ => panic!("expected Angular command"),
+            }
+        }
     }
 
     #[test]

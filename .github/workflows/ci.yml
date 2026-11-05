@@ -138,6 +138,16 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      # The fish-script wrap is skipped without a resolvable `fish`, so without
+      # this step `tests/fish_wrap_test.rs` asserts only the disabled path and
+      # the feature's own code never runs on any runner. Windows has no wrap to
+      # exercise: it is disabled there by design.
+      - name: Install fish (wrap coverage)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fish
+      - name: Install fish (wrap coverage)
+        if: runner.os == 'macOS'
+        run: brew install fish
         # `--all` is `--workspace`: `rtk` + `engine`. `proxy/` is tested in
         # its own job, since it is not a member.
       - run: cargo test --all
@@ -290,8 +300,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # Only output tokens are measured, so a release build would only add time.
       - name: Build rtk
-        run: cargo build --release
+        run: cargo build
 
       - name: Install system tools
         run: sudo apt-get install -y tree ripgrep
@@ -304,11 +315,30 @@ jobs:
         with:
           go-version: "stable"
 
-      - name: Install Go tools
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          install-only: true
+          skip-cache: true
 
       - name: Run benchmark
         run: ./scripts/benchmark.sh
+        env:
+          RTK_BIN: target/debug/rtk
+
+  # The one PR job building the shipped profile: LTO problems only show at this link.
+  release:
+    name: release (build)
+    needs: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --release
 
   # ─── AI Doc Review: develop PRs only ───
 

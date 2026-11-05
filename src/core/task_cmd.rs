@@ -1009,6 +1009,9 @@ pub fn answer_call(task_name: &str, facts: &rtk_engine::pipeline::Facts) -> Opti
 /// agent runs instead — the task, wrapping the original command.
 pub fn swap_command(task_name: &str, command: &str) -> Option<String> {
     let resolved = resolve_task(task_name)?;
+    if resolved.task.kind != "digest" {
+        return None;
+    }
     let question = task_question(&resolved).unwrap_or_else(|| IN_HOOK_QUESTION.to_string());
     Some(format!(
         "rtk {task_name} --question {} -- sh -c {}",
