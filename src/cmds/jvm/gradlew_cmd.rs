@@ -6,6 +6,7 @@ use crate::core::utils::resolved_command;
 use anyhow::Result;
 use regex::Regex;
 use std::ffi::OsString;
+use std::path::Path;
 use std::process::Command;
 use std::sync::LazyLock;
 
@@ -67,35 +68,70 @@ fn detect_task(args: &[String]) -> GradlewTask {
 /// Returns the Gradle executable: prefers `./gradlew` (wrapper), falls back to `gradle`.
 fn gradlew_binary() -> &'static str {
     if cfg!(windows) {
-        if std::path::Path::new(".\\gradlew.bat").exists() {
+        if Path::new(".\\gradlew.bat").exists() {
             ".\\gradlew.bat"
         } else {
             "gradle"
         }
-    } else if std::path::Path::new("./gradlew").exists() {
-        "./gradlew"
     } else {
-        "gradle"
+        unix_gradle_binary(Path::new("./gradlew"))
     }
 }
 
-/// Builds a Gradle `Command`.
+/// A `./gradlew` that exists but cannot be spawned would fail the whole run
+/// with a bare EACCES/ENOENT, while `gradle` on PATH may work fine.
+fn unix_gradle_binary(wrapper: &Path) -> &'static str {
+    if !wrapper.exists() {
+        return "gradle";
+    }
+    match unix_wrapper_defect(wrapper) {
+        Some(defect) => {
+            eprintln!(
+                "rtk: {} {defect}, running gradle from PATH instead",
+                wrapper.display()
+            );
+            "gradle"
+        }
+        None => "./gradlew",
+    }
+}
+
+#[cfg(unix)]
+fn unix_wrapper_defect(path: &Path) -> Option<&'static str> {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    if file.metadata().ok()?.permissions().mode() & 0o111 == 0 {
+        return Some("is not executable (chmod +x gradlew)");
+    }
+    let mut head = [0u8; 256];
+    let n = file.read(&mut head).ok()?;
+    let first_line = head[..n].split(|&b| b == b'\n').next()?;
+    // `#!/bin/sh\r` names an interpreter that does not exist, so exec fails
+    // with ENOENT. Typical of a Windows checkout used from WSL.
+    if first_line.starts_with(b"#!") && first_line.ends_with(b"\r") {
+        return Some("has CRLF line endings (dos2unix gradlew)");
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn unix_wrapper_defect(_path: &Path) -> Option<&'static str> {
+    None
+}
+
+/// Builds a Gradle `Command` for the executable picked by `gradlew_binary`.
 ///
 /// Local wrappers (`./gradlew`, `gradlew.bat`) are passed as string literals so
 /// semgrep's `dynamic-command-execution` rule stays happy. The `gradle` system
 /// binary is resolved via `resolved_command("gradle")` for PATHEXT support on
 /// Windows (`.CMD`/`.BAT` shims) — matches how cargo, golangci-lint, etc. do it.
-fn new_gradle_command(args: &[String]) -> Command {
-    let mut cmd = if cfg!(windows) {
-        if std::path::Path::new(".\\gradlew.bat").exists() {
-            Command::new(".\\gradlew.bat")
-        } else {
-            resolved_command("gradle")
-        }
-    } else if std::path::Path::new("./gradlew").exists() {
-        Command::new("./gradlew")
-    } else {
-        resolved_command("gradle")
+fn new_gradle_command(args: &[String], tool: &str) -> Command {
+    let mut cmd = match tool {
+        "./gradlew" => Command::new("./gradlew"),
+        ".\\gradlew.bat" => Command::new(".\\gradlew.bat"),
+        _ => resolved_command("gradle"),
     };
     cmd.args(args);
     cmd
@@ -119,18 +155,18 @@ impl StreamFilter for BuildLineFilter {
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    let tool = gradlew_binary();
     // Verbose flags bypass filtering — user wants full output
     if args
         .iter()
         .any(|a| a == "--stacktrace" || a == "--info" || a == "--debug" || a == "--full-stacktrace")
     {
         let osargs: Vec<OsString> = args.iter().map(OsString::from).collect();
-        return runner::run_passthrough(gradlew_binary(), &osargs, verbose);
+        return runner::run_passthrough(tool, &osargs, verbose);
     }
 
-    let cmd = new_gradle_command(args);
+    let cmd = new_gradle_command(args, tool);
     let args_display = display_args(args);
-    let tool = gradlew_binary();
 
     match detect_task(args) {
         GradlewTask::Build => runner::run_streamed(
@@ -170,7 +206,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         ),
         GradlewTask::Other => {
             let osargs: Vec<OsString> = args.iter().map(OsString::from).collect();
-            runner::run_passthrough(gradlew_binary(), &osargs, verbose)
+            runner::run_passthrough(tool, &osargs, verbose)
         }
     }
 }
@@ -541,6 +577,66 @@ mod tests {
 
     fn count_tokens(text: &str) -> usize {
         text.split_whitespace().count()
+    }
+
+    // ── WRAPPER SELECTION ─────────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    fn write_wrapper(dir: &Path, body: &str, mode: u32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("gradlew");
+        std::fs::write(&path, body).expect("write gradlew");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+            .expect("chmod gradlew");
+        path
+    }
+
+    /// A `./gradlew` that exists but cannot be spawned (no execute bit, or a
+    /// CRLF shebang from a Windows checkout) must not be picked over `gradle`.
+    #[cfg(unix)]
+    #[test]
+    fn unrunnable_wrapper_falls_back_to_gradle() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let cases = [
+            ("#!/bin/sh\nexit 0\n", 0o644, "not executable"),
+            ("#!/bin/sh\r\nexit 0\r\n", 0o755, "CRLF"),
+        ];
+        for (body, mode, defect) in cases {
+            let path = write_wrapper(dir.path(), body, mode);
+            assert!(
+                Command::new(&path).status().is_err(),
+                "{defect}: the wrapper should fail to spawn"
+            );
+            assert!(unix_wrapper_defect(&path).expect("defect").contains(defect));
+            assert_eq!(unix_gradle_binary(&path), "gradle", "{defect}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runnable_wrapper_is_kept() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = write_wrapper(dir.path(), "#!/bin/sh\nexit 0\n", 0o755);
+        assert_eq!(unix_wrapper_defect(&path), None);
+        assert_eq!(unix_gradle_binary(&path), "./gradlew");
+        assert_eq!(unix_gradle_binary(&dir.path().join("missing")), "gradle");
+    }
+
+    #[test]
+    fn gradle_command_runs_the_picked_tool_with_args() {
+        let args: Vec<String> = ["build", "--offline"].map(String::from).to_vec();
+        for tool in ["./gradlew", ".\\gradlew.bat", "gradle"] {
+            let cmd = new_gradle_command(&args, tool);
+            let argv: Vec<String> = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(argv, args, "tool={tool}");
+        }
+        assert_eq!(
+            new_gradle_command(&args, "./gradlew").get_program(),
+            "./gradlew"
+        );
     }
 
     // ── TASK DETECTION ────────────────────────────────────────────────────────
