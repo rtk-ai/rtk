@@ -219,7 +219,9 @@ fn swappable(
         return false;
     }
     match rewrite {
-        HookDecision::AllowRewrite(_) | HookDecision::AskRewrite(..) => true,
+        HookDecision::AllowRewrite(_) | HookDecision::AskRewrite(..) => {
+            !runs_rtk(cmd) && !registry::chain_mentions_excluded(cmd, excluded)
+        }
         HookDecision::Deny => false,
         HookDecision::Defer => {
             matches!(
@@ -335,6 +337,26 @@ mod tests {
         assert!(decide("git log -3", PermissionVerdict::Default, &[]));
         assert!(decide("git log -3", PermissionVerdict::Allow, &[]));
         assert!(decide("bash -c 'ls'", PermissionVerdict::Ask, &[]));
+    }
+
+    #[test]
+    fn a_filtered_chain_with_an_excluded_or_bypassed_segment_is_not_swapped() {
+        let excluded = vec!["./run-suite.sh".to_string()];
+        assert!(!decide(
+            "git status && ./run-suite.sh",
+            PermissionVerdict::Allow,
+            &excluded
+        ));
+        assert!(decide(
+            "git status && ./run-suite.sh",
+            PermissionVerdict::Allow,
+            &[]
+        ));
+        assert!(!decide(
+            "git status && rtk bypass cat x",
+            PermissionVerdict::Allow,
+            &[]
+        ));
     }
 
     #[test]
