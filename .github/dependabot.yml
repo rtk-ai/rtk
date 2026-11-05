@@ -8,6 +8,8 @@ updates:
     labels:
       - "dependencies"
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: "github-actions"
     target-branch: "develop"
@@ -17,3 +19,5 @@ updates:
     labels:
       - "dependencies"
       - "area:ci"
+    cooldown:
+      default-days: 7
