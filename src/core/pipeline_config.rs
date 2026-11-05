@@ -707,6 +707,7 @@ pub fn before_tool_decision(
                             rule,
                         };
                     }
+                    return ShellHookDecision::Rewrite;
                 }
                 Some("answer") => {
                     return match crate::core::task_cmd::answer_call(task, facts) {
@@ -1073,6 +1074,52 @@ mod tests {
                 assert_eq!(message, "blocked by an rtk pipeline rule")
             }
             _ => panic!("expected a deny"),
+        }
+    }
+
+    fn swap_decision_for(task: &str) -> ShellHookDecision {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("pipeline.toml"),
+            format!(
+                "[upstream.u]\nprovider = \"anthropic\"\nmodel = \"m\"\n\n[task.t]\n{task}\n\n[[hook.before_tool.shell]]\nname = \"sw\"\nwhen = {{ command_matches = \"^./run\" }}\naction = \"route\"\ntask = \"t\"\nmode = \"swap\"\n"
+            ),
+        )
+        .expect("write");
+        let root = dir.path().to_str().expect("utf-8 path");
+        crate::core::user_env::with_vars(
+            &[
+                ("RTK_CONFIG_DIR", Some(root)),
+                ("XDG_DATA_HOME", Some(root)),
+                ("HOME", Some(root)),
+            ],
+            || before_shell_decision("./run.sh"),
+        )
+    }
+
+    #[test]
+    fn a_digest_task_with_an_upstream_swaps_the_command() {
+        match swap_decision_for("kind = \"digest\"\nupstream = \"u\"") {
+            ShellHookDecision::Swap { command, rule } => {
+                assert!(command.starts_with("rtk t --question "), "{command}");
+                assert!(command.ends_with("-- sh -c './run.sh'"), "{command}");
+                assert_eq!(rule, "sw");
+            }
+            _ => panic!("expected a swap"),
+        }
+    }
+
+    #[test]
+    fn a_task_that_cannot_run_the_command_leaves_it_alone() {
+        for task in [
+            "kind = \"summarize\"\nupstream = \"u\"",
+            "kind = \"generate\"\nupstream = \"u\"",
+            "kind = \"digest\"",
+        ] {
+            assert!(
+                matches!(swap_decision_for(task), ShellHookDecision::Rewrite),
+                "{task}"
+            );
         }
     }
 

@@ -54,8 +54,13 @@ pub(super) fn handle(v: &Value, raw_len: usize) -> Result<bool> {
                 deny(&message);
                 true
             }
-            Gate::Swap { command, .. } => {
-                let output = pre_tool_use_rewrite_output(v, &command, None);
+            Gate::Swap {
+                command,
+                rule,
+                decision,
+                ..
+            } => {
+                let output = swap_output(v, &command, &rule, decision);
                 let _ = writeln!(io::stdout(), "{output}");
                 true
             }
@@ -72,4 +77,43 @@ fn deny(message: &str) {
         }
     });
     let _ = writeln!(io::stdout(), "{response}");
+}
+
+fn swap_output(v: &Value, command: &str, rule: &str, decision: Option<&str>) -> Value {
+    let mut output = pre_tool_use_rewrite_output(v, command, decision);
+    if decision == Some("ask") {
+        output["hookSpecificOutput"]["permissionDecisionReason"] = Value::String(format!(
+            "RTK pipeline rule `{rule}` runs this command through a worker task, and it needs approval"
+        ));
+    }
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ask_rule_still_asks_before_a_swap_runs() {
+        let input = json!({ "tool_input": { "command": "./run-suite.sh" } });
+        let asked = swap_output(&input, "rtk t -- x", "sw", Some("ask"));
+        let hook = &asked["hookSpecificOutput"];
+        assert_eq!(hook["permissionDecision"], "ask");
+        assert_eq!(hook["updatedInput"]["command"], "rtk t -- x");
+        assert!(
+            hook["permissionDecisionReason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("`sw`"))
+        );
+    }
+
+    #[test]
+    fn a_swap_with_no_decision_leaves_the_check_to_the_agent() {
+        let input = json!({ "tool_input": { "command": "./run-suite.sh" } });
+        let output = swap_output(&input, "rtk t -- x", "sw", None);
+        let hook = &output["hookSpecificOutput"];
+        assert!(hook.get("permissionDecision").is_none());
+        assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
+        assert_eq!(hook["updatedInput"]["command"], "rtk t -- x");
+    }
 }

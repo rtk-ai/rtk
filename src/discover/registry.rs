@@ -1740,6 +1740,28 @@ fn rewrite_shell_wrapper(
     wrapper.replace_script(command, &rewritten)
 }
 
+#[cfg(feature = "engine")]
+pub(crate) fn chain_mentions_excluded(cmd: &str, excluded: &[String]) -> bool {
+    let compiled = compile_exclude_patterns(excluded);
+    split_on_operators(cmd, false).iter().any(|segment| {
+        let segment = segment.trim();
+        let words: String = segment
+            .chars()
+            .map(|c| match c {
+                '\'' | '"' | '`' | '(' | ')' | '{' | '}' => ' ',
+                other => other,
+            })
+            .collect();
+        is_excluded(segment, &compiled)
+            || words
+                .char_indices()
+                .filter(|&(i, c)| {
+                    !c.is_whitespace() && (i == 0 || words[..i].ends_with(char::is_whitespace))
+                })
+                .any(|(i, _)| is_excluded(&words[i..], &compiled))
+    })
+}
+
 fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
     excluded.iter().any(|pat| match pat {
         ExcludePattern::Regex(re) => re.is_match(cmd),
