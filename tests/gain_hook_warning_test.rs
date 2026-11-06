@@ -258,6 +258,20 @@ fn suppress_hook_warning_does_not_hide_an_outdated_hook() {
 }
 
 #[test]
+fn an_untagged_legacy_hook_gets_the_version_tag_hint() {
+    // `rtk init -g` replaces a hand-written hook; the warning must say so and
+    // name the tag that clears it.
+    let home = outdated_hook_home();
+    let combined = gain(&["gain"], home.path());
+    assert_eq!(
+        count(&combined, "# rtk-hook-version: "),
+        1,
+        "outdated untagged hook must print the tag hint once: {combined}"
+    );
+    assert_eq!(count(&combined, "rtk init -g` replaces"), 1, "{combined}");
+}
+
+#[test]
 fn an_outdated_hook_is_reported_on_every_view() {
     let home = outdated_hook_home();
     for args in [vec!["gain"], vec!["gain", "--daily"], vec!["gain", "--all"]] {
