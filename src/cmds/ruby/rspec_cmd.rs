@@ -30,7 +30,7 @@ static RE_FINISHED_IN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Finished
 static RE_SCREENSHOT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"saved screenshot to (.+)").unwrap());
 static RE_RSPEC_SUMMARY: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(\d+) examples?, (\d+) failures?").unwrap());
+    LazyLock::new(|| Regex::new(r"^(\d+) examples?, (\d+) failures?\b").unwrap());
 
 // ── JSON structures matching RSpec's --format json output ───────────────────
 
@@ -170,6 +170,12 @@ fn filter_rspec_output(output: &str) -> String {
         return build_rspec_summary(&rspec);
     }
 
+    // Suite hooks and at_exit handlers can write on either side of the report,
+    // including on the same line. Extract it before noise stripping can remove it.
+    if let Some(rspec) = parse_embedded_rspec_json(output) {
+        return build_rspec_summary(&rspec);
+    }
+
     // Strip noise (Spring, SimpleCov, etc.) and retry JSON parse
     let stripped = strip_noise(output);
     match serde_json::from_str::<RspecOutput>(&stripped) {
@@ -183,6 +189,25 @@ fn filter_rspec_output(output: &str) -> String {
     }
 
     filter_rspec_text(&stripped)
+}
+
+fn parse_embedded_rspec_json(mut output: &str) -> Option<RspecOutput> {
+    while let Some(start) = output.find('{') {
+        output = &output[start..];
+        let mut stream =
+            serde_json::Deserializer::from_str(output).into_iter::<serde_json::Value>();
+        match stream.next() {
+            Some(Ok(value)) => {
+                if let Ok(rspec) = serde_json::from_value(value) {
+                    return Some(rspec);
+                }
+                // Skip complete unrelated JSON logs without searching inside them.
+                output = &output[stream.byte_offset()..];
+            }
+            _ => output = &output[1..],
+        }
+    }
+    None
 }
 
 fn build_rspec_summary(rspec: &RspecOutput) -> String {
@@ -373,7 +398,7 @@ fn filter_rspec_text(output: &str) -> String {
     // Fallback: look for summary anywhere
     for line in output.lines().rev() {
         let t = line.trim();
-        if t.contains("example") && (t.contains("failure") || t.contains("pending")) {
+        if RE_RSPEC_SUMMARY.is_match(t) {
             return format!("RSpec: {}", t);
         }
     }
@@ -601,6 +626,87 @@ mod tests {
         assert!(result.contains("user_spec.rb:10"));
         assert!(result.contains("ExpectationNotMetError"));
         assert!(result.contains("expected true but got false"));
+    }
+
+    fn compact_json(json: &str) -> String {
+        let value: serde_json::Value = serde_json::from_str(json).expect("valid RSpec fixture");
+        serde_json::to_string(&value).expect("serialize RSpec fixture")
+    }
+
+    #[test]
+    fn test_filter_rspec_json_after_suite_output() {
+        for json in [all_pass_json(), with_failures_json(), with_pending_json()] {
+            let report = compact_json(json);
+            for prefix in [
+                "[some-gem] WARNING! printed from a before(:suite) hook\n",
+                "\x1b[33m[rspec-sidekiq] WARNING! Jobs will not run\x1b[0m\r\n",
+                "Running via Spring preloader in process 12345\n",
+                "DEPRECATION WARNING: old API\n",
+            ] {
+                let input = format!("{prefix}{report}");
+                assert_eq!(filter_rspec_output(&input), filter_rspec_output(json));
+            }
+        }
+    }
+
+    #[test]
+    fn test_filter_rspec_json_before_exit_output() {
+        for json in [all_pass_json(), with_failures_json(), with_pending_json()] {
+            let report = compact_json(json);
+            for suffix in [
+                "Coverage report generated for RSpec to ./coverage. 10 / 20 LOC (50.0%) covered.\n",
+                "[some-gem] finished cleaning up\n",
+                "\n[at_exit] cleanup finished\n",
+            ] {
+                let input = format!("{report}{suffix}");
+                assert_eq!(filter_rspec_output(&input), filter_rspec_output(json));
+            }
+        }
+    }
+
+    #[test]
+    fn test_filter_rspec_json_after_unrelated_json() {
+        let report = compact_json(with_failures_json());
+        let input = format!(
+            "[some-gem] options {{not JSON}}\n{{\"level\":\"warn\",\"details\":{{\"retry\":false}}}}\n{report}Coverage report generated for RSpec\n"
+        );
+        assert_eq!(
+            filter_rspec_output(&input),
+            filter_rspec_output(with_failures_json())
+        );
+    }
+
+    #[test]
+    fn test_filter_rspec_text_does_not_treat_json_as_a_summary() {
+        let report = compact_json(all_pass_json());
+        assert_eq!(filter_rspec_text(&report), report);
+
+        let input = format!("{report}\n3 examples, 1 failure, 1 pending\n");
+        assert_eq!(
+            filter_rspec_text(&input),
+            "RSpec: 3 examples, 1 failure, 1 pending"
+        );
+    }
+
+    #[test]
+    fn test_filter_rspec_captured_suite_and_exit_output() {
+        // RSpec 3.13.6: a before(:suite) warning and at_exit coverage output.
+        let input = include_str!("../../../tests/fixtures/rspec_suite_and_exit_output.txt");
+        let output = filter_rspec_output(input);
+        assert_eq!(
+            output,
+            concat!(
+                "RSpec: 2 passed, 1 failed (0.00s)\n\nFailures:\n",
+                "1. ✗ math multiplies\n   ./spec/math_spec.rb:5\n",
+                "   ExpectationNotMetError: \n",
+                "   ./spec/math_spec.rb:5:in `block (2 levels) in <top (required)>'"
+            )
+        );
+        let savings = 100.0 - count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0;
+        assert!(
+            savings >= 20.0,
+            "expected at least 20% savings, got {savings:.1}%"
+        );
     }
 
     #[test]
