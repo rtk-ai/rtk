@@ -53,6 +53,7 @@ rtk-engine = { path = "engine", optional = true }
 rtk-plugin = { path = "plugin", optional = true }
 rtk-text = { path = "text" }
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 anyhow = "1.0"
 # Console code page decoding for child-process output. Kept off the
 # cfg(windows) target so the mapping and the incremental UTF-8 walk stay
