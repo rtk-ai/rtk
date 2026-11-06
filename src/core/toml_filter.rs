@@ -1575,6 +1575,24 @@ make[1]: Leaving directory '/home/user/project/docs'
     }
 
     #[test]
+    fn test_make_keeps_the_error_at_the_end_of_a_long_build() {
+        let filters = make_filters(BUILTIN_TOML);
+        let filter = find_filter_in("make", &filters).expect("make built-in");
+        // Last 120 lines of a failing Buildroot build: kernel module install, then a compile error.
+        let input = include_str!("../../tests/fixtures/make_buildroot_fail_compile_raw.txt");
+
+        let out = apply_filter(filter, input);
+
+        assert!(out.starts_with("... ("), "the cut must be marked: {out}");
+        assert!(out.contains("rtk-fail-compile.c:7:9: error: ‘count’ undeclared"));
+        assert!(out.ends_with("make: *** [Makefile:23: _all] Error 2"));
+        assert!(
+            !out.contains("l2tp_ip.ko.xz"),
+            "the head of the build is dropped"
+        );
+    }
+
+    #[test]
     fn test_spring_boot_match_command_requires_spring_named_jar() {
         let filters = make_filters(BUILTIN_TOML);
         let spring_boot = filters
