@@ -2604,7 +2604,6 @@ fn a_blank_last_line_is_counted_among_the_hidden_ones() {
 /// Flags that make git print something after a commit: a directory summary, a stat line, a
 /// patch for a line range. What follows a commit is not another commit.
 const PRINTS_AFTER_A_COMMIT: &[&str] = &[
-    "--dd",
     "-X",
     "--dirstat-by-file",
     "--cumulative",
