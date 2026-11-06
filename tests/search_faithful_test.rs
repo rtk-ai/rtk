@@ -418,3 +418,31 @@ fn rg_surfaces_regex_error_not_silent_zero() {
         "an rg regex parse error must surface as exit 2, not a silent 0/1"
     );
 }
+
+// --- directory errors: one folded line, not one per directory ---
+
+#[test]
+fn grep_folds_is_a_directory_errors_into_one_line() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(tmp.path().join("a.txt"), "needle\n").expect("write a.txt");
+    for d in ["d1", "d2", "d3"] {
+        std::fs::create_dir(tmp.path().join(d)).expect("mkdir");
+    }
+    let out = rtk()
+        .args(["grep", "needle", "a.txt", "d1", "d2", "d3"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("run rtk grep");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stdout.contains("needle"), "match must survive:\n{stdout}");
+    assert!(
+        stderr.contains("grep: 3 dirs not searched (no -r): d1, d2, d3"),
+        "directory errors must fold into one line:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.lines().count(),
+        1,
+        "no per-directory line may remain:\n{stderr}"
+    );
+}
