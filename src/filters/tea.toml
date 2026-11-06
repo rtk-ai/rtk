@@ -1,0 +1,29 @@
+[filters.tea]
+description = "Compact Gitea tea CLI output: drop glamour padding and box-drawing table borders"
+match_command = "^tea(?:\\s|$)"
+strip_ansi = true
+replace = [
+  { pattern = "\\s+$", replacement = "" },        # glamour pads every line to terminal width
+  { pattern = "^  ", replacement = "" },          # glamour body indent
+  { pattern = "\\s*│\\s*", replacement = "|" },    # table cell separators and column padding
+  { pattern = "^\\||\\|$", replacement = "" },
+]
+strip_lines_matching = [
+  "^\\s*$",
+  "^[┌├└][─┬┼┴┐┤┘]+$",                           # table borders
+]
+
+[[tests.tea]]
+name = "issue list table collapses to pipe rows"
+input = "┌───────┬───────┬─────────────┐\n│ INDEX │ TITLE │   LABELS    │\n├───────┼───────┼─────────────┤\n│ 75    │ Foo   │ \u001b[94menhancement\u001b[0m │\n│ 74    │ Bar   │             │\n└───────┴───────┴─────────────┘"
+expected = "INDEX|TITLE|LABELS\n75|Foo|enhancement\n74|Bar|"
+
+[[tests.tea]]
+name = "issue detail drops padding and blank lines, keeps nested indent"
+input = "  # #76 title (closed)          \n                               \n  @user created 2026-10-09       \n\n  ## Problem                     \n    code line                    "
+expected = "# #76 title (closed)\n@user created 2026-10-09\n## Problem\n  code line"
+
+[[tests.tea]]
+name = "plain one-line output passes through"
+input = "https://gitea.example.com/owner/repo/issues/12"
+expected = "https://gitea.example.com/owner/repo/issues/12"
