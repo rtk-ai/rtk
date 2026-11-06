@@ -113,12 +113,13 @@ fn run_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
 /// pass reads it: without that, `run -p scan src/` took its pattern for the `scan` subcommand
 /// and gave up the filter entirely.
 ///
-/// Short of that first positional being `run`, the line is not identified -- an option this
-/// module does not know may have claimed the real subcommand's place -- and any of the other
-/// names then disqualifies it, wherever it sits among the free positionals before `--`. That
-/// costs a pattern or a path spelled like a subcommand, which is compression; reading `lsp` as
-/// a `run` hands an editor a closed stdin, which is correctness, and RTK's priority order
-/// picks correctness.
+/// ast-grep only ever reads that first positional as a subcommand; everything after is a
+/// pattern or a path, so only the first is looked at. That is safe because the options that
+/// may precede a subcommand are known exactly (see `global_takes_value`): nothing but `-c`
+/// can put a value ahead of it, so the first free positional is the subcommand slot and not
+/// an option's value. A later `test/` or `scan/` directory therefore still filters. When the
+/// first positional is a known non-`run` subcommand, the filter stands down: `scan`'s
+/// diagnostics are a different shape, and `lsp` speaks a protocol over stdin.
 fn filters_this_invocation(args: &[String]) -> bool {
     let global_tokens =
         arg_tokenizer::tokenize_grammar(args, &global_takes_value, arg_tokenizer::Dialect::Posix);
@@ -128,9 +129,10 @@ fn filters_this_invocation(args: &[String]) -> bool {
         .map(|t| t.text)
         .collect();
 
-    let identified_as_run = positionals.first() == Some(&"run");
-    if !identified_as_run && positionals.iter().any(|n| OTHER_SUBCOMMANDS.contains(n)) {
-        return false;
+    if let Some(first) = positionals.first() {
+        if *first != "run" && OTHER_SUBCOMMANDS.contains(first) {
+            return false;
+        }
     }
 
     // Two runs have to reach the terminal as they happen. `--stdin` reads the source from the
@@ -646,24 +648,42 @@ b.rs:3:eight
         ])));
     }
 
-    /// A subcommand sitting behind a flag whose arity RTK does not know would land in first
-    /// position and read as `run` -- handing an editor a closed stdin again.
+    /// ast-grep only ever reads the first positional as a subcommand. A later path
+    /// named like `test`/`scan`/`new` is a search path, not a subcommand, so an
+    /// implicit `run` must still filter.
+    #[test]
+    fn test_implicit_run_later_path_named_like_subcommand_still_filters() {
+        for path in ["test", "scan", "new"] {
+            assert!(
+                filters_this_invocation(&args(&["-p", "$A", "src", path])),
+                "implicit run with path {path}"
+            );
+        }
+        // Real subcommands as the first positional still stand the filter down.
+        for sub in ["test", "scan", "lsp"] {
+            assert!(!filters_this_invocation(&args(&[sub])), "{sub}");
+        }
+        // Explicit `run` with the same path args is unchanged.
+        assert!(filters_this_invocation(&args(&[
+            "run", "-p", "$A", "src", "test"
+        ])));
+        assert!(filters_this_invocation(&args(&["run", "-p", "$A", "src"])));
+    }
+
+    /// A flag the global table does not list is read as taking no value, so a subcommand right
+    /// behind it lands in first position and is still a subcommand. Only the first positional is
+    /// looked at: ast-grep rejects every option but `-c` ahead of a subcommand, so nothing else
+    /// can put a value in front of it.
     #[test]
     fn test_a_subcommand_behind_any_flag_is_still_a_subcommand() {
-        for flag in [
-            "--color",
-            "--heading",
-            "--no-ignore",
-            "--globs",
-            "--threads",
-        ] {
+        for flag in ["--heading", "--no-ignore", "--globs", "--threads"] {
             assert!(
-                !filters_this_invocation(&args(&[flag, "always", "lsp"])),
-                "{flag}"
+                !filters_this_invocation(&args(&[flag, "lsp"])),
+                "{flag} lsp"
             );
             assert!(
-                !filters_this_invocation(&args(&[flag, "always", "scan"])),
-                "{flag}"
+                !filters_this_invocation(&args(&[flag, "scan"])),
+                "{flag} scan"
             );
         }
     }
