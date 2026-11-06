@@ -747,6 +747,47 @@ pub fn run(
     let reads_piped_stdin =
         stdin_is_readable() && (paths.is_empty() || paths.iter().any(|path| path == "-"));
 
+    // A recursive grep searches what the ignore rules leave: the agent's operands become the
+    // walked ones, and every later run of the engine, verbatim passthrough included, uses them.
+    let walked = if detected_flags.recursive && !reads_piped_stdin {
+        let follow = arg_tokenizer::before_dashdash(&help_tokens)
+            .iter()
+            .any(|t| {
+                (t.kind == TokenKind::Short && t.text == "R")
+                    || (t.kind == TokenKind::Long && t.text == "dereference-recursive")
+            });
+        ignore_walk(&paths, follow)
+    } else {
+        None
+    };
+    let walked_args: Vec<String>;
+    let (paths, args) = match walked {
+        Some((operands, skipped)) => {
+            if skipped > 0 {
+                eprintln!(
+                    "[rtk] {} paths skipped by ignore rules; to search them: rtk bypass {}",
+                    skipped, real_cmd
+                );
+            }
+            if operands.is_empty() {
+                timer.track(&real_cmd, &rtk_label, "", "");
+                return Ok(1);
+            }
+            let mut rebuilt = extra_args.clone();
+            if detected_flags.show_file == Some(false) {
+                rebuilt.push("-h".to_string());
+            }
+            for p in &patterns {
+                rebuilt.extend(["-e".to_string(), p.clone()]);
+            }
+            rebuilt.push("--".to_string());
+            rebuilt.extend(operands.iter().cloned());
+            walked_args = rebuilt;
+            (operands, &walked_args)
+        }
+        None => (paths, args),
+    };
+
     // format/shape flags (-c/-l/-o/...): already-minimal native output, passthrough.
     if extra_args_has_format_flag {
         let fold = is_bare_file_list(engine, args);
@@ -934,6 +975,100 @@ pub fn run(
     timer.track(&real_cmd, &rtk_label, &raw_output, &output);
 
     Ok(exit_code)
+}
+
+/// Version-control directories Claude Code's own `grep` never descends into.
+const VCS_DIRS: &[&str] = &[".git", ".svn", ".hg", ".bzr", ".jj", ".sl"];
+
+/// Walks a recursive grep's operands with the ignore files `rtk find` reads, keeping hidden
+/// files and skipping [`VCS_DIRS`], and returns the operands that reach only what the walk kept
+/// plus the count of ignored paths. A directory with nothing skipped under it stays one
+/// operand, so grep's own `--exclude-dir` still applies there; a named operand is always
+/// searched, even when ignored. No path means grep's `.`, shown without the `./` prefix.
+/// `None` when nothing was skipped (or a path is not UTF-8): the operands stay as typed.
+fn ignore_walk(paths: &[String], follow_links: bool) -> Option<(Vec<String>, usize)> {
+    use std::path::{Path, PathBuf};
+
+    fn expand(
+        dir: &Path,
+        children: &HashMap<PathBuf, Vec<ignore::DirEntry>>,
+        follow_links: bool,
+        skipped: &mut usize,
+    ) -> Option<Vec<PathBuf>> {
+        let kids = children.get(dir).map(Vec::as_slice).unwrap_or_default();
+        let (mut vcs, mut on_disk) = (0usize, 0usize);
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            on_disk += 1;
+            if VCS_DIRS.iter().any(|v| entry.file_name() == *v) {
+                vcs += 1;
+            }
+        }
+        let ignored = on_disk.saturating_sub(kids.len() + vcs);
+        *skipped += ignored;
+        let mut dirty = ignored + vcs > 0;
+        let mut operands = Vec::new();
+        for kid in kids {
+            if kid.file_type().is_some_and(|t| t.is_dir()) {
+                match expand(kid.path(), children, follow_links, skipped) {
+                    Some(inner) => {
+                        dirty = true;
+                        operands.extend(inner);
+                    }
+                    None => operands.push(kid.path().to_path_buf()),
+                }
+            } else if follow_links || !kid.path_is_symlink() {
+                // `grep -r` skips the symlinks it meets but follows one named as an operand.
+                operands.push(kid.path().to_path_buf());
+            }
+        }
+        dirty.then_some(operands)
+    }
+
+    let no_operand = paths.is_empty();
+    let roots = if no_operand {
+        vec![".".to_string()]
+    } else {
+        paths.to_vec()
+    };
+    let mut operands = Vec::new();
+    let mut skipped = 0;
+    let mut changed = false;
+    for root in roots {
+        if !Path::new(&root).is_dir() {
+            operands.push(root);
+            continue;
+        }
+        let mut children: HashMap<PathBuf, Vec<ignore::DirEntry>> = HashMap::new();
+        let walk = ignore::WalkBuilder::new(&root)
+            .hidden(false)
+            .follow_links(follow_links)
+            .filter_entry(|e| !VCS_DIRS.iter().any(|v| e.file_name() == *v))
+            .build();
+        for entry in walk.flatten().filter(|e| e.depth() > 0) {
+            if let Some(parent) = entry.path().parent() {
+                children
+                    .entry(parent.to_path_buf())
+                    .or_default()
+                    .push(entry);
+            }
+        }
+        match expand(Path::new(&root), &children, follow_links, &mut skipped) {
+            Some(inner) => {
+                changed = true;
+                for path in inner {
+                    let path = path.to_str()?;
+                    let shown = if no_operand {
+                        path.strip_prefix("./").unwrap_or(path)
+                    } else {
+                        path
+                    };
+                    operands.push(shown.to_string());
+                }
+            }
+            None => operands.push(root),
+        }
+    }
+    changed.then_some((operands, skipped))
 }
 
 /// Parses a single rg/grep match or context line of the form `file\0line_number[:-]content`.
