@@ -7,6 +7,34 @@ use crate::hooks::constants::{
 };
 use std::path::Component;
 
+/// True when any artifact `rtk init --codex` writes is present.
+///
+/// Used by the default `rtk init -g --uninstall` so it can clean Codex without
+/// printing a "nothing to remove" block for every user who never configured
+/// it (#1450).
+pub(super) fn codex_artifacts_present(global: bool) -> bool {
+    let (agents_md, rtk_md, hooks_json) = if global {
+        let Ok(codex_dir) = resolve_codex_dir() else {
+            return false;
+        };
+        (
+            codex_dir.join(AGENTS_MD),
+            codex_dir.join(RTK_MD),
+            codex_dir.join(HOOKS_JSON),
+        )
+    } else {
+        (
+            user_dirs::in_working_dir(AGENTS_MD),
+            user_dirs::in_working_dir(RTK_MD),
+            user_dirs::in_working_dir(CODEX_DIR).join(HOOKS_JSON),
+        )
+    };
+
+    rtk_md.exists()
+        || hooks_json.exists()
+        || fs::read_to_string(&agents_md).is_ok_and(|content| content.contains(RTK_MD_REF))
+}
+
 /// The line that says an `RTK.md` is RTK's to rewrite and to remove.
 ///
 /// `--codex` is the one mode whose `RTK.md` sits at the project root, next to the user's own
@@ -536,7 +564,17 @@ fn codex_uninstall_report(
     report
 }
 
-fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+/// Removals the default `rtk init -g --uninstall` folds into its own report,
+/// without printing a second Codex block.
+pub(super) fn uninstall_codex_removals(global: bool, ctx: InitContext) -> Result<Vec<String>> {
+    if !global {
+        return Ok(Vec::new());
+    }
+    let codex_dir = resolve_codex_dir()?;
+    uninstall_codex_at(&codex_dir, ctx)
+}
+
+pub(super) fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
     let absolute_rtk_md_ref = codex_rtk_md_ref(codex_dir);
     uninstall_codex_with_paths(
         &codex_dir.join(AGENTS_MD),
