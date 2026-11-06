@@ -1,0 +1,17 @@
+Progress: resolved 1, reused 0, downloaded 0, added 0
+ ERR_PNPM_FETCH_404  GET https://registry.npmjs.org/@ferr079-nope%2Fpkg-zz: Not Found - 404
+
+This error happened while installing a direct dependency of /project
+
+@ferr079-nope/pkg-zz is not in the npm registry, or you have no permission to fetch it.
+
+No authorization header was set for the request.
+
+   ╭──────────────────────────────────────────────────────────────────────╮
+   │                                                                      │
+   │                 Update available! 10.34.9 → 12.16.1.                 │
+   │                 Changelog: https://pnpm.io/v/12.16.1                 │
+   │   To update, run: curl -fsSL https://get.pnpm.io/install.sh | sh -   │
+   │                                                                      │
+   ╰──────────────────────────────────────────────────────────────────────╯
+
