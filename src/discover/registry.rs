@@ -1756,7 +1756,8 @@ pub(crate) fn chain_mentions_excluded(cmd: &str, excluded: &[String]) -> bool {
             || words
                 .char_indices()
                 .filter(|&(i, c)| {
-                    !c.is_whitespace() && (i == 0 || words[..i].ends_with(char::is_whitespace))
+                    !c.is_whitespace()
+                        && (i == 0 || words[..i].ends_with(|p: char| p.is_whitespace() || p == '/'))
                 })
                 .any(|(i, _)| is_excluded(&words[i..], &compiled))
     })

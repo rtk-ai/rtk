@@ -585,6 +585,23 @@ mod tests {
     }
 
     #[test]
+    fn an_excluded_command_called_by_path_is_not_swapped() {
+        let excluded = vec!["curl".to_string(), "terraform".to_string()];
+        for cmd in [
+            "/usr/bin/curl -s a",
+            "./node_modules/.bin/terraform plan",
+            "python3 -c 1 | /usr/bin/curl -s a",
+            "env X=1 /usr/bin/curl -s a",
+        ] {
+            assert!(!decide(cmd, PermissionVerdict::Default, &excluded), "{cmd}");
+            assert!(decide(cmd, PermissionVerdict::Default, &[]), "{cmd}");
+        }
+        for cmd in ["python3 tools/curl/run.py", "/usr/bin/curlie -s a"] {
+            assert!(decide(cmd, PermissionVerdict::Default, &excluded), "{cmd}");
+        }
+    }
+
+    #[test]
     fn an_rtk_command_anywhere_in_the_line_is_not_swapped() {
         for cmd in [
             "rtk bypass ./run-suite.sh | ./lint.sh",
