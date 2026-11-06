@@ -26,6 +26,8 @@ enum ParseState {
     Header,
     TestProgress,
     Failures,
+    CapturedReports,
+    Durations,
     Summary,
 }
 
@@ -124,9 +126,16 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
     let mut current_failure: Vec<String> = Vec::new();
     let mut xfail_lines: Vec<String> = Vec::new();
     let mut summary_line = String::new();
+    let mut duration_report = Vec::new();
 
     for line in output.lines() {
         let trimmed = line.trim();
+        let section = trimmed.trim_matches('=').trim();
+        let is_durations = section == "slowest durations"
+            || section
+                .strip_prefix("slowest ")
+                .and_then(|rest| rest.strip_suffix(" durations"))
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()));
 
         // State transitions
         if trimmed.starts_with("===") && trimmed.contains("test session starts") {
@@ -134,17 +143,25 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             continue;
         // pytest prints setup/teardown/collection errors in an ERRORS section
         // shaped like FAILURES, so both feed the same failure blocks.
-        } else if trimmed.starts_with("===")
-            && (trimmed.contains("FAILURES") || trimmed.contains("ERRORS"))
-        {
+        } else if trimmed.starts_with("===") && matches!(section, "FAILURES" | "ERRORS") {
             state = ParseState::Failures;
             if !current_failure.is_empty() {
                 failures.push(current_failure.join("\n"));
                 current_failure.clear();
             }
             continue;
-        } else if trimmed.starts_with("===") && trimmed.contains("short test summary") {
-            state = ParseState::Summary;
+        } else if trimmed.starts_with("===")
+            && (is_durations
+                || matches!(section, "short test summary info" | "XPASSES" | "XFAILURES"))
+        {
+            state = if section == "short test summary info" {
+                ParseState::Summary
+            } else if is_durations {
+                duration_report.push(line.trim_end());
+                ParseState::Durations
+            } else {
+                ParseState::CapturedReports
+            };
             // Save current failure if any
             if !current_failure.is_empty() {
                 failures.push(current_failure.join("\n"));
@@ -193,6 +210,12 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                     current_failure.push(line.trim_end().to_string());
                 }
             }
+            ParseState::CapturedReports => {}
+            ParseState::Durations => {
+                if !trimmed.is_empty() {
+                    duration_report.push(line.trim_end());
+                }
+            }
             ParseState::Summary => {
                 // FAILED test lines
                 if trimmed.starts_with("FAILED") || trimmed.starts_with("ERROR") {
@@ -210,7 +233,13 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
     }
 
     // Build compact output
-    build_pytest_summary(&summary_line, &test_files, &failures, &xfail_lines)
+    let mut result = build_pytest_summary(&summary_line, &test_files, &failures, &xfail_lines);
+    // --durations explicitly requests these rows; preserve them outside failure details.
+    if !duration_report.is_empty() {
+        result.push_str("\n\n");
+        result.push_str(&duration_report.join("\n"));
+    }
+    result
 }
 
 #[derive(Default)]
@@ -486,6 +515,70 @@ fn parse_duration(summary: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_expected_outcome_sections_do_not_create_failures() {
+        for section in ["XPASSES", "XFAILURES"] {
+            let output = format!(
+                "=== FAILURES ===\n___ test_real ___\nE REAL_FAILURE\n=== {section} ===\n___ test_report_only ___\nE REPORT_DETAIL\n=== short test summary info ===\nXFAIL test_report.py::test_expected - known bug\nXPASS test_report.py::test_fixed - already fixed\n=== 1 failed, 1 xfailed, 1 xpassed in 0.01s ==="
+            );
+            let result = filter_pytest_output(&output);
+            assert!(result.contains("[FAIL] test_real"), "{section}: {result}");
+            assert!(result.contains("E REAL_FAILURE"), "{section}: {result}");
+            assert!(!result.contains("test_report_only"), "{section}: {result}");
+            assert!(!result.contains("REPORT_DETAIL"), "{section}: {result}");
+            assert!(
+                result.contains("XFAIL test_report.py::test_expected"),
+                "{result}"
+            );
+            assert!(
+                result.contains("XPASS test_report.py::test_fixed"),
+                "{result}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_duration_reports_stay_outside_failure_blocks() {
+        for section in [
+            "slowest durations",
+            "slowest 1 durations",
+            "slowest 20 durations",
+        ] {
+            let report = format!("=== {section} ===\n0.02s call     test_d.py::test_key");
+            let output = format!(
+                "=== FAILURES ===\n___ test_key ___\ntest_d.py:5: in test_key\nE KeyError: 'a'\n{report}\n=== short test summary info ===\nXFAIL test_d.py::test_expected - known bug\n=== 1 failed, 1 xfailed in 0.03s ==="
+            );
+            let result = filter_pytest_output(&output);
+            assert!(result.contains("[FAIL] test_key"), "{result}");
+            assert!(result.contains("     test_d.py:5: in test_key"), "{result}");
+            assert!(result.contains("     E KeyError: 'a'"), "{result}");
+            assert!(result.ends_with(&report), "{result}");
+            assert!(!result.contains("     0.02s call"), "{result}");
+            assert!(
+                result.contains("XFAIL test_d.py::test_expected"),
+                "{result}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_application_banners_keep_later_failures() {
+        for banner in [
+            "application diagnostics",
+            "slowest application durations",
+            "slowest 1 durations extra",
+        ] {
+            let output = format!(
+                "=== FAILURES ===\n___ test_first ___\nE FIRST_FAILURE\n=== {banner} ===\n___ test_second ___\nE SECOND_FAILURE\n=== 2 failed in 0.01s ==="
+            );
+            let result = filter_pytest_output(&output);
+            assert!(result.contains("[FAIL] test_first"), "{result}");
+            assert!(result.contains("[FAIL] test_second"), "{result}");
+            assert!(result.contains("E FIRST_FAILURE"), "{result}");
+            assert!(result.contains("E SECOND_FAILURE"), "{result}");
+        }
+    }
 
     #[test]
     fn test_filter_pytest_all_pass() {
@@ -1307,7 +1400,11 @@ Failures:
 1. [FAIL] test_slow
      test_du.py:6: in test_slow
      E   AssertionError: slow fail
-     E   assert 1 == 2"#
+     E   assert 1 == 2
+
+============================= slowest 2 durations ==============================
+0.03s call     test_du.py::test_slow
+0.00s teardown test_du.py::test_slow"#
         );
     }
 

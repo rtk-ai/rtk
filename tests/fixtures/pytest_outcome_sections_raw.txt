@@ -1,0 +1,20 @@
+FxX.                                                                                         [100%]
+============================================= FAILURES =============================================
+_____________________________________________ test_key _____________________________________________
+test_reports.py:6: in test_key
+    return {}["REAL_KEY_FAILURE"]
+           ^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'REAL_KEY_FAILURE'
+============================================ XFAILURES =============================================
+_____________________________________________ test_xf ______________________________________________
+test_reports.py:10: in test_xf
+    raise ValueError("EXPECTED_XFAIL_DETAIL")
+E   ValueError: EXPECTED_XFAIL_DETAIL
+============================================= XPASSES ==============================================
+_____________________________________________ test_xp ______________________________________________
+--------------------------------------- Captured stdout call ---------------------------------------
+CAPTURED_XPASS_OUTPUT
+===================================== short test summary info ======================================
+XFAIL test_reports.py::test_xf - known issue
+XPASS test_reports.py::test_xp - already fixed
+1 failed, 1 passed, 1 xfailed, 1 xpassed in 0.03s
