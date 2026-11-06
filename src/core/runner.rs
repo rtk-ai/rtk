@@ -467,6 +467,7 @@ fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
                 ("cargo", "test" | "bench" | "run" | "nextest")
                     | ("go", "test" | "run")
                     | ("uv", "run")
+                    | ("poetry", "run")
                     | ("npm" | "pnpm" | "yarn" | "bun", "run" | "exec" | "test")
             ),
         whole_arg: if stem == "go" { &["-help"] } else { &[] },
@@ -1822,6 +1823,9 @@ mod requests_help_tests {
         assert!(asks("cargo", &["test", "--", "--help"]));
         assert!(asks("cargo", &["test", "--", "-h"]));
         assert!(asks("uv", &["run", "--", "pytest", "--help"]));
+        assert!(asks("poetry", &["run", "--", "pytest", "--help"]));
+        assert!(asks("poetry", &["run", "pytest", "--version"]));
+        assert!(asks("poetry", &["run", "ruff", "--help"]));
         assert!(asks("go", &["test", "--", "-h"]));
         assert!(asks("npx", &["--no-install", "--", "tsc", "--help"]));
 
