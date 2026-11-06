@@ -59,9 +59,14 @@ The permission gate, discover/analytics classification, and rewrite each segment
 
 ## How History Analysis Works
 
-`rtk discover` reads Claude Code JSONL session files. Each file contains `tool_use`/`tool_result` pairs for every command the LLM ran. The module:
+`rtk discover` reads session history through the `SessionProvider` trait, which abstracts over where an agent keeps its transcripts:
 
-1. Extracts commands from the JSONL (via `SessionProvider` trait — currently only Claude Code)
+- **`ClaudeProvider`** (`provider.rs`) — Claude Code JSONL files under `~/.claude/projects`. Each file contains `tool_use`/`tool_result` pairs for every command the LLM ran.
+- **`OpenCodeProvider`** (`opencode_provider.rs`) — OpenCode's SQLite store (`$XDG_DATA_HOME/opencode/opencode.db`). Two storage generations exist: OpenCode 2.x writes `session_v2`/`session_message` (tool calls nested in each message's `content[]`) and migrates 1.x history into them; 1.x wrote `session`/`part`. The provider probes `sqlite_master` and reads the v2 tables when present (the migrated superset), else falls back to the 1.x tables — a store is always scanned once, from the tables the installed OpenCode actually writes to. Shell calls are extracted with `json_extract`. Verified against OpenCode 1.19.0 (legacy) and 2.0.32 (v2). Access is strictly read-only: a missing store stays silent, a corrupt or locked one warns "provider unavailable" and skips that provider — rtk never recovers or writes another application's database.
+
+`rtk discover --agent claude|opencode|all` picks providers explicitly; the default scans every provider whose storage exists. Coverage (the hook-decision log) is Claude-only — OpenCode calls never pass through rtk's hook, so the report notes that coverage is not measured for those sessions instead of guessing. The module:
+
+1. Extracts commands from each provider's store
 2. Splits compound commands using the same lexer-based tokenization
 3. Classifies each command against the same rules used for live rewriting
 4. Aggregates results: which commands could have been rewritten, estimated token savings, adoption rate

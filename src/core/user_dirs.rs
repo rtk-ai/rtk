@@ -72,6 +72,24 @@ pub fn config() -> Option<PathBuf> {
     }
 }
 
+/// The user's local data directory (`$XDG_DATA_HOME`, falling back to
+/// `~/.local/share`), where third-party tools keep their stores — OpenCode's
+/// `opencode/opencode.db` hangs off this. Unlike [`data`], this is not rtk's
+/// own directory; rtk only ever reads such stores, never writes them.
+///
+/// In a test build it is `test_isolation::root`, so a test build never
+/// resolves a developer's third-party store.
+pub fn data_local() -> Option<PathBuf> {
+    #[cfg(not(test))]
+    {
+        dirs::data_local_dir()
+    }
+    #[cfg(test)]
+    {
+        Some(test_isolation::root())
+    }
+}
+
 /// The user's home directory, the root every agent's own config directory hangs
 /// off (`~/.claude`, `~/.cursor`, `~/.config/opencode`, …).
 ///
