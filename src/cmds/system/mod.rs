@@ -5,6 +5,7 @@ pub mod deps;
 pub mod env_cmd;
 pub mod find_cmd;
 pub mod format_cmd;
+pub mod gci;
 pub mod json_cmd;
 pub mod local_llm;
 pub mod log_cmd;
