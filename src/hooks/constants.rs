@@ -113,6 +113,10 @@ pub const COPILOT_HOOK_FILE: &str = "rtk-rewrite.json";
 pub const COPILOT_INSTRUCTIONS_FILE: &str = "copilot-instructions.md";
 pub const COPILOT_USER_DIR: &str = ".copilot";
 pub const COPILOT_HOME_ENV: &str = "COPILOT_HOME";
+/// VS Code Copilot Chat reads user-level instructions from
+/// `~/.copilot/instructions/*.instructions.md`, not `~/.copilot/copilot-instructions.md`.
+pub const COPILOT_VSCODE_INSTRUCTIONS_SUBDIR: &str = "instructions";
+pub const COPILOT_VSCODE_INSTRUCTIONS_FILE: &str = "rtk.instructions.md";
 
 pub const PI_DIR: &str = ".pi/agent";
 pub const PI_LOCAL_DIR: &str = ".pi";

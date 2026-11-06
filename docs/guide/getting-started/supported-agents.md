@@ -111,7 +111,7 @@ rtk init --copilot            # project-scoped (.github/hooks/)
 rtk init --global --copilot   # user-scoped (~/.copilot/hooks/, respects $COPILOT_HOME)
 ```
 
-Project-scoped writes `.github/hooks/rtk-rewrite.json` — a single `PreToolUse` entry shared by both hosts, each getting transparent rewrite via `updatedInput` — plus the RTK block in `.github/copilot-instructions.md`. User-scoped writes the same hook config to `~/.copilot/hooks/rtk-rewrite.json` and the RTK block to `~/.copilot/copilot-instructions.md` (both respect `$COPILOT_HOME` if set).
+Project-scoped writes `.github/hooks/rtk-rewrite.json` — a single `PreToolUse` entry shared by both hosts, each getting transparent rewrite via `updatedInput` — plus the RTK block in `.github/copilot-instructions.md`. User-scoped writes the same hook config to `~/.copilot/hooks/rtk-rewrite.json`, the RTK block to `~/.copilot/copilot-instructions.md` (read by Copilot CLI), and `~/.copilot/instructions/rtk.instructions.md` with `applyTo: "**"` front matter (read by VS Code Copilot Chat, which ignores `~/.copilot/copilot-instructions.md`). All three respect `$COPILOT_HOME` if set.
 
 Earlier `rtk` versions also registered a second, camelCase `preToolUse` entry, which made Copilot CLI run the hook twice per tool call. Re-run `rtk init --copilot` (or `--global --copilot`) to upgrade an existing install to the single-hook config.
 
@@ -122,7 +122,7 @@ rtk init --uninstall --copilot
 rtk init --uninstall --global --copilot
 ```
 
-Removes only RTK's hook file (and, for project, the RTK block in `copilot-instructions.md`). Other files in `.github/hooks/` or `~/.copilot/hooks/` and your own instruction content are untouched.
+Removes only RTK's hook file, the RTK block in `copilot-instructions.md`, and (for global) `~/.copilot/instructions/rtk.instructions.md`. Other files in `.github/hooks/` or `~/.copilot/hooks/` and your own instruction content are untouched.
 
 ### Gemini CLI
 
