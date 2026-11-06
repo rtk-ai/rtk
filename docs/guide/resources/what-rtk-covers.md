@@ -38,6 +38,7 @@ listing into `head`, `tail`, or `cat`.
 | `gh pr view` | Removes ASCII art and verbose metadata |
 | `gh pr checks` | Status + name only, failures highlighted |
 | `gh run list` | Compact workflow run summary |
+| `gh run view --log` / `--log-failed` | Job log without the job/step/timestamp prefix on every line, colour or runner metadata; step output kept |
 | `gh issue view` | Body only, no decoration |
 
 ## Graphite (Stacked PRs)
