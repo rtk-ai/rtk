@@ -19,10 +19,15 @@
 bind = "127.0.0.1:8080"
 
 # Where each dialect's traffic is forwarded. Any API-compatible gateway works;
-# the request path is forwarded unchanged.
-# (env: RTK_PROXY_ANTHROPIC_UPSTREAM / RTK_PROXY_OPENAI_UPSTREAM)
+# the request path is forwarded unchanged for Anthropic. For OpenAI, the
+# forward path is `openai_path` (default `/v1/chat/completions`) — override it
+# for providers whose endpoint doesn't live under `/v1` (e.g. Z.AI's
+# `/chat/completions`).
+# (env: RTK_PROXY_ANTHROPIC_UPSTREAM / RTK_PROXY_OPENAI_UPSTREAM /
+#  RTK_PROXY_OPENAI_PATH)
 anthropic_upstream = "https://api.anthropic.com"
 openai_upstream = "https://api.openai.com"
+# openai_path = "/chat/completions"
 
 # CCR (Compress-Cache-Retrieve) — the one compression lever. Oversized tool
 # output is replaced by a preview + marker, the original is cached locally, and
