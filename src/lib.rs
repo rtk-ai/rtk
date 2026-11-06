@@ -1658,6 +1658,29 @@ enum CargoCommands {
     Other(Vec<OsString>),
 }
 
+/// Clap initially treats rustup's selector as an external subcommand. Parse the
+/// remaining Cargo invocation through the same CLI so known subcommands retain
+/// their filters and unknown ones retain their passthrough behavior.
+fn cargo_toolchain_command(command: CargoCommands) -> (Option<String>, CargoCommands) {
+    if let CargoCommands::Other(args) = &command
+        && args.len() > 1
+        && let Some(selector) = args[0]
+            .to_str()
+            .filter(|s| s.starts_with('+') && s.len() > 1)
+        && let Ok(cli) = try_parse_cli_from(
+            [OsString::from("rtk"), OsString::from("cargo")]
+                .into_iter()
+                .chain(args[1..].iter().cloned()),
+        )
+        && let Commands::Cargo { command } = cli.command
+    {
+        return (Some(selector.to_owned()), command);
+    }
+    // Flags before the subcommand (e.g. +stable --help) remain native Cargo
+    // invocations when the wrapper parser cannot represent them.
+    (None, command)
+}
+
 #[derive(Debug, Subcommand)]
 enum DotnetCommands {
     /// Build with compact output
@@ -3401,27 +3424,50 @@ fn run_cli() -> Result<i32> {
 
         Commands::Playwright { args } => playwright_cmd::run(&args, cli.verbose)?,
 
-        Commands::Cargo { command } => match command {
-            CargoCommands::Build { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Build, &args, cli.verbose)?
+        Commands::Cargo { command } => {
+            let (toolchain, command) = cargo_toolchain_command(command);
+            match command {
+                CargoCommands::Build { args } => cargo_cmd::run(
+                    cargo_cmd::CargoCommand::Build,
+                    toolchain.as_deref(),
+                    &args,
+                    cli.verbose,
+                )?,
+                CargoCommands::Test { args } => cargo_cmd::run(
+                    cargo_cmd::CargoCommand::Test,
+                    toolchain.as_deref(),
+                    &args,
+                    cli.verbose,
+                )?,
+                CargoCommands::Clippy { args } => cargo_cmd::run(
+                    cargo_cmd::CargoCommand::Clippy,
+                    toolchain.as_deref(),
+                    &args,
+                    cli.verbose,
+                )?,
+                CargoCommands::Check { args } => cargo_cmd::run(
+                    cargo_cmd::CargoCommand::Check,
+                    toolchain.as_deref(),
+                    &args,
+                    cli.verbose,
+                )?,
+                CargoCommands::Install { args } => cargo_cmd::run(
+                    cargo_cmd::CargoCommand::Install,
+                    toolchain.as_deref(),
+                    &args,
+                    cli.verbose,
+                )?,
+                CargoCommands::Nextest { args } => cargo_cmd::run(
+                    cargo_cmd::CargoCommand::Nextest,
+                    toolchain.as_deref(),
+                    &args,
+                    cli.verbose,
+                )?,
+                CargoCommands::Other(args) => {
+                    cargo_cmd::run_passthrough(toolchain.as_deref(), &args, cli.verbose)?
+                }
             }
-            CargoCommands::Test { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Test, &args, cli.verbose)?
-            }
-            CargoCommands::Clippy { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Clippy, &args, cli.verbose)?
-            }
-            CargoCommands::Check { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Check, &args, cli.verbose)?
-            }
-            CargoCommands::Install { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Install, &args, cli.verbose)?
-            }
-            CargoCommands::Nextest { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Nextest, &args, cli.verbose)?
-            }
-            CargoCommands::Other(args) => cargo_cmd::run_passthrough(&args, cli.verbose)?,
-        },
+        }
 
         Commands::Bun { command } => match command {
             BunCommands::Install { args } => bun_cmd::run_pkg("install", &args, cli.verbose)?,
@@ -4124,6 +4170,46 @@ mod tests {
     use super::*;
     use crate::core::test_isolation;
     use std::cell::Cell;
+
+    #[test]
+    fn test_cargo_toolchain_parsing() {
+        for selector in ["+stable", "+nightly", "+1.75.0"] {
+            let cli =
+                try_parse_cli_from(["rtk", "cargo", selector, "check", "-p", "demo"]).unwrap();
+            let Commands::Cargo { command } = cli.command else {
+                panic!("expected cargo")
+            };
+            let (toolchain, command) = cargo_toolchain_command(command);
+            assert_eq!(toolchain.as_deref(), Some(selector));
+            assert!(matches!(command, CargoCommands::Check { args } if args == ["-p", "demo"]));
+        }
+        for args in [
+            vec!["rtk", "cargo", "metadata"],
+            vec!["rtk", "cargo", "+stable", "metadata"],
+        ] {
+            let cli = try_parse_cli_from(args).unwrap();
+            let Commands::Cargo { command } = cli.command else {
+                panic!("expected cargo")
+            };
+            let (_, command) = cargo_toolchain_command(command);
+            assert!(
+                matches!(command, CargoCommands::Other(args) if args == [OsString::from("metadata")])
+            );
+        }
+    }
+
+    #[test]
+    fn test_cargo_toolchain_global_flags_stay_passthrough() {
+        let cli = try_parse_cli_from(["rtk", "cargo", "+stable", "--help"]).unwrap();
+        let Commands::Cargo { command } = cli.command else {
+            panic!("expected cargo")
+        };
+        let (toolchain, command) = cargo_toolchain_command(command);
+        assert!(toolchain.is_none());
+        assert!(
+            matches!(command, CargoCommands::Other(args) if args == [OsString::from("+stable"), OsString::from("--help")])
+        );
+    }
 
     #[test]
     fn test_jest_and_vitest_get_the_hook_integrity_check() {
