@@ -1271,44 +1271,29 @@ fn opencode_answer_for(cmd: &str, agent: Option<&str>) -> Value {
     opencode_answer(cmd, &rules)
 }
 
-/// Decide what the plugin should do with `cmd` under OpenCode's own rules.
-///
-/// OpenCode evaluates whatever command the plugin hands back against the
-/// user's permission rules itself, and from 1.1.4 on plugins cannot
-/// influence that verdict: there is no `permission.ask` plugin hook (1.0.142
-/// had one). So the one thing RTK must guarantee is that the rewrite never
-/// changes what those rules decide: whenever the verdict for `rtk <cmd>`
-/// differs from the verdict for `cmd` as typed, RTK steps aside and returns
-/// `{}`, trading token savings on that command for the user's own policy
-/// (#4195). An allow stays an allow, an ask stays a prompt, and a deny stays
-/// denied — RTK never blocks, lifts or silences anything.
+/// Render [`decision::decide_for_opencode_with_rules`] as the JSON object the
+/// OpenCode plugin consumes, recording recall and audit events on the way.
 fn opencode_answer(cmd: &str, rules: &[permissions_opencode::Rule]) -> Value {
     if cmd.trim().is_empty() {
         return json!({});
     }
-    let before = permissions_opencode::check_command_with_opencode_rules(cmd, rules);
-    // OpenCode re-evaluates its own patterns against whatever RTK returns, so
-    // the rule set read here is advisory rather than enforced — hence
-    // `Unattested`, and no fish script is wrapped for this host.
-    let rewritten = match decide_from_verdict(cmd, before, permissions::DenyRules::Unattested, None)
-    {
+    let decided = decision::decide_for_opencode_with_rules(cmd, rules);
+    if !matches!(decided, HookDecision::Deny) {
+        crate::hooks::rewrite_cmd::track_tee_read(cmd);
+    }
+    match decided {
         // OpenCode denies the typed command itself; a rewrite could only
         // un-match the deny rule.
         HookDecision::Deny => {
             audit_log("deny", cmd, "");
-            return json!({});
+            json!({})
         }
-        HookDecision::Defer => return json!({}),
-        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r, _) => r,
-    };
-
-    let after = permissions_opencode::check_command_with_opencode_rules(&rewritten, rules);
-    if before != after {
-        return json!({});
+        HookDecision::Defer => json!({}),
+        HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten, _) => {
+            audit_log("rewrite", cmd, &rewritten);
+            json!({ "command": rewritten })
+        }
     }
-
-    audit_log("rewrite", cmd, &rewritten);
-    json!({ "command": rewritten })
 }
 
 /// Run the Factory Droid PreToolUse hook natively.
