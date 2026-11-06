@@ -800,7 +800,23 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
             if policy.stop_at_pipe && matches!(tok.kind, TokenKind::Pipe(_)) {
                 return out;
             }
-            seg_start = tok.offset + tok.value.len();
+            let op_end = tok.offset + tok.value.len();
+            if tok.kind == TokenKind::Shellism
+                && tok.value == "&"
+                && let Some(bang) = tokens.get(i + 1)
+                && bang.kind == TokenKind::Shellism
+                && bang.value == "!"
+                && bang.offset == op_end
+            {
+                // `&!` is zsh's background-and-disown operator; bash and sh
+                // never run a glued `!cmd`, so stepping over the `!` exposes
+                // the command after `&!` to deny/ask rules regardless of
+                // whether a space follows the pair.
+                seg_start = bang.offset + bang.value.len();
+                i += 1;
+            } else {
+                seg_start = op_end;
+            }
             seg_has_text = false;
         } else if tok.kind == TokenKind::Redirect && policy.redirects != RedirectPolicy::Keep {
             if !seg_has_text {
@@ -2144,6 +2160,15 @@ mod tests {
             vec!["git status", "rm -rf ~"]
         );
         assert_eq!(split_for_permissions("sleep 1 &"), vec!["sleep 1"]);
+        assert_eq!(
+            split_for_permissions("git status &!rm -rf /tmp/example"),
+            vec!["git status", "rm -rf /tmp/example"]
+        );
+        assert_eq!(
+            split_for_permissions("git status &! rm -rf /tmp/example"),
+            vec!["git status", "rm -rf /tmp/example"]
+        );
+        assert_eq!(split_for_permissions("git status &!"), vec!["git status"]);
     }
 
     #[test]
