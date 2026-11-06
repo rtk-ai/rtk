@@ -1,0 +1,5 @@
+make[1]: Entering directory '/home/user/project'
+gcc -DHAVE_CONFIG_H -I. -I../include -O2 -Wall -c src/main.c -o src/main.o
+src/main.c:15:10: warning: unused parameter 'argc' [-Wunused-parameter]
+gcc -O2 -Wall -o myproject src/main.o libcore.a -lm -lpthread
+make[1]: Leaving directory '/home/user/project'
