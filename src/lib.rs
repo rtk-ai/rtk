@@ -135,7 +135,7 @@ struct GainArgs {
     /// Show all time breakdowns (daily + weekly + monthly)
     #[arg(short, long)]
     all: bool,
-    /// Output format: text, json, csv
+    /// Output format: text, json, jsonl (one line per tracked command), csv
     #[arg(short, long, default_value = "text")]
     format: String,
     /// Show parse failure log (commands that fell back to raw execution)
