@@ -153,66 +153,92 @@ fn format_single_line(line: &str, mode: &WcMode) -> String {
         }
         WcMode::Mixed => {
             // Strip file path, keep numbers only
-            if parts.len() >= 2 {
-                let last_is_path = parts.last().is_some_and(|p| p.parse::<u64>().is_err());
-                if last_is_path {
-                    parts[..parts.len() - 1].join(" ")
-                } else {
-                    parts.join(" ")
-                }
-            } else {
+            let (counts, _) = split_counts(line, mode);
+            if counts.is_empty() {
                 line.trim().to_string()
+            } else {
+                counts.join(" ")
             }
         }
     }
+}
+
+/// Number of count columns wc prints for a mode, when it is known.
+fn count_columns(mode: &WcMode) -> Option<usize> {
+    match mode {
+        WcMode::Lines | WcMode::Words | WcMode::Bytes | WcMode::Chars => Some(1),
+        WcMode::Full => Some(3),
+        WcMode::Mixed => None,
+    }
+}
+
+/// Split a wc output line into its leading counts and the file name.
+///
+/// wc prints the name after the counts verbatim, so a name may contain
+/// spaces and must be taken as the rest of the line, not the last token.
+fn split_counts<'a>(line: &'a str, mode: &WcMode) -> (Vec<&'a str>, &'a str) {
+    let max = count_columns(mode).unwrap_or(usize::MAX);
+    let mut counts = Vec::new();
+    let mut rest = line.trim_start();
+    while counts.len() < max && !rest.is_empty() {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let token = &rest[..end];
+        if token.parse::<u64>().is_err() {
+            break;
+        }
+        counts.push(token);
+        rest = rest[end..].trim_start();
+    }
+    (counts, rest)
 }
 
 /// Format multiple files as a compact table
 fn format_multi_line(lines: &[&str], mode: &WcMode) -> String {
     let mut result = Vec::new();
 
-    // Find common directory prefix to shorten paths
-    let paths: Vec<&str> = lines
+    let rows: Vec<(&str, Vec<&str>, &str)> = lines
         .iter()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            parts.last().copied()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let (counts, name) = split_counts(line, mode);
+            (*line, counts, name)
         })
-        .filter(|p| *p != "total")
+        .collect();
+
+    // Find common directory prefix to shorten paths
+    let paths: Vec<&str> = rows
+        .iter()
+        .map(|(_, _, name)| *name)
+        .filter(|name| !name.is_empty() && *name != "total")
         .collect();
 
     let common_prefix = find_common_prefix(&paths);
 
-    for line in lines {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() {
-            continue;
-        }
-
-        let is_total = parts.last().is_some_and(|p| *p == "total");
+    for (line, counts, name) in &rows {
+        let is_total = *name == "total";
 
         match mode {
             WcMode::Lines | WcMode::Words | WcMode::Bytes | WcMode::Chars => {
+                let count = counts.first().unwrap_or(&"0");
                 if is_total {
-                    result.push(format!("Σ {}", parts.first().unwrap_or(&"0")));
+                    result.push(format!("Σ {}", count));
                 } else {
-                    let name = strip_prefix(parts.last().unwrap_or(&""), &common_prefix);
-                    result.push(format!("{} {}", parts.first().unwrap_or(&"0"), name));
+                    result.push(format!("{} {}", count, strip_prefix(name, &common_prefix)));
                 }
             }
             WcMode::Full => {
                 if is_total {
                     result.push(format!(
                         "Σ {}L {}W {}B",
-                        parts.first().unwrap_or(&"0"),
-                        parts.get(1).unwrap_or(&"0"),
-                        parts.get(2).unwrap_or(&"0"),
+                        counts.first().unwrap_or(&"0"),
+                        counts.get(1).unwrap_or(&"0"),
+                        counts.get(2).unwrap_or(&"0"),
                     ));
-                } else if parts.len() >= 4 {
-                    let name = strip_prefix(parts[3], &common_prefix);
+                } else if counts.len() == 3 && !name.is_empty() {
+                    let name = strip_prefix(name, &common_prefix);
                     result.push(format!(
                         "{}L {}W {}B {}",
-                        parts[0], parts[1], parts[2], name
+                        counts[0], counts[1], counts[2], name
                     ));
                 } else {
                     result.push(line.trim().to_string());
@@ -220,19 +246,14 @@ fn format_multi_line(lines: &[&str], mode: &WcMode) -> String {
             }
             WcMode::Mixed => {
                 if is_total {
-                    let nums: Vec<&str> = parts[..parts.len() - 1].to_vec();
-                    result.push(format!("Σ {}", nums.join(" ")));
-                } else if parts.len() >= 2 {
-                    let last_is_path = parts.last().is_some_and(|p| p.parse::<u64>().is_err());
-                    if last_is_path {
-                        let name = strip_prefix(parts.last().unwrap_or(&""), &common_prefix);
-                        let nums: Vec<&str> = parts[..parts.len() - 1].to_vec();
-                        result.push(format!("{} {}", nums.join(" "), name));
-                    } else {
-                        result.push(parts.join(" "));
-                    }
-                } else {
+                    result.push(format!("Σ {}", counts.join(" ")));
+                } else if counts.is_empty() {
                     result.push(line.trim().to_string());
+                } else if name.is_empty() {
+                    result.push(counts.join(" "));
+                } else {
+                    let name = strip_prefix(name, &common_prefix);
+                    result.push(format!("{} {}", counts.join(" "), name));
                 }
             }
         }
@@ -335,6 +356,47 @@ mod tests {
             result,
             "30L 96W 978B main.rs\n50L 120W 1500B lib.rs\nΣ 80L 216W 2478B"
         );
+    }
+
+    #[test]
+    fn test_multi_file_lines_names_with_spaces() {
+        let raw = " 1 alpha report.txt\n 5 beta report.txt\n 2 gamma report.txt\n 8 total\n";
+        let result = filter_wc_output(raw, &WcMode::Lines);
+        assert_eq!(
+            result,
+            "1 alpha report.txt\n5 beta report.txt\n2 gamma report.txt\nΣ 8"
+        );
+    }
+
+    #[test]
+    fn test_multi_file_full_names_with_spaces() {
+        let raw = "  3  10  60 docs/my notes.md\n  4  20  90 docs/to do.md\n  7  30 150 total\n";
+        let result = filter_wc_output(raw, &WcMode::Full);
+        assert_eq!(
+            result,
+            "3L 10W 60B my notes.md\n4L 20W 90B to do.md\nΣ 7L 30W 150B"
+        );
+    }
+
+    #[test]
+    fn test_multi_file_mixed_names_with_spaces() {
+        let raw = "  3  10 docs/my notes.md\n  4  20 docs/to do.md\n  7  30 total\n";
+        let result = filter_wc_output(raw, &WcMode::Mixed);
+        assert_eq!(result, "3 10 my notes.md\n4 20 to do.md\nΣ 7 30");
+    }
+
+    #[test]
+    fn test_single_file_mixed_name_with_spaces() {
+        let raw = "  3  10 my notes.md\n";
+        let result = filter_wc_output(raw, &WcMode::Mixed);
+        assert_eq!(result, "3 10");
+    }
+
+    #[test]
+    fn test_multi_file_lines_numeric_name() {
+        let raw = " 1 2024\n 2 notes.md\n 3 total\n";
+        let result = filter_wc_output(raw, &WcMode::Lines);
+        assert_eq!(result, "1 2024\n2 notes.md\nΣ 3");
     }
 
     #[test]
