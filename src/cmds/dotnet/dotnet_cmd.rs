@@ -1084,6 +1084,7 @@ fn merge_build_summaries(
     mut binlog_summary: binlog::BuildSummary,
     raw_summary: binlog::BuildSummary,
 ) -> binlog::BuildSummary {
+    binlog_summary.succeeded |= raw_summary.succeeded;
     if binlog_summary.errors.is_empty() {
         binlog_summary.errors = raw_summary.errors;
     }
@@ -2121,6 +2122,36 @@ mod tests {
         let normalized = normalize_build_summary(summary, true);
         assert!(normalized.succeeded);
         assert_eq!(normalized.project_count, 1);
+    }
+
+    #[test]
+    fn test_merge_build_summaries_preserves_text_fallback_status() {
+        for (command_success, expected_prefix) in
+            [(true, "ok dotnet build:"), (false, "fail dotnet build:")]
+        {
+            let raw_summary =
+                normalize_build_summary(binlog::BuildSummary::default(), command_success);
+            let merged = merge_build_summaries(binlog::BuildSummary::default(), raw_summary);
+            assert_eq!(merged.succeeded, command_success);
+            let output = format_build_output(&merged, Path::new("user.binlog"));
+            assert!(
+                output
+                    .lines()
+                    .last()
+                    .expect("status line")
+                    .starts_with(expected_prefix)
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_build_summaries_preserves_binlog_success() {
+        let binlog_summary = binlog::BuildSummary {
+            succeeded: true,
+            ..Default::default()
+        };
+        let merged = merge_build_summaries(binlog_summary, binlog::BuildSummary::default());
+        assert!(merged.succeeded);
     }
 
     #[test]
