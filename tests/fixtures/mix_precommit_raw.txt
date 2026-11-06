@@ -1,0 +1,205 @@
+Compiling 23 files (.ex)
+Generated shop app
+Running ExUnit with seed: 892569, max_cases: 4
+
+.....18:00:12.283 [warning] price cache miss
+.....
+
+  1) test products update_product/2 with valid data updates the product (Shop.CatalogTest)
+     test/shop/catalog_test.exs:35
+     Assertion with == failed
+     code:  assert product.name == "some renamed name"
+     left:  "some updated name"
+     right: "some renamed name"
+     stacktrace:
+       test/shop/catalog_test.exs:40: (test)
+
+..18:00:12.311 request_id=GOHXoM0yGEn-qaMAAAvh [warning] price cache miss
+
+
+  2) test Index lists all products (ShopWeb.ProductLiveTest)
+     test/shop_web/live/product_live_test.exs:19
+     ** (ArgumentError) errors were found at the given arguments:
+
+       * 1st argument: not a textual representation of an integer
+
+     stacktrace:
+       :erlang.binary_to_integer("some name")
+       (shop 0.1.0) lib/shop_web/live/product_live/index.ex:25: anonymous fn/3 in ShopWeb.ProductLive.Index.render/1
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:454: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+
+18:00:12.332 request_id=GOHXoM6m_coqlpgAAAwB [warning] price cache miss
+
+
+  3) test Index updates product in listing (ShopWeb.ProductLiveTest)
+     test/shop_web/live/product_live_test.exs:52
+     ** (ArgumentError) errors were found at the given arguments:
+
+       * 1st argument: not a textual representation of an integer
+
+     stacktrace:
+       :erlang.binary_to_integer("some name")
+       (shop 0.1.0) lib/shop_web/live/product_live/index.ex:25: anonymous fn/3 in ShopWeb.ProductLive.Index.render/1
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:454: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+
+
+
+  4) test Show updates product and returns to show (ShopWeb.ProductLiveTest)
+     test/shop_web/live/product_live_test.exs:96
+     ** (ArgumentError) errors were found at the given arguments:
+
+       * 1st argument: not a textual representation of an integer
+
+     stacktrace:
+       :erlang.binary_to_integer("some name")
+       (shop 0.1.0) lib/shop_web/live/product_live/show.ex:25: anonymous fn/2 in ShopWeb.ProductLive.Show.render/1
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:454: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:159: Phoenix.LiveView.Diff.render/4
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/static.ex:291: Phoenix.LiveView.Static.to_rendered_content_tag/4
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/static.ex:171: Phoenix.LiveView.Static.do_render/4
+
+18:00:12.337 request_id=GOHXoM72sp36w48AAAxB [warning] price cache miss
+
+
+  5) test Index deletes product in listing (ShopWeb.ProductLiveTest)
+     test/shop_web/live/product_live_test.exs:78
+     ** (ArgumentError) errors were found at the given arguments:
+
+       * 1st argument: not a textual representation of an integer
+
+     stacktrace:
+       :erlang.binary_to_integer("some name")
+       (shop 0.1.0) lib/shop_web/live/product_live/index.ex:25: anonymous fn/3 in ShopWeb.ProductLive.Index.render/1
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:454: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+
+
+
+  6) test Show displays product (ShopWeb.ProductLiveTest)
+     test/shop_web/live/product_live_test.exs:89
+     ** (ArgumentError) errors were found at the given arguments:
+
+       * 1st argument: not a textual representation of an integer
+
+     stacktrace:
+       :erlang.binary_to_integer("some name")
+       (shop 0.1.0) lib/shop_web/live/product_live/show.ex:25: anonymous fn/2 in ShopWeb.ProductLive.Show.render/1
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:454: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:159: Phoenix.LiveView.Diff.render/4
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/static.ex:291: Phoenix.LiveView.Static.to_rendered_content_tag/4
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/static.ex:171: Phoenix.LiveView.Static.do_render/4
+
+18:00:12.343 request_id=GOHXoM9SlLTYCqYAAA1C [warning] price cache miss
+
+
+  7) test Index saves new product (ShopWeb.ProductLiveTest)
+     test/shop_web/live/product_live_test.exs:26
+     ** (ArgumentError) errors were found at the given arguments:
+
+       * 1st argument: not a textual representation of an integer
+
+     stacktrace:
+       :erlang.binary_to_integer("some name")
+       (shop 0.1.0) lib/shop_web/live/product_live/index.ex:25: anonymous fn/3 in ShopWeb.ProductLive.Index.render/1
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:454: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+
+
+Finished in 0.4 seconds (0.3s async, 0.1s sync)
+
+Result: 12/19 passed
+Failed: 7 tests

@@ -916,12 +916,13 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^mix\s+(compile|format)(\s|$)",
+        pattern: r"^mix\s+(compile|format|test|precommit)(\s|$)",
         rtk_cmd: "rtk mix",
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &["mix"],
         category: "Build",
         savings_pct: 65.0,
+        subcmd_savings: &[("test", 85.0), ("precommit", 70.0)],
         ..RtkRule::DEFAULT
     },
     RtkRule {
