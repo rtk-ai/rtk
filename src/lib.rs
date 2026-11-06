@@ -2509,6 +2509,37 @@ fn pings_telemetry(parsed: &Result<Cli, clap::Error>) -> bool {
     )
 }
 
+/// clap's `trailing_var_arg` strips a `--` that leads a variant's arguments, so
+/// `rtk tsc -- zzz` would forward `tsc zzz` (#4753). Restoring it here, once, lets each
+/// module place it after the options it injects, the way it places the rest of `args`.
+fn restore_leading_double_dash(command: &mut Commands) {
+    match command {
+        Commands::Tsc { args }
+        | Commands::Prettier { args }
+        | Commands::Phpunit { args }
+        | Commands::Phpstan { args }
+        | Commands::Pest { args }
+        | Commands::Mvn { args }
+        | Commands::Rspec { args }
+        | Commands::Rubocop { args }
+        | Commands::Vitest { args }
+        | Commands::Jest { args } => *args = core::args_utils::restore_double_dash(args),
+        Commands::Go {
+            command: GoCommands::Other(args),
+        }
+        | Commands::Cargo {
+            command: CargoCommands::Other(args),
+        }
+        | Commands::Docker {
+            command: DockerCommands::Other(args),
+        }
+        | Commands::Kubectl {
+            command: KubectlCommands::Other(args),
+        } => *args = core::args_utils::restore_double_dash_os(args),
+        _ => {}
+    }
+}
+
 fn run_cli() -> Result<i32> {
     let parsed = try_parse_cli_from(std::env::args_os());
 
@@ -2517,7 +2548,7 @@ fn run_cli() -> Result<i32> {
         core::telemetry::maybe_ping();
     }
 
-    let cli = match parsed {
+    let mut cli = match parsed {
         Ok(cli) => cli,
         Err(e) => {
             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
@@ -2526,6 +2557,7 @@ fn run_cli() -> Result<i32> {
             return run_fallback(e);
         }
     };
+    restore_leading_double_dash(&mut cli.command);
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain (shows its own inline warning), Init/Verify (manage the
