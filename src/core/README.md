@@ -123,6 +123,7 @@ grep_max_per_file = 25
 status_max_files = 15
 status_max_untracked = 10
 passthrough_max_chars = 2000
+max_line_chars = 2000        # grep/rg/read: cut longer lines, full output kept for `rtk recall`; 0 = off
 ```
 
 ## Shared Utilities (utils.rs)

@@ -243,6 +243,14 @@ pub struct LimitsConfig {
     pub status_max_untracked: usize,
     /// Max chars for parser passthrough fallback (default: 2000)
     pub passthrough_max_chars: usize,
+    /// Max chars per line in `rtk grep`/`rtk rg`/`rtk read` output. A longer line is
+    /// cut, and the full output kept for `rtk recall` (default: 2000, 0 = no cap)
+    #[serde(default = "default_max_line_chars")]
+    pub max_line_chars: usize,
+}
+
+fn default_max_line_chars() -> usize {
+    crate::core::line_cap::DEFAULT_MAX_LINE_CHARS
 }
 
 impl Default for LimitsConfig {
@@ -253,6 +261,7 @@ impl Default for LimitsConfig {
             status_max_files: 15,
             status_max_untracked: 10,
             passthrough_max_chars: 2000,
+            max_line_chars: default_max_line_chars(),
         }
     }
 }

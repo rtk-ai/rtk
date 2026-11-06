@@ -12,9 +12,10 @@ use crate::core::stream::{
 };
 use crate::core::tracking;
 use crate::core::utils::{ChildArgExt, resolved_command, strip_ansi};
-use crate::core::{args_utils, config};
+use crate::core::{args_utils, config, line_cap};
 use anyhow::{Context, Result};
 use regex::Regex;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::process::Command;
@@ -589,24 +590,28 @@ fn passthrough<T: AsRef<str>>(
     } else {
         None
     };
-    match &folded {
-        Some(folded) => print!("{}", folded),
-        None => print!("{}", cleaned),
-    }
+    // A folded list is all paths; anything else (`-o`, rg `--json`) can carry a minified line.
+    let shown = match folded {
+        Some(folded) => Cow::Owned(folded),
+        None => line_cap::cap_long_lines(&cleaned, real_cmd),
+    };
+    print!("{}", shown);
     if !result.stderr.is_empty() {
         eprint!("{}", result.stderr);
     }
 
-    match &folded {
-        // Real sizes, so the fold shows up in `rtk gain`.
-        Some(folded) => timer.track(
+    match &shown {
+        // Real sizes, so the fold or the line cap shows up in `rtk gain`.
+        Cow::Owned(shown) => timer.track(
             real_cmd,
             &format!("rtk {}", engine.label()),
             &cleaned,
-            folded,
+            shown,
         ),
         // 0/0 keeps an unchanged passthrough from diluting the savings statistics.
-        None => timer.track_passthrough(real_cmd, &tracking::passthrough_label(real_cmd)),
+        Cow::Borrowed(_) => {
+            timer.track_passthrough(real_cmd, &tracking::passthrough_label(real_cmd))
+        }
     }
     Ok(result.exit_code)
 }
@@ -929,6 +934,8 @@ pub fn run(
     } else {
         plain
     };
+    // The faithful form prints a matched minified bundle or JSONL record whole.
+    let output = line_cap::cap_long_lines(&output, &real_cmd);
 
     print!("{}", output);
     timer.track(&real_cmd, &rtk_label, &raw_output, &output);
