@@ -145,6 +145,7 @@ listing into `head`, `tail`, or `cat`.
 | `curl` | Response body only, headers stripped |
 | `helm list` | Release name, namespace, status, and chart columns |
 | `terraform plan` | Planned changes summary, resource diffs condensed |
+| `ansible-lint` | Violations grouped by rule with sample paths and the final summary |
 
 ## Global flags
 
