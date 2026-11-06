@@ -58,21 +58,58 @@ pub fn maybe_ping() {
         return;
     }
 
-    let marker = telemetry_marker_path();
-    if !ping_due(&marker) {
-        return;
-    }
-
-    // Spawn thread so we never block the CLI. The thread claims the marker,
-    // not this one: process exit kills it, often before it connects, and a
-    // marker written here would then skip the day's ping without sending it.
-    std::thread::spawn(move || {
-        let _ = send_ping(&marker);
+    let _ = start_ping_if_due(telemetry_marker_path(), |marker| {
+        let _ = send_ping(marker);
     });
+}
+
+/// The main-thread half of the ping: checks the marker and hands the work to a
+/// thread so the CLI never blocks. It never writes the marker. Process exit
+/// kills the thread, often before it connects, and a marker written here would
+/// then skip the day's ping without sending it; `run_ping` claims it instead.
+fn start_ping_if_due<W>(marker: PathBuf, work: W) -> Option<std::thread::JoinHandle<()>>
+where
+    W: FnOnce(&Path) + Send + 'static,
+{
+    if !ping_due(&marker) {
+        return None;
+    }
+    Some(std::thread::spawn(move || work(&marker)))
+}
+
+/// The send-thread half: prepares the payload, then claims the marker, then
+/// sends. Claiming last means a command that exits during preparation leaves
+/// the ping for the next one, and re-checking at the claim means a process
+/// that claimed in the meantime wins. Returns whether a request went out.
+fn run_ping<P, E>(
+    marker: &Path,
+    prepare: impl FnOnce() -> P,
+    send: impl FnOnce(P) -> Result<(), E>,
+) -> Result<bool, E> {
+    let payload = prepare();
+    if !claim_ping(marker) {
+        return Ok(false);
+    }
+    send(payload)?;
+    Ok(true)
 }
 
 fn send_ping(marker: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let url = endpoint_url().ok_or("no telemetry URL")?;
+    run_ping(marker, build_payload, |payload| {
+        let mut req = ureq::post(url).set("Content-Type", "application/json");
+        if let Some(token) = TELEMETRY_TOKEN {
+            req = req.set("X-RTK-Token", token);
+        }
+        // 2 second timeout — if server is down, we move on
+        req.timeout(std::time::Duration::from_secs(2))
+            .send_string(&payload.to_string())?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    Ok(())
+}
+
+fn build_payload() -> serde_json::Value {
     let device_hash = generate_device_hash();
     let version = env!("CARGO_PKG_VERSION").to_string();
     let os = std::env::consts::OS.to_string();
@@ -108,7 +145,7 @@ fn send_ping(marker: &Path) -> Result<(), Box<dyn std::error::Error>> {
         },
     };
 
-    let payload = serde_json::json!({
+    serde_json::json!({
         "device_hash": device_hash,
         "version": version,
         "os": os,
@@ -147,23 +184,7 @@ fn send_ping(marker: &Path) -> Result<(), Box<dyn std::error::Error>> {
         "recall_stats": build_recall_stats(
             &crate::core::retriever::stats_snapshot().unwrap_or_default()
         ),
-    });
-
-    let mut req = ureq::post(url).set("Content-Type", "application/json");
-
-    if let Some(token) = TELEMETRY_TOKEN {
-        req = req.set("X-RTK-Token", token);
-    }
-
-    if !claim_ping(marker) {
-        return Ok(());
-    }
-
-    // 2 second timeout — if server is down, we move on
-    req.timeout(std::time::Duration::from_secs(2))
-        .send_string(&payload.to_string())?;
-
-    Ok(())
+    })
 }
 
 pub fn generate_device_hash() -> String {
@@ -573,8 +594,18 @@ fn claim_ping(marker: &Path) -> bool {
     true
 }
 
+/// Sets the marker's modification time to now, creating it if needed. The
+/// time is set explicitly: rewriting an already-empty file does not update it
+/// on Windows, which would leave an aged marker due after every claim.
 fn touch_marker(path: &Path) {
-    let _ = std::fs::write(path, b"");
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+    {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
 }
 
 #[cfg(test)]
@@ -723,6 +754,81 @@ mod tests {
         assert!(ping_due(&marker));
         assert!(claim_ping(&marker));
         assert!(!ping_due(&marker));
+    }
+
+    #[test]
+    fn the_marker_is_claimed_after_the_payload_and_before_the_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(".telemetry_last_ping");
+
+        let sent = run_ping(
+            &marker,
+            || {
+                assert!(
+                    !marker.exists(),
+                    "the marker must not be written before the payload is ready"
+                );
+                "payload"
+            },
+            |payload| {
+                assert_eq!(payload, "payload");
+                assert!(
+                    marker.exists(),
+                    "the marker must be written before the request goes out"
+                );
+                Ok::<(), ()>(())
+            },
+        );
+
+        assert_eq!(sent, Ok(true));
+        assert!(!ping_due(&marker));
+    }
+
+    #[test]
+    fn a_marker_claimed_by_another_process_during_preparation_means_no_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(".telemetry_last_ping");
+
+        let sent = run_ping(
+            &marker,
+            || touch_marker(&marker),
+            |()| -> Result<(), ()> { panic!("a ping claimed elsewhere must not be sent again") },
+        );
+
+        assert_eq!(sent, Ok(false));
+    }
+
+    #[test]
+    fn the_main_thread_starts_the_ping_without_writing_the_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(".telemetry_last_ping");
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let handle = start_ping_if_due(marker.clone(), move |m| {
+            tx.send(m.exists()).expect("send");
+        })
+        .expect("a missing marker means a ping is due");
+        handle.join().expect("ping thread");
+
+        assert_eq!(
+            rx.recv().ok(),
+            Some(false),
+            "the marker must still be absent when the send thread starts"
+        );
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn a_fresh_marker_means_no_preparation_at_all() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(".telemetry_last_ping");
+        touch_marker(&marker);
+
+        let started = start_ping_if_due(marker, |_| {
+            panic!("a fresh marker must not start the send thread")
+        });
+
+        assert!(started.is_none());
     }
 
     #[test]

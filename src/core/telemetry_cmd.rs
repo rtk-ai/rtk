@@ -30,9 +30,9 @@ fn salt_missing_label(
         Some(false) | None => "(telemetry not enabled; run `rtk telemetry enable` to opt in)",
         Some(true) if !enabled => "(telemetry disabled in config.toml)",
         // Every gate is clear, so the salt is simply not there yet. This is true
-        // both when no ping has landed (the 23 h interval, or a run that touched
-        // the marker before the detached thread wrote the salt) and when a write
-        // genuinely failed — as far as the available state lets us go.
+        // both when no ping has been prepared yet (the 23 h interval, or every
+        // run so far exited before the detached thread wrote the salt) and when
+        // a write genuinely failed — as far as the available state lets us go.
         Some(true) => "(no salt file yet; written on the first ping)",
     }
 }
