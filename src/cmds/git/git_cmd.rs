@@ -2141,7 +2141,7 @@ fn entries_window(stdout: &str, limit: usize, graph: bool) -> LogWindow {
 /// True when the walk is printed one line to a commit, so that a line past the limit is a
 /// commit past it: `oneline` is the chosen format, by its own flag or by name. `--graph` draws
 /// rails between the lines, `--notes` and `--show-notes-by-default` add the notes under a
-/// commit, `-L` and `--dd` its patch, the `--stat-*` settings a diffstat, `-X`,
+/// commit, `-L` its patch, the `--stat-*` settings a diffstat, `-X`,
 /// `--dirstat-by-file` and `--cumulative` a dirstat, and `-z` ends a commit with a NUL instead
 /// of a newline, so none of those is read that way. Anything else that adds lines is found in
 /// the run itself, by [`oneline_window`], at the cost of asking git again.
@@ -2157,7 +2157,6 @@ fn prints_one_line_per_commit(tokens: &[Token<'_>]) -> bool {
                     | "show-notes"
                     | "standard-notes"
                     | "show-notes-by-default"
-                    | "dd"
                     | "stat-count"
                     | "stat-width"
                     | "stat-name-width"
@@ -7220,7 +7219,6 @@ A  added.rs
             &["--oneline", "-pz"],
             &["--oneline", "-L1,3:f.txt"],
             &["--oneline", "-L", "1,3:f.txt"],
-            &["--oneline", "--dd"],
             &["--oneline", "--stat-count=1"],
             &["--oneline", "--stat-width=60"],
             &["--oneline", "--stat-name-width=20"],
