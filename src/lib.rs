@@ -2564,6 +2564,13 @@ fn run_cli() -> Result<i32> {
         } => {
             let mut had_error = false;
             let mut stdin_seen = false;
+            let label = if head_lines.is_some() {
+                "head"
+            } else if tail_lines.is_some() {
+                "tail"
+            } else {
+                "cat"
+            };
             for file in &files {
                 let result = if file == Path::new("-") {
                     if stdin_seen {
@@ -2591,7 +2598,7 @@ fn run_cli() -> Result<i32> {
                     )
                 };
                 if let Err(e) = result {
-                    eprintln!("cat: {}: {}", file.display(), e.root_cause());
+                    eprintln!("{label}: {}: {}", file.display(), e.root_cause());
                     had_error = true;
                 }
             }
