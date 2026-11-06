@@ -34,6 +34,7 @@ pub const RTK_META_COMMANDS: &[&str] = &[
     "json",
     "llm-proxy",
     "pipeline",
+    "bench",
     "methods",
     "tasks",
     "plugins",
