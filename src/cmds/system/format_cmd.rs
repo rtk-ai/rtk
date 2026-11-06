@@ -6,7 +6,7 @@ use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::user_dirs;
-use crate::core::utils::{package_manager_exec, resolved_command};
+use crate::core::utils::{display_path, package_manager_exec, resolved_command};
 use crate::prettier_cmd;
 use crate::ruff_cmd;
 use anyhow::{Context, Result};
@@ -242,7 +242,7 @@ fn filter_black_output(output: &str) -> String {
         if !files_to_format.is_empty() {
             const MAX_FORMAT_FILES: usize = CAP_WARNINGS;
             for (i, file) in files_to_format.iter().take(MAX_FORMAT_FILES).enumerate() {
-                result.push_str(&format!("{}. {}\n", i + 1, compact_path(file)));
+                result.push_str(&format!("{}. {}\n", i + 1, display_path(file)));
             }
 
             if files_to_format.len() > MAX_FORMAT_FILES {
@@ -264,23 +264,6 @@ fn filter_black_output(output: &str) -> String {
     }
 
     result.trim().to_string()
-}
-
-/// Compact file path (remove common prefixes)
-fn compact_path(path: &str) -> String {
-    let path = path.replace('\\', "/");
-
-    if let Some(pos) = path.rfind("/src/") {
-        format!("src/{}", &path[pos + 5..])
-    } else if let Some(pos) = path.rfind("/lib/") {
-        format!("lib/{}", &path[pos + 5..])
-    } else if let Some(pos) = path.rfind("/tests/") {
-        format!("tests/{}", &path[pos + 7..])
-    } else if let Some(pos) = path.rfind('/') {
-        path[pos + 1..].to_string()
-    } else {
-        path
-    }
 }
 
 #[cfg(test)]
@@ -363,16 +346,11 @@ Oh no! 💥 💔 💥
     }
 
     #[test]
-    fn test_compact_path() {
-        assert_eq!(
-            compact_path("/Users/foo/project/src/main.py"),
-            "src/main.py"
-        );
-        assert_eq!(compact_path("/home/user/app/lib/utils.py"), "lib/utils.py");
-        assert_eq!(
-            compact_path("C:\\Users\\foo\\project\\tests\\test.py"),
-            "tests/test.py"
-        );
-        assert_eq!(compact_path("relative/file.py"), "file.py");
+    fn test_filter_black_same_named_files_stay_distinct() {
+        let output = "would reformat: pkg_a/__init__.py\nwould reformat: pkg_b/__init__.py\nOh no! 💥 💔 💥\n2 files would be reformatted.";
+
+        let result = filter_black_output(output);
+        assert!(result.contains("1. pkg_a/__init__.py"), "{result}");
+        assert!(result.contains("2. pkg_b/__init__.py"), "{result}");
     }
 }
