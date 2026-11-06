@@ -153,7 +153,7 @@ impl InterceptedRequest {
             session: header("x-rtk-session"),
             project: header("x-rtk-project"),
             request_class: header("x-claude-code-request-class"),
-            client: crate::extract::detect_client(header("user-agent").as_deref()),
+            client: crate::extract::detect_client_from_headers(headers),
             ..Self::for_pipeline(provider, path, body)
         }
     }
@@ -402,6 +402,20 @@ mod tests {
             &axum::http::HeaderMap::new(),
         );
         assert_eq!(req.client, None);
+    }
+
+    #[test]
+    fn for_pipeline_with_headers_prefers_the_declared_client() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("user-agent", "mistral-client-python/3.5.0".parse().unwrap());
+        headers.insert("x-rtk-client", "VIBE".parse().unwrap());
+        let req = InterceptedRequest::for_pipeline_with_headers(
+            Provider::Openai,
+            "/v1/chat/completions".to_string(),
+            serde_json::json!({}),
+            &headers,
+        );
+        assert_eq!(req.client.as_deref(), Some("vibe"));
     }
 
     #[test]

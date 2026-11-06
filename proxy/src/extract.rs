@@ -433,6 +433,35 @@ pub fn detect_client(user_agent: Option<&str>) -> Option<String> {
     }
 }
 
+/// Request header a client sets to name itself, for callers the User-Agent
+/// cannot tell apart: Vibe's main chat turn sends the Mistral SDK's default
+/// User-Agent, the same as any other program using that SDK. Like every
+/// `x-rtk-` header it is proxy-internal and never reaches the upstream.
+pub const CLIENT_HEADER: &str = "x-rtk-client";
+
+/// Longest label `x-rtk-client` may declare.
+const CLIENT_LABEL_MAX_LEN: usize = 32;
+
+/// The client a request declares in `x-rtk-client`, trimmed and lowercased.
+/// The label becomes a stats key, so anything but a short token of ASCII
+/// letters, digits, `-` and `_` is ignored rather than recorded.
+pub fn declared_client(value: Option<&str>) -> Option<String> {
+    let label = value?.trim().to_ascii_lowercase();
+    let is_token = !label.is_empty()
+        && label.len() <= CLIENT_LABEL_MAX_LEN
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    is_token.then_some(label)
+}
+
+/// The calling client: the label declared in `x-rtk-client` when it is valid,
+/// otherwise the best-effort guess from the `user-agent` header.
+pub fn detect_client_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    declared_client(header(CLIENT_HEADER)).or_else(|| detect_client(header("user-agent")))
+}
+
 /// Hash an API key to a short hex fingerprint for per-key statistics.
 /// Never stores the raw key.
 pub fn hash_api_key(key: &str) -> String {
@@ -781,6 +810,73 @@ mod tests {
         assert_eq!(detect_client(Some("curl/8.0")), Some("curl".to_string()));
         assert_eq!(detect_client(Some("")), None);
         assert_eq!(detect_client(None), None);
+    }
+
+    #[test]
+    fn a_declared_client_is_trimmed_and_lowercased() {
+        assert_eq!(declared_client(Some("vibe")), Some("vibe".to_string()));
+        assert_eq!(declared_client(Some("  VIBE\t")), Some("vibe".to_string()));
+        assert_eq!(
+            declared_client(Some("My-Agent_2")),
+            Some("my-agent_2".to_string())
+        );
+        let longest = "a".repeat(32);
+        assert_eq!(declared_client(Some(&longest)), Some(longest.clone()));
+    }
+
+    #[test]
+    fn a_declared_client_that_is_not_a_short_token_is_ignored() {
+        for value in [
+            "",
+            "   ",
+            "vi be",
+            "vibe/3.0",
+            "vibe;drop",
+            "vibé",
+            &"a".repeat(33),
+        ] {
+            assert_eq!(declared_client(Some(value)), None, "{value:?}");
+        }
+        assert_eq!(declared_client(None), None);
+    }
+
+    /// Vibe's main chat turn sends the Mistral SDK's default User-Agent, so
+    /// only the header it is configured to add can name it (#4925).
+    #[test]
+    fn the_client_header_wins_over_the_user_agent() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("user-agent", "mistral-client-python/3.5.0".parse().unwrap());
+        assert_eq!(
+            detect_client_from_headers(&headers),
+            Some("mistral-client-python".to_string()),
+            "without the header the User-Agent decides, as before"
+        );
+
+        headers.insert(CLIENT_HEADER, " Vibe ".parse().unwrap());
+        assert_eq!(
+            detect_client_from_headers(&headers),
+            Some("vibe".to_string())
+        );
+
+        for invalid in ["", "not a token", "a/b", &"x".repeat(33)] {
+            headers.insert(CLIENT_HEADER, invalid.parse().unwrap());
+            assert_eq!(
+                detect_client_from_headers(&headers),
+                Some("mistral-client-python".to_string()),
+                "an invalid {invalid:?} falls back to the User-Agent"
+            );
+        }
+
+        headers.remove("user-agent");
+        headers.insert(CLIENT_HEADER, "vibe".parse().unwrap());
+        assert_eq!(
+            detect_client_from_headers(&headers),
+            Some("vibe".to_string())
+        );
+        assert_eq!(
+            detect_client_from_headers(&axum::http::HeaderMap::new()),
+            None
+        );
     }
 
     #[test]

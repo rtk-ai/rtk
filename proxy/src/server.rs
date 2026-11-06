@@ -423,8 +423,7 @@ async fn handle(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let client =
-        crate::extract::detect_client(headers.get("user-agent").and_then(|v| v.to_str().ok()));
+    let client = crate::extract::detect_client_from_headers(&headers);
     // The agent's credential, kept so a local worker routing to this same
     // provider can borrow it instead of being handed a second copy.
     s.relayed_auth.remember(&target.name, &headers);
