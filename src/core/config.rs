@@ -122,6 +122,13 @@ pub struct HooksConfig {
     #[serde(default)]
     pub exclude_commands: Vec<String>,
 
+    /// Commands whose default ask-level rewrite should be auto-allowed, e.g.
+    /// `allow_ask_commands = ["jest", "vitest"]`. Only a command that matched
+    /// no explicit permission rule is promoted; a user-written `ask` rule still
+    /// asks, and a deny rule still wins.
+    #[serde(default)]
+    pub allow_ask_commands: Vec<String>,
+
     /// Wrapper prefixes that should be transparently stripped before routing
     /// to a filter, then re-prepended on the rewrite. For example, with
     /// `transparent_prefixes = ["docker exec mycontainer"]`, the command
@@ -280,6 +287,15 @@ pub fn hook_rewrite_params() -> (Vec<String>, Vec<String>) {
         c.hooks.exclude_commands.clone(),
         c.hooks.transparent_prefixes.clone(),
     )
+}
+
+/// Commands the user opted into auto-allowing when their rewrite would
+/// otherwise be a default ask (`[hooks] allow_ask_commands`).
+///
+/// Read from the same cached config as [`hook_rewrite_params`] for the same
+/// hot-path reason.
+pub fn hook_allow_ask_commands() -> Vec<String> {
+    cached_config().hooks.allow_ask_commands.clone()
 }
 
 /// Process-wide cached `Config::load()` result, populated on first use.
@@ -556,6 +572,17 @@ exclude_commands = ["curl", "gh"]
 "#;
         let config: Config = toml::from_str(toml).expect("valid toml");
         assert_eq!(config.hooks.exclude_commands, vec!["curl", "gh"]);
+    }
+
+    #[test]
+    fn test_hooks_config_allow_ask_commands() {
+        let toml = r#"
+[hooks]
+allow_ask_commands = ["jest", "vitest"]
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.hooks.allow_ask_commands, vec!["jest", "vitest"]);
+        assert!(config.hooks.exclude_commands.is_empty());
     }
 
     #[test]
