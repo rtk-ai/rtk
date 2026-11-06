@@ -18,6 +18,18 @@ static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
         .unwrap()
 });
+// A severity word counts when it is written as a label: upper case (`ERROR`,
+// `FATAL:`), bracketed (`[error]`), a key value (`level=error`), followed by a
+// colon and a space (`error: ...`, as clang/gcc/rustc print), or a Go/Rust panic.
+const SEVERITY_WORDS: &str = "error|fatal|panic|critical|alert|emerg(?:ency)?|severe";
+static ERROR_LABEL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    let upper = SEVERITY_WORDS.to_uppercase();
+    Regex::new(&format!(
+        r"\b(?:{upper})\b|(?i:\[\s*(?:{w})\s*\]|\b(?:level|severity|lvl)\s*[=:]\s*.?(?:{w})\b|\b(?:{w}):(?:\s|$)|\bpanicked at\b)",
+        w = SEVERITY_WORDS
+    ))
+    .unwrap()
+});
 static HEX_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"0x[0-9a-fA-F]+").unwrap());
 static NUM_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\d{4,}\b").unwrap());
 static PATH_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"/[\w./\-]+").unwrap());
@@ -84,14 +96,9 @@ fn analyze_logs(content: &str) -> String {
         // (CRITICAL, FATAL, ALERT, EMERGENCY, SEVERE, PANIC) — these are the most
         // important lines in a log and were previously dropped as noise when they
         // didn't literally contain "error".
-        if line_lower.contains("error")
-            || line_lower.contains("fatal")
-            || line_lower.contains("panic")
-            || line_lower.contains("critical")
-            || line_lower.contains("alert")
-            || line_lower.contains("emerg")
-            || line_lower.contains("severe")
-        {
+        // Severity is matched as a label, not a substring: code echoed by compilers
+        // (`NSError *error`, `onError`, `UIAlertController`) is not an error line.
+        if ERROR_LABEL_RE.is_match(line) {
             let count = error_counts.entry(normalized.clone()).or_insert(0);
             if *count == 0 {
                 unique_errors.push(line.to_string());
@@ -264,6 +271,33 @@ mod tests {
             result.contains("WARNINGS"),
             "notice should count as warning"
         );
+    }
+
+    #[test]
+    fn test_analyze_logs_ignores_severity_words_inside_code() {
+        // Lines a compiler echoes from source: identifiers that contain "error" or
+        // "alert" are not error lines.
+        let logs = "  199 |  completion:(void (^)(NSArray *rows, NSError *error))completion;\n\
+                    - (void)loadWithError:(NSError **)error;\n\
+                    - (void)save:(id)item error:(NSError **)outError;\n\
+                    let alert = UIAlertController(title: nil, message: nil)\n\
+                    onError(callback)\n\
+                    foo.m:4:4: warning: pointer is missing a nullability type specifier\n";
+        let result = analyze_logs(logs);
+        assert!(result.contains("0 errors"), "{result}");
+        assert!(result.contains("1 warnings"), "{result}");
+    }
+
+    #[test]
+    fn test_analyze_logs_counts_severity_labels() {
+        let logs = "foo.m:12:3: error: use of undeclared identifier 'x'\n\
+                    Error: build failed\n\
+                    [error] request timed out\n\
+                    level=error msg=\"db down\"\n\
+                    thread 'main' panicked at src/main.rs:3:5\n\
+                    2024-01-01 10:00:00 FATAL disk gone\n";
+        let result = analyze_logs(logs);
+        assert!(result.contains("6 errors"), "{result}");
     }
 
     #[test]
