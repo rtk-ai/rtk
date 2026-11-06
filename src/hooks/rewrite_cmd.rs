@@ -105,6 +105,7 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
         decision::decide(cmd, verdict, permissions::DenyRules::Unattested),
         verdict,
     );
+    let decided = single_line_only(decided);
     if !matches!(decided, HookDecision::Deny) {
         track_tee_read(cmd);
     }
@@ -124,8 +125,43 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Refuse to emit a rewrite that spans more than one shell line.
+///
+/// `run` prints the rewrite to stdout and the caller uses it verbatim as the
+/// command, so a value carrying `'\n'`, `'\r'` or `'\0'` would hand the hook
+/// a different program than the one line the exit-code contract promises. The
+/// safe answer is `Defer` (exit 1), the pass-through decision, rather than
+/// `Deny` (exit 2): the user's command must still run — the "Never Block"
+/// rule. The gate lives here, at the emit site, and not in `decision::decide`,
+/// because `rtk hook check` reuses that shared decision to *display* a rewrite,
+/// where a multi-line value is correct.
+fn single_line_only(decided: HookDecision) -> HookDecision {
+    match decided {
+        HookDecision::AllowRewrite(rewritten) => {
+            if is_single_line(&rewritten) {
+                HookDecision::AllowRewrite(rewritten)
+            } else {
+                HookDecision::Defer
+            }
+        }
+        HookDecision::AskRewrite(rewritten, owner) => {
+            if is_single_line(&rewritten) {
+                HookDecision::AskRewrite(rewritten, owner)
+            } else {
+                HookDecision::Defer
+            }
+        }
+        other => other,
+    }
+}
+
+fn is_single_line(s: &str) -> bool {
+    !s.contains("\n") && !s.contains("\r") && !s.contains("\0")
+}
+
 #[cfg(test)]
 mod tests {
+    use super::decision::AskOwner;
     use super::*;
     use crate::discover::registry;
 
@@ -310,5 +346,49 @@ mod tests {
             // If this ever fails, the entire permission model is broken.
             assert_ne!(PermissionVerdict::Default, PermissionVerdict::Allow);
         }
+    }
+
+    /// The one-line contract behind exit 0 and 3: `run` prints exactly one
+    /// command, so a rewrite spanning several shell lines must not be emitted.
+    #[test]
+    fn multi_line_rewrites_defer() {
+        for bad in [
+            "rtk git commit -m \"line1\nline2\"",
+            "\nrtk git status",
+            "rtk git status\n",
+            "rtk git status\r",
+            "rtk git status\0",
+        ] {
+            assert_eq!(
+                single_line_only(HookDecision::AllowRewrite(bad.to_string())),
+                HookDecision::Defer,
+                "AllowRewrite carrying {bad:?}"
+            );
+            assert_eq!(
+                single_line_only(HookDecision::AskRewrite(bad.to_string(), AskOwner::Host)),
+                HookDecision::Defer,
+                "AskRewrite carrying {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_line_rewrites_pass_unchanged() {
+        for good in ["rtk git status", "rtk git commit -m \"one line\"", ""] {
+            assert_eq!(
+                single_line_only(HookDecision::AllowRewrite(good.to_string())),
+                HookDecision::AllowRewrite(good.to_string())
+            );
+            assert_eq!(
+                single_line_only(HookDecision::AskRewrite(good.to_string(), AskOwner::Host)),
+                HookDecision::AskRewrite(good.to_string(), AskOwner::Host)
+            );
+        }
+    }
+
+    #[test]
+    fn non_rewrite_decisions_pass_unchanged() {
+        assert_eq!(single_line_only(HookDecision::Defer), HookDecision::Defer);
+        assert_eq!(single_line_only(HookDecision::Deny), HookDecision::Deny);
     }
 }
