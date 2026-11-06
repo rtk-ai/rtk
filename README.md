@@ -81,6 +81,7 @@ The token counts RTK reports are estimated as `bytes / 4` — RTK ships no token
 ```bash
 brew install rtk                                              # macOS / Linux
 winget install rtk-ai.rtk                                     # Windows
+choco install rtk                                             # Windows (Chocolatey)
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
 ```
 

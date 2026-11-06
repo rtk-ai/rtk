@@ -72,6 +72,7 @@ Trigger: push to develop | workflow_dispatch (not master) | Concurrency: cancel-
      │                           │
      │ Discord:  SKIPPED         │
      │ Homebrew: SKIPPED         │
+     │ Chocolatey: SKIPPED       │
      └──────────────────────────┘
 ```
 
@@ -111,8 +112,10 @@ Trigger: push to master (only) | Concurrency: never cancelled
                      └──┬─────────┬─────────┬──┘
                         │         │         │
                         ▼         ▼         ▼
-                    Discord   Homebrew   latest
-                    notify    tap update  tag
+                    Discord   Homebrew   Chocolatey
+                    notify    tap update  community (Windows)
+                        │         │         │
+                        └─────────┴─────────┴── latest tag
 ```
 
 ## Manual release (release.yml)
@@ -137,5 +140,6 @@ Trigger: workflow_dispatch
           ▼             ▼
      Discord        pre-release
      Homebrew       badge only
+     Chocolatey     badge only
      latest tag
 ```
