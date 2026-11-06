@@ -52,7 +52,7 @@ rtk acts as a proxy between an LLM (Claude Code, Gemini CLI, etc.) and system co
 
 ### Fallback mechanism
 
-If rtk does not recognize a subcommand, it runs the raw command (passthrough) and records the event in the tracking database. This makes rtk **always safe** to use -- no command is ever blocked.
+If rtk does not recognize a subcommand, it runs the raw command (passthrough) and records the event in the tracking database. Prefix **external programs** with rtk and leave shell builtins (``cd``, ``export``, ``source``, ...) and names that collide with an rtk subcommand (``rtk test``, ``rtk log``, ``rtk trust``) unprefixed: passthrough only covers programs on PATH that rtk has no subcommand for.
 
 ---
 
@@ -1565,4 +1565,4 @@ No personal data, no command content and no file path is transmitted. Server ret
 
 ## Coverage
 
-RTK covers the 9 categories above, with automatic passthrough for unrecognized subcommands, so it is always safe to use as a prefix.
+RTK covers the 9 categories above, with automatic passthrough for unrecognized external programs, so the prefix is safe for programs on PATH; leave shell builtins and names that collide with an rtk subcommand unprefixed.
