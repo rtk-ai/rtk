@@ -12,7 +12,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
-use provider::{ClaudeProvider, SessionProvider};
+use provider::{ClaudeProvider, CursorTrackerProvider, SessionProvider};
 use registry::{
     Classification, ExcludePattern, category_avg_tokens, classify_command, split_command_chain,
     strip_disabled_prefix_for_analytics,
@@ -335,7 +335,7 @@ pub fn run(
     format: &str,
     verbose: u8,
 ) -> Result<()> {
-    let provider = ClaudeProvider;
+    let claude_provider = ClaudeProvider;
 
     // Determine project filter
     let scope = if all {
@@ -355,12 +355,39 @@ pub fn run(
         }
     };
 
-    let sessions = provider.discover_sessions(project_filter, Some(since_days))?;
+    // Tracking DB stores filesystem cwd paths, not Claude's encoded project dir names.
+    let cursor_project_scope = if all {
+        None
+    } else if let Some(p) = project {
+        Some(p.to_string())
+    } else {
+        user_dirs::current_dir()
+            .ok()
+            .map(|cwd| cwd.to_string_lossy().to_string())
+    };
+    let cursor_provider = CursorTrackerProvider::new(since_days, cursor_project_scope);
+
+    // Prefer Claude transcripts; fall back to Cursor tracking when none exist.
+    let mut sources: Vec<(&dyn SessionProvider, Vec<std::path::PathBuf>)> = Vec::new();
+    let claude_sessions =
+        claude_provider.discover_sessions(project_filter, Some(since_days))?;
+    if !claude_sessions.is_empty() {
+        sources.push((&claude_provider, claude_sessions));
+    } else {
+        let cursor_sessions = cursor_provider.discover_sessions(None, None)?;
+        if !cursor_sessions.is_empty() {
+            sources.push((&cursor_provider, cursor_sessions));
+        }
+    }
+
+    let sessions_scanned: usize = sources.iter().map(|(_, sessions)| sessions.len()).sum();
 
     if verbose > 0 {
-        eprintln!("Scanning {} session files...", sessions.len());
-        for s in &sessions {
-            eprintln!("  {}", s.display());
+        eprintln!("Scanning {} session sources...", sessions_scanned);
+        for (_, sessions) in &sources {
+            for s in sessions {
+                eprintln!("  {}", s.display());
+            }
         }
     }
 
@@ -437,19 +464,20 @@ pub fn run(
     let mut supported_map: HashMap<&'static str, SupportedBucket> = HashMap::new();
     let mut unsupported_map: HashMap<String, UnsupportedBucket> = HashMap::new();
 
-    for session_path in &sessions {
-        let extracted = match provider.extract_commands(session_path) {
-            Ok(cmds) => cmds,
-            Err(e) => {
-                if verbose > 0 {
-                    eprintln!("Warning: skipping {}: {}", session_path.display(), e);
+    for (provider, sessions) in &sources {
+        for session_path in sessions {
+            let extracted = match provider.extract_commands(session_path) {
+                Ok(cmds) => cmds,
+                Err(e) => {
+                    if verbose > 0 {
+                        eprintln!("Warning: skipping {}: {}", session_path.display(), e);
+                    }
+                    parse_errors += 1;
+                    continue;
                 }
-                parse_errors += 1;
-                continue;
-            }
-        };
+            };
 
-        for ext_cmd in &extracted {
+            for ext_cmd in &extracted {
             let parts = split_command_chain(&ext_cmd.command);
             for part in parts {
                 total_commands += 1;
@@ -497,6 +525,12 @@ pub fn run(
                         estimated_savings_pct,
                         status,
                     } => {
+                        // Cursor tracking rows already know whether RTK routed them.
+                        if ext_cmd.was_rtk_routed {
+                            already_rtk += 1;
+                            continue;
+                        }
+
                         let coverage = hook_coverage(
                             &ext_cmd.command,
                             part,
@@ -565,13 +599,15 @@ pub fn run(
                         // Ground truth from the transcript itself — the model really
                         // did invoke `rtk` directly (excluding the deliberate
                         // unfiltered `rtk bypass` escape hatch).
-                        if is_already_rtk(part) {
+                        // Cursor tracking also marks routed rows via was_rtk_routed.
+                        if ext_cmd.was_rtk_routed || is_already_rtk(part) {
                             already_rtk += 1;
                         }
                         // Otherwise just skip
                     }
                 }
             }
+        }
         }
     }
 
@@ -649,7 +685,7 @@ pub fn run(
     };
 
     let report = DiscoverReport {
-        sessions_scanned: sessions.len(),
+        sessions_scanned,
         scope,
         total_commands,
         already_rtk,

@@ -737,7 +737,7 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// Discover missed RTK savings from Claude Code history
+    /// Discover missed RTK savings from Claude Code history or Cursor tracking
     Discover {
         /// Filter by project path (substring match; case-insensitive on Windows)
         #[arg(short, long)]
