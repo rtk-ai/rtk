@@ -493,6 +493,16 @@ pub(crate) enum ShellDialect {
     Fish,
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static ATTESTATION_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn attestation_check_count() -> usize {
+    ATTESTATION_CHECKS.with(std::cell::Cell::get)
+}
+
 /// True for constructs the permission gate can't decompose, so they must never
 /// be auto-allowed: command/process substitution, quoting the lexer reads
 /// differently from bash, a heredoc or herestring whatever its delimiter, or a
@@ -500,6 +510,8 @@ pub(crate) enum ShellDialect {
 /// Separators and subshells are handled by [`split_for_permissions`], not
 /// flagged here.
 pub fn contains_unattestable_construct(cmd: &str) -> bool {
+    #[cfg(test)]
+    ATTESTATION_CHECKS.with(|checks| checks.set(checks.get() + 1));
     contains_unattestable_construct_in(cmd, ShellDialect::Posix)
 }
 
