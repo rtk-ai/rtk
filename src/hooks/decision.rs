@@ -313,13 +313,17 @@ pub(crate) fn decide_for_agent(
 }
 
 /// [`decide_for_agent`] for a hook whose payload reports the command's working
-/// directory: inside a Claude Code managed worktree, `git` is left unrewritten.
+/// directory: inside a Claude Code managed worktree, `git` is left unrewritten
+/// and fish-script wrapping is disabled.
 ///
 /// Claude Code's worktree-isolation guard runs on the command *after* the hook
 /// has rewritten it, and it only accepts git spelled plainly (or under the few
 /// launchers it models). A rewritten `rtk git …` is refused outright as
 /// "cannot be shown not to be git", so no git command could run from an
-/// isolated session (#3864). The payload carries no isolation flag, so the
+/// isolated session (#3864). For the same reason, `rtk run --shell fish -c …`
+/// is refused by the worktree guard because `rtk` is not a recognized launcher
+/// and `fish` in the command text is treated as an opaque subshell that might
+/// invoke git. The payload carries no isolation flag, so the
 /// signal is the path shape Claude Code gives the worktrees it creates,
 /// `<repo>/.claude/worktrees/<name>` (see [`in_claude_worktree`]). A worktree a
 /// `WorktreeCreate` hook places elsewhere is not detected, and git there is
@@ -360,7 +364,8 @@ fn decide_for_agent_at_with_attestation(
     cwd: Option<&str>,
 ) -> HookDecision {
     let (mut excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
-    if cwd.is_some_and(in_claude_worktree) {
+    let in_worktree = cwd.is_some_and(in_claude_worktree);
+    if in_worktree {
         excluded.push("git".to_string());
     }
     suppress_identity(
@@ -370,7 +375,7 @@ fn decide_for_agent_at_with_attestation(
             verdict,
             &excluded,
             &transparent_prefixes,
-            attest,
+            attest.filter(|_| !in_worktree),
             crate::discover::fish_script::try_wrap,
         ),
     )
@@ -678,6 +683,23 @@ mod tests {
                 HookDecision::AllowRewrite("rtk ls -la".into())
             );
         });
+    }
+
+    #[test]
+    fn claude_worktree_leaves_fish_scripts_unwrapped() {
+        let script = "if test -d src\n    cargo build\nend";
+        let wt = Some("/repo/.claude/worktrees/feat-x");
+        assert_eq!(
+            decide_for_agent_at_with_attestation(
+                script,
+                PermissionVerdict::Allow,
+                Some(|| -> DenyRules {
+                    panic!("worktree must not evaluate deny-rule attestation for fish wrapping")
+                }),
+                wt,
+            ),
+            HookDecision::Defer
+        );
     }
 
     /// A rewritable command with no rule matching it is an ask-rewrite, never
