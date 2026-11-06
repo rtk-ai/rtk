@@ -13,12 +13,14 @@ use std::collections::HashMap;
 
 use provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
 use registry::{
-    Classification, ExcludePattern, category_avg_tokens, classify_command_at,
+    ChainPart, Classification, ExcludePattern, category_avg_tokens, classify_command_at,
     split_command_chain_parts, strip_disabled_prefix_for_analytics,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
-use crate::core::cmdline::lexer::{self, CommandStart, join_continuations, tokenize, words};
+use crate::core::cmdline::lexer::{
+    self, CommandStart, TokenKind, joined_or_as_written, tokenize, words,
+};
 use crate::core::cmdline::rtk::rtk_invocation;
 use crate::core::tracking::{HookDecisionRecord, Tracker};
 use crate::core::user_dirs;
@@ -314,9 +316,10 @@ struct SupportedBucket {
     /// `total_output_tokens / total_raw_output_tokens` — a weighted average across
     /// all sub-commands, regardless of which sub-command was seen first.
     total_raw_output_tokens: usize,
-    /// How many of `count` were sized by the category average because the line
-    /// they came from measured somebody else's output. A command that feeds a
-    /// pipe is never the last of its line, so it is always one of these.
+    /// How many of `count` were estimated from category averages: sized by their own,
+    /// because what the line measured was somebody else's output, or given a share of a
+    /// number other commands wrote to as well. A command that feeds a pipe is always one
+    /// of these.
     estimated_occurrences: usize,
     // For display: the most common raw command
     command_counts: HashMap<String, usize>,
@@ -371,6 +374,98 @@ fn disposition(bypassed: bool, reached: bool, covered: bool, consumes_a_pipe: bo
     Disposition::Opportunity
 }
 
+/// A command reads another's output when the one before it feeds a pipe.
+fn consumes_a_pipe(parts: &[ChainPart<'_>], index: usize) -> bool {
+    index
+        .checked_sub(1)
+        .and_then(|prev| parts.get(prev))
+        .is_some_and(|prev| prev.feeds_pipe)
+}
+
+/// After a pipe, `time` is the program `time`.
+fn command_start(consumes_a_pipe: bool) -> CommandStart {
+    if consumes_a_pipe {
+        CommandStart::PipeStage
+    } else {
+        CommandStart::Pipeline
+    }
+}
+
+/// Whether a redirect sends `command`'s own output somewhere other than the tool result.
+fn sends_its_output_elsewhere(command: &str) -> bool {
+    tokenize(command).iter().any(|token| {
+        token.kind == TokenKind::Redirect && {
+            let operator = token.value.strip_prefix('1').unwrap_or(token.value);
+            // `>&2` copies it to the other stream, which comes back too. A bare `>&` takes a
+            // file for its word.
+            operator == ">&"
+                || (operator.starts_with('>') && !operator.starts_with(">&"))
+                || operator.starts_with("&>")
+        }
+    })
+}
+
+/// Commands whose output is next to nothing beside what they run with.
+const WRITES_NEXT_TO_NOTHING: &[&str] = &[
+    "cd", "echo", "printf", "pwd", "true", "false", "export", "set", "unset", "mkdir", "mv", "cp",
+    "rm", "chmod", "chown", "touch", "sleep", "wait", "kill", "fi", "done",
+];
+
+fn writes_next_to_nothing(command: &str) -> bool {
+    // A comment or a bare assignment leaves no command at all.
+    command.is_empty()
+        || head_words(command)
+            .first()
+            .is_some_and(|word| WRITES_NEXT_TO_NOTHING.contains(word))
+}
+
+/// What each part's share of a call's measured output is, `None` where it gets none and
+/// its category average stands in.
+///
+/// The one number is shared by the commands that wrote to it, in proportion to their
+/// category averages, and a command alone takes it whole. A command that fed a pipe never
+/// reached it, and one that redirected its output is known to have added nothing. A trailing
+/// `echo done` or `cd x` is left out. Any other command with no row, such as `bash x.sh` or
+/// `rtk cargo test`, may have written it all, so it takes a share that no row shows.
+fn output_shares(parts: &[ChainPart<'_>], output_len: Option<usize>) -> Vec<Option<usize>> {
+    let Some(output_len) = output_len else {
+        return vec![None; parts.len()];
+    };
+    let weights: Vec<Option<usize>> = (0..parts.len())
+        .map(|index| {
+            let start = command_start(consumes_a_pipe(parts, index));
+            let (_, command) = strip_disabled_prefix_for_analytics(parts[index].text);
+            if parts[index].feeds_pipe {
+                return None;
+            }
+            if sends_its_output_elsewhere(command) {
+                return Some(0);
+            }
+            match classify_command_at(command, start) {
+                Classification::Supported { category, .. } => {
+                    let head = head_words(command);
+                    let subcmd = head.get(1).copied().unwrap_or("");
+                    Some(category_avg_tokens(category, subcmd))
+                }
+                _ if writes_next_to_nothing(command) => None,
+                _ => Some(category_avg_tokens("", "")),
+            }
+        })
+        .collect();
+    let total: usize = weights.iter().flatten().sum();
+    weights
+        .iter()
+        .map(|weight| {
+            let weight = (*weight)?;
+            Some(if weight == 0 {
+                0
+            } else {
+                (output_len as f64 * weight as f64 / total as f64) as usize
+            })
+        })
+        .collect()
+}
+
 /// Everything one scan counts, kept apart from the session files and the
 /// tracking database `run()` reads them from.
 ///
@@ -403,8 +498,8 @@ impl Tally {
     fn add(&mut self, ext_cmd: &ExtractedCommand, ctx: &CoverageContext) {
         // The line as the hook reads it, so a `\⏎` is no word of the report's. One too
         // complex to join stays as written.
-        let joined = join_continuations(&ext_cmd.command);
-        let command = joined.as_deref().unwrap_or(ext_cmd.command.as_str());
+        let joined = joined_or_as_written(&ext_cmd.command);
+        let command: &str = &joined;
         let parts = split_command_chain_parts(command);
         // One answer per command, worked out once for the line: what the
         // rewriter does to one command depends on the ones around it, and a
@@ -415,31 +510,13 @@ impl Tally {
             &ctx.exclude_patterns,
             &ctx.normalized_transparent_prefixes,
         );
+        let shares = output_shares(&parts, ext_cmd.output_len);
+        let is_split = shares.iter().flatten().filter(|share| **share > 0).count() > 1;
         for (index, chain_part) in parts.iter().enumerate() {
             let part = chain_part.text;
-            // A command reads another's output when the one before it feeds
-            // a pipe, and after that pipe `time` is the program `time`.
-            let consumes_a_pipe = index
-                .checked_sub(1)
-                .and_then(|prev| parts.get(prev))
-                .is_some_and(|prev| prev.feeds_pipe);
-            let start = if consumes_a_pipe {
-                CommandStart::PipeStage
-            } else {
-                CommandStart::Pipeline
-            };
-            // `output_len` measures what came back from the tool call, which
-            // is what the last command in the line wrote. An earlier one
-            // either fed a pipe, and its output was consumed rather than
-            // returned, or shares the number with its siblings — either way
-            // the per-category average is the honest estimate for it, and
-            // handing this number to every part would multiply the total by
-            // the number of parts.
-            let output_len = if index + 1 == parts.len() {
-                ext_cmd.output_len
-            } else {
-                None
-            };
+            let consumes_a_pipe = consumes_a_pipe(&parts, index);
+            let start = command_start(consumes_a_pipe);
+            let output_len = shares[index];
             self.total_commands += 1;
 
             // Detect RTK_DISABLED= bypass before classification
@@ -515,7 +592,7 @@ impl Tally {
 
                     bucket.count += 1;
 
-                    if output_len.is_none() {
+                    if output_len.is_none() || is_split {
                         bucket.estimated_occurrences += 1;
                     }
 
@@ -924,6 +1001,140 @@ mod tests {
             tally.add(&scanned(c, None), ctx);
         }
         tally
+    }
+
+    /// Tokens of 400 KB of output, as a row reads them.
+    const MEASURED: usize = 100_000;
+
+    fn row_of_a_call(command: &str, rule: &str) -> (usize, usize) {
+        let mut tally = Tally::default();
+        tally.add(&scanned(command, Some(4 * MEASURED)), &test_ctx(false));
+        [&tally.supported, &tally.opportunities]
+            .iter()
+            .find_map(|map| map.get(rule))
+            .map(|bucket| (bucket.estimated_occurrences, bucket.total_raw_output_tokens))
+            .unwrap_or_else(|| panic!("{command:?}: no {rule} row"))
+    }
+
+    /// A command alone takes the call's whole output, whatever the report ignores after it.
+    #[test]
+    fn test_a_calls_only_writer_takes_its_measured_output() {
+        for command in [
+            "cargo test",
+            "cargo test\necho done",
+            "cargo test; echo done",
+            "cargo test\ncd x",
+            "cargo test\n# done",
+            "cargo test; # done",
+            "cargo test\nprintf done",
+            "cd x\ncargo test",
+        ] {
+            assert_eq!(
+                row_of_a_call(command, "rtk cargo"),
+                (0, MEASURED),
+                "{command:?}"
+            );
+        }
+        // Where `time` after a pipe is the program, a stage the report does not size.
+        assert_eq!(
+            row_of_a_call("foo | time cargo test; git status", "rtk git").1,
+            MEASURED * 40 / 190
+        );
+    }
+
+    /// What fed a pipe never reached the output, and its size is not known.
+    #[test]
+    fn test_a_command_feeding_a_pipe_keeps_its_average() {
+        let average = (1, category_avg_tokens("Cargo", "test"));
+        for command in ["cargo test | foo", "cargo test | foo\necho done"] {
+            assert_eq!(row_of_a_call(command, "rtk cargo"), average, "{command:?}");
+        }
+    }
+
+    /// What went to a file added nothing to the output, and that is known.
+    #[test]
+    fn test_a_redirected_command_is_measured_at_nothing() {
+        for command in [
+            "cargo test > out.log\necho done",
+            "cargo test >> out.log; echo done",
+            "cargo test 1>out.log\necho done",
+            "cargo test &> out.log\necho done",
+            "cargo test >& out.log\necho done",
+            "cargo test >/dev/null; echo $?",
+            "cargo test > out.log",
+        ] {
+            assert_eq!(row_of_a_call(command, "rtk cargo"), (0, 0), "{command:?}");
+        }
+        assert_eq!(
+            row_of_a_call("cargo test > out.log; git status", "rtk git"),
+            (0, MEASURED)
+        );
+        // Its errors and a copy to the other stream still reach it.
+        for command in ["cargo test 2>err.log", "cargo test >&2", "cargo test 2>&1"] {
+            assert_eq!(
+                row_of_a_call(command, "rtk cargo"),
+                (0, MEASURED),
+                "{command:?}"
+            );
+        }
+    }
+
+    /// Commands that wrote to the output share it by their averages, and add up to it.
+    #[test]
+    fn test_writers_share_the_measured_output_by_their_averages() {
+        let cargo_avg = category_avg_tokens("Cargo", "test");
+        let git_avg = category_avg_tokens("Git", "status");
+        let total = cargo_avg + git_avg;
+        for command in ["cargo test\ngit status", "cargo test; git status"] {
+            let (cargo_estimated, cargo) = row_of_a_call(command, "rtk cargo");
+            let (git_estimated, git) = row_of_a_call(command, "rtk git");
+            assert_eq!((cargo_estimated, git_estimated), (1, 1), "{command:?}");
+            assert_eq!(cargo, MEASURED * cargo_avg / total, "{command:?}");
+            assert_eq!(git, MEASURED * git_avg / total, "{command:?}");
+        }
+        // The prefix is no word of the command, so `test` is still what sizes it.
+        assert_eq!(
+            row_of_a_call("RTK_DISABLED=1 cargo test\ngit status", "rtk git").1,
+            MEASURED * git_avg / total
+        );
+    }
+
+    /// A command with no row, or already through rtk, may have written it all.
+    #[test]
+    fn test_a_command_with_no_row_keeps_its_share() {
+        let other = category_avg_tokens("", "");
+        let git_avg = category_avg_tokens("Git", "status");
+        for command in [
+            "git status && ./build.sh",
+            "git status\npython gen.py",
+            "git status\nrtk cargo test",
+            "git status\nrtk bypass cargo test",
+            "git status\nbash ./build.sh",
+            "git status; sed -n 1,9p big.log",
+            "git status\npython3 -c 'print(1)'",
+        ] {
+            assert_eq!(
+                row_of_a_call(command, "rtk git"),
+                (1, MEASURED * git_avg / (git_avg + other)),
+                "{command:?}"
+            );
+        }
+    }
+
+    /// Every line of a multi-line call is a command the agent ran.
+    #[test]
+    fn test_the_report_counts_every_line_of_a_call() {
+        let tally = tally_of(
+            &[
+                "git status\ncargo test",
+                "cd x\ngit log",
+                "foo bar\ngit diff",
+            ],
+            &test_ctx(false),
+        );
+
+        assert_eq!(tally.total_commands, 6);
+        assert_eq!(counts(&tally.supported), [("rtk cargo", 1), ("rtk git", 3)]);
     }
 
     /// A `\⏎` is no word: the report reads a line as the hook does.

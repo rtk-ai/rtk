@@ -438,6 +438,11 @@ fn has_source_syntax(text: &str) -> bool {
     text.contains('#') || text.contains("\\\n")
 }
 
+/// `text` with its continuations joined; one too complex to join stays as written.
+pub(crate) fn joined_or_as_written(text: &str) -> Cow<'_, str> {
+    join_continuations(text).unwrap_or(Cow::Borrowed(text))
+}
+
 /// What to read of a [`join_continuations`] answer: the line, or every reading of one
 /// too complex to read.
 pub(crate) fn every_reading<'a>(
