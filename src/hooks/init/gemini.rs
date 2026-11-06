@@ -31,22 +31,9 @@ pub fn run_gemini(
     }
 
     let gemini_dir = resolve_gemini_dir()?;
-    if !dry_run {
-        fs::create_dir_all(&gemini_dir).with_context(|| {
-            format!(
-                "Failed to create Gemini config dir: {}",
-                gemini_dir.display()
-            )
-        })?;
-    }
 
     // 1. Install hook script
-    let hook_dir = gemini_dir.join("hooks");
-    if !dry_run {
-        fs::create_dir_all(&hook_dir)
-            .with_context(|| format!("Failed to create hook dir: {}", hook_dir.display()))?;
-    }
-    let hook_path = hook_dir.join(GEMINI_HOOK_FILE);
+    let hook_path = gemini_dir.join(HOOKS_SUBDIR).join(GEMINI_HOOK_FILE);
     write_if_changed(&hook_path, GEMINI_HOOK_SCRIPT, "Gemini hook", ctx)?;
 
     #[cfg(unix)]
@@ -176,6 +163,14 @@ fn patch_gemini_settings(
         return Ok(false);
     }
 
+    // A file the patch would refuse is neither asked about nor patched, whatever the mode:
+    // say why, and leave it to the user as a declined prompt does.
+    if let Err(error) = ensure_patchable(&settings_path) {
+        eprintln!("[warn] {error:#}");
+        println!("Skipped. Add hook manually later.");
+        return Ok(false);
+    }
+
     if patch_mode == PatchMode::Ask {
         if dry_run {
             println!(
@@ -221,28 +216,18 @@ fn patch_gemini_settings(
         .context("BeforeTool is not an array")?
         .push(hook_entry);
 
-    let content = serde_json::to_string_pretty(&settings)?;
-
-    if dry_run {
-        println!(
+    update_json_file(
+        &settings_path,
+        &settings,
+        ctx,
+        "Gemini settings.json",
+        Report::new(format!(
             "[dry-run] would patch Gemini settings.json: {}",
             settings_path.display()
-        );
-        if verbose > 0 {
-            println!("[dry-run] content:\n{}", content);
-        }
-        return Ok(false);
-    }
-
-    // Write atomically
-    let tmp = NamedTempFile::new_in(gemini_dir)?;
-    fs::write(tmp.path(), &content)?;
-    tmp.persist(&settings_path)
-        .with_context(|| format!("Failed to write {}", settings_path.display()))?;
-
-    if verbose > 0 {
-        eprintln!("Patched {}", settings_path.display());
-    }
+        ))
+        .with_content()
+        .done_verbose(format!("Patched {}", settings_path.display())),
+    )?;
 
     Ok(false)
 }
@@ -304,15 +289,12 @@ pub(super) fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
                         .is_some_and(|c| c.contains("rtk"))
                 });
                 if arr.len() < before {
-                    if dry_run {
-                        println!(
-                            "[dry-run] would remove RTK hook from Gemini settings.json: {}",
-                            settings_path.display()
-                        );
-                    } else {
-                        let new_content = serde_json::to_string_pretty(&settings)?;
-                        fs::write(&settings_path, new_content)?;
-                    }
+                    let new_content = serde_json::to_string_pretty(&settings)?;
+                    let report = Report::new(format!(
+                        "[dry-run] would remove RTK hook from Gemini settings.json: {}",
+                        settings_path.display()
+                    ));
+                    write_reported(&settings_path, WriteKind::Config, &new_content, ctx, report)?;
                     removed.push("Gemini settings.json: removed RTK hook entry".to_string());
                 }
             }
