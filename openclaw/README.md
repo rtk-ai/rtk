@@ -98,9 +98,11 @@ Everything that `rtk rewrite` supports. See [what RTK covers](https://www.rtk-ai
 
 Handled by `rtk rewrite` guards:
 - Commands already using `rtk`
-- Piped commands (`|`, `&&`, `;`)
 - Heredocs (`<<`)
 - Commands without an RTK filter
+- Intermediate pipeline stages and `|&` pipelines
+
+Compound commands are not skipped: `rtk rewrite` splits on `&&`, `||`, `;` and `|` and rewrites each segment on its own (`git status && cargo test` becomes `rtk git status && rtk cargo test`). See [Compound splitting](https://github.com/rtk-ai/rtk/blob/develop/src/discover/README.md) for which pipeline stages are rewritten.
 
 ## License
 
