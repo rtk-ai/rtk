@@ -88,6 +88,15 @@ static TEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("valid regex")
 });
+// `dotnet test` on the Microsoft Testing Platform prints one `key: value` per line under the header.
+// A run over several assemblies lists each of them (then a blank line) between the header and
+// `total:`, and `total:` gains a `(+N retried)` suffix when tests were retried.
+static MTP_MULTILINE_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?mi)Test\s+run\s+summary:\s*(?:Passed!|Failed!)[^\n]*\n(?:[^\n]*\n)*?\s*total:\s*(?P<total>\d+)[^\n]*\n\s*failed:\s*(?P<failed>\d+)\s*\n\s*(?:succeeded|passed):\s*(?P<passed>\d+)\s*\n\s*skipped:\s*(?P<skipped>\d+)\s*\n\s*duration:\s*(?P<duration>[^\r\n]+)"
+    )
+    .expect("valid regex")
+});
 static FAILED_TEST_HEAD_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^\s*Failed\s+(?P<name>[^\r\n\[]+)\s+\[[^\]\r\n]+\]\s*$").expect("valid regex")
 });
@@ -895,7 +904,11 @@ pub fn parse_test_from_text(text: &str) -> TestSummary {
         summary.duration_text = fallback_duration;
     }
 
-    if let Some(captures) = TEST_SUMMARY_RE.captures_iter(&scrubbed).last() {
+    if let Some(captures) = TEST_SUMMARY_RE
+        .captures_iter(&scrubbed)
+        .last()
+        .or_else(|| MTP_MULTILINE_SUMMARY_RE.captures_iter(&scrubbed).last())
+    {
         summary.passed = captures
             .name("passed")
             .and_then(|m| m.as_str().parse::<usize>().ok())
@@ -1669,5 +1682,98 @@ Time Elapsed 00:00:00.12
 
         let selected = select_best_issues(primary.clone(), fallback);
         assert_eq!(selected, primary);
+    }
+
+    #[test]
+    fn test_parse_test_from_text_mtp_multiline_passed() {
+        let input = "\
+Determining projects to restore...
+  All projects are up-to-date for restore.
+Test run summary: Passed!
+  total: 72
+  failed: 0
+  succeeded: 72
+  skipped: 0
+  duration: 1s 672ms
+";
+        let summary = parse_test_from_text(input);
+        assert_eq!(summary.total, 72);
+        assert_eq!(summary.passed, 72);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped, 0);
+        assert_eq!(summary.duration_text.as_deref(), Some("1s 672ms"));
+    }
+
+    #[test]
+    fn test_parse_test_from_text_mtp_multiline_failed() {
+        let input = "\
+Test run summary: Failed!
+  total: 50
+  failed: 3
+  succeeded: 45
+  skipped: 2
+  duration: 2s 100ms
+";
+        let summary = parse_test_from_text(input);
+        assert_eq!(summary.total, 50);
+        assert_eq!(summary.passed, 45);
+        assert_eq!(summary.failed, 3);
+        assert_eq!(summary.skipped, 2);
+        assert_eq!(summary.duration_text.as_deref(), Some("2s 100ms"));
+    }
+
+    #[test]
+    fn test_parse_test_from_text_mtp_multiline_lists_several_assemblies() {
+        let input = "\
+Test run summary: Passed!
+  /repo/tests/Unit/bin/Debug/net10.0/Unit.dll (net10.0|x64) passed [+3/x0/?0] (1s 100ms)
+  /repo/tests/Api/bin/Debug/net10.0/Api.dll (net10.0|x64) passed [+2/x0/?0] (600ms)
+
+  total: 5
+  failed: 0
+  succeeded: 5
+  skipped: 0
+  duration: 1s 700ms
+";
+        let summary = parse_test_from_text(input);
+        assert_eq!(summary.total, 5);
+        assert_eq!(summary.passed, 5);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.duration_text.as_deref(), Some("1s 700ms"));
+    }
+
+    #[test]
+    fn test_parse_test_from_text_mtp_multiline_total_with_retried_suffix() {
+        let input = "\
+Test run summary: Failed!
+  total: 4 (+1 retried)
+  failed: 1
+  succeeded: 3
+  skipped: 0
+  duration: 3s 5ms
+";
+        let summary = parse_test_from_text(input);
+        assert_eq!(summary.total, 4);
+        assert_eq!(summary.passed, 3);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.duration_text.as_deref(), Some("3s 5ms"));
+    }
+
+    #[test]
+    fn test_parse_test_from_text_mtp_multiline_error_line_before_counts() {
+        let input = "\
+Test run summary: Failed!
+  error: 1
+
+  total: 3
+  failed: 0
+  succeeded: 3
+  skipped: 0
+  duration: 2s
+";
+        let summary = parse_test_from_text(input);
+        assert_eq!(summary.total, 3);
+        assert_eq!(summary.passed, 3);
+        assert_eq!(summary.failed, 0);
     }
 }
