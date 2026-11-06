@@ -1,0 +1,16 @@
+[ 10%] Building CXX object CMakeFiles/myapp.dir/main.cpp.o
+[ 20%] Building CXX object CMakeFiles/myapp.dir/util.cpp.o
+[ 30%] Building CXX object CMakeFiles/myapp.dir/parser.cpp.o
+/home/user/proj/src/parser.cpp:42:14: error: 'undefined_symbol' was not declared in this scope
+   42 |     return undefined_symbol(token);
+      |            ^~~~~~~~~~~~~~~~
+/home/user/proj/src/parser.cpp:55:5: warning: unused variable 'tmp' [-Wunused-variable]
+   55 |     int tmp = 0;
+      |     ^~~
+[ 40%] Building CXX object CMakeFiles/myapp.dir/lexer.cpp.o
+/home/user/proj/src/lexer.cpp:120:9: error: expected ';' before 'return'
+  120 |         return tok
+      |         ^~~~~~~~~~
+make[2]: *** [CMakeFiles/myapp.dir/build.make:84: CMakeFiles/myapp.dir/parser.cpp.o] Error 1
+make[1]: *** [CMakeFiles/Makefile2:99: CMakeFiles/myapp.dir/all] Error 2
+make: *** [Makefile:130: all] Error 2
