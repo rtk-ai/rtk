@@ -88,10 +88,12 @@ pub fn from_json_str<'a, T: serde::Deserialize<'a>>(s: &'a str) -> serde_json::R
 /// assert_eq!(format_tokens(694), "694");
 /// ```
 pub fn format_tokens(n: usize) -> String {
-    if n >= 1_000_000 {
+    let thousands = format!("{:.1}", n as f64 / 1_000.0);
+    // 999_950 and up round to "1000.0" thousands: show them as millions instead.
+    if n >= 1_000_000 || thousands == "1000.0" {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
-        format!("{:.1}K", n as f64 / 1_000.0)
+        format!("{thousands}K")
     } else {
         format!("{}", n)
     }
@@ -755,12 +757,15 @@ pub fn human_bytes(bytes: u64) -> String {
     const MB: u64 = KB * 1024;
     const GB: u64 = MB * 1024;
     const TB: u64 = GB * 1024;
+    // A size just under the next unit rounds to "1024.0" of the smaller one
+    // (1_048_575 bytes is 1023.999 KB): show it in the next unit instead.
+    let rounds_up_from = |unit: u64| format!("{:.1}", bytes as f64 / unit as f64) == "1024.0";
 
-    if bytes >= TB {
+    if bytes >= TB || rounds_up_from(GB) {
         format!("{:.1} TB", bytes as f64 / TB as f64)
-    } else if bytes >= GB {
+    } else if bytes >= GB || rounds_up_from(MB) {
         format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
+    } else if bytes >= MB || rounds_up_from(KB) {
         format!("{:.1} MB", bytes as f64 / MB as f64)
     } else if bytes >= KB {
         format!("{:.1} KB", bytes as f64 / KB as f64)
@@ -1057,6 +1062,14 @@ mod tests {
     fn test_format_tokens_thousands() {
         assert_eq!(format_tokens(59_234), "59.2K");
         assert_eq!(format_tokens(1_000), "1.0K");
+    }
+
+    #[test]
+    fn test_format_tokens_moves_to_next_unit_when_rounding_reaches_it() {
+        assert_eq!(format_tokens(999_949), "999.9K");
+        assert_eq!(format_tokens(999_950), "1.0M");
+        assert_eq!(format_tokens(999_999), "1.0M");
+        assert_eq!(format_tokens(999), "999");
     }
 
     #[test]
@@ -1471,6 +1484,14 @@ mod tests {
     fn test_shorten_arn_fallback() {
         // Non-ARN string - return as-is
         assert_eq!(shorten_arn("simple-name"), "simple-name");
+    }
+
+    #[test]
+    fn test_human_bytes_moves_to_next_unit_when_rounding_reaches_it() {
+        assert_eq!(human_bytes(1_048_524), "1023.9 KB");
+        assert_eq!(human_bytes(1_048_575), "1.0 MB");
+        assert_eq!(human_bytes(1_073_741_823), "1.0 GB");
+        assert_eq!(human_bytes(1_099_511_627_775), "1.0 TB");
     }
 
     #[test]
