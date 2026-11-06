@@ -36,6 +36,8 @@ pub struct LogEntry {
     pub shadow: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 pub fn log_path() -> Option<PathBuf> {
@@ -145,8 +147,13 @@ pub fn render(entry: &LogEntry) -> String {
         (None, false) => entry.methods.join(","),
         (None, true) => "-".to_string(),
     };
+    let outcome = entry
+        .outcome
+        .as_deref()
+        .map(|o| format!("  {o}"))
+        .unwrap_or_default();
     let tokens = match (entry.tokens_before, entry.tokens_after) {
-        (Some(before), Some(after)) => format!("  {before} -> {after}"),
+        (Some(before), Some(after)) if entry.outcome.is_none() => format!("  {before} -> {after}"),
         _ => String::new(),
     };
     let shadow = if entry.shadow { "  (shadow)" } else { "" };
@@ -156,7 +163,7 @@ pub fn render(entry: &LogEntry) -> String {
         .map(|r| format!("  recovery {r}"))
         .unwrap_or_default();
     format!(
-        "{}  {:<28} {:<24} {:<16} {}{}{}{}",
+        "{}  {:<28} {:<24} {:<16} {}{}{}{}{}",
         entry.ts,
         position,
         entry
@@ -165,6 +172,7 @@ pub fn render(entry: &LogEntry) -> String {
             .unwrap_or(entry.tool.as_deref().unwrap_or("")),
         entry.rule,
         what,
+        outcome,
         tokens,
         shadow,
         recovery
@@ -192,6 +200,7 @@ mod tests {
             tokens_after: Some(640),
             shadow: false,
             recovery: Some("recall 1f3a9c".to_string()),
+            outcome: None,
         };
         let line = serde_json::to_string(&entry).expect("serializes");
         let back: LogEntry = serde_json::from_str(&line).expect("parses");
@@ -200,5 +209,38 @@ mod tests {
         assert!(rendered.contains("hook.after_tool.shell"));
         assert!(rendered.contains("cargo test"));
         assert!(rendered.contains("3812 -> 640"));
+    }
+
+    #[test]
+    fn test_render_with_outcome_reason() {
+        let entry = LogEntry {
+            ts: "2026-10-30T10:00:00Z".to_string(),
+            session: None,
+            site: "hook".to_string(),
+            event: "after_tool".to_string(),
+            subject: "search".to_string(),
+            tool: Some("search".to_string()),
+            command: Some("src".to_string()),
+            rule: "grep-group".to_string(),
+            action: None,
+            methods: vec!["grep-group".to_string()],
+            tokens_before: Some(660),
+            tokens_after: Some(660),
+            shadow: false,
+            recovery: None,
+            outcome: Some("kept as is (no smaller result)".to_string()),
+        };
+        let line = serde_json::to_string(&entry).expect("serializes");
+        let back: LogEntry = serde_json::from_str(&line).expect("parses");
+        assert_eq!(
+            back.outcome.as_deref(),
+            Some("kept as is (no smaller result)")
+        );
+        let rendered = render(&back);
+        assert!(rendered.contains("hook.after_tool.search"));
+        assert!(rendered.contains("src"));
+        assert!(rendered.contains("grep-group"));
+        assert!(rendered.contains("kept as is (no smaller result)"));
+        assert!(!rendered.contains("660 -> 660"));
     }
 }

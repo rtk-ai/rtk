@@ -139,6 +139,7 @@ fn process_with_config(event: &Value, config: &Config, pipeline: &Resolved) -> O
     };
 
     let composed = filter_and_compose(
+        event,
         config,
         pipeline,
         subject,
@@ -220,6 +221,7 @@ fn log_entry_for(
     applied: &Applied,
     before: usize,
     after: usize,
+    outcome: Option<String>,
 ) -> pipeline_log::LogEntry {
     pipeline_log::LogEntry {
         ts: pipeline_log::now_ts(),
@@ -238,6 +240,7 @@ fn log_entry_for(
         tokens_after: Some(after),
         shadow: applied.shadow,
         recovery: None,
+        outcome,
     }
 }
 
@@ -248,13 +251,25 @@ fn queue_log(
     applied: &Applied,
     before: usize,
     after: usize,
+    outcome: Option<String>,
 ) {
     if !pipeline_log::enabled() {
         return;
     }
     pipeline_log::queue(log_entry_for(
-        subject, command, source, applied, before, after,
+        subject, command, source, applied, before, after, outcome,
     ));
+}
+
+fn partial_read_info(event: &Value) -> Option<(u64, u64)> {
+    let file = event.pointer("/tool_response/file")?;
+    let num_lines = file.get("numLines").and_then(|v| v.as_u64())?;
+    let total_lines = file.get("totalLines").and_then(|v| v.as_u64())?;
+    if num_lines < total_lines {
+        Some((num_lines, total_lines))
+    } else {
+        None
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -478,6 +493,7 @@ fn record_recovery(command: &str) {
 /// `None` = no matching rule, chain was a no-op, not smaller, or shadow.
 #[allow(clippy::too_many_arguments)]
 fn filter_and_compose(
+    event: &Value,
     config: &Config,
     pipeline: &Resolved,
     subject: Subject,
@@ -501,6 +517,20 @@ fn filter_and_compose(
 
     if filtered == raw {
         // No-op chain: skip the recall store entirely.
+        let outcome = if let Some((num, total)) = partial_read_info(event) {
+            format!("kept as is (partial read, {num} of {total} lines)")
+        } else {
+            "kept as is (no change)".to_string()
+        };
+        queue_log(
+            subject,
+            None,
+            source,
+            &applied,
+            estimate_tokens(raw),
+            estimate_tokens(raw),
+            Some(outcome),
+        );
         track(tool_name, format.as_str(), source, raw, raw, duration_ms);
         return None;
     }
@@ -515,6 +545,15 @@ fn filter_and_compose(
     };
 
     if estimate_tokens(&composed) > estimate_tokens(raw) {
+        queue_log(
+            subject,
+            None,
+            source,
+            &applied,
+            estimate_tokens(raw),
+            estimate_tokens(raw),
+            Some("kept as is (no smaller result)".to_string()),
+        );
         track(tool_name, format.as_str(), source, raw, raw, duration_ms);
         return None;
     }
@@ -526,6 +565,7 @@ fn filter_and_compose(
         &applied,
         estimate_tokens(raw),
         estimate_tokens(&composed),
+        None,
     );
     if applied.shadow {
         track(tool_name, format.as_str(), source, raw, raw, duration_ms);
@@ -596,10 +636,29 @@ fn process_websearch(
     }
 
     if !changed || shadow {
-        if let Some(applied) = &last_applied
-            && shadow
-        {
-            attribute(applied, &raw_concat, &filtered_concat);
+        if let Some(applied) = &last_applied {
+            if shadow {
+                attribute(applied, &raw_concat, &filtered_concat);
+                queue_log(
+                    Subject::Web,
+                    None,
+                    source,
+                    applied,
+                    estimate_tokens(&raw_concat),
+                    estimate_tokens(&filtered_concat),
+                    None,
+                );
+            } else {
+                queue_log(
+                    Subject::Web,
+                    None,
+                    source,
+                    applied,
+                    estimate_tokens(&raw_concat),
+                    estimate_tokens(&raw_concat),
+                    Some("kept as is (no change)".to_string()),
+                );
+            }
         }
         track(
             "WebSearch",
@@ -628,6 +687,17 @@ fn process_websearch(
     }
 
     if estimate_tokens(&filtered_concat) > estimate_tokens(&raw_concat) {
+        if let Some(applied) = &last_applied {
+            queue_log(
+                Subject::Web,
+                None,
+                source,
+                applied,
+                estimate_tokens(&raw_concat),
+                estimate_tokens(&raw_concat),
+                Some("kept as is (no smaller result)".to_string()),
+            );
+        }
         track(
             "WebSearch",
             "web",
@@ -651,6 +721,7 @@ fn process_websearch(
             applied,
             estimate_tokens(&raw_concat),
             estimate_tokens(&filtered_concat),
+            None,
         );
     }
     track(
@@ -769,16 +840,29 @@ fn process_shell(
     let raw_combined = combine_streams(stdout, stderr);
 
     if (filtered_stdout == stdout && filtered_stderr == stderr) || shadow {
-        if shadow && let Some(applied) = &applied_stdout {
-            attribute(applied, &raw_combined, &filtered_stdout);
-            queue_log(
-                Subject::Shell,
-                Some(command),
-                "",
-                applied,
-                estimate_tokens(&raw_combined),
-                estimate_tokens(&filtered_stdout),
-            );
+        if let Some(applied) = &applied_stdout {
+            if shadow {
+                attribute(applied, &raw_combined, &filtered_stdout);
+                queue_log(
+                    Subject::Shell,
+                    Some(command),
+                    "",
+                    applied,
+                    estimate_tokens(&raw_combined),
+                    estimate_tokens(&filtered_stdout),
+                    None,
+                );
+            } else {
+                queue_log(
+                    Subject::Shell,
+                    Some(command),
+                    "",
+                    applied,
+                    estimate_tokens(&raw_combined),
+                    estimate_tokens(&raw_combined),
+                    Some("kept as is (no change)".to_string()),
+                );
+            }
         }
         track(
             "Bash",
@@ -800,6 +884,17 @@ fn process_shell(
 
     let emitted_combined = combine_streams(&composed_stdout, &filtered_stderr);
     if estimate_tokens(&emitted_combined) > estimate_tokens(&raw_combined) {
+        if let Some(applied) = &applied_stdout {
+            queue_log(
+                Subject::Shell,
+                Some(command),
+                "",
+                applied,
+                estimate_tokens(&raw_combined),
+                estimate_tokens(&raw_combined),
+                Some("kept as is (no smaller result)".to_string()),
+            );
+        }
         track(
             "Bash",
             "term",
@@ -825,6 +920,7 @@ fn process_shell(
             applied,
             estimate_tokens(&raw_combined),
             estimate_tokens(&emitted_combined),
+            None,
         );
     }
     track(
@@ -1761,6 +1857,7 @@ mod tests {
             &applied,
             estimate_tokens(&applied.text),
             10,
+            None,
         );
         let line = serde_json::to_string(&entry).expect("serializes");
         assert!(
@@ -1769,6 +1866,355 @@ mod tests {
         );
         assert!(line.contains("term-default"));
         assert!(line.contains("cargo test"));
+    }
+
+    /// Runs `event` through the shipped posthook pipeline in a home of its
+    /// own, with the decision log on or off, and returns the hook's output
+    /// and every entry the log recorded. A home per test keeps the log marker
+    /// and file out of the scratch home every other test shares.
+    fn run_logged(event: &Value, log_on: bool) -> (Option<String>, Vec<pipeline_log::LogEntry>) {
+        run_logged_with(event, &test_config(), &posthook_pipeline(), log_on)
+    }
+
+    fn run_logged_with(
+        event: &Value,
+        config: &Config,
+        pipeline: &Resolved,
+        log_on: bool,
+    ) -> (Option<String>, Vec<pipeline_log::LogEntry>) {
+        let home = crate::core::test_isolation::tempdir();
+        crate::core::test_isolation::with_root(home.path(), || {
+            pipeline_log::set_enabled(log_on).expect("toggle the decision log");
+            let output = run_with(event, config, pipeline);
+            pipeline_log::flush();
+            (output, pipeline_log::read_last(100, None))
+        })
+    }
+
+    /// Recall on, in tee mode, writing to `dir`: every filtered result gains
+    /// a `[full output: <path>]` hint, so a chain that saves only a few bytes
+    /// ends up larger than the raw output once the hint is composed in.
+    fn tee_config(dir: &std::path::Path) -> Config {
+        let mut config = Config::default();
+        config.retriever.mode = crate::core::retriever::RecoveryMode::Tee;
+        config.retriever.tee_directory = Some(dir.to_path_buf());
+        config
+    }
+
+    fn bash_event(command: &str, stdout: &str) -> Value {
+        serde_json::json!({
+            "hookEventName": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": command },
+            "tool_response": { "stdout": stdout, "stderr": "" }
+        })
+    }
+
+    fn websearch_event(result: &str) -> Value {
+        serde_json::json!({
+            "hookEventName": "PostToolUse",
+            "tool_name": "WebSearch",
+            "tool_input": { "query": "rtk pipeline log" },
+            "tool_response": {
+                "query": "rtk pipeline log",
+                "results": [
+                    { "tool_use_id": "srvtoolu_1", "content": [] },
+                    result
+                ]
+            }
+        })
+    }
+
+    /// Distinct plain lines with one ANSI reset at the top: `ansi` strips four
+    /// bytes, about one token, so the filtered result is barely smaller.
+    fn one_ansi_code_lines() -> String {
+        let mut text = "\x1b[0m".to_string();
+        for i in 0..15 {
+            text.push_str(&format!("running job task {i} with distinct description\n"));
+        }
+        text
+    }
+
+    fn grep_two_matches_per_file_event() -> Value {
+        let mut content = String::new();
+        for i in 0..40 {
+            content.push_str(&format!("src/file_{i}.rs:10:fn handler_3() {{}}\n"));
+            content.push_str(&format!("src/file_{i}.rs:20:fn handler_3() {{}}\n"));
+        }
+        serde_json::json!({
+            "hookEventName": "PostToolUse",
+            "tool_name": "Grep",
+            "tool_input": {
+                "path": "src",
+                "output_mode": "content"
+            },
+            "tool_response": {
+                "mode": "content",
+                "content": content
+            }
+        })
+    }
+
+    #[test]
+    fn test_pipeline_log_records_decision_when_output_grows() {
+        let (output, entries) = run_logged(&grep_two_matches_per_file_event(), true);
+        assert!(
+            output.is_none(),
+            "grouping 2 matches per file is not smaller"
+        );
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "grep-group");
+        assert_eq!(entry.command.as_deref(), Some("src"));
+        assert_eq!(
+            entry.outcome.as_deref(),
+            Some("kept as is (no smaller result)")
+        );
+        let rendered = pipeline_log::render(entry);
+        assert!(rendered.contains("hook.after_tool.search"), "{rendered}");
+        assert!(
+            rendered.contains("kept as is (no smaller result)"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn test_pipeline_log_off_records_no_kept_as_is_decision() {
+        let (output, entries) = run_logged(&grep_two_matches_per_file_event(), false);
+        assert!(output.is_none());
+        assert!(entries.is_empty(), "log is off: {entries:?}");
+    }
+
+    #[test]
+    fn test_pipeline_log_records_decision_when_partial_lockfile_read() {
+        let event = serde_json::json!({
+            "hookEventName": "PostToolUse",
+            "tool_name": "Read",
+            "tool_input": {
+                "file_path": "package-lock.json"
+            },
+            "tool_response": {
+                "file": {
+                    "filePath": "package-lock.json",
+                    "content": "{\n  \"name\": \"my-app\",\n  \"lockfileVersion\": 3,\n".repeat(20),
+                    "numLines": 757,
+                    "startLine": 1,
+                    "totalLines": 966
+                }
+            }
+        });
+        let (output, entries) = run_logged(&event, true);
+        assert!(output.is_none(), "a partial lockfile cannot be summarized");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "lockfiles");
+        assert_eq!(entry.command.as_deref(), Some("package-lock.json"));
+        assert_eq!(
+            entry.outcome.as_deref(),
+            Some("kept as is (partial read, 757 of 966 lines)")
+        );
+        let rendered = pipeline_log::render(entry);
+        assert!(rendered.contains("hook.after_tool.read"), "{rendered}");
+        assert!(
+            rendered.contains("kept as is (partial read, 757 of 966 lines)"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn test_pipeline_log_records_decision_when_shell_output_unchanged() {
+        let stdout = (0..15)
+            .map(|i| format!("running job task {i} with distinct description\n"))
+            .collect::<String>();
+        let event = serde_json::json!({
+            "hookEventName": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "cargo test"
+            },
+            "tool_response": {
+                "stdout": stdout,
+                "stderr": ""
+            }
+        });
+        let (output, entries) = run_logged(&event, true);
+        assert!(output.is_none());
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "term-default");
+        assert_eq!(entry.outcome.as_deref(), Some("kept as is (no change)"));
+        let rendered = pipeline_log::render(entry);
+        assert!(rendered.contains("kept as is (no change)"), "{rendered}");
+    }
+
+    #[test]
+    fn test_pipeline_log_records_decision_when_websearch_unchanged() {
+        let result = "Plain prose search result with nothing to convert or trim. ".repeat(12);
+        let event = serde_json::json!({
+            "hookEventName": "PostToolUse",
+            "tool_name": "WebSearch",
+            "tool_input": {
+                "query": "rtk pipeline log"
+            },
+            "tool_response": {
+                "query": "rtk pipeline log",
+                "results": [
+                    { "tool_use_id": "srvtoolu_1", "content": [] },
+                    result
+                ]
+            }
+        });
+        let (output, entries) = run_logged(&event, true);
+        assert!(output.is_none());
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "web-default");
+        assert_eq!(entry.outcome.as_deref(), Some("kept as is (no change)"));
+    }
+
+    #[test]
+    fn test_pipeline_log_records_decision_when_full_read_unchanged() {
+        // The partial-lockfile test's content, read in full: `lockfile`
+        // cannot summarize it, and nothing marks the read as partial.
+        let event = serde_json::json!({
+            "hookEventName": "PostToolUse",
+            "tool_name": "Read",
+            "tool_input": {
+                "file_path": "package-lock.json"
+            },
+            "tool_response": {
+                "file": {
+                    "filePath": "package-lock.json",
+                    "content": "{\n  \"name\": \"my-app\",\n  \"lockfileVersion\": 3,\n".repeat(20),
+                    "numLines": 60,
+                    "startLine": 1,
+                    "totalLines": 60
+                }
+            }
+        });
+        let (output, entries) = run_logged(&event, true);
+        assert!(output.is_none());
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "lockfiles");
+        assert_eq!(entry.outcome.as_deref(), Some("kept as is (no change)"));
+        assert_eq!(entry.tokens_before, entry.tokens_after);
+    }
+
+    #[test]
+    fn test_pipeline_log_records_shadow_shell_decision_without_outcome() {
+        let pipeline = pipeline_from(
+            "[pipeline]\nextends = \"rtk:posthook\"\n[override.term-default]\nshadow = true\n",
+        );
+        let event = bash_fixture("repetitive");
+        let (output, entries) = run_logged_with(&event, &test_config(), &pipeline, true);
+        assert!(output.is_none(), "a shadow rule emits nothing");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "term-default");
+        assert!(entry.shadow);
+        assert_eq!(entry.outcome, None, "a shadow decision is a real decision");
+
+        let stdout = event["tool_response"]["stdout"]
+            .as_str()
+            .expect("fixture has stdout");
+        let stderr = event["tool_response"]["stderr"].as_str().unwrap_or("");
+        let raw = combine_streams(stdout, stderr);
+        let filtered = run_selected(
+            &pipeline,
+            Subject::Shell,
+            "Bash",
+            ContentFormat::Term,
+            "",
+            stdout,
+            0,
+            Some(false),
+        )
+        .expect("term chain applies")
+        .text;
+        assert_eq!(entry.tokens_before, Some(estimate_tokens(&raw)));
+        assert_eq!(entry.tokens_after, Some(estimate_tokens(&filtered)));
+        assert!(entry.tokens_after < entry.tokens_before, "{entry:?}");
+    }
+
+    #[test]
+    fn test_pipeline_log_records_decision_when_shell_hint_outgrows_savings() {
+        let tee_dir = crate::core::test_isolation::tempdir();
+        let stdout = one_ansi_code_lines();
+        let event = bash_event("make build", &stdout);
+        let (output, entries) = run_logged_with(
+            &event,
+            &tee_config(tee_dir.path()),
+            &posthook_pipeline(),
+            true,
+        );
+        assert!(output.is_none(), "filtered + hint is larger than raw");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "term-default");
+        assert_eq!(
+            entry.outcome.as_deref(),
+            Some("kept as is (no smaller result)")
+        );
+        assert_eq!(entry.tokens_before, Some(estimate_tokens(&stdout)));
+        assert_eq!(entry.tokens_after, entry.tokens_before);
+    }
+
+    #[test]
+    fn test_pipeline_log_records_shadow_websearch_decision_without_outcome() {
+        let pipeline = pipeline_from(
+            "[pipeline]\nextends = \"rtk:posthook\"\n[override.web-default]\nshadow = true\n",
+        );
+        let result = "\x1b[1mPlain prose\x1b[0m search result with nothing to trim. ".repeat(12);
+        let (output, entries) =
+            run_logged_with(&websearch_event(&result), &test_config(), &pipeline, true);
+        assert!(output.is_none(), "a shadow rule emits nothing");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "web-default");
+        assert!(entry.shadow);
+        assert_eq!(entry.outcome, None, "a shadow decision is a real decision");
+
+        let filtered = run_selected(
+            &pipeline,
+            Subject::Web,
+            "WebSearch",
+            ContentFormat::Web,
+            "",
+            &result,
+            0,
+            None,
+        )
+        .expect("web chain applies")
+        .text;
+        assert_eq!(entry.tokens_before, Some(estimate_tokens(&result)));
+        assert_eq!(entry.tokens_after, Some(estimate_tokens(&filtered)));
+        assert!(entry.tokens_after < entry.tokens_before, "{entry:?}");
+    }
+
+    #[test]
+    fn test_pipeline_log_records_decision_when_websearch_hint_outgrows_savings() {
+        let tee_dir = crate::core::test_isolation::tempdir();
+        let result = format!(
+            "\x1b[0m{}",
+            "Plain prose search result with nothing to convert or trim. ".repeat(12)
+        );
+        let (output, entries) = run_logged_with(
+            &websearch_event(&result),
+            &tee_config(tee_dir.path()),
+            &posthook_pipeline(),
+            true,
+        );
+        assert!(output.is_none(), "filtered + hint is larger than raw");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "web-default");
+        assert_eq!(
+            entry.outcome.as_deref(),
+            Some("kept as is (no smaller result)")
+        );
+        assert_eq!(entry.tokens_before, Some(estimate_tokens(&result)));
+        assert_eq!(entry.tokens_after, entry.tokens_before);
     }
 
     #[test]
