@@ -1,11 +1,16 @@
 [filters.mix-compile]
-description = "Compact mix compile output"
+description = "Compact mix compile output: warnings and errors with their location, no code frames"
 match_command = "^mix\\s+compile(\\s|$)"
 strip_ansi = true
+# Elixir prints progress on stdout and every warning and error on stderr.
+filter_stderr = true
 strip_lines_matching = [
   "^Compiling \\d+ file",
   "^\\s*$",
   "^Generated\\s",
+  # The code frame under each warning and error (Elixir 1.16+); the `└─ file:line` location stays.
+  "^\\s*│",
+  "^\\s*\\d+\\s*│",
 ]
 max_lines = 40
 on_empty = "mix compile: ok"
@@ -25,3 +30,69 @@ expected = "warning: variable \"conn\" is unused\n  lib/router.ex:42"
 name = "on_empty when only noise"
 input = "Compiling 3 files (.ex)\nGenerated my_app app\n"
 expected = "mix compile: ok"
+
+[[tests.mix-compile]]
+name = "Elixir 1.16+ warnings keep the message and location, drop the code frame"
+input = """
+Compiling 3 files (.ex)
+Generated shop app
+    warning: variable "discount" is unused (if the variable is not meant to be used, prefix it with an underscore)
+    │
+  2 │   def total(items, discount), do: Enum.sum(items)
+    │                    ~~~~~~~~
+    │
+    └─ lib/cart.ex:2:20: Shop.Cart.total/2
+
+    warning: Shop.Rates.vat/0 is undefined (module Shop.Rates is not available or is yet to be defined)
+    │
+  4 │   def tax(price), do: Shop.Rates.vat() * price
+    │                                  ~
+    │
+    └─ lib/cart.ex:4:34: Shop.Cart.tax/1
+
+"""
+expected = """
+    warning: variable "discount" is unused (if the variable is not meant to be used, prefix it with an underscore)
+    └─ lib/cart.ex:2:20: Shop.Cart.total/2
+    warning: Shop.Rates.vat/0 is undefined (module Shop.Rates is not available or is yet to be defined)
+    └─ lib/cart.ex:4:34: Shop.Cart.tax/1"""
+
+[[tests.mix-compile]]
+name = "a compile error keeps the error, its location and the CompileError"
+input = """
+Compiling 1 file (.ex)
+    error: undefined variable "missing_var"
+    │
+  2 │   def go, do: missing_var + 1
+    │               ^^^^^^^^^^^
+    │
+    └─ lib/broken.ex:2:15: Shop.Broken.go/0
+
+
+== Compilation error in file lib/broken.ex ==
+** (CompileError) lib/broken.ex: cannot compile module Shop.Broken (errors have been logged)
+
+"""
+expected = """
+    error: undefined variable "missing_var"
+    └─ lib/broken.ex:2:15: Shop.Broken.go/0
+== Compilation error in file lib/broken.ex ==
+** (CompileError) lib/broken.ex: cannot compile module Shop.Broken (errors have been logged)"""
+
+[[tests.mix-compile]]
+name = "--warnings-as-errors failure is never reported as ok"
+input = """
+Compiling 2 files (.ex)
+    warning: variable "precision" is unused (if the variable is not meant to be used, prefix it with an underscore)
+    │
+  2 │   def round(amount, precision), do: Float.round(amount, 2)
+    │                     ~~~~~~~~~
+    │
+    └─ lib/price.ex:2:21: Shop.Price.round/2
+
+Compilation failed due to warnings while using the --warnings-as-errors option
+"""
+expected = """
+    warning: variable "precision" is unused (if the variable is not meant to be used, prefix it with an underscore)
+    └─ lib/price.ex:2:21: Shop.Price.round/2
+Compilation failed due to warnings while using the --warnings-as-errors option"""
