@@ -303,7 +303,6 @@ impl Dialect {
     };
 
     /// Go's `flag` package: atomic single-dash options, with `-flag` and `--flag` equivalent.
-    #[allow(dead_code)] // No in-tree caller yet: go still parses its args by hand.
     pub const GoFlag: Self = Self {
         single_dash: SingleDash::AtomicAliasingLong,
         ..Self::Posix
