@@ -1204,6 +1204,16 @@ truncate_lines_at = 5
     }
 
     #[test]
+    fn task_filter_does_not_match_hyphenated_commands() {
+        let toml = format!("schema_version = 1\n{}", include_str!("../filters/task.toml"));
+        let filters = make_filters(&toml);
+        assert!(find_filter_in("task-start foo", &filters).is_none());
+        assert!(find_filter_in("task-runner foo", &filters).is_none());
+        assert!(find_filter_in("task build", &filters).is_some());
+        assert!(find_filter_in("task", &filters).is_some());
+    }
+
+    #[test]
     fn test_head_lines() {
         let f = first_filter(
             r#"
