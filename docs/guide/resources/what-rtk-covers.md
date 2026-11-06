@@ -103,6 +103,14 @@ listing into `head`, `tail`, or `cat`.
 | `dotnet build` | Errors and warnings only |
 | `dotnet restore` | Restore summary, errors and warnings kept |
 
+## Scala
+
+| Command | What changes |
+|---------|--------------|
+| `bloop test` | Passing suites collapsed to a tally, failures only (munit, ScalaTest, specs2, ZIO Test) |
+| `bloop compile` | One line per diagnostic, compile tallies summarized |
+| `bloop run` | Build-server banner stripped, program output kept |
+
 ## Docker / Kubernetes
 
 | Command | What changes |

@@ -589,6 +589,7 @@ fn should_sample_cleanup(key: &str, rate: u32) -> bool {
 const SUBCOMMAND_ROUTERS: &[&str] = &[
     "artisan",
     "aws",
+    "bloop",
     "bun",
     "cargo",
     "deno",

@@ -1,0 +1,54 @@
+Compiling root (1 Scala source)
+Compiled root (1513ms)
+Compiling root-test (1 Scala source)
+Compiled root-test (875ms)
+Test run example.CalculatorSuite started
+==> X example.CalculatorSuite.sub returns the difference 0.023s munit.FailException: /tmp/workspace/munit-clue-fail-small/src/test/scala/example/CalculatorSuite.scala:10 assertion failed
+9:   test("sub returns the difference") {
+10:    assert(clue(Calculator.sub(10, 4)) == clue(7))
+11:  }
+Clues {
+  Calculator.sub(10, 4): Int = 6
+  7: Int = 7
+}
+    at munit.FunSuite.assert(FunSuite.scala:12)
+    at example.CalculatorSuite.$init$$$anonfun$2(CalculatorSuite.scala:10)
+==> X example.CalculatorSuite.div returns the quotient 0.001s munit.FailException: /tmp/workspace/munit-clue-fail-small/src/test/scala/example/CalculatorSuite.scala:18 assertion failed
+17:  test("div returns the quotient") {
+18:    assert(clue(Calculator.div(20, 4)) == clue(4))
+19:  }
+Clues {
+  Calculator.div(20, 4): Int = 5
+  4: Int = 4
+}
+    at munit.FunSuite.assert(FunSuite.scala:12)
+    at example.CalculatorSuite.$init$$$anonfun$4(CalculatorSuite.scala:18)
+example.CalculatorSuite: finished 0.065s
+Test run example.CalculatorSuite finished: 2 failed, 0 ignored, 4 total 0.078s
+Execution took 35ms
+4 tests, 2 passed, 2 failed
+
+The test execution was successfully closed.
+====================================================================================================
+Total duration: 35ms
+1 failed
+
+Failed:
+- example.CalculatorSuite:
+  * example.CalculatorSuite.sub returns the difference - munit.FailException: /tmp/workspace/munit-clue-fail-small/src/test/scala/example/CalculatorSuite.scala:10 assertion failed
+9:   test("sub returns the difference") {
+10:    assert(clue(Calculator.sub(10, 4)) == clue(7))
+11:  }
+Clues {
+  Calculator.sub(10, 4): Int = 6
+  7: Int = 7
+}
+  * example.CalculatorSuite.div returns the quotient - munit.FailException: /tmp/workspace/munit-clue-fail-small/src/test/scala/example/CalculatorSuite.scala:18 assertion failed
+17:  test("div returns the quotient") {
+18:    assert(clue(Calculator.div(20, 4)) == clue(4))
+19:  }
+Clues {
+  Calculator.div(20, 4): Int = 5
+  4: Int = 4
+}
+====================================================================================================
