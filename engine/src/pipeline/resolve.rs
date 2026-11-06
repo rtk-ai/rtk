@@ -601,7 +601,8 @@ fn apply_override(
 /// covering unknown override keys, so a key outside this list is reported
 /// rather than ignored.
 const OVERRIDE_RULE_KEYS: &[&str] = &[
-    "enabled", "action", "task", "upstream", "message", "mode", "continue", "shadow", "use", "when",
+    "enabled", "action", "task", "upstream", "message", "mode", "emit", "continue", "shadow",
+    "use", "when",
 ];
 
 fn patch_rule(
@@ -627,7 +628,7 @@ fn patch_rule(
     for (key, value) in &patch.patch {
         match key.as_str() {
             "enabled" | "continue" | "shadow" if !value.is_bool() => typed_bool.push(key.clone()),
-            "action" | "task" | "upstream" | "message" | "mode" if !value.is_str() => {
+            "action" | "task" | "upstream" | "message" | "mode" | "emit" if !value.is_str() => {
                 typed_str.push(key.clone())
             }
             _ => {}
@@ -665,6 +666,11 @@ fn patch_rule(
             "mode" => {
                 if let Some(v) = value.as_str() {
                     rule.def.mode = Some(v.to_string());
+                }
+            }
+            "emit" => {
+                if let Some(v) = value.as_str() {
+                    rule.def.emit = Some(v.to_string());
                 }
             }
             "continue" => rule.def.continue_ = value.as_bool().unwrap_or(rule.def.continue_),

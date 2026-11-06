@@ -621,6 +621,14 @@ fn validate_rule(
         push(Diagnostic::new(Code::E005, message));
     }
 
+    if let Some(message) = def
+        .emit
+        .as_deref()
+        .and_then(|emit| emit_problem(position, has_use, def.action.as_deref(), emit))
+    {
+        push(Diagnostic::new(Code::E005, message));
+    }
+
     if has_use && position.site == SiteKind::Hook && position.event == Event::BeforeTool {
         push(Diagnostic::new(
             Code::E005,
@@ -876,6 +884,39 @@ fn references_classifier(def: &super::schema::RuleDef) -> bool {
         .chain(def.any.iter())
         .flat_map(|group| group.keys())
         .any(|key| super::conditions::classifier_condition(&split_key(key).0).is_some())
+}
+
+pub const EMIT_TARGETS: &[&str] = &["output", "note"];
+
+/// What is wrong with `emit = "<emit>"` on this rule, if anything. A note
+/// is added beside a tool's result, so it needs a transform chain (`use`)
+/// and a position after a tool.
+fn emit_problem(
+    position: Position,
+    has_use: bool,
+    action: Option<&str>,
+    emit: &str,
+) -> Option<String> {
+    if !EMIT_TARGETS.contains(&emit) {
+        return Some(format!(
+            "unknown emit target `{emit}` — expected `output` or `note`"
+        ));
+    }
+    if emit == "output" {
+        return None;
+    }
+    if action.is_some() || !has_use {
+        return Some(
+            "`emit = \"note\"` only applies to a transform rule (`use = [...]`)".to_string(),
+        );
+    }
+    if position.site != SiteKind::Hook || position.event != Event::AfterTool {
+        return Some(
+            "`emit = \"note\"` only applies after a tool — a note is added beside the tool's result"
+                .to_string(),
+        );
+    }
+    None
 }
 
 pub const ROUTE_MODES: &[&str] = &["suggest", "swap", "answer"];
@@ -1506,6 +1547,28 @@ use  = ["term"]
         assert!(rule("route").iter().any(|d| d.code == Code::E005));
         assert!(!rule("deny").iter().any(|d| d.code == Code::E005));
         assert!(!rule("passthrough").iter().any(|d| d.code == Code::E005));
+    }
+
+    #[test]
+    fn emit_note_is_legal_only_on_an_after_tool_transform() {
+        let e005 = |text: &str| diagnostics_for(text).iter().any(|d| d.code == Code::E005);
+        assert!(!e005(
+            "[[hook.after_tool.shell]]\nname = \"n\"\nuse = [\"ansi\"]\nemit = \"note\"\n"
+        ));
+        assert!(!e005(
+            "[[hook.after_tool.read]]\nname = \"n\"\nuse = [\"ansi\"]\nemit = \"output\"\n"
+        ));
+        // Before the tool there is no result to put a note beside.
+        assert!(e005(
+            "[[hook.before_tool.shell]]\nname = \"n\"\nuse = [\"ansi\"]\nemit = \"note\"\n"
+        ));
+        // An action is not a chain whose result could be a note.
+        assert!(e005(
+            "[[hook.after_tool.shell]]\nname = \"n\"\naction = \"passthrough\"\nemit = \"note\"\n"
+        ));
+        assert!(e005(
+            "[[hook.after_tool.shell]]\nname = \"n\"\nuse = [\"ansi\"]\nemit = \"aside\"\n"
+        ));
     }
 
     fn mode_rule(position: &str, kind: &str, extra: &str) -> String {
