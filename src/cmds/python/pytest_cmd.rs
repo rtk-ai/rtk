@@ -112,6 +112,28 @@ fn injected_args(args: &[String]) -> Vec<&'static str> {
 const PYTEST_NO_TESTS: &str = "Pytest: No tests collected";
 const PYTEST_EXIT_NO_TESTS: i32 = 5;
 
+/// Stdin has no pytest exit code: only compact a recognized terminal summary.
+pub(crate) fn filter_pytest_stdin(output: &str) -> String {
+    let cleaned = strip_ansi(output);
+    let has_terminal_summary = cleaned
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(|line| PYTEST_SUMMARY_RE.is_match(line.trim()));
+    if !has_terminal_summary {
+        // Quiet runs, startup errors and incomplete streams can all omit stats.
+        // Preserve the original bytes, including ANSI, rather than infer a result.
+        return output.to_string();
+    }
+
+    let filtered = filter_pytest_output(output);
+    if filtered == PYTEST_NO_TESTS {
+        output.to_string()
+    } else {
+        filtered
+    }
+}
+
 pub(crate) fn filter_pytest_output(output: &str) -> String {
     // pytest colors its summary even when piped (force-color CI/venv setups), and the
     // `N passed` / FAILURES anchors below never match through ANSI codes. The parser owns
