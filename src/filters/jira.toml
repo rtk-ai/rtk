@@ -2,6 +2,10 @@
 description = "Compact Jira CLI output — strip verbose metadata, keep essentials"
 match_command = "^jira\\b"
 strip_ansi = true
+# jira-cli pads every line to its box width; the padding carries nothing.
+replace = [
+  { pattern = "\\s+$", replacement = "" },
+]
 strip_lines_matching = [
   "^\\s*$",
   "^\\s*--",
@@ -18,3 +22,8 @@ expected = "TYPE\tKEY\tSUMMARY\tSTATUS\nStory\tPROJ-123\tAdd login feature\tIn P
 name = "single issue view"
 input = "KEY: PROJ-123\nSummary: Add login feature\nStatus: In Progress\nAssignee: john@example.com"
 expected = "KEY: PROJ-123\nSummary: Add login feature\nStatus: In Progress\nAssignee: john@example.com"
+
+[[tests.jira]]
+name = "strips trailing box padding from plain view"
+input = "  Bug  Open  2024-01-02                    \n  # Fix crash on startup      \n\t\n  Reporter: jane            "
+expected = "  Bug  Open  2024-01-02\n  # Fix crash on startup\n  Reporter: jane"
