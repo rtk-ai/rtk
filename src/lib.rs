@@ -467,7 +467,9 @@ enum Commands {
         extra_args: Vec<String>,
     },
 
-    /// Compact ripgrep - runs rg natively, same output filter as grep
+    /// Compact ripgrep - runs rg natively, same output filter as grep.
+    /// `--warn-hidden-skip` prints a notice when a root-origin scan silently
+    /// skips dot-directories.
     Rg {
         /// Pattern, path, and any rg flags (e.g. -v, -i, -t rust, --glob)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -3005,7 +3007,11 @@ fn run_cli() -> Result<i32> {
             cli.verbose,
         )?,
         Commands::AstGrep { extra_args } => ast_grep_cmd::run(&extra_args)?,
-        Commands::Rg { extra_args } => {
+        Commands::Rg { mut extra_args } => {
+            let warn_hidden = search::take_warn_hidden_skip(&mut extra_args);
+            if warn_hidden {
+                search::warn_hidden_skipped(&extra_args);
+            }
             search::run(search::Engine::Rg, 80, 200, false, &extra_args, cli.verbose)?
         }
 

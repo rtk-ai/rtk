@@ -677,6 +677,84 @@ fn fold_path_prefix(raw: &str) -> Option<String> {
     Some(out)
 }
 
+/// Print a one-line notice when a root-origin `rg` scan will silently skip
+/// hidden dot-directories. The caller has already removed
+/// `--warn-hidden-skip` from `args`.
+pub fn warn_hidden_skipped(args: &[String]) {
+    let hidden_dirs = std::fs::read_dir(".")
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+        .count();
+    if let Some(notice) = hidden_skip_notice(args, hidden_dirs) {
+        eprintln!("{notice}");
+    }
+}
+
+/// Remove `--warn-hidden-skip` from the rtk-owned region of `args` (before
+/// `--`) and report whether it was present. Past `--` the token is a path.
+pub fn take_warn_hidden_skip(args: &mut Vec<String>) -> bool {
+    let boundary = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    let mut requested = false;
+    let mut kept = Vec::with_capacity(args.len());
+    for (index, arg) in std::mem::take(args).into_iter().enumerate() {
+        if index < boundary && arg == "--warn-hidden-skip" {
+            requested = true;
+        } else {
+            kept.push(arg);
+        }
+    }
+    *args = kept;
+    requested
+}
+
+/// The notice [`warn_hidden_skipped`] would print, or `None` when the scan is
+/// not a root-origin scan or already asks for hidden files.
+fn hidden_skip_notice(args: &[String], hidden_dirs: usize) -> Option<String> {
+    if hidden_dirs == 0 {
+        return None;
+    }
+
+    let tokens = tokenize_search_args(args, Engine::Rg);
+    let before = arg_tokenizer::before_dashdash(&tokens);
+    if before
+        .iter()
+        .any(|t| t.kind == TokenKind::Long && t.text == "hidden")
+    {
+        return None;
+    }
+    // `-uu` (and `-uuu`) imply `--hidden`; a single `-u` only relaxes ignore
+    // rules, so it still skips dot-directories.
+    if args
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| {
+            arg.starts_with('-')
+                && !arg.starts_with("--")
+                && arg.chars().filter(|c| *c == 'u').count() >= 2
+        })
+    {
+        return None;
+    }
+
+    // The first free positional is the pattern; any further one is an explicit
+    // path, which makes the scan path-origin and no longer hides dot-dirs at
+    // the root.
+    if before.iter().filter(|t| t.is_free_positional()).count() > 1 {
+        return None;
+    }
+
+    let plural = if hidden_dirs == 1 { "y" } else { "ies" };
+    Some(format!(
+        "[rtk rg] {hidden_dirs} hidden director{plural} skipped (pass --hidden to include, e.g. .claude/, .github/)"
+    ))
+}
+
 pub fn run(
     engine: Engine,
     max_line_len: usize,
@@ -1196,6 +1274,43 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_skip_notice_names_root_origin_scans_only() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        // Root-origin scan: pattern only, no --hidden.
+        let notice = hidden_skip_notice(&args(&["needle"]), 3).expect("notice");
+        assert!(notice.contains("3 hidden directories"), "{notice}");
+        assert!(notice.contains("--hidden"), "{notice}");
+
+        // A single hidden directory is singular.
+        let notice = hidden_skip_notice(&args(&["needle"]), 1).expect("notice");
+        assert!(notice.contains("1 hidden directory"), "{notice}");
+
+        // Explicit path argument: the scan is path-origin.
+        assert!(hidden_skip_notice(&args(&["needle", ".claude/"]), 3).is_none());
+        // Already asks for hidden files.
+        assert!(hidden_skip_notice(&args(&["--hidden", "needle"]), 3).is_none());
+        assert!(hidden_skip_notice(&args(&["-uu", "needle"]), 3).is_none());
+        // Nothing hidden to skip.
+        assert!(hidden_skip_notice(&args(&["needle"]), 0).is_none());
+    }
+
+    #[test]
+    fn warn_hidden_skip_flag_is_only_taken_before_the_boundary() {
+        let mut args = vec!["needle".to_string(), "--warn-hidden-skip".to_string()];
+        assert!(take_warn_hidden_skip(&mut args));
+        assert_eq!(args, vec!["needle"]);
+
+        let mut args = vec!["--".to_string(), "--warn-hidden-skip".to_string()];
+        assert!(!take_warn_hidden_skip(&mut args));
+        assert_eq!(
+            args,
+            vec!["--".to_string(), "--warn-hidden-skip".to_string()],
+            "past `--` the token is a path, not a flag"
+        );
+    }
 
     #[test]
     fn test_clean_line() {
