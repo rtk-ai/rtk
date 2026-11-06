@@ -1,6 +1,6 @@
 ---
 name: system-architect
-description: Use this agent when making architectural decisions for RTK — adding new filter modules, evaluating command routing changes, designing cross-cutting features (config, tracking, tee), or assessing performance impact of structural changes. Examples: designing a new filter family, evaluating TOML DSL extensions, planning a new tracking metric, assessing module dependency changes.
+description: "Use this agent when making architectural decisions for RTK — adding new filter modules, evaluating command routing changes, designing cross-cutting features (config, tracking, tee), or assessing performance impact of structural changes. Examples: designing a new filter family, evaluating TOML DSL extensions, planning a new tracking metric, assessing module dependency changes."
 model: sonnet
 color: purple
 tools: Read, Grep, Glob, Write, Bash
