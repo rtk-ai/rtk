@@ -60,6 +60,14 @@ fn attribution_json(
     }
     if by_rule {
         out.insert("by_rule".into(), json!(rows("hook", "rule")?));
+        if let Some(proxy) = crate::llm_proxy::read_gain_summary() {
+            let rules: Vec<serde_json::Value> = proxy
+                .by_rule
+                .iter()
+                .map(|(name, saved)| json!({"name": name, "saved": saved}))
+                .collect();
+            out.insert("by_rule_proxy".into(), json!(rules));
+        }
     }
     if by_pipeline {
         out.insert("by_pipeline".into(), json!(rows("hook", "pipeline")?));
@@ -194,7 +202,11 @@ pub fn run_attribution(
                 let layer = rtk_engine::registry::info_of(name)
                     .and_then(|info| info.saves_on.first().copied())
                     .map(|l| l.as_str())
-                    .unwrap_or("history");
+                    .unwrap_or(if name == crate::llm_proxy::RULES_METHOD {
+                        "tool_result"
+                    } else {
+                        "history"
+                    });
                 #[cfg(not(feature = "engine"))]
                 let layer = "history";
                 let slot = per_layer.entry(layer).or_default();
@@ -274,6 +286,19 @@ pub fn run_attribution(
             &format!("By Rule — hook site (last {DAYS}d)"),
             &tracker.attribution_site("hook", "rule", DAYS)?,
         );
+        if let Some(proxy) = crate::llm_proxy::read_gain_summary()
+            && !proxy.by_rule.is_empty()
+        {
+            println!("{}", "By Rule — proxy site (all time)".bold());
+            for (rule, saved) in &proxy.by_rule {
+                println!(
+                    "  {:<28} {:>10} saved",
+                    truncate(rule, 28),
+                    format_tokens((*saved).max(0) as usize)
+                );
+            }
+            println!();
+        }
     }
 
     if by_pipeline {
@@ -850,12 +875,29 @@ pub fn run(
             // Skipped entirely when there is only one, since the "Tokens
             // saved" line above already says the same number.
             let by_method = proxy.savings_by_method();
-            if by_method.len() > 1 {
+            if by_method.len() > 1 || !proxy.by_rule.is_empty() {
                 for (method, saved) in by_method {
                     print_kpi(
                         &format!("  via {method}"),
                         format_tokens(saved.max(0) as usize),
                     );
+                    if method == crate::llm_proxy::RULES_METHOD {
+                        for (rule, saved) in proxy.by_rule.iter().take(PANEL_RULES) {
+                            print_kpi(
+                                &format!("    {rule}"),
+                                format_tokens((*saved).max(0) as usize),
+                            );
+                        }
+                        if proxy.by_rule.len() > PANEL_RULES {
+                            print_kpi(
+                                "    …",
+                                format!(
+                                    "{} more · rtk gain --by-rule",
+                                    proxy.by_rule.len() - PANEL_RULES
+                                ),
+                            );
+                        }
+                    }
                 }
             }
             // Printed next to the savings because the two must be read
@@ -1268,6 +1310,8 @@ fn styled(text: &str, strong: bool) -> String {
 }
 
 /// Print a key-value pair in KPI layout. // added
+const PANEL_RULES: usize = 5;
+
 fn print_kpi(label: &str, value: String) {
     println!("{:<18} {}", format!("{label}:"), value);
 }

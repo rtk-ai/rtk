@@ -2196,6 +2196,7 @@ mod tests {
             saved_normalize: 350,
             saved_ingest_filter: 0,
             saved_pixel_compress: 0,
+            saved_rules: 0,
             cache_read: 4000,
             cache_created: 1000,
         };

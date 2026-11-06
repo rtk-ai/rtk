@@ -112,6 +112,7 @@ pub struct Applied {
     /// so a downstream binary's own transforms show up here without a change
     /// to this struct.
     pub saved_by_stage: Vec<(&'static str, i64)>,
+    pub saved_by_rule: Vec<(String, i64)>,
     /// Whether the client asked for a streamed (SSE) response.
     pub stream: bool,
     /// Session the request declared (`x-rtk-session`), carried through so the
@@ -164,6 +165,7 @@ pub async fn apply(
                 tokens_saved: 0,
                 routed_from: None,
                 saved_by_stage: Vec::new(),
+                saved_by_rule: Vec::new(),
                 session: None,
                 project: None,
                 stream: false,
@@ -190,6 +192,7 @@ pub async fn apply(
             tokens_saved: 0,
             routed_from: None,
             saved_by_stage: Vec::new(),
+            saved_by_rule: Vec::new(),
             session: req.session.clone(),
             project: req.project.clone(),
             stream,
@@ -235,6 +238,7 @@ pub async fn apply(
         tokens_saved: req.tokens_saved,
         routed_from: req.routed_from,
         saved_by_stage: req.saved_by_stage,
+        saved_by_rule: req.saved_by_rule,
         session: req.session,
         project: req.project,
         stream,
