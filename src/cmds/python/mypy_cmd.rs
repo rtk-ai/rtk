@@ -1,6 +1,7 @@
 //! Filters mypy type-checking output, grouping errors by file.
 
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
@@ -27,7 +28,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered_with_exit(
         cmd,
         "mypy",
-        &args.join(" "),
+        &display_args(args),
         |raw, exit_code| {
             let clean = strip_ansi(raw);
             let filtered = filter_mypy_output(&clean);
@@ -89,12 +90,12 @@ pub fn filter_mypy_output(output: &str) -> String {
 
             if severity == "note" {
                 // Attach note to preceding error if same file and line
-                if let Some(last) = errors.last_mut() {
-                    if last.file == file {
-                        last.context_lines.push(message);
-                        i += 1;
-                        continue;
-                    }
+                if let Some(last) = errors.last_mut()
+                    && last.file == file
+                {
+                    last.context_lines.push(message);
+                    i += 1;
+                    continue;
                 }
                 // Standalone note with no parent -- display as fileless
                 fileless_lines.push(line.to_string());
@@ -113,13 +114,14 @@ pub fn filter_mypy_output(output: &str) -> String {
             // Capture continuation note lines
             i += 1;
             while i < lines.len() {
-                if let Some(next_caps) = MYPY_DIAG.captures(lines[i]) {
-                    if &next_caps[3] == "note" && next_caps[1] == err.file {
-                        let note_msg = next_caps[4].to_string();
-                        err.context_lines.push(note_msg);
-                        i += 1;
-                        continue;
-                    }
+                if let Some(next_caps) = MYPY_DIAG.captures(lines[i])
+                    && &next_caps[3] == "note"
+                    && next_caps[1] == err.file
+                {
+                    let note_msg = next_caps[4].to_string();
+                    err.context_lines.push(note_msg);
+                    i += 1;
+                    continue;
                 }
                 break;
             }

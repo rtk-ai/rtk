@@ -1,14 +1,28 @@
 #!/usr/bin/env bash
 set -e
 
-# Use local release build if available, otherwise fall back to installed rtk
-if [ -f "./target/release/rtk" ]; then
-  RTK="$(cd "$(dirname ./target/release/rtk)" && pwd)/$(basename ./target/release/rtk)"
+# cargo prints no colour into a pipe, which is how agents read it.
+export CARGO_TERM_COLOR=never
+
+# RTK_BIN names the binary to measure. Otherwise use the local release build if
+# available, and fall back to the installed rtk.
+if [ -n "${RTK_BIN:-}" ]; then
+  if [ ! -f "$RTK_BIN" ] || [ ! -x "$RTK_BIN" ]; then
+    echo "Error: RTK_BIN=$RTK_BIN is not a path to an executable file."
+    exit 1
+  fi
+  RTK="$RTK_BIN"
+elif [ -f "./target/release/rtk" ]; then
+  RTK="./target/release/rtk"
 elif command -v rtk &> /dev/null; then
   RTK="$(command -v rtk)"
 else
-  echo "Error: rtk not found. Run 'cargo build --release' or install rtk."
+  echo "Error: rtk not found. Run 'cargo build --release', install rtk, or set RTK_BIN."
   exit 1
+fi
+# Absolute, since the benches change directory. `command -v` can name a shell function.
+if [[ "$RTK" == */* ]]; then
+  RTK="$(CDPATH= cd -- "$(dirname -- "$RTK")" && pwd)/$(basename -- "$RTK")"
 fi
 BENCH_DIR="$(pwd)/scripts/benchmark"
 RTK_ROOT="$(pwd)"
@@ -42,13 +56,21 @@ FAIL_TESTS=0
 WARN_TESTS=0
 NEGATIVE_TESTS=0
 
+# bench runs the raw side first, so a first build's compile output would land on
+# that side alone and read as savings. Building first gives both sides the same target.
+precompile() {
+  "$@" > /dev/null 2>&1 || echo "⚠️  precompile failed: $*" >&2
+}
+
 bench() {
   local name="$1"
   local unix_cmd="$2"
   local rtk_cmd="$3"
 
-  unix_out=$(eval "$unix_cmd" 2>/dev/null || true)
-  rtk_out=$(eval "$rtk_cmd" 2>/dev/null || true)
+  # rtk forwards the stderr it does not filter, so measuring only stdout would book
+  # a passed-through stream as if the filter had removed it.
+  unix_out=$(eval "$unix_cmd" 2>&1 || true)
+  rtk_out=$(eval "$rtk_cmd" 2>&1 || true)
 
   unix_tokens=$(count_tokens "$unix_out")
   rtk_tokens=$(count_tokens "$rtk_out")
@@ -174,7 +196,7 @@ bench "ls multi" "ls -la src/ scripts/" "$RTK ls src/ scripts/"
 # ===================
 if command -v tree &>/dev/null; then
   section "tree"
-  bench "tree" "tree -L 2" "$RTK tree -L 2"
+  bench "tree" "tree -L 2 -I target" "$RTK tree -L 2"
   bench "tree src/" "tree src/ -L 2" "$RTK tree src/ -L 2"
 else
   echo ""
@@ -185,17 +207,18 @@ fi
 # read
 # ===================
 section "read"
-bench "read" "cat src/main.rs" "$RTK read src/main.rs"
-bench "read -l minimal" "cat src/main.rs" "$RTK read src/main.rs -l minimal"
-bench "read -l aggressive" "cat src/main.rs" "$RTK read src/main.rs -l aggressive"
-bench "read -n" "cat -n src/main.rs" "$RTK read src/main.rs -n"
+# The CLI lives in src/lib.rs; src/main.rs is a 3-line shim.
+bench "read" "cat src/lib.rs" "$RTK read src/lib.rs"
+bench "read -l minimal" "cat src/lib.rs" "$RTK read src/lib.rs -l minimal"
+bench "read -l aggressive" "cat src/lib.rs" "$RTK read src/lib.rs -l aggressive"
+bench "read -n" "cat -n src/lib.rs" "$RTK read src/lib.rs -n"
 
 # ===================
 # find
 # ===================
 section "find"
-bench "find *" "find . -type f" "$RTK find '*'"
-bench "find *.rs" "find . -name '*.rs' -type f" "$RTK find '*.rs'"
+bench "find *" "find . -not -path './target/*' -not -path './.git/*' -type f" "$RTK find '*'"
+bench "find *.rs" "find . -not -path './target/*' -not -path './.git/*' -name '*.rs' -type f" "$RTK find '*.rs'"
 # `rtk find --max N` caps how many names are DISPLAYED but still scans and
 # summarizes the whole tree, so the honest baseline is the full `find` a user
 # would otherwise read, not a `head -N`-truncated slice — that measures a
@@ -215,6 +238,8 @@ count_find_names() {
     /^ext: /             { next }   # extension histogram footer
     /^\.\.\. \(/          { next }   # "... (8 filtered)" disclosure note
     /^\[see remaining: / { next }   # tee pointer for the disclosed entries
+    /^\[\+[0-9]+ hidden: / { next }   # sqlite recall pointer, same role
+    /^\[full output: /   { next }   # sqlite recall pointer for a whole capture
     NF == 0              { next }
     { n += NF - ($1 ~ /\/$/ ? 1 : 0) }   # grouped lines lead with "dir/"
     END { print n + 0 }
@@ -230,6 +255,8 @@ count_find_total() {
     /^ext: /             { next }
     /^\.\.\. \(/          { next }
     /^\[see remaining: / { next }
+    /^\[\+[0-9]+ hidden: / { next }
+    /^\[full output: /   { next }
     NF == 0              { next }
     { shown += NF - ($1 ~ /\/$/ ? 1 : 0) }
     END { print (total ? total : shown + more) + 0 }
@@ -283,11 +310,16 @@ bench "grep -c" "grep -ron 'fn ' src/ || true" "$RTK grep -rc 'fn ' src/"
 # ===================
 # rg (native ripgrep, recursive by default, same output filter)
 # ===================
-section "rg"
-bench "rg fn" "rg -n 'fn ' src/ || true" "$RTK rg 'fn ' src/"
-bench "rg struct" "rg -n 'struct ' src/ || true" "$RTK rg 'struct ' src/"
-bench "rg -l files" "rg -l 'fn ' src/ || true" "$RTK rg -l 'fn ' src/"
-bench "rg -c count" "rg -c 'fn ' src/ || true" "$RTK rg -c 'fn ' src/"
+if command -v rg &>/dev/null; then
+  section "rg"
+  bench "rg fn" "rg -n 'fn ' src/ || true" "$RTK rg 'fn ' src/"
+  bench "rg struct" "rg -n 'struct ' src/ || true" "$RTK rg 'struct ' src/"
+  bench "rg -l files" "rg -l 'fn ' src/ || true" "$RTK rg -l 'fn ' src/"
+  bench "rg -c count" "rg -c 'fn ' src/ || true" "$RTK rg -c 'fn ' src/"
+else
+  echo ""
+  echo "⏭️  rg (not installed, skipped)"
+fi
 
 # ===================
 # json
@@ -331,6 +363,7 @@ bench "env -f PATH" "env | grep PATH" "$RTK env -f PATH"
 # ===================
 section "err"
 if command -v cargo &>/dev/null; then
+  precompile cargo build
   bench "err cargo build" "cargo build 2>&1 || true" "$RTK err cargo build 2>&1"
 else
   echo "⏭️  err cargo build (cargo not in PATH, skipped)"
@@ -341,7 +374,8 @@ fi
 # ===================
 section "test"
 if command -v cargo &>/dev/null; then
-  bench "test cargo test" "cargo test 2>&1 || true" "$RTK test cargo test 2>&1"
+  precompile cargo test --lib --no-run
+  bench "test cargo test" "cargo test --lib 2>&1 || true" "$RTK test cargo test --lib 2>&1"
 else
   echo "⏭️  test cargo test (cargo not in PATH, skipped)"
 fi
@@ -389,9 +423,13 @@ fi
 # ===================
 section "cargo"
 if command -v cargo &>/dev/null; then
+  precompile cargo build
   bench "cargo build" "cargo build 2>&1 || true" "$RTK cargo build 2>&1"
-  bench "cargo test" "cargo test 2>&1 || true" "$RTK cargo test 2>&1"
+  precompile cargo test --lib --no-run
+  bench "cargo test" "cargo test --lib 2>&1 || true" "$RTK cargo test --lib 2>&1"
+  precompile cargo clippy
   bench "cargo clippy" "cargo clippy 2>&1 || true" "$RTK cargo clippy 2>&1"
+  precompile cargo check
   bench "cargo check" "cargo check 2>&1 || true" "$RTK cargo check 2>&1"
 else
   echo "⏭️  cargo build/test/clippy/check (cargo not in PATH, skipped)"

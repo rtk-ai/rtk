@@ -1,0 +1,18 @@
+[package]
+name = "rtk-plugin"
+version = "0.49.0"
+edition = "2021"
+rust-version = "1.91"
+authors = ["RTK AI Labs"]
+description = "Author RTK pipeline methods: the Method trait, block types, and the rtk_plugin! registration macro"
+license = "BUSL-1.1"
+publish = false
+
+[dependencies]
+rtk-engine = { path = "../engine" }
+
+[lints.rust]
+unsafe_code = "deny"
+warnings = "deny"
+
+[dev-dependencies]

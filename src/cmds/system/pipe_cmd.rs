@@ -27,6 +27,7 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "mypy" => Some(crate::cmds::python::mypy_cmd::filter_mypy_output),
         "ruff-check" => Some(crate::cmds::python::ruff_cmd::filter_ruff_check_json),
         "ruff-format" => Some(crate::cmds::python::ruff_cmd::filter_ruff_format),
+        "sqlfluff-lint" => Some(crate::cmds::python::sqlfluff_cmd::filter_sqlfluff_lint_json),
         "prettier" => Some(crate::cmds::js::prettier_cmd::filter_prettier_output),
         "phpunit" => Some(crate::cmds::php::phpunit_cmd::filter_phpunit_output),
         "pest" | "paratest" | "php-test" => {
@@ -40,19 +41,19 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
 }
 
 fn go_test_wrapper(input: &str) -> String {
-    crate::cmds::go::go_cmd::filter_go_test_json(input)
+    crate::cmds::go::go_cmd::filter_go_test_pipe(input)
 }
 
 fn git_status_wrapper(input: &str) -> String {
-    crate::cmds::git::git::format_status_output(input)
+    crate::cmds::git::git_cmd::format_status_output(input)
 }
 
 fn git_log_wrapper(input: &str) -> String {
-    crate::cmds::git::git::filter_log_output(input, 50, false, false)
+    crate::cmds::git::git_cmd::filter_log_output(input, 50, false)
 }
 
 fn git_diff_wrapper(input: &str) -> String {
-    crate::cmds::git::git::compact_diff(input, 200)
+    crate::cmds::git::git_cmd::compact_diff(input, 200)
 }
 
 fn phpstan_wrapper(input: &str) -> String {
@@ -92,11 +93,14 @@ fn grep_wrapper(input: &str) -> String {
 
     for line in input.lines() {
         let parts: Vec<&str> = line.splitn(3, ':').collect();
-        if parts.len() == 3 {
-            if let Ok(_line_num) = parts[1].parse::<usize>() {
-                total += 1;
-                by_file.entry(parts[0]).or_default().push((parts[1], parts[2]));
-            }
+        if parts.len() == 3
+            && let Ok(_line_num) = parts[1].parse::<usize>()
+        {
+            total += 1;
+            by_file
+                .entry(parts[0])
+                .or_default()
+                .push((parts[1], parts[2]));
         }
     }
 
@@ -193,7 +197,9 @@ pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
         return crate::cmds::php::phpunit_cmd::filter_phpunit_output;
     }
 
-    if first_trimmed.starts_with('{') && first_1k.contains("\"Action\"") {
+    if crate::cmds::go::go_cmd::is_go_test_json(input)
+        || (first_trimmed.starts_with('{') && first_1k.contains("\"Action\""))
+    {
         return go_test_wrapper;
     }
 
@@ -241,11 +247,12 @@ fn identity_filter(input: &str) -> String {
 }
 
 fn apply_filter(filter_fn: fn(&str) -> String, input: &str) -> String {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| filter_fn(input)))
-        .unwrap_or_else(|_| {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| filter_fn(input))).unwrap_or_else(
+        |_| {
             eprintln!("[rtk] warning: filter panicked — passing through raw output");
             input.to_string()
-        })
+        },
+    )
 }
 
 pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
@@ -269,7 +276,7 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
             anyhow::anyhow!(
                 "Unknown filter '{}'. Available: cargo-test, pytest, go-test, go-build, \
                  ctest, tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
-                 log, mypy, ruff-check, ruff-format, prettier, phpunit, pest, \
+                 log, mypy, ruff-check, ruff-format, sqlfluff-lint, prettier, phpunit, pest, \
                  paratest, php-test, ecs, phpstan, pint",
                 name
             )
@@ -308,6 +315,16 @@ mod tests {
     }
 
     #[test]
+    fn test_pipe_pytest_strips_ansi_before_parsing() {
+        // A colored pytest summary must not be reported as "No tests collected".
+        let input = "\u{1b}[32m===== \u{1b}[32m\u{1b}[1m12 passed\u{1b}[0m\u{1b}[32m in 21.90s\u{1b}[0m\u{1b}[32m =====\u{1b}[0m\n";
+        let f = resolve_filter("pytest").expect("pytest filter must exist");
+        let out = f(input);
+        assert!(out.contains("12 passed"), "out={}", out);
+        assert!(!out.contains("No tests collected"), "out={}", out);
+    }
+
+    #[test]
     fn test_resolve_filter_phpunit() {
         assert!(resolve_filter("phpunit").is_some());
     }
@@ -316,7 +333,11 @@ mod tests {
     fn test_resolve_filter_cargo_test() {
         let f = resolve_filter("cargo-test").expect("cargo-test filter must exist");
         let out = f("test result: ok. 5 passed; 0 failed");
-        assert!(out.contains("passed") || out.contains("PASS"), "out={}", out);
+        assert!(
+            out.contains("passed") || out.contains("PASS"),
+            "out={}",
+            out
+        );
     }
 
     #[test]
@@ -344,6 +365,34 @@ mod tests {
     #[test]
     fn test_resolve_filter_pytest() {
         assert!(resolve_filter("pytest").is_some());
+    }
+
+    #[test]
+    fn go_test_wrapper_preserves_non_event_input() {
+        for input in [
+            "",
+            " \n\t\n",
+            "ok  \texample.com/proj\t0.001s\nFAIL\texample.com/other\t0.002s\n",
+            r#"{"Action":"pass"}"#,
+            r#"{"Action":"unknown","Package":"example.com/proj"}"#,
+            r#"{"Action":"output","Package":"example.com/proj","Output":42}"#,
+            r#"{"Action":"output","Package":"example.com/proj","message":"setup failed"}"#,
+            r#"{"Action":"build-output","ImportPath":"example.com/proj","message":"compile failed"}"#,
+        ] {
+            assert_eq!(go_test_wrapper(input), input);
+        }
+    }
+
+    #[test]
+    fn go_test_wrapper_keeps_build_event_filtering() {
+        let input = concat!(
+            "{\"Action\":\"build-output\",\"ImportPath\":\"example.com/proj\",\"Output\":\"main.go:4: undefined: missing\\n\"}\n",
+            "{\"Action\":\"build-fail\",\"ImportPath\":\"example.com/proj\"}\n",
+            "{\"Action\":\"fail\",\"Package\":\"example.com/proj\",\"FailedBuild\":\"example.com/proj\"}\n",
+        );
+        let shown = go_test_wrapper(input);
+        assert!(shown.contains("main.go:4: undefined: missing"), "{shown}");
+        assert_ne!(shown, input);
     }
 
     #[test]
@@ -592,6 +641,11 @@ Total Test time (real) =   0.01 sec\n";
     }
 
     #[test]
+    fn test_resolve_filter_sqlfluff_lint() {
+        assert!(resolve_filter("sqlfluff-lint").is_some());
+    }
+
+    #[test]
     fn test_resolve_filter_prettier() {
         assert!(resolve_filter("prettier").is_some());
     }
@@ -627,7 +681,9 @@ Total Test time (real) =   0.01 sec\n";
         assert!(
             savings >= 40.0, // TODO: grep pipe filter below 60% target — improve grouping
             "grep filter: expected ≥40% savings, got {:.1}% (in={}, out={})",
-            savings, count_tokens(&input), count_tokens(&output)
+            savings,
+            count_tokens(&input),
+            count_tokens(&output)
         );
     }
 
@@ -648,7 +704,9 @@ Total Test time (real) =   0.01 sec\n";
         assert!(
             savings >= 40.0, // TODO: find pipe filter below 60% target — improve grouping
             "find filter: expected ≥40% savings, got {:.1}% (in={}, out={})",
-            savings, count_tokens(&input), count_tokens(&output)
+            savings,
+            count_tokens(&input),
+            count_tokens(&output)
         );
     }
 

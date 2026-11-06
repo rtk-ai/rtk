@@ -7,8 +7,7 @@ use std::sync::LazyLock;
 
 // file:line:col: severity: message [-Wflag]
 static DIAG: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^([^:\n]+):(\d+):\d+:\s*(error|warning|note):\s+(.+?)(?:\s+\[(-\S+)\])?$")
-        .unwrap()
+    Regex::new(r"^([^:\n]+):(\d+):\d+:\s*(error|warning|note):\s+(.+?)(?:\s+\[(-\S+)\])?$").unwrap()
 });
 
 // "In file included from …" / "In function 'foo':" / "At top level:"

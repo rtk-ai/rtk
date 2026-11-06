@@ -1,4 +1,5 @@
 use crate::core::guard::never_worse;
+use crate::core::shell::quote_word;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::resolved_command;
@@ -38,13 +39,23 @@ pub fn run(url: &str, args: &[String], verbose: u8) -> Result<i32> {
         );
         let shown = never_worse(&raw_output, &msg);
         println!("{}", shown);
-        timer.track(&format!("wget {}", url), "rtk wget", &raw_output, shown);
+        timer.track(
+            &format!("wget {}", quote_word(url)),
+            "rtk wget",
+            &raw_output,
+            shown,
+        );
     } else {
         let error = parse_error(&result.stderr, &result.stdout);
         let msg = format!("{} FAILED: {}", compact_url(url), error);
         let shown = never_worse(&raw_output, &msg);
         println!("{}", shown);
-        timer.track(&format!("wget {}", url), "rtk wget", &raw_output, shown);
+        timer.track(
+            &format!("wget {}", quote_word(url)),
+            "rtk wget",
+            &raw_output,
+            shown,
+        );
         return Ok(result.exit_code);
     }
 
@@ -95,7 +106,7 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<i32> {
         let shown = never_worse(&result.stdout, &rtk_output);
         print!("{}", shown);
         timer.track(
-            &format!("wget -O - {}", url),
+            &format!("wget -O - {}", quote_word(url)),
             "rtk wget -o",
             &result.stdout,
             shown,
@@ -105,7 +116,12 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<i32> {
         let msg = format!("{} FAILED: {}", compact_url(url), error);
         let shown = never_worse(&result.stderr, &msg);
         println!("{}", shown);
-        timer.track(&format!("wget -O - {}", url), "rtk wget -o", &result.stderr, shown);
+        timer.track(
+            &format!("wget -O - {}", quote_word(url)),
+            "rtk wget -o",
+            &result.stderr,
+            shown,
+        );
         return Ok(result.exit_code);
     }
 
@@ -115,10 +131,10 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<i32> {
 fn extract_filename_from_output(stderr: &str, url: &str, args: &[String]) -> String {
     // Check for -O argument first
     for (i, arg) in args.iter().enumerate() {
-        if arg == "-O" || arg == "--output-document" {
-            if let Some(name) = args.get(i + 1) {
-                return name.clone();
-            }
+        if (arg == "-O" || arg == "--output-document")
+            && let Some(name) = args.get(i + 1)
+        {
+            return name.clone();
         }
         if let Some(name) = arg.strip_prefix("-O") {
             return name.to_string();
@@ -143,11 +159,11 @@ fn extract_filename_from_output(stderr: &str, url: &str, args: &[String]) -> Str
                 }
             }
 
-            if let (Some(s), Some(e)) = (start_idx, end_idx) {
-                if e > s + 1 {
-                    let filename: String = chars[s + 1..e].iter().collect();
-                    return filename.trim().to_string();
-                }
+            if let (Some(s), Some(e)) = (start_idx, end_idx)
+                && e > s + 1
+            {
+                let filename: String = chars[s + 1..e].iter().collect();
+                return filename.trim().to_string();
             }
         }
     }
@@ -266,15 +282,24 @@ mod tests {
 
     #[test]
     fn test_compact_url_strips_protocol() {
-        assert_eq!(compact_url("https://example.com/file.zip"), "example.com/file.zip");
-        assert_eq!(compact_url("http://example.com/file.zip"), "example.com/file.zip");
+        assert_eq!(
+            compact_url("https://example.com/file.zip"),
+            "example.com/file.zip"
+        );
+        assert_eq!(
+            compact_url("http://example.com/file.zip"),
+            "example.com/file.zip"
+        );
     }
 
     #[test]
     fn test_compact_url_truncates_long_url() {
         let long = "https://example.com/very/long/path/that/exceeds/fifty/characters/file.zip";
         let result = compact_url(long);
-        assert!(result.contains("..."), "Long URL should be truncated with ...");
+        assert!(
+            result.contains("..."),
+            "Long URL should be truncated with ..."
+        );
         assert!(result.len() < long.len());
     }
 

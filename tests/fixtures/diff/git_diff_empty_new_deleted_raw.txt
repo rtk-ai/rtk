@@ -1,0 +1,15 @@
+diff --git a/empty_new.txt b/empty_new.txt
+new file mode 100644
+index 0000000..e69de29
+diff --git a/empty_seed.txt b/empty_seed.txt
+deleted file mode 100644
+index e69de29..0000000
+diff --git a/main.rs b/main.rs
+index 7d2d177..cccfcf4 100644
+--- a/main.rs
++++ b/main.rs
+@@ -5,3 +5,4 @@ fn main() {
+     println!("four");
+     println!("five");
+ }
++    println!("probe");

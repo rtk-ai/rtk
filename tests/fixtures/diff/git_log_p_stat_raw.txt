@@ -1,0 +1,21 @@
+commit 0a2ba5b8360c9aa94c06797b5672bfdc8447cf9e
+Author: Ann <ann@example.com>
+Date:   Mon Sep 7 09:05:11 2026 -0400
+
+    mode+indent
+---
+ i.py  | 2 +-
+ m.txt | 0
+ 2 files changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/i.py b/i.py
+index 919c173..59809c0 100644
+--- a/i.py
++++ b/i.py
+@@ -1,2 +1,2 @@
+     foo
+-    bar
++    BAR
+diff --git a/m.txt b/m.txt
+old mode 100644
+new mode 100755

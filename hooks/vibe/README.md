@@ -1,6 +1,6 @@
 # Mistral Vibe Hooks
 
-> Part of [`hooks/`](../README.md) — see also [`src/hooks/`](../../src/hooks/README.md) for installation code
+> Part of [`hooks/`](../README.md)
 
 ## Specifics
 
@@ -10,10 +10,10 @@
 - Returns `hook_specific_output.tool_input.command` for transparent rewrite plus a `system_message` for UI visibility
 - Non-bash tool / empty command / malformed JSON / RTK-unknown command → passthrough (exit 0, empty stdout)
 - RTK permission deny → `{"decision":"deny","reason":"..."}`
-- Alongside the hook, a system prompt at `~/.vibe/prompts/rtk.md` is installed as a belt-and-suspenders fallback (skip with `--hook-only`)
+- Alongside the hook, a system prompt at `~/.vibe/prompts/rtk.md` is installed as a belt-and-suspenders fallback (skip with `--hook-only`); its content follows `awareness.level` in config.toml (`../rtk-awareness*.md`)
 - Installed globally via `rtk init -g --agent vibe`; there is no project-scoped variant
 
 ## Notes
 
-- This directory intentionally holds only this README — the hook is a subcommand of the RTK binary (`rtk hook vibe`), not a standalone script or plugin file, so nothing is deployed here
+- The hook is a subcommand of the RTK binary (`rtk hook vibe`); no separate script or plugin file is installed
 - Vibe hook contract reference: https://docs.mistral.ai/vibe/code/cli/hooks
