@@ -909,9 +909,9 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// PHP command runner with compact output for artisan and syntax checks
+    /// PHP command runner with compact output for version, artisan and syntax checks
     Php {
-        /// PHP arguments (e.g., artisan about, -l app/Http/Controller.php)
+        /// PHP arguments (e.g., -v, artisan about, -l app/Http/Controller.php)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },

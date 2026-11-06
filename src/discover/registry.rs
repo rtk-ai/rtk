@@ -8757,6 +8757,35 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_php_version() {
+        assert_eq!(
+            rewrite_command_no_prefixes("php -v", &[]),
+            Some("rtk php -v".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("php --version", &[]),
+            Some("rtk php --version".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("php -v && echo ok", &[]),
+            Some("rtk php -v && echo ok".into())
+        );
+    }
+
+    /// The version banner is what a pipe consumer reads (`grep -i xdebug`), so only a
+    /// standalone `php -v` is rewritten; and `-v` after a script name is the script's.
+    #[test]
+    fn test_php_version_not_rewritten_when_piped_or_a_script_argument() {
+        // The consumer may be rewritten by its own rule; the producer must not be.
+        let piped = rewrite_command_no_prefixes("php -v | grep -i xdebug", &[]);
+        assert!(
+            piped.as_deref().is_none_or(|r| r.starts_with("php -v |")),
+            "php -v rewritten as a pipe producer: {piped:?}"
+        );
+        assert_eq!(rewrite_command_no_prefixes("php script.php -v", &[]), None);
+    }
+
+    #[test]
     fn test_classify_phpt_run_tests() {
         assert!(matches!(
             classify_command("php run-tests.php Zend/tests/"),

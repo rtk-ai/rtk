@@ -4,7 +4,7 @@
 
 ## Specifics
 
-- `php_cmd.rs` summarizes `php -l` syntax checks and routes `php artisan*` to specialized helpers
+- `php_cmd.rs` reduces `php -v`/`--version` to the bare version (`8.5.12`, keeping any startup warnings), summarizes `php -l` syntax checks and routes `php artisan*` to specialized helpers
 - `artisan_cmd.rs` cleans Artisan output and applies runner-aware filtering for `php artisan test`
 - `phpunit_cmd.rs` strips progress/header noise and keeps failure details + final summary
 - `phpstan_cmd.rs` injects JSON output by default and emits compact file/line error summaries
