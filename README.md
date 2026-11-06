@@ -76,6 +76,8 @@ Bash output is **one contributor to input tokens**, alongside your prompt, the s
 The token counts RTK reports are estimated as `bytes / 4` — RTK ships no tokenizer, so the **percentages are reliable but the absolute token numbers are approximate**.
 
 > Full explanation: [How RTK Savings Work](docs/guide/resources/savings-explained.md)
+>
+> Per-command trade-offs: [Data Loss and Transformations](docs/usage/DATA_LOSS.md)
 ## Installation
 
 ```bash
