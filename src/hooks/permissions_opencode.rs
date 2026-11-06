@@ -396,7 +396,10 @@ fn read_first_config(dir: &Path) -> Option<Value> {
 
 fn read_config(path: &Path) -> Option<Value> {
     let content = std::fs::read_to_string(path).ok()?;
-    match crate::core::utils::from_json_str::<Value>(&content) {
+    // JSONC, because the `.jsonc` extension exists for comments and trailing
+    // commas and OpenCode's own examples use it. Parsing either extension as
+    // plain JSON dropped every rule in any file that carried a `//`.
+    match crate::core::utils::from_jsonc_str::<Value>(&content) {
         Ok(v) => Some(v),
         Err(_) => {
             eprintln!(
@@ -992,6 +995,84 @@ mod tests {
             let rules = load_opencode_rules(None);
             assert_eq!(rules, vec![rule("git *", Action::Allow)]);
         });
+    }
+
+    #[test]
+    fn jsonc_comments_and_trailing_commas_keep_the_rules() {
+        let tmp = test_isolation::tempdir();
+        let project = tmp.path().join("project");
+        write_json(
+            &project.join("opencode.jsonc"),
+            r#"{
+  // never push from this project
+  /* and block comments too */
+  "permission": {
+    "bash": {
+      "git push *": "deny",   // inline comment
+      "ls *": "ask",
+    },
+  },
+}"#,
+        );
+
+        test_isolation::with_root(&tmp.path().join("home"), || {
+            let _entered = test_isolation::enter(&project);
+            let rules = load_opencode_rules(None);
+            assert_eq!(
+                rules,
+                vec![rule("git push *", Action::Deny), rule("ls *", Action::Ask)],
+                "a comment or trailing comma must not cost a rule (#4524)"
+            );
+        });
+    }
+
+    #[test]
+    fn jsonc_keys_that_look_like_comments_are_content() {
+        let tmp = test_isolation::tempdir();
+        let project = tmp.path().join("project");
+        write_json(
+            &project.join("opencode.jsonc"),
+            r#"{ "permission": { "bash": { "//server/share": "deny", "a/*b": "ask" } } }"#,
+        );
+
+        test_isolation::with_root(&tmp.path().join("home"), || {
+            let _entered = test_isolation::enter(&project);
+            let rules = load_opencode_rules(None);
+            assert_eq!(
+                rules,
+                vec![
+                    rule("//server/share", Action::Deny),
+                    rule("a/*b", Action::Ask)
+                ],
+                "comment markers inside a string are part of the pattern"
+            );
+        });
+    }
+
+    #[test]
+    fn a_bom_and_a_leading_comment_still_parse() {
+        let tmp = test_isolation::tempdir();
+        let project = tmp.path().join("project");
+        write_json(
+            &project.join("opencode.jsonc"),
+            "\u{feff}// header comment\n{ \"permission\": { \"bash\": \"deny\" } }\n",
+        );
+
+        test_isolation::with_root(&tmp.path().join("home"), || {
+            let _entered = test_isolation::enter(&project);
+            assert_eq!(load_opencode_rules(None), vec![rule("*", Action::Deny)]);
+        });
+    }
+
+    #[test]
+    fn genuinely_broken_json_is_still_rejected() {
+        // Stripping comments must not turn broken input into a parse that
+        // succeeds and yields the wrong rules.
+        assert!(crate::core::utils::from_jsonc_str::<Value>("{ \"a\": }").is_err());
+        assert!(crate::core::utils::from_jsonc_str::<Value>("{ \"a\": 1").is_err());
+        assert!(crate::core::utils::from_jsonc_str::<Value>("not json at all").is_err());
+        // An unterminated block comment leaves nothing valid behind.
+        assert!(crate::core::utils::from_jsonc_str::<Value>("{ /* open\n\"a\": 1 }").is_err());
     }
 
     /// `check_command_for_agent` must route `Host::OpenCode` through this
