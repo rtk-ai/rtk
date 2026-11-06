@@ -400,7 +400,7 @@ enum Commands {
         file: Option<PathBuf>,
     },
 
-    /// .NET commands with compact output (build/test/restore/format)
+    /// .NET commands with compact output (build/test/restore/format/tool list)
     Dotnet {
         #[command(subcommand)]
         command: DotnetCommands,
@@ -1680,6 +1680,11 @@ enum DotnetCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Tool commands with compact list output
+    Tool {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
     /// Passthrough: runs any unsupported dotnet subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -2894,6 +2899,7 @@ fn run_cli() -> Result<i32> {
             DotnetCommands::Test { args } => dotnet_cmd::run_test(&args, cli.verbose)?,
             DotnetCommands::Restore { args } => dotnet_cmd::run_restore(&args, cli.verbose)?,
             DotnetCommands::Format { args } => dotnet_cmd::run_format(&args, cli.verbose)?,
+            DotnetCommands::Tool { args } => dotnet_cmd::run_tool(&args, cli.verbose)?,
             DotnetCommands::Other(args) => dotnet_cmd::run_passthrough(&args, cli.verbose)?,
         },
 

@@ -1,0 +1,4 @@
+Package Id                Version      Commands
+------------------------------------------------------
+csharp-ls                 0.28.0       csharp-ls
+dotnet-outdated-tool      4.8.1        dotnet-outdated
