@@ -1,0 +1,117 @@
+[filters.bitbake]
+description = "Compact Yocto BitBake output — strip per-task progress, cache/parse chatter and the Build Configuration block, keep ERROR/WARNING, failed-task logs and summaries"
+match_command = "^bitbake(?:\\s|$)"
+strip_ansi = true
+# Known noise only: any line not listed here survives, including every NOTE not listed,
+# so -e, -s, -g and -c listtasks output passes through almost untouched.
+# stderr is left unfiltered: knotty writes only the first line of each WARNING/ERROR there.
+strip_lines_matching = [
+  "^NOTE: Running (?:setscene |noexec )?task \\d+ of \\d+ \\(",
+  "^NOTE: recipe \\S+: task \\S+: (?:Started|Succeeded)$",
+  "^NOTE: (?:Executing (?:SetScene )?Tasks|Resolving any missing task queue dependencies|Setscene tasks completed)$",
+  "^NOTE: Fetching uninative binary shim ",
+  "^(?:Loading cache\\.\\.\\.|Loaded \\d+ entries from dependency cache\\.|Parsing recipes\\.\\.\\.|Parsing of \\d+ \\.bb files complete|Initialising tasks\\.\\.\\.|Checking sstate mirror object availability\\.\\.\\.|Sstate summary: )",
+  "^done\\.$",
+  "^Build Configuration:$",
+  "^[A-Z][A-Z0-9_]*\\s+= \".*\"$",
+  "^(?:meta[\\w-]*|workspace)\\s*(?:= \"[^\"]*\")?$",
+  "^\\s*$",
+]
+on_empty = "bitbake: ok"
+
+[[tests.bitbake]]
+name = "clean build keeps warnings and both summaries"
+input = """
+Loading cache...done.
+Loaded 0 entries from dependency cache.
+Parsing recipes...done.
+Parsing of 963 .bb files complete (0 cached, 963 parsed). 1925 targets, 76 skipped, 0 masked, 0 errors.
+NOTE: Resolving any missing task queue dependencies
+
+Build Configuration:
+BB_VERSION           = "2.8.1"
+MACHINE              = "raspberrypi4-64"
+meta
+meta-raspberrypi
+meta-rpi-ref         = "<unknown>:<unknown>"
+
+NOTE: Fetching uninative binary shim http://downloads.yoctoproject.org/releases/uninative/5.1/x86_64-nativesdk-libc-5.1.tar.xz;sha256sum=2b63
+Initialising tasks...Sstate summary: Wanted 1754 Local 0 Mirrors 0 Missed 1754 Current 0 (0% match, 0% complete)
+done.
+NOTE: Executing Tasks
+NOTE: Running task 1 of 3729 (/ref/yocto/poky/meta/recipes-devtools/quilt/quilt-native_0.67.bb:do_recipe_qa)
+NOTE: recipe texinfo-dummy-native-1.0-r0: task do_recipe_qa: Started
+NOTE: recipe texinfo-dummy-native-1.0-r0: task do_recipe_qa: Succeeded
+WARNING: squashfs-tools-native-4.6.1-r0 do_fetch: Failed to fetch URL git://github.com/plougher/squashfs-tools.git;protocol=https;branch=v6.1.1, attempting MIRRORS if available
+NOTE: Running noexec task 3729 of 3729 (/ref/yocto/poky/meta/recipes-core/images/core-image-minimal.bb:do_build)
+NOTE: Tasks Summary: Attempted 3729 tasks of which 0 didn't need to be rerun and all succeeded.
+
+Summary: There were 2 WARNING messages.
+"""
+expected = """
+WARNING: squashfs-tools-native-4.6.1-r0 do_fetch: Failed to fetch URL git://github.com/plougher/squashfs-tools.git;protocol=https;branch=v6.1.1, attempting MIRRORS if available
+NOTE: Tasks Summary: Attempted 3729 tasks of which 0 didn't need to be rerun and all succeeded.
+Summary: There were 2 WARNING messages.
+"""
+
+[[tests.bitbake]]
+name = "failed task keeps the error, its log path, the task log and the summary"
+input = """
+NOTE: Executing Tasks
+ERROR: rtk-fail-compile-1.0-r0 do_compile: ExecutionError('/work/build/tmp/work/cortexa72-poky-linux/rtk-fail-compile/1.0/temp/run.do_compile.288', 1, None, None)
+ERROR: Logfile of failure stored in: /work/build/tmp/work/cortexa72-poky-linux/rtk-fail-compile/1.0/temp/log.do_compile.288
+Log data follows:
+| DEBUG: Executing shell function do_compile
+| rtk-fail-compile.c:7:9: error: 'count' undeclared (first use in this function)
+|     7 |         count += i;
+| WARNING: exit code 1 from a shell command.
+NOTE: recipe rtk-fail-compile-1.0-r0: task do_compile: Failed
+ERROR: Task (/ref/yocto/poky/../meta-rpi-ref/recipes-test/rtk-fail-compile/rtk-fail-compile.bb:do_compile) failed with exit code '1'
+NOTE: Tasks Summary: Attempted 834 tasks of which 824 didn't need to be rerun and 1 failed.
+
+Summary: 1 task failed:
+  /ref/yocto/poky/../meta-rpi-ref/recipes-test/rtk-fail-compile/rtk-fail-compile.bb:do_compile
+    log: /work/build/tmp/work/cortexa72-poky-linux/rtk-fail-compile/1.0/temp/log.do_compile.288
+Summary: There was 1 ERROR message, returning a non-zero exit code.
+"""
+expected = """
+ERROR: rtk-fail-compile-1.0-r0 do_compile: ExecutionError('/work/build/tmp/work/cortexa72-poky-linux/rtk-fail-compile/1.0/temp/run.do_compile.288', 1, None, None)
+ERROR: Logfile of failure stored in: /work/build/tmp/work/cortexa72-poky-linux/rtk-fail-compile/1.0/temp/log.do_compile.288
+Log data follows:
+| DEBUG: Executing shell function do_compile
+| rtk-fail-compile.c:7:9: error: 'count' undeclared (first use in this function)
+|     7 |         count += i;
+| WARNING: exit code 1 from a shell command.
+NOTE: recipe rtk-fail-compile-1.0-r0: task do_compile: Failed
+ERROR: Task (/ref/yocto/poky/../meta-rpi-ref/recipes-test/rtk-fail-compile/rtk-fail-compile.bb:do_compile) failed with exit code '1'
+NOTE: Tasks Summary: Attempted 834 tasks of which 824 didn't need to be rerun and 1 failed.
+Summary: 1 task failed:
+  /ref/yocto/poky/../meta-rpi-ref/recipes-test/rtk-fail-compile/rtk-fail-compile.bb:do_compile
+    log: /work/build/tmp/work/cortexa72-poky-linux/rtk-fail-compile/1.0/temp/log.do_compile.288
+Summary: There was 1 ERROR message, returning a non-zero exit code.
+"""
+
+[[tests.bitbake]]
+name = "unknown NOTE lines survive"
+input = """
+NOTE: Reconnecting to bitbake server...
+NOTE: Running task 5 of 10 (/ref/x.bb:do_fetch)
+"""
+expected = "NOTE: Reconnecting to bitbake server..."
+
+[[tests.bitbake]]
+name = "-c listtasks keeps the task list"
+input = """
+NOTE: Executing Tasks
+NOTE: Running task 1 of 1 (/ref/yocto/poky/meta/recipes-core/busybox/busybox_1.36.1.bb:do_listtasks)
+do_build                              Default task for a recipe - depends on all other normal tasks required to 'build' a recipe
+do_compile                            Compiles the source in the compilation directory
+do_fetch                              Fetches the source code
+NOTE: Tasks Summary: Attempted 1 tasks of which 0 didn't need to be rerun and all succeeded.
+"""
+expected = """
+do_build                              Default task for a recipe - depends on all other normal tasks required to 'build' a recipe
+do_compile                            Compiles the source in the compilation directory
+do_fetch                              Fetches the source code
+NOTE: Tasks Summary: Attempted 1 tasks of which 0 didn't need to be rerun and all succeeded.
+"""
