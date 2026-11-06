@@ -1916,6 +1916,14 @@ where
     <Cli as clap::FromArgMatches>::from_arg_matches(&matches)
 }
 
+/// True when clap is about to display `rtk rewrite`'s own help. Split out from
+/// `run_fallback` so the decision can be asserted without spawning a process.
+fn rewrite_help_defers(args: &[String], err: &clap::Error) -> bool {
+    matches!(args.first().map(String::as_str), Some("rewrite"))
+        && matches!(args.get(1).map(String::as_str), Some("-h") | Some("--help"))
+        && err.kind() == clap::error::ErrorKind::DisplayHelp
+}
+
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     use crate::core::utils::ChildArgExt;
 
@@ -2520,6 +2528,16 @@ fn run_cli() -> Result<i32> {
     let cli = match parsed {
         Ok(cli) => cli,
         Err(e) => {
+            // `rtk rewrite`'s stdout and exit code are a machine contract: the shipped
+            // hooks read them as "the command to run" / allow, ask, deny, defer. Clap
+            // answers `-h`/`--help` on stdout at exit 0, which a caller cannot tell from
+            // an allow-rewrite, so the hook would try to run the help text. Show the same
+            // help on stderr and defer (exit 1, empty stdout): the user still gets the
+            // help, the hook gets nothing it can mistake for a command (#4351).
+            if rewrite_help_defers(&std::env::args().skip(1).collect::<Vec<_>>(), &e) {
+                eprint!("{}", e);
+                return Ok(1);
+            }
             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
                 e.exit();
             }
@@ -4851,6 +4869,34 @@ mod tests {
             misses.is_empty(),
             "these wrappers still answer -h/--help themselves: {misses:#?}"
         );
+    }
+
+    #[test]
+    fn rewrite_help_defers_instead_of_answering_on_stdout() {
+        // `rtk rewrite` is a machine contract; its help must not look like a rewrite.
+        let help_err = |argv: [&str; 3]| match try_parse_cli_from(argv) {
+            Err(e) => e,
+            Ok(_) => panic!("expected a help error for {argv:?}"),
+        };
+        let err = help_err(["rtk", "rewrite", "-h"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert!(rewrite_help_defers(
+            &["rewrite".to_string(), "-h".to_string()],
+            &err
+        ));
+        assert!(rewrite_help_defers(
+            &["rewrite".to_string(), "--help".to_string()],
+            &err
+        ));
+        // Any other rewrite parse error keeps the old reporting path.
+        assert!(!rewrite_help_defers(&["rewrite".to_string()], &err));
+        // And the rule does not leak to other subcommands.
+        let gain_help = help_err(["rtk", "gain", "-h"]);
+        assert_eq!(gain_help.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert!(!rewrite_help_defers(
+            &["gain".to_string(), "-h".to_string()],
+            &gain_help
+        ));
     }
 
     #[test]
