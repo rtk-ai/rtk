@@ -1,9 +1,9 @@
 {
   "hooks": {
-    "PreToolUse": [
+    "preToolUse": [
       {
         "type": "command",
-        "command": "rtk hook",
+        "command": "rtk hook copilot",
         "cwd": ".",
         "timeout": 5
       }
