@@ -92,7 +92,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^cargo\s+(?:\+[^\s]+\s+)?(build|test|clippy|check|fmt|install)(?:\s|$|[;|&()<>])",
+        pattern: r"^cargo\s+(build|test|clippy|check|fmt|install|nextest)(?:\s|$|[;|&()<>])",
         rtk_cmd: "rtk cargo",
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &["cargo"],

@@ -1,6 +1,5 @@
 //! Filters cargo output — build errors, test results, clippy warnings.
 
-use crate::core::args_utils;
 use crate::core::runner;
 use crate::core::shell::display_args;
 use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
@@ -13,29 +12,28 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::LazyLock;
 
-#[derive(Debug, Clone)]
-pub enum CargoCommand {
-    Build,
-    Test,
-    Clippy,
-    Check,
-    Install,
-    Nextest,
-}
-
-pub fn run(
-    cmd: CargoCommand,
-    toolchain: Option<&str>,
-    args: &[String],
-    verbose: u8,
-) -> Result<i32> {
-    match cmd {
-        CargoCommand::Build => run_build(toolchain, args, verbose),
-        CargoCommand::Test => run_test(toolchain, args, verbose),
-        CargoCommand::Clippy => run_clippy(toolchain, args, verbose),
-        CargoCommand::Check => run_check(toolchain, args, verbose),
-        CargoCommand::Install => run_install(toolchain, args, verbose),
-        CargoCommand::Nextest => run_nextest(toolchain, args, verbose),
+pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
+    let Some(invocation) = super::cargo_args::parse(args) else {
+        return run_passthrough(args, verbose);
+    };
+    let Some(rest) = args[invocation.subcommand_index + 1..]
+        .iter()
+        .map(|s| s.to_str().map(str::to_owned))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return run_passthrough(args, verbose);
+    };
+    // Keep the original spelling (including aliases) and all prefix options in
+    // their original positions. The canonical name only selects the filter.
+    let prefix = &args[..=invocation.subcommand_index];
+    match invocation.subcommand {
+        "build" => run_build(prefix, &rest, verbose),
+        "test" => run_test(prefix, &rest, verbose),
+        "clippy" => run_clippy(prefix, &rest, verbose),
+        "check" => run_check(prefix, &rest, verbose),
+        "install" => run_install(prefix, &rest, verbose),
+        "nextest" => run_nextest(prefix, &rest, verbose),
+        _ => run_passthrough(args, verbose),
     }
 }
 
@@ -267,10 +265,10 @@ impl BlockHandler for CargoTestHandler {
 }
 
 /// Generic cargo command runner with filtering.
-/// Builds the Command with restored `--` separator, then delegates to shared runner.
+/// The raw Cargo argument tail already contains its original `--` separators.
 fn run_cargo_filtered<F>(
     subcommand: &str,
-    toolchain: Option<&str>,
+    prefix: &[OsString],
     args: &[String],
     verbose: u8,
     filter_fn: F,
@@ -279,22 +277,20 @@ where
     F: Fn(&str) -> String,
 {
     let mut cmd = resolved_command("cargo");
-    cmd.args(toolchain);
-    cmd.arg(subcommand);
+    cmd.args(prefix);
 
-    let restored_args = args_utils::restore_double_dash(args);
-    for arg in &restored_args {
+    for arg in args {
         cmd.arg(arg);
     }
 
     if verbose > 0 {
-        eprintln!("Running: cargo {} {}", subcommand, restored_args.join(" "));
+        eprintln!("Running: {:?}", cmd);
     }
 
     runner::run_filtered(
         cmd,
         &format!("cargo {}", subcommand),
-        &display_args(&restored_args),
+        &display_args(args),
         filter_fn,
         runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
     )
@@ -304,7 +300,7 @@ where
 /// so it can tell a genuine failure from a clean run when no diagnostics parse.
 fn run_cargo_filtered_with_exit<F>(
     subcommand: &str,
-    toolchain: Option<&str>,
+    prefix: &[OsString],
     args: &[String],
     verbose: u8,
     filter_fn: F,
@@ -313,22 +309,20 @@ where
     F: Fn(&str, i32) -> String,
 {
     let mut cmd = resolved_command("cargo");
-    cmd.args(toolchain);
-    cmd.arg(subcommand);
+    cmd.args(prefix);
 
-    let restored_args = args_utils::restore_double_dash(args);
-    for arg in &restored_args {
+    for arg in args {
         cmd.arg(arg);
     }
 
     if verbose > 0 {
-        eprintln!("Running: cargo {} {}", subcommand, restored_args.join(" "));
+        eprintln!("Running: {:?}", cmd);
     }
 
     runner::run_filtered_with_exit(
         cmd,
         &format!("cargo {}", subcommand),
-        &display_args(&restored_args),
+        &display_args(args),
         filter_fn,
         runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
     )
@@ -336,28 +330,26 @@ where
 
 fn run_cargo_streamed(
     subcommand: &str,
-    toolchain: Option<&str>,
+    prefix: &[OsString],
     args: &[String],
     verbose: u8,
     filter: Box<dyn StreamFilter>,
 ) -> Result<i32> {
     let mut cmd = resolved_command("cargo");
-    cmd.args(toolchain);
-    cmd.arg(subcommand);
+    cmd.args(prefix);
 
-    let restored_args = args_utils::restore_double_dash(args);
-    for arg in &restored_args {
+    for arg in args {
         cmd.arg(arg);
     }
 
     if verbose > 0 {
-        eprintln!("Running: cargo {} {}", subcommand, restored_args.join(" "));
+        eprintln!("Running: {:?}", cmd);
     }
 
     runner::run_streamed(
         cmd,
         &format!("cargo {}", subcommand),
-        &display_args(&restored_args),
+        &display_args(args),
         filter,
         runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
     )
@@ -378,15 +370,15 @@ fn has_json_message_format(args: &[String]) -> bool {
     json
 }
 
-fn run_build(toolchain: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
+fn run_build(prefix: &[OsString], args: &[String], verbose: u8) -> Result<i32> {
     if has_json_message_format(args) {
-        return run_cargo_filtered_with_exit("build", toolchain, args, verbose, |o, exit| {
+        return run_cargo_filtered_with_exit("build", prefix, args, verbose, |o, exit| {
             filter_cargo_build_labeled(o, "build", exit)
         });
     }
     run_cargo_streamed(
         "build",
-        toolchain,
+        prefix,
         args,
         verbose,
         Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
@@ -395,42 +387,42 @@ fn run_build(toolchain: Option<&str>, args: &[String], verbose: u8) -> Result<i3
     )
 }
 
-fn run_test(toolchain: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
+fn run_test(prefix: &[OsString], args: &[String], verbose: u8) -> Result<i32> {
     // No json branch here on purpose: --message-format=json only reformats the
     // build phase, the test harness output stays human-readable. CargoTestHandler
     // reads both — it aggregates the `test result:` lines and, on a compile error,
     // parses the json diagnostics in format_summary.
     run_cargo_streamed(
         "test",
-        toolchain,
+        prefix,
         args,
         verbose,
         Box::new(BlockStreamFilter::new(CargoTestHandler::new())),
     )
 }
 
-fn run_clippy(toolchain: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
+fn run_clippy(prefix: &[OsString], args: &[String], verbose: u8) -> Result<i32> {
     if has_json_message_format(args) {
         return run_cargo_filtered_with_exit(
             "clippy",
-            toolchain,
+            prefix,
             args,
             verbose,
             filter_cargo_clippy_json,
         );
     }
-    run_cargo_filtered("clippy", toolchain, args, verbose, filter_cargo_clippy)
+    run_cargo_filtered("clippy", prefix, args, verbose, filter_cargo_clippy)
 }
 
-fn run_check(toolchain: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
+fn run_check(prefix: &[OsString], args: &[String], verbose: u8) -> Result<i32> {
     if has_json_message_format(args) {
-        return run_cargo_filtered_with_exit("check", toolchain, args, verbose, |o, exit| {
+        return run_cargo_filtered_with_exit("check", prefix, args, verbose, |o, exit| {
             filter_cargo_build_labeled(o, "check", exit)
         });
     }
     run_cargo_streamed(
         "check",
-        toolchain,
+        prefix,
         args,
         verbose,
         Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
@@ -439,12 +431,12 @@ fn run_check(toolchain: Option<&str>, args: &[String], verbose: u8) -> Result<i3
     )
 }
 
-fn run_install(toolchain: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
-    run_cargo_filtered("install", toolchain, args, verbose, filter_cargo_install)
+fn run_install(prefix: &[OsString], args: &[String], verbose: u8) -> Result<i32> {
+    run_cargo_filtered("install", prefix, args, verbose, filter_cargo_install)
 }
 
-fn run_nextest(toolchain: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
-    run_cargo_filtered("nextest", toolchain, args, verbose, filter_cargo_nextest)
+fn run_nextest(prefix: &[OsString], args: &[String], verbose: u8) -> Result<i32> {
+    run_cargo_filtered("nextest", prefix, args, verbose, filter_cargo_nextest)
 }
 
 /// Format crate name + version into a display string
@@ -1509,13 +1501,8 @@ fn filter_cargo_clippy_json(output: &str, exit_code: i32) -> String {
     filter_cargo_build_labeled(output, "clippy", exit_code)
 }
 
-pub fn run_passthrough(toolchain: Option<&str>, args: &[OsString], verbose: u8) -> Result<i32> {
-    let args: Vec<OsString> = toolchain
-        .into_iter()
-        .map(OsString::from)
-        .chain(args.iter().cloned())
-        .collect();
-    crate::core::runner::run_passthrough("cargo", &args, verbose)
+pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
+    crate::core::runner::run_passthrough("cargo", args, verbose)
 }
 
 #[cfg(test)]

@@ -234,6 +234,9 @@ pub fn classify_command(cmd: &str) -> Classification {
         } else {
             cmd_normalized
         };
+    // Use the same Cargo prefix parser as execution; normalization is only
+    // for matching. Rewriting preserves the original command verbatim.
+    let cmd_normalized = normalize_cargo_command(&cmd_normalized);
     let cmd_clean = cmd_normalized.as_str();
 
     // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
@@ -454,6 +457,19 @@ fn strip_git_global_opts(cmd: &str) -> String {
     let after_git = &cmd[4..]; // skip "git "
     let stripped = GIT_GLOBAL_OPT.replace(after_git, "");
     format!("git {}", stripped.trim())
+}
+
+fn normalize_cargo_command(cmd: &str) -> String {
+    if !cmd.starts_with("cargo ") {
+        return cmd.to_owned();
+    }
+    let words = shell_split(cmd);
+    if words.first().map(String::as_str) == Some("cargo")
+        && let Some(invocation) = crate::cmds::rust::cargo_args::parse(&words[1..])
+    {
+        return format!("cargo {}", invocation.subcommand);
+    }
+    cmd.to_owned()
 }
 
 /// Strip pnpm global options before the subcommand (mirror of `strip_git_global_opts`).
@@ -3369,9 +3385,10 @@ mod tests {
 
     #[test]
     fn test_registry_covers_all_cargo_subcommands() {
-        // Verify that every CargoCommand variant (Build, Test, Clippy, Check, Fmt)
-        // except Other has a matching pattern in the registry
-        for subcmd in ["build", "test", "clippy", "check", "fmt"] {
+        // Every filtered Cargo subcommand and fmt passthrough has a rule.
+        for subcmd in [
+            "build", "test", "clippy", "check", "fmt", "install", "nextest", "b", "c", "t",
+        ] {
             let cmd = format!("cargo {subcmd}");
             match classify_command(&cmd) {
                 Classification::Supported { .. } => {}

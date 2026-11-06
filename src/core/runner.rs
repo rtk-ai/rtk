@@ -474,20 +474,34 @@ fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
 }
 
 fn asks_for_usage(stem: &str, args: &[String]) -> bool {
-    let first = args.first().map(String::as_str);
+    // Cargo may put its selector and global options before the subcommand.
+    // Resolve aliases too, so `cargo --locked t -- --help` remains libtest help.
+    let cargo = (stem == "cargo")
+        .then(|| crate::cmds::rust::cargo_args::parse(args))
+        .flatten();
+    let first = cargo
+        .as_ref()
+        .map(|c| c.subcommand)
+        .or_else(|| args.first().map(String::as_str));
     let spelling = help_spelling(stem, first);
     let takes_value = |kind: TokenKind, name: &str| {
         let cargo_install_version = stem == "cargo"
             && first == Some("install")
             && kind == TokenKind::Long
             && name == "version";
+        let cargo_global_value = stem == "cargo"
+            && match kind {
+                TokenKind::Long => matches!(name, "config" | "color"),
+                TokenKind::Short => matches!(name, "C" | "Z"),
+                _ => false,
+            };
         let git_message = stem == "git"
             && match kind {
                 TokenKind::Short => matches!(name, "m" | "F"),
                 TokenKind::Long => matches!(name, "message" | "file"),
                 _ => false,
             };
-        (cargo_install_version || git_message).then(ValueSpec::value)
+        (cargo_install_version || cargo_global_value || git_message).then(ValueSpec::value)
     };
     let tokens = arg_tokenizer::tokenize_grammar(args, &takes_value, spelling.dialect);
     if names_usage(
@@ -1813,6 +1827,30 @@ mod requests_help_tests {
             }
         }
         assert!(checked > 500, "fuzz did not cover enough, got {checked}");
+    }
+
+    #[test]
+    fn cargo_global_options_and_aliases_preserve_help_detection() {
+        assert!(asks(
+            "cargo",
+            &[
+                "+nightly",
+                "-Z",
+                "unstable-options",
+                "-C",
+                "some path",
+                "t",
+                "--",
+                "--help"
+            ]
+        ));
+        assert!(asks("cargo", &["--locked", "test", "--", "-h"]));
+        assert!(!asks("cargo", &["--offline", "b", "--", "--help"]));
+        assert!(!asks("cargo", &["--config", "--help", "check"]));
+        assert!(!asks(
+            "cargo",
+            &["+stable", "install", "ripgrep", "--version", "1.2.3"]
+        ));
     }
 
     #[test]
