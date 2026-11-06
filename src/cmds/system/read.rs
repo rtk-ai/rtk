@@ -37,22 +37,21 @@ pub fn run(
         eprintln!("Reading: {} (filter: {})", file.display(), level);
     }
 
+    let label = window_label(level, head_lines, tail_lines, &file.to_string_lossy())
+        .unwrap_or_else(|| cat_label(file));
+
     // `head -n N` stops as soon as it has N lines. Reading the file whole first gives the same
     // answer on a regular file and no answer at all on a device node or a FIFO nobody closes,
     // which is reachable now that `head -n N` rewrites to this.
-    if level == FilterLevel::None
-        && !line_numbers
+    if passes_bytes_through(level, line_numbers)
         && let Some(head) = head_lines
     {
-        let window = read_head_lines(file, head)?;
-        io::stdout()
-            .lock()
-            .write_all(&window)
-            .context("Failed to write line window")?;
-        // The user asked for these lines, so the baseline is the window itself
-        // (what `head -n N` would have printed), not the rest of the file.
-        let window = String::from_utf8_lossy(&window);
-        timer.track(&cat_label(file), "rtk read", &window, &window);
+        let read_context = || format!("Failed to read file: {}", file.display());
+        let mut source = fs::File::open(file).with_context(read_context)?;
+        // The window is written as it is read, so what it holds and what reached stdout are
+        // the same bytes.
+        let window = copy_head_lines(&mut source, head, &mut io::stdout().lock(), read_context)?;
+        timer.track_bytes(&label, "rtk read", window, window);
         return Ok(());
     }
 
@@ -71,9 +70,7 @@ pub fn run(
             .lock()
             .write_all(window)
             .context("Failed to write raw bytes")?;
-        // A plain or windowed raw read is the baseline too: see `tracking_baseline`.
-        let window = String::from_utf8_lossy(window);
-        timer.track(&cat_label(file), "rtk read", &window, &window);
+        timer.track_bytes(&label, "rtk read", window.len(), window.len());
         return Ok(());
     }
     let content = String::from_utf8(bytes)
@@ -133,7 +130,7 @@ pub fn run(
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
     timer.track(
-        &cat_label(file),
+        &label,
         "rtk read",
         &tracking_baseline(&raw, shown, window_cut, || {
             windowed_raw(&content, max_lines, head_lines, tail_lines, line_numbers)
@@ -157,6 +154,25 @@ pub fn run_stdin(
         eprintln!("Reading from stdin (filter: {})", level);
     }
 
+    let label = window_label(level, head_lines, tail_lines, "-")
+        .unwrap_or_else(|| "cat - (stdin)".to_string());
+
+    // `head -n N` stops as soon as it has N lines. Draining stdin first gives the same answer
+    // on a producer that ends and no answer at all on one that does not, so the head window is
+    // taken straight off the stream.
+    if passes_bytes_through(level, line_numbers)
+        && let Some(head) = head_lines
+    {
+        let window = copy_head_lines(
+            &mut io::stdin().lock(),
+            head,
+            &mut io::stdout().lock(),
+            || "Failed to read from stdin".to_string(),
+        )?;
+        timer.track_bytes(&label, "rtk read -", window, window);
+        return Ok(());
+    }
+
     // Read from stdin
     let mut bytes = Vec::new();
     io::stdin()
@@ -175,8 +191,7 @@ pub fn run_stdin(
             .lock()
             .write_all(window)
             .context("Failed to write raw bytes")?;
-        let window = String::from_utf8_lossy(window);
-        timer.track("cat - (stdin)", "rtk read -", &window, &window);
+        timer.track_bytes(&label, "rtk read -", window.len(), window.len());
         return Ok(());
     }
     let content = String::from_utf8(bytes).context("Failed to decode stdin")?;
@@ -222,7 +237,7 @@ pub fn run_stdin(
     print!("{}", shown);
 
     timer.track(
-        "cat - (stdin)",
+        &label,
         "rtk read -",
         &tracking_baseline(&raw, shown, window_cut, || {
             windowed_raw(&content, max_lines, head_lines, tail_lines, line_numbers)
@@ -319,67 +334,115 @@ fn apply_line_window(
     content.to_string()
 }
 
-/// How much is pulled from the file at a time. Only the lines asked for are ever read, so the
-/// chunk bounds how far past the `n`th newline that read can reach.
+/// How much is pulled from the source at a time, which bounds both the memory an unfiltered head
+/// window costs and how much of the source is consumed reaching the `n`th newline -- for a pipe
+/// or a seekable stdin, how much a later reader loses. On unix that second bound is exact:
+/// `StdinLock`'s buffer has the same capacity, and a read that large is handed straight to the
+/// OS instead of going through it. On Windows its buffer holds 12 KiB, so a read can fill that
+/// much instead.
 const READ_CHUNK: usize = 8192;
 
-/// The first `n` newline-terminated lines of `file`, read in chunks and stopped at the `n`th
-/// newline so an endless source is never read past what was asked for. Short input, or input
-/// whose last line is unterminated, comes back whole, matching [`head_window`].
+/// Where the first `n` newline-terminated lines end in `bytes`, and how many of their
+/// terminators that prefix holds: the whole slice, and a count short of `n`, when there are
+/// fewer lines than asked for.
 ///
-/// Only the unfiltered head window is served this way. A filter level or `--line-numbers`
-/// still needs the file whole -- `--tail-lines` inherently so -- and none of those is reachable
-/// from a `head` rewrite, which is what made this path the one that had to stop early.
-fn read_head_lines(file: &Path, n: usize) -> Result<Vec<u8>> {
-    let mut handle =
-        fs::File::open(file).with_context(|| format!("Failed to read file: {}", file.display()))?;
-    let mut window = Vec::new();
+/// This is where `read` defines the head window. [`head_window`] applies it once to bytes
+/// already in memory; [`copy_head_lines`] applies it to each chunk with a running count, which
+/// is what lets it stop at the `n`th newline instead of draining the source. Scanning for line
+/// ends twice would be two places for CRLF endings and unterminated last lines to drift apart.
+fn head_prefix(bytes: &[u8], n: usize) -> (usize, usize) {
+    if n == 0 {
+        return (0, 0);
+    }
+    let mut seen = 0;
+    for (idx, &byte) in bytes.iter().enumerate() {
+        if byte == b'\n' {
+            seen += 1;
+            if seen == n {
+                return (idx + 1, seen);
+            }
+        }
+    }
+    (bytes.len(), seen)
+}
+
+/// Copies the first `n` newline-terminated lines of `source` to `out`, and reports how many
+/// bytes that was. Reading stops at the `n`th newline rather than at the source's end, so a
+/// source that never ends still returns -- the chunk that newline arrived in is read whole and
+/// no further -- and each chunk is written as it is read, so a line of any length costs one
+/// chunk of memory rather than its own length. Input with fewer than `n` newlines comes
+/// through whole, its last line terminated or not, matching [`head_window`].
+///
+/// Only the unfiltered head window is served this way: a filter level or `--line-numbers`
+/// needs the input whole, and `--tail-lines` inherently so.
+fn copy_head_lines(
+    source: &mut impl IoRead,
+    n: usize,
+    out: &mut impl Write,
+    read_context: impl Fn() -> String,
+) -> Result<usize> {
     let mut chunk = [0u8; READ_CHUNK];
     let mut seen = 0;
+    let mut written = 0;
     while seen < n {
-        let read = match handle.read(&mut chunk) {
+        let read = match source.read(&mut chunk) {
             Ok(read) => read,
-            // `fs::read`, which this replaces, retries this itself; a bare `read` does not,
-            // and turning a signal into a failed read would lose the window entirely.
+            // A bare `read` does not retry after a signal, and turning one into a failed
+            // read would lose the window entirely.
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("Failed to read file: {}", file.display()));
-            }
+            Err(error) => return Err(error).with_context(read_context),
         };
         if read == 0 {
             break;
         }
-        for &byte in &chunk[..read] {
-            window.push(byte);
-            if byte == b'\n' {
-                seen += 1;
-                if seen == n {
-                    break;
-                }
-            }
-        }
+        let (taken, found) = head_prefix(&chunk[..read], n - seen);
+        out.write_all(&chunk[..taken])
+            .context("Failed to write line window")?;
+        written += taken;
+        seen += found;
     }
-    Ok(window)
+    Ok(written)
+}
+
+/// The row's name for a read that is a window the user asked for: the command it stands in
+/// for. The hook rewrites `head -n N <file>` to `rtk read <file> --head-lines N`, and RTK
+/// prints the window that command prints, so the row is measured against that window and not
+/// against the rest of the file: crediting RTK with bytes the user never asked for would be
+/// crediting it with their own choice of command. Every unfiltered path prints the window
+/// whole, so every such row books nothing, which is what the rewrite saves. `--line-numbers`
+/// renders the window rather than printing it, but the read still stands in for `head` or
+/// `tail`.
+///
+/// `None` for everything else, a plain read or one RTK cuts down itself with a filter level,
+/// which the caller names as `cat`: cutting the input down is RTK's own doing.
+fn window_label(
+    level: FilterLevel,
+    head_lines: Option<usize>,
+    tail_lines: Option<usize>,
+    source: &str,
+) -> Option<String> {
+    if level != FilterLevel::None {
+        return None;
+    }
+    let source = quote_word(source);
+    match (head_lines, tail_lines) {
+        (Some(n), _) => Some(format!("head -n {n} {source}")),
+        (None, Some(n)) => Some(format!("tail -n {n} {source}")),
+        (None, None) => None,
+    }
+}
+
+/// Whether the input can go out as the bytes it came in as: no filter level and no line
+/// numbers, so nothing needs it decoded.
+fn passes_bytes_through(level: FilterLevel, line_numbers: bool) -> bool {
+    level == FilterLevel::None && !line_numbers
 }
 
 /// First `n` lines, sliced on byte offsets rather than round-tripped through
 /// `lines()`, so CRLF endings and an unterminated final line survive verbatim.
 /// `\n` is ASCII, so valid UTF-8 input also stays valid after slicing.
 fn head_window(content: &[u8], n: usize) -> &[u8] {
-    if n == 0 {
-        return &[];
-    }
-    let mut seen = 0;
-    for (idx, &byte) in content.iter().enumerate() {
-        if byte == b'\n' {
-            seen += 1;
-            if seen == n {
-                return &content[..=idx];
-            }
-        }
-    }
-    content
+    &content[..head_prefix(content, n).0]
 }
 
 /// Last `n` lines, byte-sliced for the same fidelity reasons as `head_window`.
@@ -419,7 +482,7 @@ fn raw_byte_window(
     tail_lines: Option<usize>,
     line_numbers: bool,
 ) -> Option<&[u8]> {
-    if level != FilterLevel::None || line_numbers {
+    if !passes_bytes_through(level, line_numbers) {
         return None;
     }
     byte_line_window(content, head_lines, tail_lines)
@@ -451,15 +514,52 @@ mod tests {
         assert_eq!(cat_label(Path::new("my notes.txt")), "cat 'my notes.txt'");
     }
 
-    /// `read_head_lines` must agree with `head_window` byte-for-byte on every shape, since it
-    /// replaces it on the unfiltered path -- CRLF endings and an unterminated last line
-    /// included.
+    /// The context a failing read would carry; the tests never make one fail.
+    fn context() -> String {
+        "test source".to_string()
+    }
+
+    /// [`copy_head_lines`] into a buffer, for assertions that compare whole windows. The
+    /// reported size is what tracking books, so it is pinned to what was actually written.
+    fn head_lines_of(source: &mut impl IoRead, n: usize) -> Result<Vec<u8>> {
+        let mut window = Vec::new();
+        let reported = copy_head_lines(source, n, &mut window, context)?;
+        assert_eq!(
+            reported,
+            window.len(),
+            "reported size must match the bytes written"
+        );
+        Ok(window)
+    }
+
+    /// A second definition of the head window, as one pass over bytes already in memory. Both
+    /// ways of reaching the window are asserted against it rather than against each other, so
+    /// a change to one of them that the other does not share is caught.
+    fn reference_head_window(content: &[u8], n: usize) -> &[u8] {
+        if n == 0 {
+            return &[];
+        }
+        let mut seen = 0;
+        for (idx, &byte) in content.iter().enumerate() {
+            if byte == b'\n' {
+                seen += 1;
+                if seen == n {
+                    return &content[..=idx];
+                }
+            }
+        }
+        content
+    }
+
+    /// `copy_head_lines` and `head_window` must both reproduce `reference_head_window`
+    /// byte-for-byte on every shape -- CRLF endings and an unterminated last line included --
+    /// since between them they serve every unfiltered head window RTK emits.
     ///
     /// The inputs have to span more than one `READ_CHUNK`, because reading across chunks is
-    /// the only thing the rewrite added: a set that all fits in the first chunk passes just as
+    /// the only thing the reader adds: a set that all fits in the first chunk passes just as
     /// happily with the loop stopped after that chunk.
     #[test]
-    fn test_read_head_lines_matches_head_window() -> Result<()> {
+    fn test_head_windows_match_the_reference() -> Result<()> {
         let long_line = "x".repeat(READ_CHUNK * 2);
         // A newline sitting exactly on a chunk boundary, and on either side of it.
         let boundary = |at: usize| format!("{}\n{}\n", "y".repeat(at - 1), "z".repeat(100));
@@ -495,10 +595,17 @@ mod tests {
             file.write_all(content.as_bytes())?;
             file.flush()?;
             for n in [0, 1, 2, 3, 10, 1000, 4000] {
+                let expected = reference_head_window(content.as_bytes(), n);
                 assert_eq!(
-                    read_head_lines(file.path(), n)?,
+                    head_lines_of(&mut fs::File::open(file.path())?, n)?,
+                    expected,
+                    "copy_head_lines, content of {} bytes, n {n}",
+                    content.len()
+                );
+                assert_eq!(
                     head_window(content.as_bytes(), n),
-                    "content of {} bytes, n {n}",
+                    expected,
+                    "head_window, content of {} bytes, n {n}",
                     content.len()
                 );
             }
@@ -510,7 +617,7 @@ mod tests {
     /// closes stands in for the `/dev/urandom` case, which `head -n N` now rewrites to.
     #[cfg(unix)]
     #[test]
-    fn test_read_head_lines_returns_from_an_endless_source() -> Result<()> {
+    fn test_copy_head_lines_returns_from_an_endless_source() -> Result<()> {
         use std::io::Write as _;
         let dir = tempfile::tempdir()?;
         let fifo = dir.path().join("endless");
@@ -533,8 +640,150 @@ mod tests {
             while handle.write_all(b"line\n").is_ok() {}
         });
 
-        assert_eq!(read_head_lines(&fifo, 3)?, b"line\nline\nline\n");
+        // A copy that drains the FIFO never returns, so the read runs on a thread the test
+        // waits for with a deadline, and fails instead of hanging.
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let window = fs::File::open(&fifo)
+                .map_err(anyhow::Error::from)
+                .and_then(|mut source| head_lines_of(&mut source, 3));
+            let _ = sent.send(window);
+        });
+        let window = received
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("copy_head_lines drained a source that never ends")?;
+        assert_eq!(window, b"line\nline\nline\n");
         drop(writer);
+        Ok(())
+    }
+
+    /// What a pipe looks like and a file does not: a few bytes per read, never any end, line
+    /// endings split across reads. A source like this is the one the stdin path has to stop
+    /// itself on, and `served` pins that it stops without draining -- at the cost of the read
+    /// already in flight, and no more.
+    #[test]
+    fn test_copy_head_lines_stops_on_a_trickling_endless_source() -> Result<()> {
+        const READ: usize = 5;
+        struct Trickle {
+            at: usize,
+            served: usize,
+        }
+        impl IoRead for Trickle {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                // Read well past the window, the source fails, so a copy that drains it fails
+                // the test instead of spinning forever.
+                if self.served > 64 * READ {
+                    return Err(io::Error::other("read past the window"));
+                }
+                let take = buf.len().min(READ);
+                for slot in &mut buf[..take] {
+                    *slot = b"ab\r\n"[self.at % 4];
+                    self.at += 1;
+                }
+                self.served += take;
+                Ok(take)
+            }
+        }
+
+        // The fourth line's terminator starts in one read and ends in the next.
+        let expected = b"ab\r\nab\r\nab\r\nab\r\n";
+        let mut source = Trickle { at: 0, served: 0 };
+        assert_eq!(head_lines_of(&mut source, 4)?, expected);
+        // A read already in flight when the `n`th newline arrives still delivers its chunk.
+        assert!(
+            source.served < expected.len() + READ,
+            "consumed {} bytes for a {}-byte window",
+            source.served,
+            expected.len()
+        );
+
+        let mut untouched = Trickle { at: 0, served: 0 };
+        assert_eq!(head_lines_of(&mut untouched, 0)?, b"");
+        assert_eq!(untouched.served, 0, "n = 0 must not read at all");
+        Ok(())
+    }
+
+    /// Each chunk is written as soon as it is read, which is what holds a window to one chunk
+    /// of memory: when the source fails after its first chunk, the lines that chunk held are
+    /// already out.
+    #[test]
+    fn test_copy_head_lines_writes_each_chunk_as_it_reads_it() {
+        const FIRST: &[u8] = b"alpha\nbravo\n";
+        struct FailsAfterFirstChunk {
+            served: bool,
+        }
+        impl IoRead for FailsAfterFirstChunk {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if std::mem::replace(&mut self.served, true) {
+                    return Err(io::Error::other("source failed"));
+                }
+                buf[..FIRST.len()].copy_from_slice(FIRST);
+                Ok(FIRST.len())
+            }
+        }
+
+        let mut out = Vec::new();
+        let result = copy_head_lines(
+            &mut FailsAfterFirstChunk { served: false },
+            5,
+            &mut out,
+            context,
+        );
+        assert!(result.is_err(), "the source failed: {result:?}");
+        assert_eq!(out, FIRST);
+    }
+
+    /// The row has to name the command RTK stands in for, because that is what its numbers
+    /// are measured against.
+    #[test]
+    fn test_window_label_names_the_command_it_stands_in_for() {
+        assert_eq!(
+            window_label(FilterLevel::None, Some(5), None, "big.txt").as_deref(),
+            Some("head -n 5 big.txt")
+        );
+        assert_eq!(
+            window_label(FilterLevel::None, None, Some(5), "big.txt").as_deref(),
+            Some("tail -n 5 big.txt")
+        );
+        assert_eq!(
+            window_label(FilterLevel::None, Some(5), None, "-").as_deref(),
+            Some("head -n 5 -")
+        );
+        assert_eq!(
+            window_label(FilterLevel::None, Some(5), None, "my notes.txt").as_deref(),
+            Some("head -n 5 'my notes.txt'")
+        );
+        // A plain read, and a read RTK cuts down itself, are left to the caller's `cat` name.
+        assert_eq!(window_label(FilterLevel::None, None, None, "big.txt"), None);
+        assert_eq!(
+            window_label(FilterLevel::Aggressive, Some(5), None, "big.txt"),
+            None
+        );
+    }
+
+    /// A signal is not the end of the input. Reading it as one truncates the window, which
+    /// no output assertion elsewhere would notice, since the source has more to give.
+    #[test]
+    fn test_copy_head_lines_retries_after_a_signal() -> Result<()> {
+        struct InterruptFirst<'a> {
+            interrupted: bool,
+            rest: &'a [u8],
+        }
+        impl IoRead for InterruptFirst<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
+                self.rest.read(buf)
+            }
+        }
+
+        let mut source = InterruptFirst {
+            interrupted: false,
+            rest: b"a\nb\n",
+        };
+        assert_eq!(head_lines_of(&mut source, 2)?, b"a\nb\n");
         Ok(())
     }
 
