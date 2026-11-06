@@ -37,6 +37,8 @@ pub const RTK_META_COMMANDS: &[&str] = &[
     "methods",
     "tasks",
     "plugins",
+    // `test` also passes through to the POSIX binary, but a flag clap rejects on
+    // it is RTK's own: `rtk test --shell` reports the error instead of running `test`.
     "test",
     "format",
     // `err` and `summary` name no real binary, and since they grew `--shell`

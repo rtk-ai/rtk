@@ -120,7 +120,7 @@ fn fallback_propagates_invalid_baseline_errors() {
         dir.path().join(".claude/hooks/.rtk-hook.sha256"),
         "not a hash",
     )
-    .unwrap();
+    .expect("write isolated fixture");
     let out = run(dir.path(), &["make", "all"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("Invalid hash format"));
@@ -141,13 +141,13 @@ fn fallback_checks_integrity_before_agent_dispatch() {
 fn fallback_checks_integrity_before_task_dispatch() {
     for state in ["verified", "tampered"] {
         let dir = sandbox(state);
-        std::fs::create_dir(dir.path().join("config")).unwrap();
+        std::fs::create_dir(dir.path().join("config")).expect("write isolated fixture");
         std::fs::write(
             dir.path().join("config/pipeline.toml"),
             "[task.bulk-sum]\nkind = \"digest\"\n",
         )
-        .unwrap();
-        std::fs::write(dir.path().join("f.txt"), "fixture input").unwrap();
+        .expect("write isolated fixture");
+        std::fs::write(dir.path().join("f.txt"), "fixture input").expect("write isolated fixture");
         let out = run(dir.path(), &["bulk-sum", "f.txt"]);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "{state}: {stderr}");
