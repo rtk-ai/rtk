@@ -13,6 +13,7 @@
 //! command string as bash (see `lexer::ShellDialect`).
 
 use super::lexer::{self, ParsedToken, TokenKind};
+use super::registry::collapse_line_continuations;
 use super::shell_wrapper::is_shell_wrapper_candidate;
 
 /// Keywords only fish accepts at command position. One of these, at a command
@@ -72,7 +73,13 @@ fn try_wrap_with_probes(
     }
 
     let script = cmd.trim();
-    if script.split_whitespace().next() == Some("rtk") || is_shell_wrapper_candidate(script) {
+    // Bash drops a leading `\` + newline, so read the first word after it.
+    if collapse_line_continuations(script)
+        .split_whitespace()
+        .next()
+        == Some("rtk")
+        || is_shell_wrapper_candidate(script)
+    {
         return None;
     }
     if !is_unambiguous_fish(script) {
@@ -612,6 +619,20 @@ mod tests {
         // A background `&` followed by a *separate* pipeline still wraps: the
         // two are only the fish pipe when they are adjacent.
         assert!(try_wrap_gated("sleep 1 & git status | cat; and true", true).is_some());
+    }
+
+    /// Bash drops a leading `\` + newline, so the first word it runs is `rtk`:
+    /// an already-wrapped command behind a continuation is not wrapped again.
+    #[cfg(not(windows))]
+    #[test]
+    fn test_rtk_behind_leading_continuation_is_not_wrapped() {
+        for cmd in [
+            "rtk run --shell fish -c 'echo ok'; and git status",
+            "\\\nrtk run --shell fish -c 'echo ok'; and git status",
+            "\\\r\n  \\\n rtk run --shell fish -c 'echo ok'; and git status",
+        ] {
+            assert!(try_wrap_gated(cmd, true).is_none(), "{cmd:?}");
+        }
     }
 
     #[test]
