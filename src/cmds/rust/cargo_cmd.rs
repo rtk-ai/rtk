@@ -1,6 +1,6 @@
 //! Filters cargo output — build errors, test results, clippy warnings.
 
-use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
+use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec};
 use crate::core::runner;
 use crate::core::shell::display_args;
 use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
@@ -62,6 +62,11 @@ pub struct CargoInvocation<'a, T = OsString> {
     args: &'a [T],
     command_args: &'a [T],
     command: CargoCommand,
+    metadata: FilterMetadata,
+}
+
+#[derive(Debug)]
+struct FilterMetadata {
     message_format: MessageFormat,
     requests_help: bool,
 }
@@ -94,96 +99,20 @@ impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
         // one iterator in two disjoint regions: discovery, then metadata.
         let mut remaining = tokens
             .iter()
+            .copied()
             .filter(|t| !matches!(t.kind, TokenKind::Positional) || t.linked.is_none());
-        let command_token = loop {
-            let token = remaining.next()?;
-            match (token.kind, token.text) {
-                // Rustup recognizes +toolchain only immediately after cargo.
-                // https://rust-lang.github.io/rustup/overrides.html#toolchain-override-shorthand
-                (TokenKind::Positional, name)
-                    if token.source_index == 0 && name.starts_with('+') => {}
-                (TokenKind::Positional, _) => break token,
-                // Only prefix options need recognition: unknown arities could
-                // make an option value look like the command.
-                // https://doc.rust-lang.org/cargo/commands/cargo.html#common-options
-                (
-                    TokenKind::Long,
-                    "config" | "color" | "locked" | "offline" | "frozen" | "quiet" | "verbose",
-                )
-                | (TokenKind::Short, "C" | "v" | "q") => {}
-                (TokenKind::Short, "Z") => {
-                    // Script mode changes command interpretation; leave it native.
-                    // https://doc.rust-lang.org/cargo/reference/unstable.html#script
-                    if token.value(&tokens).is_some_and(|v| {
-                        v.trim_start_matches('=').split('=').next() == Some("script")
-                    }) {
-                        return None;
-                    }
-                }
-                _ => return None,
-            }
-        };
-        // Canonical names have one source; aliases are separate.
-        // https://doc.rust-lang.org/cargo/reference/config.html#alias
-        let command = match command_token.text {
-            "b" => CargoCommand::Build,
-            "c" => CargoCommand::Check,
-            "t" => CargoCommand::Test,
-            name => CargoCommand::ALL.into_iter().find(|c| c.as_str() == name)?,
-        };
-        let command_args = &args[command_token.source_index + 1..];
-        let mut message_format = MessageFormat::Human;
-        let mut requests_help = false;
-        let mut forwarded = false;
-        // The command is fixed. Ignore ordinary options and positionals; only
-        // collect RTK's format/help metadata. Cargo validates everything else.
-        for token in remaining {
-            if forwarded {
-                if token.text == "--" {
-                    break;
-                }
-                requests_help |= is_help_argument(token.text);
-                continue;
-            }
-            let value = token.value(&tokens);
-            match (token.kind, token.text) {
-                (TokenKind::DashDash, _) => {
-                    // Only libtest/nextest interpret the tail as test arguments.
-                    // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
-                    // https://nexte.st/docs/running/
-                    if !matches!(command, CargoCommand::Test | CargoCommand::Nextest) {
-                        break;
-                    }
-                    forwarded = true;
-                }
-                (TokenKind::Long, "message-format") => {
-                    if let Some(value) = value {
-                        message_format = if value.contains("json") {
-                            MessageFormat::Json
-                        } else {
-                            MessageFormat::Human
-                        };
-                    }
-                }
-                // install --version takes a crate version, not a help request.
-                // https://doc.rust-lang.org/cargo/commands/cargo-install.html#install-options
-                (TokenKind::Long, "version")
-                    if command == CargoCommand::Install && value.is_some() => {}
-                _ if is_help_argument(words[token.source_index].as_ref()) => requests_help = true,
-                _ => {}
-            }
-        }
+        let (command, command_args_start) = find_command(&mut remaining, &tokens)?;
+        let metadata = read_filter_metadata(command, remaining, &tokens, &words);
         Some(Self {
             args,
-            command_args,
+            command_args: &args[command_args_start..],
             command,
-            message_format,
-            requests_help,
+            metadata,
         })
     }
 
     pub fn requests_help(&self) -> bool {
-        self.requests_help
+        self.metadata.requests_help
     }
 
     pub fn command(&self) -> CargoCommand {
@@ -191,7 +120,7 @@ impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
     }
 
     pub fn message_format(&self) -> MessageFormat {
-        self.message_format
+        self.metadata.message_format
     }
 
     /// Preserve the original argv, including aliases, --, and configuration order.
@@ -211,6 +140,106 @@ impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
                 .map(|s| s.as_ref().to_string_lossy().into_owned())
                 .collect::<Vec<_>>(),
         )
+    }
+}
+
+/// Consume prefix options and stop immediately after the command. Syntax is
+/// handled by the shared tokenizer; the acceptance rules here belong to Cargo.
+fn find_command<'a>(
+    remaining: &mut impl Iterator<Item = Token<'a>>,
+    all_tokens: &[Token<'a>],
+) -> Option<(CargoCommand, usize)> {
+    let command_token = loop {
+        let token = remaining.next()?;
+        match (token.kind, token.text) {
+            // Rustup recognizes +toolchain only immediately after cargo.
+            // https://rust-lang.github.io/rustup/overrides.html#toolchain-override-shorthand
+            (TokenKind::Positional, name) if token.source_index == 0 && name.starts_with('+') => {}
+            (TokenKind::Positional, _) => break token,
+            // Only prefix options need recognition: unknown arities could
+            // make an option value look like the command.
+            // https://doc.rust-lang.org/cargo/commands/cargo.html#common-options
+            (
+                TokenKind::Long,
+                "config" | "color" | "locked" | "offline" | "frozen" | "quiet" | "verbose",
+            )
+            | (TokenKind::Short, "C" | "v" | "q") => {}
+            (TokenKind::Short, "Z") => {
+                // Script mode changes command interpretation; leave it native.
+                // https://doc.rust-lang.org/cargo/reference/unstable.html#script
+                if token
+                    .value(all_tokens)
+                    .is_some_and(|v| v.trim_start_matches('=').split('=').next() == Some("script"))
+                {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    };
+    // Canonical names have one source; aliases are separate.
+    // https://doc.rust-lang.org/cargo/reference/config.html#alias
+    let command = match command_token.text {
+        "b" => CargoCommand::Build,
+        "c" => CargoCommand::Check,
+        "t" => CargoCommand::Test,
+        name => CargoCommand::ALL.into_iter().find(|c| c.as_str() == name)?,
+    };
+    Some((command, command_token.source_index + 1))
+}
+
+/// Inspect only the remaining tokens for metadata affecting RTK's filter.
+/// Accept any token iterator, so this never needs to restart command discovery.
+fn read_filter_metadata<'a>(
+    command: CargoCommand,
+    remaining: impl Iterator<Item = Token<'a>>,
+    all_tokens: &[Token<'a>],
+    words: &[impl AsRef<str>],
+) -> FilterMetadata {
+    let mut message_format = MessageFormat::Human;
+    let mut requests_help = false;
+    let mut forwarded = false;
+    // The command is fixed. Ignore ordinary options and positionals; only
+    // collect RTK's format/help metadata. Cargo validates everything else.
+    for token in remaining {
+        if forwarded {
+            if token.text == "--" {
+                break;
+            }
+            requests_help |= is_help_argument(token.text);
+            continue;
+        }
+        let value = token.value(all_tokens);
+        match (token.kind, token.text) {
+            (TokenKind::DashDash, _) => {
+                // Only libtest/nextest interpret the tail as test arguments.
+                // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
+                // https://nexte.st/docs/running/
+                if !matches!(command, CargoCommand::Test | CargoCommand::Nextest) {
+                    break;
+                }
+                forwarded = true;
+            }
+            (TokenKind::Long, "message-format") => {
+                if let Some(value) = value {
+                    message_format = if value.contains("json") {
+                        MessageFormat::Json
+                    } else {
+                        MessageFormat::Human
+                    };
+                }
+            }
+            // install --version takes a crate version, not a help request.
+            // https://doc.rust-lang.org/cargo/commands/cargo-install.html#install-options
+            (TokenKind::Long, "version") if command == CargoCommand::Install && value.is_some() => {
+            }
+            _ if is_help_argument(words[token.source_index].as_ref()) => requests_help = true,
+            _ => {}
+        }
+    }
+    FilterMetadata {
+        message_format,
+        requests_help,
     }
 }
 
