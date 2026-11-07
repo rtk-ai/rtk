@@ -263,11 +263,15 @@ impl BlockHandler for CargoTestHandler {
 
 /// Generic cargo command runner with filtering.
 /// Builds the Command with restored `--` separator, then delegates to shared runner.
+///
+/// `raw_on_failure` prints the child's stdout and stderr unfiltered when it exits
+/// non-zero, for subcommands whose failure text the filter does not recognise.
 fn run_cargo_filtered<F>(
     subcommand: &str,
     args: &[String],
     verbose: u8,
     filter_fn: F,
+    raw_on_failure: bool,
 ) -> Result<i32>
 where
     F: Fn(&str) -> String,
@@ -284,12 +288,18 @@ where
         eprintln!("Running: cargo {} {}", subcommand, restored_args.join(" "));
     }
 
+    let tee_label = format!("cargo_{}", subcommand);
+    let mut opts = runner::RunOptions::with_tee(&tee_label);
+    if raw_on_failure {
+        opts = opts.early_exit_on_failure();
+    }
+
     runner::run_filtered(
         cmd,
         &format!("cargo {}", subcommand),
         &display_args(&restored_args),
         filter_fn,
-        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
+        opts,
     )
 }
 
@@ -400,7 +410,7 @@ fn run_clippy(args: &[String], verbose: u8) -> Result<i32> {
     if has_json_message_format(args) {
         return run_cargo_filtered_with_exit("clippy", args, verbose, filter_cargo_clippy_json);
     }
-    run_cargo_filtered("clippy", args, verbose, filter_cargo_clippy)
+    run_cargo_filtered("clippy", args, verbose, filter_cargo_clippy, false)
 }
 
 fn run_check(args: &[String], verbose: u8) -> Result<i32> {
@@ -420,11 +430,13 @@ fn run_check(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 fn run_install(args: &[String], verbose: u8) -> Result<i32> {
-    run_cargo_filtered("install", args, verbose, filter_cargo_install)
+    // The filter keeps only `error:` blocks, so a failure that explains itself any
+    // other way (a registry or policy refusal, a wrapper's message) would vanish.
+    run_cargo_filtered("install", args, verbose, filter_cargo_install, true)
 }
 
 fn run_nextest(args: &[String], verbose: u8) -> Result<i32> {
-    run_cargo_filtered("nextest", args, verbose, filter_cargo_nextest)
+    run_cargo_filtered("nextest", args, verbose, filter_cargo_nextest, false)
 }
 
 /// Format crate name + version into a display string

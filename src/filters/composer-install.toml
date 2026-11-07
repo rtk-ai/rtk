@@ -13,6 +13,8 @@ match_output = [
   { pattern = "Nothing to install, update or remove", message = "ok (up to date)" },
 ]
 max_lines = 30
+# A failed install (a conflict, a policy refusal) is shown as composer printed it.
+raw_on_failure = true
 
 [[tests.composer-install]]
 name = "nothing to do short-circuits"

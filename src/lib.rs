@@ -2032,6 +2032,28 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                     stdout_raw.to_string()
                 };
                 let success = output.status.success();
+
+                if filter.raw_on_failure && !success {
+                    // Each stream as the tool wrote it: stderr was inherited unless the
+                    // filter captured it for merging.
+                    print!("{}", stdout_raw);
+                    if filter.filter_stderr {
+                        eprint!("{}", stderr_raw);
+                    }
+                    timer.track(
+                        &tracked_command,
+                        &format!("rtk:toml {}", tracked_command),
+                        &combined_raw,
+                        &combined_raw,
+                    );
+                    core::tracking::record_parse_failure_silent(
+                        &tracked_command,
+                        &error_message,
+                        true,
+                    );
+                    return Ok(exit_code);
+                }
+
                 let (filtered, loss) =
                     core::toml_filter::apply_filter_with_info(filter, &combined_raw);
                 let lossy = !matches!(loss, core::toml_filter::Lossiness::None);
