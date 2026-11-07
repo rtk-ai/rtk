@@ -9,12 +9,12 @@
 
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::display_args;
-use crate::core::utils::{ChildArgExt, resolved_command};
+use crate::core::utils::resolved_command;
 use anyhow::Result;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("wc");
-    cmd.child_args(args);
+    cmd.args(args);
 
     if verbose > 0 {
         eprintln!("Running: wc {}", args.join(" "));

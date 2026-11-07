@@ -17,9 +17,8 @@ toml = "0.8"
 toon-format = { version = "0.5.0", default-features = false }
 htmd = "0.5.5"
 
-[lints.rust]
-unsafe_code = "deny"
-warnings = "deny"
+[lints]
+workspace = true
 
 [dev-dependencies]
 tempfile = "3"

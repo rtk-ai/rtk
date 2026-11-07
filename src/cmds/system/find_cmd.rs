@@ -3,7 +3,6 @@
 use crate::core::shell::{display_args, with_args};
 use crate::core::tracking;
 use crate::core::truncate::CAP_INVENTORY;
-use crate::core::utils::ChildArgExt;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::collections::{HashMap, HashSet};
@@ -275,17 +274,16 @@ fn run_compress(
     let max_results = max.unwrap_or(CAP_INVENTORY);
     let max_explicit = max.is_some();
     let mut cmd = crate::core::utils::resolved_command("find");
-    cmd.child_args(options).child_args(paths);
+    cmd.args(options).args(paths);
     if !expr.is_empty() {
-        cmd.child_arg("(");
-        cmd.child_args(expr);
-        cmd.child_arg(")");
+        cmd.arg("(");
+        cmd.args(expr);
+        cmd.arg(")");
     }
     if let Some(t) = file_type {
-        cmd.child_arg("-type").child_arg(t);
+        cmd.arg("-type").arg(t);
     }
-    cmd.child_arg("-print0")
-        .stdin(std::process::Stdio::inherit());
+    cmd.arg("-print0").stdin(std::process::Stdio::inherit());
     let output = cmd.output().context("Failed to execute find")?;
     let exit_code = crate::core::utils::exit_code_from_output(&output, "find");
     {

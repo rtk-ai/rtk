@@ -1,5 +1,7 @@
 //! OpenCode plugin: install/uninstall helpers.
 use super::*;
+#[cfg(not(test))]
+use crate::core::child_command::ChildCommand;
 use crate::hooks::constants::{CONFIG_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR};
 
 // Embedded OpenCode plugin (auto-rewrite)
@@ -32,7 +34,7 @@ fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
 /// The installed OpenCode version banner, or `None` when there is none we can read.
 #[cfg(not(test))]
 fn opencode_version() -> Option<String> {
-    let out = std::process::Command::new("opencode")
+    let out = ChildCommand::new("opencode")
         .arg("--version")
         .output()
         .ok()?;
