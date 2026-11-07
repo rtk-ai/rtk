@@ -1,56 +1,148 @@
+use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec};
+use crate::core::guard::never_worse;
+use crate::core::shell::quote_word;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 
-/// Check whether trailing args contain `-O -` / `-O-` / `--output-document -`
-/// (stdout redirect that Clap's trailing_var_arg may have absorbed).
-pub fn has_stdout_output_flag(args: &[String]) -> bool {
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i].as_str();
-        // -O- (combined short form)
-        if a == "-O-" {
-            return true;
-        }
-        // -O - or -O <value> — only stdout when value is "-"
-        if a == "-O" || a == "--output-document" {
-            if args.get(i + 1).map(|v| v.as_str()) == Some("-") {
-                return true;
-            }
-            i += 2;
-            continue;
-        }
-        // --output-document=- (long form with =)
-        if a == "--output-document=-" {
-            return true;
-        }
-        i += 1;
-    }
-    false
+/// wget's value-taking short flags, from `wget --help` (GNU Wget 1.25).
+const SHORT_VALUE_FLAGS: &[&str] = &[
+    "e", "o", "a", "i", "B", "t", "O", "T", "w", "Q", "P", "U", "l", "A", "R", "D", "I", "X",
+];
+
+/// wget's value-taking long flags, from `wget --help` (GNU Wget 1.25).
+const LONG_VALUE_FLAGS: &[&str] = &[
+    "execute",
+    "output-file",
+    "append-output",
+    "input-file",
+    "base",
+    "tries",
+    "output-document",
+    "timeout",
+    "wait",
+    "quota",
+    "directory-prefix",
+    "user-agent",
+    "level",
+    "accept",
+    "reject",
+    "domains",
+    "include-directories",
+    "exclude-directories",
+    "report-speed",
+    "config",
+    "rejected-log",
+    "retry-on-http-error",
+    "start-pos",
+    "progress",
+    "dns-timeout",
+    "connect-timeout",
+    "read-timeout",
+    "waitretry",
+    "bind-address",
+    "limit-rate",
+    "restrict-file-names",
+    "prefer-family",
+    "user",
+    "password",
+    "use-askpass",
+    "local-encoding",
+    "remote-encoding",
+    "cut-dirs",
+    "http-user",
+    "http-password",
+    "default-page",
+    "header",
+    "compression",
+    "proxy-user",
+    "proxy-password",
+    "referer",
+    "load-cookies",
+    "save-cookies",
+    "post-data",
+    "post-file",
+    "method",
+    "body-data",
+    "body-file",
+    "secure-protocol",
+    "certificate",
+    "certificate-type",
+    "private-key",
+    "private-key-type",
+    "ca-certificate",
+    "ca-directory",
+    "crl-file",
+    "pinnedpubkey",
+    "random-file",
+    "ciphers",
+    "ftp-user",
+    "ftp-password",
+    "warc-file",
+    "warc-header",
+    "warc-max-size",
+    "warc-dedup",
+    "warc-tempdir",
+    "backups",
+    "accept-regex",
+    "reject-regex",
+    "regex-type",
+    "exclude-domains",
+    "follow-tags",
+    "ignore-tags",
+];
+
+fn wget_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    let takes = match kind {
+        TokenKind::Short => SHORT_VALUE_FLAGS.contains(&name),
+        TokenKind::Long => LONG_VALUE_FLAGS.contains(&name),
+        _ => false,
+    };
+    takes.then(ValueSpec::value)
 }
 
-/// Remove the `-O -` / `-O-` / `--output-document -` tokens from args,
-/// returning the remaining arguments to pass through to wget.
+fn tokenize(args: &[String]) -> Vec<Token<'_>> {
+    arg_tokenizer::tokenize_grammar(args, &wget_takes_value, Dialect::Posix)
+}
+
+/// `-O -` in any spelling: `-O -`, `-O-`, `-qO-`, `--output-document -`, `--output-document=-`.
+fn is_stdout_output(token: &Token<'_>, tokens: &[Token<'_>]) -> bool {
+    let is_output = match token.kind {
+        TokenKind::Short => token.text == "O",
+        TokenKind::Long => token.text == "output-document",
+        _ => false,
+    };
+    is_output && token.value(tokens) == Some("-")
+}
+
+/// Check whether trailing args ask wget to write the document to stdout
+/// (Clap's trailing_var_arg absorbs `-O -` when another flag precedes it).
+pub fn has_stdout_output_flag(args: &[String]) -> bool {
+    let tokens = tokenize(args);
+    tokens.iter().any(|t| is_stdout_output(t, &tokens))
+}
+
+/// Remove the stdout `-O -` from args, returning the remaining arguments to pass
+/// through to wget. Other flags clustered with it survive: `-qO-` becomes `-q`.
 pub fn strip_output_flag(args: &[String]) -> Vec<String> {
-    let mut result = Vec::with_capacity(args.len());
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i].as_str();
-        if a == "-O-" || a == "--output-document=-" {
-            i += 1;
-            continue;
+    let tokens = tokenize(args);
+    let mut kept: Vec<Option<String>> = args.iter().cloned().map(Some).collect();
+    for token in tokens.iter().filter(|t| is_stdout_output(t, &tokens)) {
+        if let Some(value) = token.linked.and_then(|i| tokens.get(i)) {
+            kept[value.source_index] = None;
         }
-        if a == "-O" || a == "--output-document" {
-            if args.get(i + 1).map(|v| v.as_str()) == Some("-") {
-                i += 2;
-                continue;
-            }
-        }
-        result.push(args[i].clone());
-        i += 1;
+        // A Short `O` can only follow boolean flags in its cluster: a value-taking
+        // flag before it would have consumed the rest of the arg as its value.
+        let flags_before = match token.kind {
+            TokenKind::Short => args[token.source_index][1..]
+                .split_once('O')
+                .map_or("", |(before, _)| before),
+            _ => "",
+        };
+        kept[token.source_index] = (!flags_before.is_empty()).then(|| format!("-{flags_before}"));
     }
-    result
+    kept.into_iter().flatten().collect()
 }
 
 /// Compact wget - strips progress bars, shows only result
@@ -85,13 +177,25 @@ pub fn run(url: &str, args: &[String], verbose: u8) -> Result<i32> {
             filename,
             format_size(size)
         );
-        println!("{}", msg);
-        timer.track(&format!("wget {}", url), "rtk wget", &raw_output, &msg);
+        let shown = never_worse(&raw_output, &msg);
+        println!("{}", shown);
+        timer.track(
+            &format!("wget {}", quote_word(url)),
+            "rtk wget",
+            &raw_output,
+            shown,
+        );
     } else {
         let error = parse_error(&result.stderr, &result.stdout);
         let msg = format!("{} FAILED: {}", compact_url(url), error);
-        println!("{}", msg);
-        timer.track(&format!("wget {}", url), "rtk wget", &raw_output, &msg);
+        let shown = never_worse(&raw_output, &msg);
+        println!("{}", shown);
+        timer.track(
+            &format!("wget {}", quote_word(url)),
+            "rtk wget",
+            &raw_output,
+            shown,
+        );
         return Ok(result.exit_code);
     }
 
@@ -128,7 +232,7 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<i32> {
                 total,
                 format_size(result.stdout.len() as u64)
             ));
-            rtk_output.push_str("--- first 10 lines ---\n");
+            rtk_output.push_str("first 10 lines:\n");
             for line in lines.iter().take(10) {
                 rtk_output.push_str(&format!("{}\n", truncate_line(line, 100)));
             }
@@ -139,18 +243,25 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<i32> {
                 rtk_output.push_str(&format!("{}\n", line));
             }
         }
-        print!("{}", rtk_output);
+        let shown = never_worse(&result.stdout, &rtk_output);
+        print!("{}", shown);
         timer.track(
-            &format!("wget -O - {}", url),
+            &format!("wget -O - {}", quote_word(url)),
             "rtk wget -o",
             &result.stdout,
-            &rtk_output,
+            shown,
         );
     } else {
         let error = parse_error(&result.stderr, "");
         let msg = format!("{} FAILED: {}", compact_url(url), error);
-        println!("{}", msg);
-        timer.track(&format!("wget -O - {}", url), "rtk wget -o", &result.stderr, &msg);
+        let shown = never_worse(&result.stderr, &msg);
+        println!("{}", shown);
+        timer.track(
+            &format!("wget -O - {}", quote_word(url)),
+            "rtk wget -o",
+            &result.stderr,
+            shown,
+        );
         return Ok(result.exit_code);
     }
 
@@ -160,10 +271,10 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<i32> {
 fn extract_filename_from_output(stderr: &str, url: &str, args: &[String]) -> String {
     // Check for -O argument first
     for (i, arg) in args.iter().enumerate() {
-        if arg == "-O" || arg == "--output-document" {
-            if let Some(name) = args.get(i + 1) {
-                return name.clone();
-            }
+        if (arg == "-O" || arg == "--output-document")
+            && let Some(name) = args.get(i + 1)
+        {
+            return name.clone();
         }
         if let Some(name) = arg.strip_prefix("-O") {
             return name.to_string();
@@ -188,11 +299,11 @@ fn extract_filename_from_output(stderr: &str, url: &str, args: &[String]) -> Str
                 }
             }
 
-            if let (Some(s), Some(e)) = (start_idx, end_idx) {
-                if e > s + 1 {
-                    let filename: String = chars[s + 1..e].iter().collect();
-                    return filename.trim().to_string();
-                }
+            if let (Some(s), Some(e)) = (start_idx, end_idx)
+                && e > s + 1
+            {
+                let filename: String = chars[s + 1..e].iter().collect();
+                return filename.trim().to_string();
             }
         }
     }
@@ -352,7 +463,10 @@ mod tests {
 
     #[test]
     fn no_detect_no_output_flag() {
-        assert!(!has_stdout_output_flag(&s(&["-q", "--no-check-certificate"])));
+        assert!(!has_stdout_output_flag(&s(&[
+            "-q",
+            "--no-check-certificate"
+        ])));
     }
 
     #[test]
@@ -400,19 +514,58 @@ mod tests {
         assert_eq!(strip_output_flag(&args), args);
     }
 
+    #[test]
+    fn detect_and_strip_clustered_short_flags() {
+        // `wget URL -qO-`: the common combined spelling, after the URL
+        assert!(has_stdout_output_flag(&s(&["-qO-"])));
+        assert_eq!(strip_output_flag(&s(&["-qO-"])), s(&["-q"]));
+        assert!(has_stdout_output_flag(&s(&["-qO", "-"])));
+        assert_eq!(strip_output_flag(&s(&["-qO", "-", "-v"])), s(&["-q", "-v"]));
+    }
+
+    #[test]
+    fn strip_long_form_separated() {
+        assert_eq!(
+            strip_output_flag(&s(&["--output-document", "-", "-q"])),
+            s(&["-q"])
+        );
+    }
+
+    #[test]
+    fn no_detect_dash_as_value_of_another_flag() {
+        // `-` is the value of --header / -U here, not of -O
+        assert!(!has_stdout_output_flag(&s(&["--header", "-", "-O", "out"])));
+        assert!(!has_stdout_output_flag(&s(&["-U", "-O-"])));
+        assert!(!has_stdout_output_flag(&s(&["-tO-"])));
+    }
+
+    #[test]
+    fn no_detect_after_dashdash() {
+        assert!(!has_stdout_output_flag(&s(&["--", "-O", "-"])));
+    }
+
     // --- compact_url ---
 
     #[test]
     fn test_compact_url_strips_protocol() {
-        assert_eq!(compact_url("https://example.com/file.zip"), "example.com/file.zip");
-        assert_eq!(compact_url("http://example.com/file.zip"), "example.com/file.zip");
+        assert_eq!(
+            compact_url("https://example.com/file.zip"),
+            "example.com/file.zip"
+        );
+        assert_eq!(
+            compact_url("http://example.com/file.zip"),
+            "example.com/file.zip"
+        );
     }
 
     #[test]
     fn test_compact_url_truncates_long_url() {
         let long = "https://example.com/very/long/path/that/exceeds/fifty/characters/file.zip";
         let result = compact_url(long);
-        assert!(result.contains("..."), "Long URL should be truncated with ...");
+        assert!(
+            result.contains("..."),
+            "Long URL should be truncated with ..."
+        );
         assert!(result.len() < long.len());
     }
 
