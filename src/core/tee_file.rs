@@ -150,6 +150,43 @@ fn write_tee_file(
     write_named_tee_file(raw, &filename, dir, max_file_size, max_files)
 }
 
+fn capped_content(raw: &str, max_file_size: usize) -> String {
+    if raw.len() <= max_file_size {
+        return raw.to_string();
+    }
+
+    let marker = |omitted| format!("\n\n--- {omitted} bytes omitted from middle ---\n\n");
+    // The original length bounds the digit count even after UTF-8 rounding.
+    let marker_size = marker(raw.len()).len();
+    let Some(content_budget) = max_file_size.checked_sub(marker_size) else {
+        // A tiny cap cannot hold an honest marker. Prefer the verdict over a
+        // partial marker, and never exceed the configured on-disk byte limit.
+        let mut start = raw.len() - max_file_size;
+        while !raw.is_char_boundary(start) {
+            start += 1;
+        }
+        return raw[start..].to_string();
+    };
+
+    // Keep the prologue, but give build/test summaries three quarters of the
+    // remaining budget. Round inward so multibyte text cannot exceed the cap.
+    let head_budget = content_budget / 4;
+    let mut head_end = head_budget;
+    while !raw.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = raw.len() - (content_budget - head_budget);
+    while !raw.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    format!(
+        "{}{}{}",
+        &raw[..head_end],
+        marker(tail_start - head_end),
+        &raw[tail_start..]
+    )
+}
+
 pub(crate) fn write_named_tee_file(
     raw: &str,
     filename: &str,
@@ -159,21 +196,7 @@ pub(crate) fn write_named_tee_file(
 ) -> Option<PathBuf> {
     create_tee_dir(dir)?;
     let filepath = dir.join(filename);
-    let content = if raw.len() > max_file_size {
-        let boundary = raw
-            .char_indices()
-            .take_while(|(i, _)| *i < max_file_size)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
-        format!(
-            "{}\n\n--- truncated at {} bytes ---",
-            &raw[..boundary],
-            max_file_size
-        )
-    } else {
-        raw.to_string()
-    };
+    let content = capped_content(raw, max_file_size);
     let mut file = crate::core::utils::open_private(
         std::fs::OpenOptions::new()
             .write(true)
@@ -282,6 +305,13 @@ pub fn force_tee_tail_hint(
     line_offset: usize,
 ) -> Option<String> {
     let path = write(cfg, content, slug)?;
+    // Middle elision changes line numbers; the original offset can skip the
+    // retained tail entirely. Read the whole capped file in that case.
+    let line_offset = if content.len() > cfg.tee_max_file_size {
+        1
+    } else {
+        line_offset
+    };
     Some(format!(
         "[see remaining: tail -n +{} {}]",
         line_offset,
@@ -332,12 +362,13 @@ mod tests {
 
         let tmpdir = tempfile::tempdir().unwrap();
         let tee_dir = tmpdir.path().join("tee");
-        let path = write_tee_file("secret output\n", "grep", &tee_dir, MAX_FILE_SIZE, 20)
-            .expect("tee file written");
-
         let mode = |p: &std::path::Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode(&path), 0o600, "tee file must be owner-only");
-        assert_eq!(mode(&tee_dir), 0o700, "tee dir must be owner-only");
+        for cap in [MAX_FILE_SIZE, 100, 4] {
+            let path = write_tee_file(&"secret output\n".repeat(100), "grep", &tee_dir, cap, 20)
+                .expect("tee file written");
+            assert_eq!(mode(&path), 0o600, "tee file must be owner-only");
+            assert_eq!(mode(&tee_dir), 0o700, "tee dir must be owner-only");
+        }
     }
 
     #[test]
@@ -362,24 +393,163 @@ mod tests {
     #[test]
     fn test_write_tee_file_truncation() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let big_output = "x".repeat(2000);
+        let big_output = format!(
+            "build started\n{}\nerror: final test failed\n",
+            "x".repeat(2000)
+        );
         let result = write_tee_file(&big_output, "test", tmpdir.path(), 1000, 20);
         let path = result.expect("tee file written");
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("--- truncated at 1000 bytes ---"));
-        assert!(content.len() < 2000);
+        assert!(content.starts_with("build started\n"));
+        assert!(content.ends_with("\nerror: final test failed\n"));
+        assert!(content.len() <= 1000, "marker must fit within the cap");
+        assert_omitted_bytes(&big_output, &content);
+        let (head, _) = content.split_once("\n\n--- ").unwrap();
+        let (_, tail) = content.rsplit_once(" ---\n\n").unwrap();
+        assert!(tail.len() >= 3 * head.len());
+    }
+
+    fn assert_omitted_bytes(raw: &str, content: &str) {
+        let (head, rest) = content.split_once("\n\n--- ").expect("omission marker");
+        let (omitted, tail) = rest
+            .split_once(" bytes omitted from middle ---\n\n")
+            .expect("complete omission marker");
+        assert!(raw.starts_with(head));
+        assert!(raw.ends_with(tail));
+        assert!(tail.len() >= head.len(), "retain more of the failure tail");
+        assert_eq!(
+            omitted.parse::<usize>().unwrap(),
+            raw.len() - head.len() - tail.len()
+        );
     }
 
     #[test]
     fn test_write_tee_file_truncation_utf8_boundary() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let japanese = "\u{6F22}".repeat(333);
-        assert_eq!(japanese.len(), 999);
-        let result = write_tee_file(&japanese, "test_utf8", tmpdir.path(), 998, 20);
-        let path = result.expect("tee file written");
-        let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("--- truncated at 998 bytes ---"));
-        assert!(content.starts_with(&"\u{6F22}".repeat(332)));
+        for raw in ["\u{6F22}".repeat(400), "\u{1F600}".repeat(400)] {
+            // Vary both cuts across every byte of three- and four-byte characters.
+            for cap in 980..1000 {
+                let path = write_tee_file(&raw, "utf8", tmpdir.path(), cap, 20).unwrap();
+                let content = fs::read_to_string(&path).expect("valid UTF-8 at both cuts");
+                assert!(content.len() <= cap);
+                assert_omitted_bytes(&raw, &content);
+                assert!(content.starts_with(raw.chars().next().unwrap()));
+                assert!(content.ends_with(raw.chars().last().unwrap()));
+            }
+        }
+    }
+
+    #[test]
+    fn test_write_tee_file_at_or_below_cap_is_unchanged() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        for raw in ["", "short output\n", "\u{6F22}\u{1F600}"] {
+            for cap in [raw.len(), raw.len() + 1, usize::MAX] {
+                let path = write_tee_file(raw, "unchanged", tmpdir.path(), cap, 20).unwrap();
+                assert_eq!(fs::read_to_string(path).unwrap(), raw);
+            }
+        }
+    }
+
+    #[test]
+    fn test_write_tee_file_tiny_caps_keep_utf8_tail() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let raw = format!("{}\u{6F22}\u{1F600}", "x".repeat(100));
+        for (cap, expected) in [
+            (0, ""),
+            (1, ""),
+            (3, ""),
+            (4, "\u{1F600}"),
+            (6, "\u{1F600}"),
+            (7, "\u{6F22}\u{1F600}"),
+        ] {
+            let path = write_tee_file(&raw, "tiny", tmpdir.path(), cap, 20).unwrap();
+            let content = fs::read_to_string(path).unwrap();
+            assert_eq!(content, expected, "cap {cap}");
+            assert!(content.len() <= cap);
+        }
+    }
+
+    #[test]
+    fn test_write_tee_file_marker_budget_and_byte_counts() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        for size in [99, 100, 999, 1000, 9999, 10000] {
+            let raw = "x".repeat(size);
+            let marker = format!("\n\n--- {size} bytes omitted from middle ---\n\n");
+            for cap in [
+                marker.len() - 1,
+                marker.len(),
+                marker.len() + 1,
+                marker.len() + 17,
+            ] {
+                let path = write_tee_file(&raw, "budget", tmpdir.path(), cap, 20).unwrap();
+                let content = fs::read_to_string(path).unwrap();
+                assert!(content.len() <= cap, "size {size}, cap {cap}");
+                if cap < marker.len() {
+                    assert_eq!(content, raw[raw.len() - cap..]);
+                } else {
+                    assert_omitted_bytes(&raw, &content);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truncated_tee_files_still_rotate() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let raw = format!("{}\nfinal failure\n", "x".repeat(2000));
+        for i in 0..3 {
+            let filename = format!("100000000{i}_test.log");
+            let path = write_named_tee_file(&raw, &filename, tmpdir.path(), 100, 2).unwrap();
+            let content = fs::read_to_string(path).unwrap();
+            assert!(content.len() <= 100);
+            assert!(content.ends_with("\nfinal failure\n"));
+        }
+        assert!(!tmpdir.path().join("1000000000_test.log").exists());
+        assert!(tmpdir.path().join("1000000001_test.log").exists());
+        assert!(tmpdir.path().join("1000000002_test.log").exists());
+        assert_eq!(fs::read_dir(tmpdir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn test_truncated_tail_hint_reads_the_capped_file_from_the_start() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            tee_directory: Some(tmpdir.path().to_path_buf()),
+            tee_max_file_size: 250,
+            ..Default::default()
+        };
+        let mut raw: String = (1..=40).map(|n| format!("item {n:02}\n")).collect();
+        raw.push_str(&format!("final item: {}\n", "x".repeat(1000)));
+        let hint = force_tee_tail_hint(&cfg, &raw, "list", 21).unwrap();
+        let path = fs::read_dir(tmpdir.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.lines().count() < 21,
+            "original offset no longer exists"
+        );
+        assert_eq!(
+            hint,
+            format!("[see remaining: tail -n +1 {}]", display_shell_path(&path))
+        );
+        assert!(written.ends_with(&format!("{}\n", "x".repeat(100))));
+    }
+
+    #[test]
+    fn test_unchanged_tail_hint_keeps_the_requested_offset() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            tee_directory: Some(tmpdir.path().to_path_buf()),
+            tee_max_file_size: 250,
+            ..Default::default()
+        };
+        let raw = "first\nsecond\nthird\n";
+        let hint = force_tee_tail_hint(&cfg, raw, "list", 3).unwrap();
+        assert!(hint.starts_with("[see remaining: tail -n +3 "));
     }
 
     #[test]

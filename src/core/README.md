@@ -125,6 +125,12 @@ status_max_untracked = 10
 passthrough_max_chars = 2000
 ```
 
+Legacy tee files larger than `tee_max_file_size` keep roughly 25% of the
+available content budget from the head and 75% from the tail, preserving build
+and test verdicts. An omitted-byte marker separates them and counts toward the
+cap; both cuts preserve UTF-8 boundaries. If the cap cannot fit the marker, only
+the UTF-8 tail that fits is retained (possibly empty). Smaller files are unchanged.
+
 ## Shared Utilities (utils.rs)
 
 Key functions available to all command modules:
