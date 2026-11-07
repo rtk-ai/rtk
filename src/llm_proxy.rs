@@ -589,7 +589,7 @@ pub fn daemon_bind() -> String {
 }
 
 pub fn is_reachable() -> bool {
-    health_check_with_timeout(&daemon_bind(), Duration::from_millis(150))
+    locate_binary().is_ok() && health_check_with_timeout(&daemon_bind(), Duration::from_millis(150))
 }
 
 /// What to say when the proxy has no usage rows. Started-but-unused is the
