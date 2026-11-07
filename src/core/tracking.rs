@@ -29,6 +29,7 @@
 //!
 //! See [docs/tracking.md](../docs/tracking.md) for full documentation.
 
+use crate::core::db::{self, DbKind, Migration, MigrationMode, Schema, Version};
 use crate::core::shell::{quote_program, quote_word};
 use crate::core::user_dirs;
 use crate::core::user_env;
@@ -96,7 +97,62 @@ use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB};
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub struct Tracker {
+    conn: Db,
+}
+
+/// The tracking connection, plus why its schema is behind this build's when a
+/// migration failed on open.
+///
+/// `prepare`, `execute`, `execute_batch` and `query_row` are where a missing table
+/// or column surfaces; on a database that is behind they append
+/// [`Schema::not_upgraded`] to that error and change nothing else. There is no
+/// `Deref` to `Connection`, so any other connection method fails to compile
+/// instead of skipping the note; `conn` is the raw connection where one is needed.
+struct Db {
     conn: Connection,
+    behind: Option<String>,
+}
+
+impl Db {
+    fn annotate(&self, err: rusqlite::Error) -> anyhow::Error {
+        SCHEMA.explain_missing(err.into(), self.behind.as_deref())
+    }
+
+    fn prepare(&self, sql: &str) -> Result<rusqlite::Statement<'_>> {
+        self.conn.prepare(sql).map_err(|e| self.annotate(e))
+    }
+
+    fn execute<P: rusqlite::Params>(&self, sql: &str, params: P) -> Result<usize> {
+        self.conn.execute(sql, params).map_err(|e| self.annotate(e))
+    }
+
+    fn execute_batch(&self, sql: &str) -> Result<()> {
+        self.conn.execute_batch(sql).map_err(|e| self.annotate(e))
+    }
+
+    fn query_row<T, P, F>(&self, sql: &str, params: P, f: F) -> Result<T>
+    where
+        P: rusqlite::Params,
+        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        self.conn
+            .query_row(sql, params, f)
+            .map_err(|e| self.annotate(e))
+    }
+}
+
+/// Warn the user when a write fails because a table is missing.
+///
+/// `Tracker::new()` applies only the steps above the database's stamp, so a
+/// table dropped or corrupted out-of-band (manual `sqlite3` surgery, disk issue,
+/// partial restore) after its step was stamped stays missing until `rtk init`
+/// re-applies every step. Point the user at that fix instead of failing
+/// silently. On a database that is behind, the table is missing because its step
+/// failed, which `rtk init` would repeat, so nothing is said.
+fn warn_if_missing_table(context: &str, err: &anyhow::Error) {
+    if db::missing_table(err).is_some() {
+        eprintln!("{}", SCHEMA.repair_hint(&format!("{context}: {err}")));
+    }
 }
 
 /// Individual command record from tracking history.
@@ -405,14 +461,35 @@ pub fn average_time_ms(total_time_ms: u64, timed_commands: usize) -> u64 {
     }
 }
 
-/// Current tracking-DB schema version, stored in the SQLite `user_version` pragma.
+/// Tracking-DB schema versions, stored in the SQLite `user_version` pragma. Each
+/// variant names the schema change it introduced.
 ///
-/// `Tracker::new()` is on the hot path (every `rtk <cmd>` invocation and every
-/// PreToolUse hook call), so schema creation/migration must not re-run on every
-/// call. Bump this whenever `run_schema_migrations` gains a new statement; a stale
-/// `user_version` triggers exactly one re-run of the full migration sequence, then
-/// the pragma is updated so subsequent opens skip straight past it.
-const SCHEMA_VERSION: i64 = 2;
+/// A new schema change is a new variant directly above `Next` with the next
+/// value, its step appended to `MIGRATIONS`, and a test upgrading a database
+/// stamped at the previous variant. Released values never change. The rules
+/// every step follows are on `db::Schema::steps`.
+#[derive(Clone, Copy, Debug)]
+enum SchemaVersion {
+    /// `commands`, `parse_failures` and `hook_decisions`, with their indexes.
+    Initial = 1,
+    /// `classifier_cache` and `engine_attribution`, written by the pipeline engine.
+    EngineTables = 2,
+    /// `Initial` again, with every error reported: releases that stamped 1 or 2
+    /// discarded some of its statement errors and stamped the database anyway.
+    InitialRecheck = 3,
+    // New schema changes go directly above this line.
+    Next,
+}
+
+/// Current tracking-DB schema version: the newest `SchemaVersion` variant, the
+/// stamp of a fully migrated database.
+const SCHEMA_VERSION: i64 = SchemaVersion::Next as i64 - 1;
+
+impl Version for SchemaVersion {
+    fn number(self) -> i64 {
+        self as i64
+    }
+}
 
 /// Ceiling on a row's `input_tokens` for rate-bearing aggregates (the gain
 /// headline and the daily/weekly/monthly tables). 7,500 DB tokens is exactly
@@ -423,13 +500,44 @@ const SCHEMA_VERSION: i64 = 2;
 /// counted in `GainSummary::oversized_excluded`.
 pub const HEADLINE_INPUT_CAP_TOKENS: usize = 7_500;
 
-/// Create all tables/indexes, run column migrations, and stamp `user_version` to
-/// `SCHEMA_VERSION` for the on-disk tracker DB.
-///
-/// Runs once per database, gated by `SCHEMA_VERSION` in `Tracker::new()` — not on
-/// every call, since this is otherwise on the hot path (every `rtk <cmd>` and every
-/// PreToolUse hook invocation).
-fn run_schema_migrations(conn: &Connection) -> Result<()> {
+/// One step per `SchemaVersion`, in order: step `i` brings a database to
+/// version `i + 1`.
+const MIGRATIONS: &[(SchemaVersion, Migration)] = &[
+    (SchemaVersion::Initial, migrate_initial),
+    (SchemaVersion::EngineTables, migrate_engine_tables),
+    (SchemaVersion::InitialRecheck, migrate_initial),
+];
+
+const _: () = {
+    let mut i = 0;
+    while i < MIGRATIONS.len() {
+        assert!(
+            MIGRATIONS[i].0 as i64 == i as i64 + 1,
+            "MIGRATIONS must list every SchemaVersion once, in order"
+        );
+        i += 1;
+    }
+    assert!(MIGRATIONS.len() as i64 == SCHEMA_VERSION);
+    assert!((SCHEMA.kind as usize) < DbKind::Next as usize);
+};
+
+/// Releases before `DbKind::Tracking.application_id()` never tagged their files, so an untagged
+/// file is accepted at any stamp.
+const SCHEMA: Schema<SchemaVersion> = Schema {
+    kind: DbKind::Tracking,
+    owns_untagged_stamps: true,
+    steps: MIGRATIONS,
+};
+
+/// Migrates a connection the caller opened itself, as `db::open_and_migrate`
+/// does the file's.
+fn run_schema_migrations(conn: &Connection, mode: MigrationMode) -> Result<()> {
+    db::apply_migrations(conn, &SCHEMA, mode)
+}
+
+/// Backs both `Initial` and `InitialRecheck`: like every released step, it
+/// never changes the schema it produces.
+fn migrate_initial(conn: &Connection) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS commands (
             id INTEGER PRIMARY KEY,
@@ -442,42 +550,26 @@ fn run_schema_migrations(conn: &Connection) -> Result<()> {
             savings_pct REAL NOT NULL
         )",
         [],
-    )?;
-
+    )
+    .context("Failed to create the commands table")?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_timestamp ON commands(timestamp)",
         [],
-    )?;
-
-    // Migration: add exec_time_ms column if it doesn't exist
-    let _ = conn.execute(
-        "ALTER TABLE commands ADD COLUMN exec_time_ms INTEGER DEFAULT 0",
+    )
+    .context("Failed to index commands by timestamp")?;
+    db::add_column_if_missing(conn, "commands", "exec_time_ms", "INTEGER DEFAULT 0")?;
+    db::add_column_if_missing(conn, "commands", "project_path", "TEXT DEFAULT ''")?;
+    // Rows written before `project_path` had a default hold NULL.
+    conn.execute(
+        "UPDATE commands SET project_path = '' WHERE project_path IS NULL",
         [],
-    );
-    // Migration: add project_path column with DEFAULT '' for new rows // changed: added DEFAULT
-    let _ = conn.execute(
-        "ALTER TABLE commands ADD COLUMN project_path TEXT DEFAULT ''",
-        [],
-    );
-    // One-time migration: normalize NULLs from pre-default schema // changed: guarded with EXISTS
-    let has_nulls: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM commands WHERE project_path IS NULL)",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if has_nulls {
-        let _ = conn.execute(
-            "UPDATE commands SET project_path = '' WHERE project_path IS NULL",
-            [],
-        );
-    }
-    // Index for fast project-scoped gain queries // added
-    let _ = conn.execute(
+    )
+    .context("Failed to backfill commands.project_path")?;
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_project_path_timestamp ON commands(project_path, timestamp)",
         [],
-    );
+    )
+    .context("Failed to index commands by project")?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS parse_failures (
@@ -488,11 +580,13 @@ fn run_schema_migrations(conn: &Connection) -> Result<()> {
             fallback_succeeded INTEGER NOT NULL DEFAULT 0
         )",
         [],
-    )?;
+    )
+    .context("Failed to create the parse_failures table")?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_pf_timestamp ON parse_failures(timestamp)",
         [],
-    )?;
+    )
+    .context("Failed to index parse_failures by timestamp")?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS hook_decisions (
@@ -507,16 +601,23 @@ fn run_schema_migrations(conn: &Connection) -> Result<()> {
             rtk_version TEXT NOT NULL
         )",
         [],
-    )?;
+    )
+    .context("Failed to create the hook_decisions table")?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_hook_decisions_tool_use_id ON hook_decisions(tool_use_id)",
         [],
-    )?;
+    )
+    .context("Failed to index hook_decisions by tool_use_id")?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_hook_decisions_timestamp ON hook_decisions(timestamp)",
         [],
-    )?;
+    )
+    .context("Failed to index hook_decisions by timestamp")?;
 
+    Ok(())
+}
+
+fn migrate_engine_tables(conn: &Connection) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS classifier_cache (
             key TEXT PRIMARY KEY,
@@ -524,7 +625,8 @@ fn run_schema_migrations(conn: &Connection) -> Result<()> {
             ts TEXT NOT NULL
         )",
         [],
-    )?;
+    )
+    .context("Failed to create the classifier_cache table")?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS engine_attribution (
             day TEXT NOT NULL,
@@ -537,28 +639,10 @@ fn run_schema_migrations(conn: &Connection) -> Result<()> {
             PRIMARY KEY (day, site, kind, name)
         )",
         [],
-    )?;
-
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    )
+    .context("Failed to create the engine_attribution table")?;
 
     Ok(())
-}
-
-/// Warn the user when a tracking-DB write fails because a table is missing.
-///
-/// Migrations only run once per database (gated by `SCHEMA_VERSION`/
-/// `user_version` in `Tracker::new()`), so if a table is dropped or corrupted
-/// out-of-band (manual `sqlite3` surgery, disk issue, partial restore) after
-/// `user_version` is already current, it silently stays missing forever —
-/// there's no automatic re-migration to fall back on the way there used to be
-/// when every open re-ran the full schema unconditionally. Point the user at
-/// the fix instead of failing silently.
-fn warn_if_missing_table(context: &str, err: &rusqlite::Error) {
-    if err.to_string().contains("no such table") {
-        eprintln!(
-            "rtk: tracking database looks corrupted ({context}: {err}). Run `rtk init` to recreate it."
-        );
-    }
 }
 
 /// Pure core of `Tracker::maybe_cleanup_hook_decisions`'s sampling decision.
@@ -760,7 +844,11 @@ impl Tracker {
     /// - Cannot determine database path
     /// - Cannot create parent directories
     /// - Cannot open/create SQLite database
-    /// - Schema creation/migration fails
+    /// - The file is another database's
+    ///
+    /// A migration that fails does not fail this: the database is used as it is,
+    /// queries that need the schema it lacks say so, and [`Self::not_upgraded`] says
+    /// why.
     ///
     /// # Examples
     ///
@@ -778,14 +866,23 @@ impl Tracker {
 
     /// Create an isolated in-memory tracker for tests.
     ///
-    /// Runs the same `run_schema_migrations` the real on-disk `Tracker::new()`
-    /// path uses, rather than hand-duplicating the DDL — a second copy would
-    /// silently drift from the real schema the next time `SCHEMA_VERSION` bumps.
+    /// Runs the same `run_schema_migrations` the real on-disk path uses, in
+    /// `rtk init`'s `Always` mode, rather than hand-duplicating the DDL — a second
+    /// copy would silently drift from the real schema the next time a
+    /// `SchemaVersion` is added.
     #[cfg(test)]
     pub fn new_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("Failed to open in-memory DB")?;
-        run_schema_migrations(&conn)?;
-        Ok(Self { conn })
+        run_schema_migrations(&conn, MigrationMode::Always)?;
+        Ok(Self {
+            conn: Db { conn, behind: None },
+        })
+    }
+
+    /// What to tell the user when a migration failed on open.
+    pub fn not_upgraded(&self) -> Option<String> {
+        let why = self.conn.behind.as_ref()?;
+        Some(SCHEMA.not_upgraded(why))
     }
 
     /// Record a command execution with token counts and timing.
@@ -966,6 +1063,12 @@ impl Tracker {
 
     /// Delete all tracked data (commands + parse_failures + hook_decisions), resetting all stats to zero.
     pub fn reset_all(&self) -> Result<()> {
+        // A reset needs every table, so the migration gets another chance. A step that
+        // still fails stops the reset only if it left a table out, and that error says
+        // why.
+        if self.conn.behind.is_some() {
+            let _ = run_schema_migrations(&self.conn.conn, MigrationMode::Always);
+        }
         self.conn
             .execute_batch(
                 "BEGIN;
@@ -1843,15 +1946,10 @@ impl Tracker {
 
     /// Days since first recorded command (installation age).
     pub fn first_seen_days(&self) -> Result<i64> {
-        let oldest: Option<String> =
-            match self
-                .conn
-                .query_row("SELECT MIN(timestamp) FROM commands", [], |row| row.get(0))
-            {
-                Ok(v) => v,
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(e) => return Err(anyhow::anyhow!("Failed to query first seen timestamp: {e}")),
-            };
+        let oldest: Option<String> = self
+            .conn
+            .query_row("SELECT MIN(timestamp) FROM commands", [], |row| row.get(0))
+            .map_err(|e| anyhow::anyhow!("Failed to query first seen timestamp: {e}"))?;
         match oldest {
             Some(ts) => {
                 let first = chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%dT%H:%M:%S")
@@ -1967,27 +2065,6 @@ fn categorize_command(rtk_cmd: &str) -> String {
     .to_string()
 }
 
-/// SQLite appends `-wal`/`-shm` to the whole filename, so these are siblings
-/// rather than extension swaps. Concatenate on `OsString`, not `PathBuf::push`,
-/// which would append a component and silently target `history.db/-wal`.
-fn restrict_db_files(db_path: &std::path::Path) {
-    crate::core::utils::restrict_file(db_path);
-    for sidecar in db_sidecars(db_path) {
-        crate::core::utils::restrict_file(&sidecar);
-    }
-}
-
-fn db_sidecars(db_path: &std::path::Path) -> Vec<PathBuf> {
-    ["-wal", "-shm"]
-        .iter()
-        .map(|suffix| {
-            let mut name = db_path.as_os_str().to_os_string();
-            name.push(suffix);
-            PathBuf::from(name)
-        })
-        .collect()
-}
-
 /// The database to open: `RTK_DB_PATH` where set, otherwise the configured or
 /// default path. In a test build it is the file the test named in
 /// `RTK_DB_PATH` or its own configuration, or else its scratch database: an
@@ -2022,87 +2099,12 @@ pub(crate) fn get_db_path() -> Result<PathBuf> {
     Ok(user_dirs::data_under(".").join(HISTORY_DB))
 }
 
-/// Whether to gate schema migrations behind `user_version` (the hot-path
-/// default) or always re-run them (used by `rtk init`, which isn't a hot path
-/// and wants to self-heal a dropped/corrupted table — see `ensure_schema_fresh`).
-enum MigrationMode {
-    GatedByVersion,
-    Always,
-}
-
 /// Open (creating if needed) the tracking DB, apply pragmas, and run schema
 /// migrations per `mode`. Shared by `Tracker::new()` (hot path, gated) and
 /// `ensure_schema_fresh` (`rtk init`, unconditional).
-fn open_and_prepare(mode: MigrationMode) -> Result<Connection> {
-    let db_path = get_db_path()?;
-
-    // `create_private_dir` is cheap even when the directory already exists (its own
-    // chmod is a no-op past the first call — see `utils::set_owner_only`), so it
-    // stays unconditional.
-    //
-    // For a brand-new DB, pre-create the file ourselves via `open_private` so
-    // SQLite derives the -wal/-shm modes from an already-private DB instead of the
-    // umask. For an already-existing DB, skip that pre-create's own redundant
-    // open()/close() pair (a second file open on top of the `Connection::open`
-    // right after it) — but still re-chmod the file *before* `Connection::open`
-    // via the now-cheap `restrict_file` (a no-op stat once permissions already
-    // match), rather than only healing it via `restrict_db_files` at the very
-    // end. Skipping the pre-open heal entirely would let `Connection::open` and
-    // any migration writes touch a file whose permissions had drifted (external
-    // tampering, restored backup) before anything corrected them — the same
-    // "chmod before SQLite ever opens it" invariant the original pre-create dance
-    // provided, just without paying its extra open. `Tracker::new()` is on the
-    // hot path for every `rtk <cmd>` and, since rtk-ai/rtk#3206's hook_decisions
-    // ground-truth logging, every single PreToolUse hook call (not just
-    // RTK-covered ones), so avoiding that redundant open on the already-set-up
-    // common case matters for the <10ms budget.
-    if let Some(parent) = db_path.parent() {
-        crate::core::utils::create_private_dir(parent)?;
-    }
-    if db_path.exists() {
-        crate::core::utils::restrict_file(&db_path);
-    } else {
-        crate::core::utils::open_private(
-            std::fs::OpenOptions::new().write(true).create(true),
-            &db_path,
-        )
-        .with_context(|| {
-            format!(
-                "Failed to pre-create private DB file: {}",
-                db_path.display()
-            )
-        })?;
-    }
-
-    let conn = Connection::open(&db_path)?;
-    // WAL mode + busy_timeout for concurrent access (multiple Claude Code instances).
-    // Non-fatal: NFS/read-only filesystems may not support WAL. Cheap on every
-    // open (WAL mode persists in the DB file; busy_timeout is a per-connection
-    // in-memory setting), so these stay unconditional.
-    let _ = conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         PRAGMA busy_timeout=5000;",
-    );
-
-    match mode {
-        MigrationMode::Always => run_schema_migrations(&conn)?,
-        MigrationMode::GatedByVersion => {
-            // Schema creation/migration is comparatively expensive (several CREATE
-            // TABLE/INDEX/ALTER statements plus a table scan) and `Tracker::new()` is
-            // called on every `rtk <cmd>` invocation and every PreToolUse hook call, so
-            // gate it behind a single cheap `user_version` read instead of re-running it
-            // every time.
-            let current_version: i64 =
-                conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-            if current_version < SCHEMA_VERSION {
-                run_schema_migrations(&conn)?;
-            }
-        }
-    }
-
-    restrict_db_files(&db_path);
-
-    Ok(conn)
+fn open_and_prepare(mode: MigrationMode) -> Result<Db> {
+    let db::Opened { conn, behind } = db::open_and_migrate(&get_db_path()?, &SCHEMA, mode)?;
+    Ok(Db { conn, behind })
 }
 
 /// Unconditionally re-run schema migrations, bypassing the `user_version` gate
@@ -2110,7 +2112,9 @@ fn open_and_prepare(mode: MigrationMode) -> Result<Connection> {
 /// (not a hot path): this both pre-warms the schema during install/upgrade and
 /// self-heals a table dropped/corrupted out-of-band after `user_version` was
 /// already stamped current (see `warn_if_missing_table`) — `CREATE TABLE IF NOT
-/// EXISTS`/`ALTER TABLE` are additive, so existing history is left untouched.
+/// EXISTS`/`ALTER TABLE` are additive, so existing history is left untouched. A
+/// database stamped by a newer build is stamped back to `SCHEMA_VERSION`, so
+/// that build replays its own steps on its next open.
 pub fn ensure_schema_fresh() -> Result<()> {
     open_and_prepare(MigrationMode::Always).map(|_| ())
 }
@@ -2722,6 +2726,10 @@ mod command_label_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::db::testing::{
+        application_id, enable_wal, failing_step, spawn_waiter, user_version,
+    };
+    use crate::core::db::{schema_object_exists, table_exists};
     use crate::core::test_isolation;
 
     // Fixed timestamps bypass record(), which uses the wall clock and prunes old
@@ -3328,22 +3336,19 @@ mod tests {
         });
     }
 
-    // 8b. Tracker::new() gates schema migration behind PRAGMA user_version, so a
-    // fresh DB gets stamped to SCHEMA_VERSION and a second open on the same file
-    // still works (and doesn't re-run/fail the migration).
+    // 8b. Tracker::new() stamps a fresh DB at SCHEMA_VERSION, and a second open
+    // on the same file still works.
     #[test]
     fn test_schema_migration_gated_by_user_version() {
-        let db_path = test_isolation::scratch_dir()
-            .join(format!("rtk_test_schema_version_{}.db", std::process::id()));
-        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
-        let _ = std::fs::remove_file(&db_path);
+        let tmp = test_isolation::tempdir();
+        let db_path = tmp.path().join("history.db");
         user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
             let tracker = Tracker::new().expect("first open should run migrations");
-            let version: i64 = tracker
-                .conn
-                .query_row("PRAGMA user_version", [], |row| row.get(0))
-                .expect("user_version should be readable");
-            assert_eq!(version, SCHEMA_VERSION);
+            assert_eq!(user_version(&tracker.conn.conn), SCHEMA_VERSION);
+            assert_eq!(
+                application_id(&tracker.conn.conn),
+                DbKind::Tracking.application_id()
+            );
             drop(tracker);
 
             // Second open on the same file must skip migrations without erroring, and
@@ -3353,55 +3358,546 @@ mod tests {
                 .record("git status", "rtk git status", 100, 20, 50)
                 .expect("commands table should already exist and accept writes");
         });
-        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
-        let _ = std::fs::remove_file(&db_path);
     }
 
-    // 8c. Re-running run_schema_migrations() unconditionally (what
-    // ensure_schema_fresh()/MigrationMode::Always does, vs. Tracker::new()'s
-    // gated hot path) recreates a table dropped out-of-band, even though
-    // user_version is already at SCHEMA_VERSION. This is the self-heal `rtk
-    // init` relies on instead of a dedicated repair flag.
-    //
-    // Exercises the migration function directly on its own throwaway on-disk
-    // connection rather than going through ensure_schema_fresh()/Tracker::new(),
-    // so it never leaves the *shared default* tracking DB in a dropped-table
-    // state where an unrelated, concurrently-running test that opens
-    // Tracker::new() without its own RTK_DB_PATH could observe it.
+    // 8c. Re-running every step (what ensure_schema_fresh()/MigrationMode::Always
+    // does) recreates a table dropped out-of-band, even though user_version is
+    // already at SCHEMA_VERSION: the self-heal `rtk init` provides.
     #[test]
     fn test_run_schema_migrations_heals_dropped_table_when_forced() {
-        let db_path = test_isolation::scratch_dir().join(format!(
-            "rtk_test_heal_migrations_{}.db",
-            std::process::id()
-        ));
-        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
-        let _ = std::fs::remove_file(&db_path);
-        let conn = Connection::open(&db_path).expect("open should succeed");
+        const INSERT_DECISION: &str = "INSERT INTO hook_decisions (timestamp, session_id, tool_use_id, raw_cmd, decision, rtk_version) VALUES ('t','s','u','c','allow','0')";
+        let conn = Connection::open_in_memory().expect("open should succeed");
 
-        run_schema_migrations(&conn).expect("first migration run should succeed");
+        run_schema_migrations(&conn, MigrationMode::Always)
+            .expect("first migration run should succeed");
         conn.execute("DROP TABLE hook_decisions", [])
             .expect("drop should succeed");
         assert!(
-            conn.execute(
-                "INSERT INTO hook_decisions (timestamp, session_id, tool_use_id, raw_cmd, decision, rtk_version) VALUES ('t','s','u','c','allow','0')",
-                [],
-            )
-            .is_err(),
+            conn.execute(INSERT_DECISION, []).is_err(),
             "table should genuinely be gone after DROP"
         );
 
-        // Forced re-run (what ensure_schema_fresh does) recreates it, even
-        // though user_version is already stamped to SCHEMA_VERSION.
-        run_schema_migrations(&conn).expect("forced re-run should recreate the dropped table");
-        conn.execute(
-            "INSERT INTO hook_decisions (timestamp, session_id, tool_use_id, raw_cmd, decision, rtk_version) VALUES ('t','s','u','c','allow','0')",
-            [],
-        )
-        .expect("hook_decisions table should exist and accept writes again");
+        run_schema_migrations(&conn, MigrationMode::Always)
+            .expect("forced re-run should recreate the dropped table");
+        conn.execute(INSERT_DECISION, [])
+            .expect("hook_decisions table should exist and accept writes again");
+    }
 
-        drop(conn);
-        // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
-        let _ = std::fs::remove_file(&db_path);
+    fn apply_migrations(
+        conn: &Connection,
+        mode: MigrationMode,
+        steps: &[(SchemaVersion, Migration)],
+    ) -> Result<()> {
+        db::apply_migrations(conn, &Schema { steps, ..SCHEMA }, mode)
+    }
+
+    /// A database as a build whose newest schema version is `to` leaves it.
+    fn seed_schema(conn: &Connection, to: SchemaVersion) {
+        apply_migrations(conn, MigrationMode::Always, &MIGRATIONS[..to as usize])
+            .expect("seed migrations should succeed");
+    }
+
+    /// Opens `db_path` the way every `rtk <cmd>` does, through the gated path.
+    fn upgrade_through_tracker(db_path: &std::path::Path) -> Connection {
+        user_env::with_path("RTK_DB_PATH", Some(db_path), || {
+            Tracker::new().expect("upgrade should succeed").conn.conn
+        })
+    }
+
+    #[test]
+    fn test_upgrade_from_unversioned_db_applies_initial() {
+        let tmp = test_isolation::tempdir();
+        let db_path = tmp.path().join("history.db");
+        Connection::open(&db_path)
+            .expect("open should succeed")
+            .execute_batch(
+                "CREATE TABLE commands (
+                    id INTEGER PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    original_cmd TEXT NOT NULL,
+                    rtk_cmd TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL,
+                    output_tokens INTEGER NOT NULL,
+                    saved_tokens INTEGER NOT NULL,
+                    savings_pct REAL NOT NULL
+                );
+                INSERT INTO commands (timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens, saved_tokens, savings_pct)
+                VALUES ('2026-01-01T00:00:00Z', 'git log', 'rtk git log', 100, 20, 80, 80.0);",
+            )
+            .expect("unversioned schema should seed");
+
+        let conn = upgrade_through_tracker(&db_path);
+        assert_eq!(user_version(&conn), SCHEMA_VERSION);
+        let (rows, project_path, exec_time_ms): (i64, String, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(project_path), MAX(exec_time_ms) FROM commands",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("added columns should be readable");
+        assert_eq!((rows, project_path.as_str(), exec_time_ms), (1, "", 0));
+        for table in ["parse_failures", "hook_decisions"] {
+            assert!(table_exists(&conn, table), "{table} should be created");
+        }
+    }
+
+    /// Releases before `DbKind::Tracking.application_id()` left their files untagged.
+    #[test]
+    fn test_untagged_legacy_database_is_upgraded_and_tagged() {
+        for stamped in [SchemaVersion::Initial, SchemaVersion::EngineTables] {
+            let tmp = test_isolation::tempdir();
+            let db_path = tmp.path().join("history.db");
+            {
+                let conn = Connection::open(&db_path).expect("open should succeed");
+                seed_schema(&conn, stamped);
+                conn.pragma_update(None, "application_id", 0)
+                    .expect("tag should be cleared");
+            }
+
+            let conn = upgrade_through_tracker(&db_path);
+            assert_eq!(user_version(&conn), SCHEMA_VERSION, "from {stamped:?}");
+            assert_eq!(
+                application_id(&conn),
+                DbKind::Tracking.application_id(),
+                "from {stamped:?}"
+            );
+        }
+    }
+
+    /// A backup restored as `0444` opens read-only; the chmod to `0600` has to be
+    /// followed by a new connection, or every write fails for the whole process.
+    /// Skipped where the file stays writable anyway (root).
+    #[cfg(unix)]
+    fn read_only_copy_of(db_path: &std::path::Path) -> bool {
+        db::testing::chmod(db_path, 0o444);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(db_path)
+            .is_err()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_a_read_only_database_is_made_writable_and_written() {
+        for (stamped, symlinked) in [
+            (SchemaVersion::EngineTables, false),
+            (SchemaVersion::InitialRecheck, false),
+            (SchemaVersion::EngineTables, true),
+            (SchemaVersion::InitialRecheck, true),
+        ] {
+            let tmp = test_isolation::tempdir();
+            let db_path = tmp.path().join("history.db");
+            let read_only = user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
+                drop(Tracker::new().expect("a new database should open"));
+                if stamped as i64 != SCHEMA_VERSION {
+                    // An outdated copy: the steps above its stamp are still to run.
+                    let conn = Connection::open(&db_path).expect("open should succeed");
+                    conn.pragma_update(None, "user_version", stamped as i64)
+                        .expect("stamp should be lowered");
+                }
+                read_only_copy_of(&db_path)
+            });
+            if !read_only {
+                eprintln!(
+                    "skipped (stamped {stamped:?}): a 0444 database stays writable for this user (root)"
+                );
+                continue;
+            }
+
+            // The sidecars of the read-only connection, which copy the file's mode,
+            // are next to the file a symlink resolves to.
+            let open_path = if symlinked {
+                let link = tmp.path().join("link.db");
+                std::os::unix::fs::symlink(&db_path, &link).expect("symlink should be created");
+                link
+            } else {
+                db_path.clone()
+            };
+            user_env::with_path("RTK_DB_PATH", Some(&open_path), || {
+                let tracker = Tracker::new().expect("a read-only copy should open writable");
+                tracker
+                    .record("git status", "rtk git status", 100, 20, 5)
+                    .expect("the first write should succeed");
+                assert_eq!(user_version(&tracker.conn.conn), SCHEMA_VERSION);
+            });
+        }
+    }
+
+    #[test]
+    fn test_current_untagged_database_is_tagged_by_init_not_by_a_plain_open() {
+        let tmp = test_isolation::tempdir();
+        let db_path = tmp.path().join("history.db");
+        {
+            let conn = Connection::open(&db_path).expect("open should succeed");
+            run_schema_migrations(&conn, MigrationMode::Always).expect("schema should be created");
+            conn.pragma_update(None, "application_id", 0)
+                .expect("tag should be cleared");
+        }
+
+        assert_eq!(application_id(&upgrade_through_tracker(&db_path)), 0);
+        user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
+            ensure_schema_fresh().expect("rtk init should succeed");
+        });
+        let conn = Connection::open(&db_path).expect("open should succeed");
+        assert_eq!(application_id(&conn), DbKind::Tracking.application_id());
+    }
+
+    #[test]
+    fn test_upgrade_from_initial_applies_later_steps() {
+        let tmp = test_isolation::tempdir();
+        let db_path = tmp.path().join("history.db");
+        Connection::open(&db_path)
+            .map(|conn| seed_schema(&conn, SchemaVersion::Initial))
+            .expect("open should succeed");
+
+        let conn = upgrade_through_tracker(&db_path);
+        assert_eq!(user_version(&conn), SCHEMA_VERSION);
+        for table in ["classifier_cache", "engine_attribution"] {
+            assert!(table_exists(&conn, table), "{table} should be created");
+        }
+    }
+
+    /// Creates a table without `IF NOT EXISTS`, so running this step twice on
+    /// one database fails, whatever later steps do.
+    fn create_replay_probe(conn: &Connection) -> Result<()> {
+        conn.execute("CREATE TABLE replay_probe (x INTEGER)", [])?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_upgrade_does_not_replay_steps_at_or_below_the_stamp() {
+        let conn = Connection::open_in_memory().expect("open should succeed");
+        let steps = [
+            (SchemaVersion::Initial, migrate_initial as Migration),
+            (SchemaVersion::EngineTables, create_replay_probe),
+            (SchemaVersion::InitialRecheck, migrate_initial),
+        ];
+        apply_migrations(&conn, MigrationMode::Always, &steps[..2])
+            .expect("seed migrations should succeed");
+
+        apply_migrations(&conn, MigrationMode::GatedByVersion, &steps)
+            .expect("only the step above the stamp should run");
+        assert_eq!(user_version(&conn), SchemaVersion::InitialRecheck as i64);
+    }
+
+    /// Releases that stamped 1 or 2 discarded the error of a refused ALTER (a
+    /// busy lock, for one) and stamped the database anyway.
+    #[test]
+    fn test_upgrade_restores_a_column_an_old_release_failed_to_add() {
+        let tmp = test_isolation::tempdir();
+        let db_path = tmp.path().join("history.db");
+        {
+            let conn = Connection::open(&db_path).expect("open should succeed");
+            seed_schema(&conn, SchemaVersion::EngineTables);
+            conn.execute_batch(
+                "DROP INDEX idx_project_path_timestamp;
+                 ALTER TABLE commands DROP COLUMN project_path;",
+            )
+            .expect("reshape should succeed");
+        }
+
+        let conn = upgrade_through_tracker(&db_path);
+        assert_eq!(user_version(&conn), SCHEMA_VERSION);
+        let has_column = db::column_exists(&conn, "commands", "project_path")
+            .expect("pragma_table_info should be readable");
+        assert!(has_column, "commands.project_path should be restored");
+        assert!(schema_object_exists(
+            &conn,
+            "index",
+            "idx_project_path_timestamp"
+        ));
+    }
+
+    fn create_later_table(conn: &Connection) -> Result<()> {
+        conn.execute("CREATE TABLE later_step (x INTEGER)", [])?;
+        Ok(())
+    }
+
+    /// Another process holds the lock while this one waits on it and applies
+    /// every step after Initial: this one re-reads the stamp under the lock,
+    /// skips those steps (replaying one would fail on the probe) and still
+    /// applies the one after them (`Next` stands in for the step a later build
+    /// adds).
+    #[test]
+    fn test_gated_migration_rereads_version_under_lock() {
+        let tmp = test_isolation::tempdir();
+        let db_path = tmp.path().join("history.db");
+        let writer = Connection::open(&db_path).expect("open should succeed");
+        enable_wal(&writer);
+        seed_schema(&writer, SchemaVersion::Initial);
+        writer
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("lock should succeed");
+        create_replay_probe(&writer).expect("probe should be created");
+        writer
+            .pragma_update(None, "user_version", SCHEMA_VERSION)
+            .expect("stamp should succeed");
+
+        let migrator = spawn_waiter(&db_path, |conn| {
+            // Every step after Initial creates the probe, so replaying any of
+            // them fails.
+            let mut steps = vec![MIGRATIONS[0]];
+            steps.extend(
+                MIGRATIONS[1..]
+                    .iter()
+                    .map(|&(version, _)| (version, create_replay_probe as Migration)),
+            );
+            steps.push((SchemaVersion::Next, create_later_table));
+            apply_migrations(conn, MigrationMode::GatedByVersion, &steps)
+        });
+        migrator.wait_until_blocked();
+        writer
+            .execute_batch("COMMIT")
+            .expect("commit should succeed");
+        migrator.join().expect("gated migration should succeed");
+
+        assert!(
+            table_exists(&writer, "later_step"),
+            "the steps after a skipped one should still run"
+        );
+        assert_eq!(user_version(&writer), SchemaVersion::Next as i64);
+    }
+
+    #[test]
+    fn test_init_failing_on_a_newer_database_keeps_its_stamp() {
+        let conn = Connection::open_in_memory().expect("open should succeed");
+        run_schema_migrations(&conn, MigrationMode::Always).expect("schema should be created");
+        let newer = SCHEMA_VERSION + 1;
+        conn.pragma_update(None, "user_version", newer)
+            .expect("stamp should succeed");
+
+        apply_migrations(
+            &conn,
+            MigrationMode::Always,
+            &[
+                (SchemaVersion::Initial, migrate_initial),
+                (SchemaVersion::EngineTables, failing_step),
+            ],
+        )
+        .expect_err("the failing step should fail the run");
+        assert_eq!(
+            user_version(&conn),
+            newer,
+            "only a completed run hands the database back"
+        );
+    }
+
+    #[test]
+    fn test_init_failing_on_an_outdated_database_keeps_the_steps_it_completed() {
+        let conn = Connection::open_in_memory().expect("open should succeed");
+        seed_schema(&conn, SchemaVersion::Initial);
+
+        apply_migrations(
+            &conn,
+            MigrationMode::Always,
+            &[
+                (SchemaVersion::Initial, migrate_initial),
+                (SchemaVersion::EngineTables, migrate_engine_tables),
+                (SchemaVersion::InitialRecheck, failing_step),
+            ],
+        )
+        .expect_err("the failing step should fail the run");
+        assert_eq!(
+            user_version(&conn),
+            SchemaVersion::EngineTables as i64,
+            "the step that completed is stamped"
+        );
+    }
+
+    #[test]
+    fn test_current_database_opens_without_the_lock() {
+        let tmp = test_isolation::tempdir();
+        let db_path = tmp.path().join("history.db");
+        let writer = Connection::open(&db_path).expect("open should succeed");
+        enable_wal(&writer);
+        run_schema_migrations(&writer, MigrationMode::Always).expect("schema should be created");
+        writer
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("lock should succeed");
+
+        let conn = Connection::open(&db_path).expect("open should succeed");
+        conn.busy_timeout(std::time::Duration::ZERO)
+            .expect("busy timeout should be set");
+        run_schema_migrations(&conn, MigrationMode::GatedByVersion)
+            .expect("a current database should need no lock");
+
+        writer
+            .execute_batch("ROLLBACK")
+            .expect("rollback should succeed");
+    }
+
+    #[test]
+    fn test_newer_stamp_kept_by_tracker_and_lowered_by_init() {
+        let tmp = test_isolation::tempdir();
+        let db_path = tmp.path().join("history.db");
+        let newer = SCHEMA_VERSION + 1;
+        {
+            let conn = Connection::open(&db_path).expect("open should succeed");
+            run_schema_migrations(&conn, MigrationMode::Always).expect("schema should be created");
+            conn.pragma_update(None, "user_version", newer)
+                .expect("stamp should succeed");
+            conn.execute("DROP TABLE hook_decisions", [])
+                .expect("drop should succeed");
+        }
+
+        assert_eq!(user_version(&upgrade_through_tracker(&db_path)), newer);
+
+        user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
+            ensure_schema_fresh().expect("rtk init should succeed");
+        });
+        let conn = Connection::open(&db_path).expect("open should succeed");
+        assert_eq!(
+            user_version(&conn),
+            SCHEMA_VERSION,
+            "rtk init should hand the database back at its own version"
+        );
+        assert!(
+            table_exists(&conn, "hook_decisions"),
+            "rtk init should re-apply every step it knows"
+        );
+    }
+
+    #[test]
+    fn test_init_brings_an_outdated_database_to_current() {
+        let conn = Connection::open_in_memory().expect("open should succeed");
+        seed_schema(&conn, SchemaVersion::Initial);
+
+        run_schema_migrations(&conn, MigrationMode::Always).expect("rtk init's run should succeed");
+        assert_eq!(user_version(&conn), SCHEMA_VERSION);
+        assert!(table_exists(&conn, "engine_attribution"));
+    }
+
+    #[test]
+    fn test_upgrade_backfills_null_project_paths() {
+        let conn = Connection::open_in_memory().expect("open should succeed");
+        conn.execute_batch(
+            "CREATE TABLE commands (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                original_cmd TEXT NOT NULL,
+                rtk_cmd TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                saved_tokens INTEGER NOT NULL,
+                savings_pct REAL NOT NULL,
+                project_path TEXT
+            );
+            INSERT INTO commands (timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens, saved_tokens, savings_pct)
+            VALUES ('2026-01-01T00:00:00Z', 'git log', 'rtk git log', 100, 20, 80, 80.0);",
+        )
+        .expect("schema without a project_path default should seed");
+
+        run_schema_migrations(&conn, MigrationMode::GatedByVersion)
+            .expect("upgrade should succeed");
+        let nulls: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM commands WHERE project_path IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("commands should be readable");
+        assert_eq!(nulls, 0);
+    }
+
+    #[test]
+    fn test_initial_alter_backfill_and_index_errors_fail_the_step() {
+        // Each setup makes one Initial statement fail: the two ALTERs and the
+        // project index are the only ones with something to write, and
+        // `query_only` refuses the backfill UPDATE even when no row matches.
+        let cases = [
+            (
+                "ALTER TABLE commands DROP COLUMN exec_time_ms; PRAGMA query_only = ON;",
+                "add column commands.exec_time_ms",
+            ),
+            (
+                "DROP INDEX idx_project_path_timestamp;
+                 ALTER TABLE commands DROP COLUMN project_path;
+                 PRAGMA query_only = ON;",
+                "add column commands.project_path",
+            ),
+            ("PRAGMA query_only = ON;", "backfill commands.project_path"),
+            (
+                "DROP INDEX idx_project_path_timestamp;
+                 CREATE TABLE idx_project_path_timestamp (x INTEGER);",
+                "index commands by project",
+            ),
+        ];
+        for (setup, statement) in cases {
+            let conn = Connection::open_in_memory().expect("open should succeed");
+            seed_schema(&conn, SchemaVersion::Initial);
+            conn.execute_batch(setup).expect("setup should succeed");
+
+            let err =
+                migrate_initial(&conn).expect_err("the failing statement should fail the step");
+            assert!(
+                format!("{err:#}").contains(statement),
+                "error should name `{statement}`: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_failed_migration_still_restricts_db_files() {
+        let tmp = test_isolation::tempdir();
+        let db_path = tmp.path().join("history.db");
+        // Held open so the sidecars outlive it; the view fails the Initial step.
+        let holder = Connection::open(&db_path).expect("open should succeed");
+        enable_wal(&holder);
+        holder
+            .execute("CREATE VIEW commands AS SELECT 1 AS id", [])
+            .expect("view should be created");
+        let sidecars = db::db_sidecars(&db_path);
+        for sidecar in &sidecars {
+            db::testing::chmod(sidecar, 0o644);
+        }
+
+        user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
+            let tracker = Tracker::new().expect("the failing step should not fail the open");
+            assert!(tracker.not_upgraded().is_some(), "the Initial step failed");
+        });
+        for sidecar in &sidecars {
+            assert_eq!(
+                db::testing::mode_bits(sidecar),
+                0o600,
+                "expected 0600 on {}",
+                sidecar.display()
+            );
+        }
+    }
+
+    #[test]
+    fn test_failed_migration_step_keeps_previous_version() {
+        let conn = Connection::open_in_memory().expect("open should succeed");
+        // An index holding the name makes the EngineTables step's CREATE TABLE fail.
+        conn.execute_batch(
+            "CREATE TABLE blocker (x INTEGER);
+             CREATE INDEX engine_attribution ON blocker(x);",
+        )
+        .expect("blocking index should be created");
+
+        let err = run_schema_migrations(&conn, MigrationMode::GatedByVersion)
+            .expect_err("EngineTables step should fail");
+        assert!(
+            format!("{err:#}").contains("EngineTables"),
+            "error should name the failed step: {err:#}"
+        );
+        assert_eq!(
+            user_version(&conn),
+            SchemaVersion::Initial as i64,
+            "the Initial step should stay committed and stamped"
+        );
+        assert!(table_exists(&conn, "hook_decisions"));
+        assert!(
+            !table_exists(&conn, "classifier_cache"),
+            "the failed step's earlier statements should be rolled back"
+        );
+
+        conn.execute("DROP INDEX engine_attribution", [])
+            .expect("drop should succeed");
+        run_schema_migrations(&conn, MigrationMode::GatedByVersion).expect("retry should succeed");
+        assert_eq!(user_version(&conn), SCHEMA_VERSION);
+        assert!(table_exists(&conn, "classifier_cache"));
     }
 
     // 9. project_filter_params uses GLOB pattern with * wildcard // added
@@ -3521,41 +4017,6 @@ mod tests {
             failures.total, 0,
             "parse_failures table should be empty after reset"
         );
-    }
-
-    #[test]
-    fn test_db_sidecars_are_siblings_not_children() {
-        let got = db_sidecars(std::path::Path::new("/data/rtk/history.db"));
-        assert_eq!(
-            got,
-            vec![
-                PathBuf::from("/data/rtk/history.db-wal"),
-                PathBuf::from("/data/rtk/history.db-shm"),
-            ],
-            "PathBuf::push would yield history.db/-wal and silently harden nothing"
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn test_restrict_db_files_covers_wal_sidecars() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db = tmp.path().join("history.db");
-        let wal = tmp.path().join("history.db-wal");
-        let shm = tmp.path().join("history.db-shm");
-        for p in [&db, &wal, &shm] {
-            std::fs::write(p, b"x").expect("write");
-            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-        }
-
-        restrict_db_files(&db);
-
-        for p in [&db, &wal, &shm] {
-            let mode = std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "expected 0600 on {}", p.display());
-        }
     }
 
     // rtk-ai/rtk#3148: ground-truth hook-decision logging, so `discover` can join
@@ -4322,5 +4783,196 @@ mod tests {
             assert_eq!(total_time_ms, 7, "{period}: total exec time");
             assert_eq!(avg_time_ms, 7, "{period}: average exec time");
         }
+    }
+
+    /// A database at `to`, closed, and a read-only connection to it: SQLite
+    /// refuses every write on it with SQLITE_READONLY.
+    fn read_only_db_at(dir: &std::path::Path, to: SchemaVersion) -> Connection {
+        let db_path = dir.join("history.db");
+        seed_schema(
+            &Connection::open(&db_path).expect("open should succeed"),
+            to,
+        );
+        Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("read-only open should succeed")
+    }
+
+    fn behind_db(conn: Connection) -> Db {
+        Db {
+            conn,
+            behind: Some("disk full".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_a_tracker_says_why_its_database_was_not_upgraded() {
+        let conn = Connection::open_in_memory().expect("open should succeed");
+        let behind = Tracker {
+            conn: behind_db(conn),
+        };
+        assert_eq!(
+            behind.not_upgraded().as_deref(),
+            Some("tracking database was not upgraded: disk full")
+        );
+
+        let current = Tracker::new_in_memory().expect("in-memory tracker");
+        assert_eq!(current.not_upgraded(), None);
+    }
+
+    #[test]
+    fn test_behind_db_names_the_cause_of_a_missing_table() {
+        let tmp = test_isolation::tempdir();
+        let tracker = Tracker {
+            conn: behind_db(read_only_db_at(tmp.path(), SchemaVersion::Initial)),
+        };
+        let err = tracker
+            .attribution("pipeline", 30)
+            .expect_err("engine_attribution does not exist");
+        assert_eq!(
+            err.to_string(),
+            "no such table: engine_attribution (tracking database was not upgraded: disk full)"
+        );
+    }
+
+    #[test]
+    fn test_behind_db_annotates_a_missing_column() {
+        let tmp = test_isolation::tempdir();
+        let db_path = tmp.path().join("history.db");
+        Connection::open(&db_path)
+            .expect("open should succeed")
+            .execute_batch("CREATE TABLE commands (id INTEGER PRIMARY KEY, timestamp TEXT);")
+            .expect("old schema should seed");
+        let conn =
+            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("read-only open should succeed");
+        let db = behind_db(conn);
+        let err = db
+            .prepare("SELECT project_path FROM commands")
+            .map(|_| ())
+            .expect_err("project_path does not exist");
+        assert_eq!(
+            err.to_string(),
+            "no such column: project_path (tracking database was not upgraded: disk full)"
+        );
+        let err = db
+            .execute("INSERT INTO commands (project_path) VALUES ('x')", [])
+            .expect_err("project_path does not exist");
+        assert_eq!(
+            err.to_string(),
+            "table commands has no column named project_path (tracking database was not upgraded: disk full)"
+        );
+    }
+
+    #[test]
+    fn test_behind_db_leaves_other_errors_alone() {
+        let tmp = test_isolation::tempdir();
+        let db = behind_db(read_only_db_at(tmp.path(), SchemaVersion::Initial));
+        let err = db
+            .execute("INSERT INTO commands (id) VALUES (1)", [])
+            .expect_err("the write is refused");
+        assert!(!err.to_string().contains("was not upgraded"), "{err}");
+    }
+
+    #[test]
+    fn test_current_tracker_does_not_annotate() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+        tracker
+            .conn
+            .conn
+            .execute_batch("DROP TABLE engine_attribution")
+            .expect("drop should succeed");
+        let err = tracker
+            .conn
+            .execute("DELETE FROM engine_attribution", [])
+            .expect_err("the table is gone");
+        assert!(!err.to_string().contains("was not upgraded"), "{err}");
+    }
+
+    #[test]
+    fn test_annotate_handles_a_plain_sqlite_failure() {
+        // The bundled SQLite reports a prepare-time error as a `SqlInputError`,
+        // so this form is only reached by building it.
+        let missing = || {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                Some("no such table: x".to_string()),
+            )
+        };
+        let conn = || Connection::open_in_memory().expect("open should succeed");
+
+        let behind = behind_db(conn());
+        assert_eq!(
+            behind.annotate(missing()).to_string(),
+            "no such table: x (tracking database was not upgraded: disk full)"
+        );
+
+        let current = Db {
+            conn: conn(),
+            behind: None,
+        };
+        assert_eq!(current.annotate(missing()).to_string(), "no such table: x");
+    }
+
+    #[test]
+    fn test_behind_db_names_the_cause_for_query_row_too() {
+        let tmp = test_isolation::tempdir();
+        let db = behind_db(read_only_db_at(tmp.path(), SchemaVersion::Initial));
+        let err = db
+            .query_row("SELECT COUNT(*) FROM engine_attribution", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect_err("engine_attribution does not exist");
+        assert_eq!(
+            err.to_string(),
+            "no such table: engine_attribution (tracking database was not upgraded: disk full)"
+        );
+    }
+
+    #[test]
+    fn test_a_reset_gives_the_migration_another_chance() {
+        let conn = Connection::open_in_memory().expect("open should succeed");
+        run_schema_migrations(&conn, MigrationMode::Always).expect("migrate");
+        conn.execute_batch("DROP TABLE engine_attribution")
+            .expect("drop should succeed");
+        let tracker = Tracker {
+            conn: behind_db(conn),
+        };
+
+        tracker.reset_all().expect("the table should be back");
+
+        assert!(table_exists(&tracker.conn.conn, "engine_attribution"));
+    }
+
+    #[test]
+    fn test_a_current_database_is_not_migrated_by_a_reset() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+        tracker
+            .conn
+            .conn
+            .execute_batch("DROP TABLE engine_attribution")
+            .expect("drop should succeed");
+
+        tracker.reset_all().expect_err("the table stays missing");
+    }
+
+    /// A database whose schema is complete for what is written, like one stamped
+    /// by a release, keeps recording as it did before the step that failed.
+    #[test]
+    fn test_a_behind_tracker_still_records() {
+        let conn = Connection::open_in_memory().expect("open should succeed");
+        run_schema_migrations(&conn, MigrationMode::Always).expect("migrate");
+        let tracker = Tracker {
+            conn: behind_db(conn),
+        };
+
+        tracker
+            .record("git status", "rtk git status", 100, 20, 5)
+            .expect("the write should land");
+
+        let rows: i64 = tracker
+            .conn
+            .query_row("SELECT COUNT(*) FROM commands", [], |row| row.get(0))
+            .expect("count should be readable");
+        assert_eq!(rows, 1);
     }
 }
