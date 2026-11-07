@@ -1,0 +1,50 @@
+Index: b.dat
+===================================================================
+diff --git a/b.dat b/b.dat
+GIT binary patch
+literal 2
+Jc${Nk0ssI600RI3
+
+literal 2
+Jc${Nk1ONa700IC2
+Index: d.txt
+===================================================================
+diff --git a/d.txt b/d.txt
+deleted file mode 100644
+--- a/d.txt	(revision 1)
++++ b/d.txt	(nonexistent)
+@@ -1 +0,0 @@
+-gone
+Index: new.txt
+===================================================================
+diff --git a/new.txt b/new.txt
+new file mode 100644
+--- a/new.txt	(nonexistent)
++++ b/new.txt	(working copy)
+@@ -0,0 +1 @@
++n
+Index: sp ace.txt
+===================================================================
+diff --git a/sp ace.txt b/sp ace.txt
+--- a/sp ace.txt	(revision 1)
++++ b/sp ace.txt	(working copy)
+@@ -1 +1 @@
+-x
++y
+Index: sub/deep.txt
+===================================================================
+diff --git a/sub/deep.txt b/sub/deep.txt
+--- a/sub/deep.txt	(revision 1)
++++ b/sub/deep.txt	(working copy)
+@@ -1 +1 @@
+-x
++y
+Index: t.txt
+===================================================================
+diff --git a/t.txt b/t.txt
+--- a/t.txt	(revision 1)
++++ b/t.txt	(working copy)
+@@ -1,2 +1,2 @@
+ one
+-two
++TWO

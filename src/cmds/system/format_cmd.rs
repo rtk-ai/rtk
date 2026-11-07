@@ -1,7 +1,11 @@
 //! Runs code formatters (Prettier, Ruff) and shows only files that changed.
 
+use crate::core::guard::never_worse;
+use crate::core::shell::{display_args, with_args};
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
+use crate::core::truncate::CAP_WARNINGS;
+use crate::core::user_dirs;
 use crate::core::utils::{package_manager_exec, resolved_command};
 use crate::prettier_cmd;
 use crate::ruff_cmd;
@@ -10,7 +14,7 @@ use std::path::Path;
 
 /// Detect formatter from project files or explicit argument
 fn detect_formatter(args: &[String]) -> String {
-    detect_formatter_in_dir(args, Path::new("."))
+    detect_formatter_in_dir(args, &user_dirs::in_working_dir("."))
 }
 
 /// Detect formatter with explicit directory (for testing)
@@ -83,17 +87,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let user_args = args[start_idx..].to_vec();
 
     match formatter.as_str() {
-        "black" => {
-            // Inject --check if not present for check mode
-            if !user_args.iter().any(|a| a == "--check" || a == "--diff") {
-                cmd.arg("--check");
-            }
+        // Inject --check if not present for check mode
+        "black" if !user_args.iter().any(|a| a == "--check" || a == "--diff") => {
+            cmd.arg("--check");
         }
-        "ruff" => {
-            // Add "format" subcommand if not present
-            if user_args.is_empty() || !user_args[0].starts_with("format") {
-                cmd.arg("format");
-            }
+        // Add "format" subcommand if not present
+        "ruff" if user_args.is_empty() || !user_args[0].starts_with("format") => {
+            cmd.arg("format");
         }
         _ => {}
     }
@@ -127,14 +127,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         _ => raw.trim().to_string(),
     };
 
-    println!("{}", filtered);
+    let shown = never_worse(&raw, &filtered);
+    println!("{}", shown);
 
-    timer.track(
-        &format!("{} {}", formatter, user_args.join(" ")),
-        &format!("rtk format {} {}", formatter, user_args.join(" ")),
-        &raw,
-        &filtered,
-    );
+    let tracked = with_args(&formatter, &display_args(&user_args));
+    timer.track(&tracked, &format!("rtk format {tracked}"), &raw, shown);
 
     Ok(result.exit_code)
 }
@@ -169,11 +166,12 @@ fn filter_black_output(output: &str) -> String {
                 if part_lower.contains("would be reformatted") {
                     // Parse "X file(s) would be reformatted"
                     for (i, word) in words.iter().enumerate() {
-                        if (word == &"file" || word == &"files") && i > 0 {
-                            if let Ok(count) = words[i - 1].parse::<usize>() {
-                                files_would_reformat = count;
-                                break;
-                            }
+                        if (word == &"file" || word == &"files")
+                            && i > 0
+                            && let Ok(count) = words[i - 1].parse::<usize>()
+                        {
+                            files_would_reformat = count;
+                            break;
                         }
                     }
                 }
@@ -181,11 +179,12 @@ fn filter_black_output(output: &str) -> String {
                 if part_lower.contains("would be left unchanged") {
                     // Parse "X file(s) would be left unchanged"
                     for (i, word) in words.iter().enumerate() {
-                        if (word == &"file" || word == &"files") && i > 0 {
-                            if let Ok(count) = words[i - 1].parse::<usize>() {
-                                files_unchanged = count;
-                                break;
-                            }
+                        if (word == &"file" || word == &"files")
+                            && i > 0
+                            && let Ok(count) = words[i - 1].parse::<usize>()
+                        {
+                            files_unchanged = count;
+                            break;
                         }
                     }
                 }
@@ -196,11 +195,12 @@ fn filter_black_output(output: &str) -> String {
         if lower.contains("left unchanged") && !lower.contains("would be") {
             let words: Vec<&str> = trimmed.split_whitespace().collect();
             for (i, word) in words.iter().enumerate() {
-                if (word == &"file" || word == &"files") && i > 0 {
-                    if let Ok(count) = words[i - 1].parse::<usize>() {
-                        files_unchanged = count;
-                        break;
-                    }
+                if (word == &"file" || word == &"files")
+                    && i > 0
+                    && let Ok(count) = words[i - 1].parse::<usize>()
+                {
+                    files_unchanged = count;
+                    break;
                 }
             }
         }
@@ -238,17 +238,17 @@ fn filter_black_output(output: &str) -> String {
             "Format (black): {} files need formatting\n",
             count
         ));
-        result.push_str("═══════════════════════════════════════\n");
 
         if !files_to_format.is_empty() {
-            for (i, file) in files_to_format.iter().take(10).enumerate() {
+            const MAX_FORMAT_FILES: usize = CAP_WARNINGS;
+            for (i, file) in files_to_format.iter().take(MAX_FORMAT_FILES).enumerate() {
                 result.push_str(&format!("{}. {}\n", i + 1, compact_path(file)));
             }
 
-            if files_to_format.len() > 10 {
+            if files_to_format.len() > MAX_FORMAT_FILES {
                 result.push_str(&format!(
                     "\n... +{} more files\n",
-                    files_to_format.len() - 10
+                    files_to_format.len() - MAX_FORMAT_FILES
                 ));
             }
         }

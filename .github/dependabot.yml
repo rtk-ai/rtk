@@ -1,6 +1,7 @@
 version: 2
 updates:
   - package-ecosystem: "cargo"
+    target-branch: "develop"
     directory: "/"
     schedule:
       interval: "weekly"
@@ -9,9 +10,10 @@ updates:
     open-pull-requests-limit: 5
 
   - package-ecosystem: "github-actions"
+    target-branch: "develop"
     directory: "/"
     schedule:
       interval: "weekly"
     labels:
       - "dependencies"
-      - "ci"
+      - "area:ci"

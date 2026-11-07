@@ -1,0 +1,7 @@
+.FExX                                                                    [100%]
+=========================== short test summary info ============================
+FAILED test_tbno.py::test_bad - AssertionError: wrong total
+ERROR test_tbno.py::test_db - ConnectionError: db down
+XFAIL test_tbno.py::test_xf - ticket 7
+XPASS test_tbno.py::test_xp - fixed upstream?
+1 failed, 1 passed, 1 xfailed, 1 xpassed, 1 error in 0.01s

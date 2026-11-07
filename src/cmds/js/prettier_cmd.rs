@@ -1,6 +1,8 @@
 //! Filters Prettier output to show only files that need formatting.
 
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::display_args;
+use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::package_manager_exec;
 use anyhow::Result;
 
@@ -18,7 +20,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "prettier",
-        &args.join(" "),
+        &display_args(args),
         filter_prettier_output,
         RunOptions::stdout_only(),
     )
@@ -63,12 +65,11 @@ pub fn filter_prettier_output(output: &str) -> String {
         }
 
         // Count total files checked
-        if trimmed.contains("All matched files use Prettier") {
-            if let Some(count_str) = trimmed.split_whitespace().next() {
-                if let Ok(count) = count_str.parse::<usize>() {
-                    files_checked = count;
-                }
-            }
+        if trimmed.contains("All matched files use Prettier")
+            && let Some(count_str) = trimmed.split_whitespace().next()
+            && let Ok(count) = count_str.parse::<usize>()
+        {
+            files_checked = count;
         }
     }
 
@@ -93,16 +94,16 @@ pub fn filter_prettier_output(output: &str) -> String {
                 "Prettier: {} files need formatting\n",
                 files_to_format.len()
             ));
-            result.push_str("═══════════════════════════════════════\n");
 
-            for (i, file) in files_to_format.iter().take(10).enumerate() {
+            const MAX_PRETTIER_FILES: usize = CAP_WARNINGS;
+            for (i, file) in files_to_format.iter().take(MAX_PRETTIER_FILES).enumerate() {
                 result.push_str(&format!("{}. {}\n", i + 1, file));
             }
 
-            if files_to_format.len() > 10 {
+            if files_to_format.len() > MAX_PRETTIER_FILES {
                 result.push_str(&format!(
                     "\n... +{} more files\n",
-                    files_to_format.len() - 10
+                    files_to_format.len() - MAX_PRETTIER_FILES
                 ));
             }
 

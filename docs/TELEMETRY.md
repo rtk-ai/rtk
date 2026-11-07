@@ -62,8 +62,10 @@ This data directly drives our roadmap. For example, if telemetry shows that 40% 
 |-------|---------|---------|
 | `passthrough_top` | `["git:15", "npm:8"]` | Top 5 commands with 0% savings — these need filters |
 | `parse_failures_24h` | `3` | Filter fragility — high count means filters are breaking |
-| `low_savings_commands` | `["rtk docker ps:25%"]` | Commands averaging <30% savings — filters to improve |
-| `avg_savings_per_command` | `68.5` | Unweighted average (vs global which is volume-biased) |
+| `low_savings_commands` | `["rtk docker ps:25%"]` | Commands with weighted savings rate <30%, net-negative ones included — filters to improve. Rate is `SUM(saved)/SUM(input)` over every call of the command, the same figure as the `rtk gain` By Command table, so high-volume calls are not diluted by passthrough calls. Exact 0% is left to `passthrough_top`. |
+| `avg_savings_per_command` | `68.5` | Unweighted average across distinct command names (each filter counts once regardless of invocation volume). Each command's individual rate is weighted by volume before the outer average; commands that never had any input are skipped. |
+| `recall_mode` | `sqlite` | Which recovery mode is active (`sqlite`/`tee`/`disabled`) |
+| `recall_stats` | `[{"filter":"grep","mode":"sqlite","elisions":142,"recalls":9}]` | Per-filter counters: how often elided output is retrieved — calibrates filter caps. Filter names come from a fixed allowlist of rtk filter families; anything else is folded into `other`. No hashes, no paths, no command arguments, no output content. |
 
 ### Ecosystem distribution
 
@@ -83,7 +85,7 @@ This data directly drives our roadmap. For example, if telemetry shows that 40% 
 | Field | Example | Purpose |
 |-------|---------|---------|
 | `tokens_saved_30d` | `12000000` | 30-day token savings for trend analysis |
-| `estimated_savings_usd_30d` | `36.0` | Estimated dollar value saved (at ~$3/Mtok input pricing, Claude Sonnet) |
+| `estimated_savings_usd_30d` | — | A USD value derived from the estimated tokens saved and a fixed internal constant. It is not a measured cost and does not reflect any provider's pricing |
 
 ### Adoption
 

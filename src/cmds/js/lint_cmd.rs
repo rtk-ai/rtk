@@ -1,9 +1,12 @@
 //! Filters ESLint and Biome linter output, grouping violations by rule.
 
+use crate::cmds::python::sqlfluff_cmd;
 use crate::core::config;
+use crate::core::shell::{display_args, quote_program, with_args};
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
-use crate::core::utils::{package_manager_exec, resolved_command, truncate};
+use crate::core::truncate::{CAP_ERRORS, CAP_WARNINGS};
+use crate::core::utils::{MissingTool, resolved_command, tool_exec, truncate};
 use crate::mypy_cmd;
 use crate::ruff_cmd;
 use anyhow::{Context, Result};
@@ -53,7 +56,7 @@ struct PylintDiagnostic {
 
 /// Check if a linter is Python-based (uses pip/pipx, not npm/pnpm)
 fn is_python_linter(linter: &str) -> bool {
-    matches!(linter, "ruff" | "pylint" | "mypy" | "flake8")
+    matches!(linter, "ruff" | "pylint" | "mypy" | "flake8" | "sqlfluff")
 }
 
 /// Strip package manager prefixes (npx, bunx, pnpm, pnpm exec, yarn) from args.
@@ -71,6 +74,15 @@ fn strip_pm_prefix(args: &[String]) -> usize {
     skip
 }
 
+/// The package runner named at the front of the args, if any. `bunx eslint`
+/// and `pnpm exec eslint` both name one; a bare `exec` does not.
+fn named_runner(args: &[String], skip: usize) -> Option<&str> {
+    args[..skip]
+        .iter()
+        .map(String::as_str)
+        .find(|a| *a != "exec")
+}
+
 /// Detect the linter name from args (after stripping PM prefixes).
 /// Returns the linter name and whether it was explicitly specified.
 fn detect_linter(args: &[String]) -> (&str, bool) {
@@ -86,20 +98,31 @@ fn detect_linter(args: &[String]) -> (&str, bool) {
     }
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+/// `runner` is the package runner the user named (`bunx eslint`), or None when
+/// nothing was named and lockfile detection applies.
+pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     let skip = strip_pm_prefix(args);
     let effective_args = &args[skip..];
+    // A runner stripped from the args was still named by the user, so it wins
+    // over lockfile detection just as an explicitly threaded one does.
+    let runner = runner.or_else(|| named_runner(args, skip));
 
     let (linter, explicit) = detect_linter(effective_args);
 
-    // Python linters use resolved_command() directly (they're on PATH via pip/pipx)
+    // sqlfluff owns its own argv and its own rendering: routing, format-flag
+    // detection and failure handling live in `sqlfluff_cmd::plan` so this entry
+    // point and `rtk sqlfluff ...` cannot drift apart.
+    let sqlfluff =
+        (linter == "sqlfluff").then(|| sqlfluff_cmd::plan_for_lint(&effective_args[1..]));
+
+    // Python linter use resolved_command() directly (they're on PATH via pip/pipx)
     // JS linters use package_manager_exec (npx/pnpm exec)
     let mut cmd = if is_python_linter(linter) {
         resolved_command(linter)
     } else {
-        package_manager_exec(linter)
+        tool_exec(runner, linter, MissingTool::Fail)
     };
 
     // Add format flags based on linter
@@ -107,18 +130,16 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "eslint" => {
             cmd.arg("-f").arg("json");
         }
-        "ruff" => {
-            // Force JSON output for ruff check
-            if !effective_args.contains(&"--output-format".to_string()) {
-                cmd.arg("check").arg("--output-format=json");
-            }
+        // Force JSON output for ruff check
+        "ruff" if !effective_args.contains(&"--output-format".to_string()) => {
+            cmd.arg("check").arg("--output-format=json");
         }
-        "pylint" => {
-            // Force JSON2 output for pylint
-            if !effective_args.contains(&"--output-format".to_string()) {
-                cmd.arg("--output-format=json2");
-            }
+        // Force JSON2 output for pylint
+        "pylint" if !effective_args.contains(&"--output-format".to_string()) => {
+            cmd.arg("--output-format=json2");
         }
+        // sqlfluff's full argv comes from the plan below, flags included.
+        "sqlfluff" => {}
         "mypy" => {
             // mypy uses default text output (no special flags)
         }
@@ -141,15 +162,20 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         1
     };
 
-    for arg in &effective_args[start_idx..] {
-        // Skip --output-format if we already added it
-        if linter == "ruff" && arg.starts_with("--output-format") {
-            continue;
+    if let Some(plan) = &sqlfluff {
+        // sqlfluff's argv is planned whole, subcommand and format flags included.
+        cmd.args(&plan.args);
+    } else {
+        for arg in &effective_args[start_idx..] {
+            // Skip --output-format if we already added it
+            if linter == "ruff" && arg.starts_with("--output-format") {
+                continue;
+            }
+            if linter == "pylint" && arg.starts_with("--output-format") {
+                continue;
+            }
+            cmd.arg(arg);
         }
-        if linter == "pylint" && arg.starts_with("--output-format") {
-            continue;
-        }
-        cmd.arg(arg);
     }
 
     // Default to current directory if no path specified (for ruff/pylint/mypy/eslint)
@@ -187,33 +213,33 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
     // Dispatch to appropriate filter based on linter
-    let filtered = match linter {
-        "eslint" => filter_eslint_json(&result.stdout),
-        "ruff" => {
-            // Reuse ruff_cmd's JSON parser
-            if !result.stdout.trim().is_empty() {
-                ruff_cmd::filter_ruff_check_json(&result.stdout)
-            } else {
-                "Ruff: No issues found".to_string()
+    let filtered = if let Some(plan) = &sqlfluff {
+        plan.render(&result.stdout, result.exit_code)
+    } else {
+        match linter {
+            "eslint" => filter_eslint_json(&result.stdout),
+            "ruff" => {
+                // Reuse ruff_cmd's JSON parser
+                if !result.stdout.trim().is_empty() {
+                    ruff_cmd::filter_ruff_check_json(&result.stdout)
+                } else {
+                    "Ruff: No issues found".to_string()
+                }
             }
+            "pylint" => filter_pylint_json(&result.stdout),
+            "mypy" => mypy_cmd::filter_mypy_output(&raw),
+            _ => filter_generic_lint(&raw),
         }
-        "pylint" => filter_pylint_json(&result.stdout),
-        "mypy" => mypy_cmd::filter_mypy_output(&raw),
-        _ => filter_generic_lint(&raw),
     };
 
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "lint", result.exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
+    let hint = crate::core::tee::tee_and_hint(&raw, "lint", result.exit_code);
+    let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
 
-    timer.track(
-        &format!("{} {}", linter, args.join(" ")),
-        &format!("rtk lint {} {}", linter, args.join(" ")),
-        &raw,
-        &filtered,
+    let tracked = with_args(
+        &quote_program(linter),
+        &display_args(&effective_args[start_idx..]),
     );
+    timer.track(&tracked, &format!("rtk lint {tracked}"), &raw, &shown);
 
     if !result.success() {
         return Ok(result.exit_code);
@@ -263,7 +289,7 @@ fn filter_eslint_json(output: &str) -> String {
         .filter(|r| !r.messages.is_empty())
         .map(|r| (r, r.messages.len()))
         .collect();
-    by_file.sort_by(|a, b| b.1.cmp(&a.1));
+    by_file.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     // Build output
     let mut result = String::new();
@@ -271,7 +297,6 @@ fn filter_eslint_json(output: &str) -> String {
         "ESLint: {} errors, {} warnings in {} files\n",
         total_errors, total_warnings, total_files
     ));
-    result.push_str("═══════════════════════════════════════\n");
 
     // Show top rules
     let mut rule_counts: Vec<_> = by_rule.iter().collect();
@@ -285,30 +310,38 @@ fn filter_eslint_json(output: &str) -> String {
         result.push('\n');
     }
 
-    // Show top files with most issues
+    // Show top files with most issues, plus the top rules in each
+    const MAX_FILES: usize = CAP_WARNINGS;
     result.push_str("Top files:\n");
-    for (file_result, count) in by_file.iter().take(10) {
+    for (file_result, count) in by_file.iter().take(MAX_FILES) {
         let short_path = compact_path(&file_result.file_path);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
-        // Show top 3 rules in this file
         let mut file_rules: HashMap<String, usize> = HashMap::new();
         for msg in &file_result.messages {
             if let Some(rule) = &msg.rule_id {
                 *file_rules.entry(rule.clone()).or_insert(0) += 1;
             }
         }
-
         let mut file_rule_counts: Vec<_> = file_rules.iter().collect();
         file_rule_counts.sort_by(|a, b| b.1.cmp(a.1));
-
         for (rule, count) in file_rule_counts.iter().take(3) {
             result.push_str(&format!("    {} ({})\n", rule, count));
         }
     }
 
-    if by_file.len() > 10 {
-        result.push_str(&format!("\n... +{} more files\n", by_file.len() - 10));
+    if by_file.len() > MAX_FILES {
+        result.push_str(&format!("\n… +{} more files\n", by_file.len() - MAX_FILES));
+        let all_file_lines = by_file
+            .iter()
+            .map(|(r, count)| format!("{} ({} issues)", compact_path(&r.file_path), count))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_file_lines, "eslint-files", MAX_FILES + 1)
+        {
+            result.push_str(&format!("  {}\n", hint));
+        }
     }
 
     result.trim().to_string()
@@ -389,8 +422,6 @@ fn filter_pylint_json(output: &str) -> String {
         result.push('\n');
     }
 
-    result.push_str("═══════════════════════════════════════\n");
-
     // Show top symbols (rules)
     let mut symbol_counts: Vec<_> = by_symbol.iter().collect();
     symbol_counts.sort_by(|a, b| b.1.cmp(a.1));
@@ -404,8 +435,9 @@ fn filter_pylint_json(output: &str) -> String {
     }
 
     // Show top files
+    const MAX_FILES: usize = CAP_WARNINGS;
     result.push_str("Top files:\n");
-    for (file, count) in file_counts.iter().take(10) {
+    for (file, count) in file_counts.iter().take(MAX_FILES) {
         let short_path = compact_path(file);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
@@ -424,8 +456,21 @@ fn filter_pylint_json(output: &str) -> String {
         }
     }
 
-    if file_counts.len() > 10 {
-        result.push_str(&format!("\n... +{} more files\n", file_counts.len() - 10));
+    if file_counts.len() > MAX_FILES {
+        result.push_str(&format!(
+            "\n… +{} more files\n",
+            file_counts.len() - MAX_FILES
+        ));
+        let all_file_lines = file_counts
+            .iter()
+            .map(|(file, count)| format!("{} ({} issues)", compact_path(file), count))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_file_lines, "pylint-files", MAX_FILES + 1)
+        {
+            result.push_str(&format!("  {}\n", hint));
+        }
     }
 
     result.trim().to_string()
@@ -455,14 +500,20 @@ fn filter_generic_lint(output: &str) -> String {
 
     let mut result = String::new();
     result.push_str(&format!("Lint: {} errors, {} warnings\n", errors, warnings));
-    result.push_str("═══════════════════════════════════════\n");
 
-    for issue in issues.iter().take(20) {
+    const MAX_ISSUES: usize = CAP_ERRORS;
+    for issue in issues.iter().take(MAX_ISSUES) {
         result.push_str(&format!("{}\n", truncate(issue, 100)));
     }
 
-    if issues.len() > 20 {
-        result.push_str(&format!("\n... +{} more issues\n", issues.len() - 20));
+    if issues.len() > MAX_ISSUES {
+        result.push_str(&format!("\n… +{} more issues\n", issues.len() - MAX_ISSUES));
+        let all_issues = issues.join("\n");
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_issues, "lint-issues", MAX_ISSUES + 1)
+        {
+            result.push_str(&format!("  {}\n", hint));
+        }
     }
 
     result.trim().to_string()
@@ -684,8 +735,30 @@ mod tests {
         assert!(is_python_linter("pylint"));
         assert!(is_python_linter("mypy"));
         assert!(is_python_linter("flake8"));
+        assert!(is_python_linter("sqlfluff"));
         assert!(!is_python_linter("eslint"));
         assert!(!is_python_linter("biome"));
         assert!(!is_python_linter("unknown"));
+    }
+
+    #[test]
+    fn test_named_runner_recovers_the_stripped_prefix() {
+        let args: Vec<String> = ["bunx", "eslint", "."]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let skip = strip_pm_prefix(&args);
+        assert_eq!(named_runner(&args, skip), Some("bunx"));
+
+        let args: Vec<String> = ["pnpm", "exec", "eslint"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let skip = strip_pm_prefix(&args);
+        assert_eq!(named_runner(&args, skip), Some("pnpm"));
+
+        let args: Vec<String> = ["eslint", "src"].iter().map(|s| s.to_string()).collect();
+        let skip = strip_pm_prefix(&args);
+        assert_eq!(named_runner(&args, skip), None);
     }
 }

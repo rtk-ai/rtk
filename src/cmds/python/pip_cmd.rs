@@ -1,7 +1,10 @@
 //! Filters pip and uv package manager output.
 
+use crate::core::guard::never_worse;
+use crate::core::shell::{display_args, with_args};
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
+use crate::core::truncate::{CAP_INVENTORY, CAP_LIST};
 use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -17,12 +20,16 @@ struct Package {
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    // Auto-detect uv vs pip
-    let use_uv = tool_exists("uv");
+    // The user ran `pip` — run `pip` so RTK stays transparent and reports the
+    // *same* environment the bare command would. Only fall back to `uv pip` when
+    // `pip` genuinely isn't on PATH (uv-only environments). Auto-substituting
+    // `uv pip` unconditionally made `pip list` show uv's discovered env instead
+    // of the active one — often just the 2-package base interpreter.
+    let use_uv = !tool_exists("pip") && tool_exists("uv");
     let base_cmd = if use_uv { "uv" } else { "pip" };
 
     if verbose > 0 && use_uv {
-        eprintln!("Using uv (pip-compatible)");
+        eprintln!("pip not found — falling back to `uv pip`");
     }
 
     // Detect subcommand
@@ -41,14 +48,21 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         }
     };
 
+    let words = display_args(args);
     timer.track(
-        &format!("{} {}", base_cmd, args.join(" ")),
-        &format!("rtk {} {}", base_cmd, args.join(" ")),
+        &with_args(prog_label(base_cmd), &words),
+        &with_args("rtk pip", &words),
         &cmd_str,
         &filtered,
     );
 
     Ok(exit_code)
+}
+
+/// `base_cmd` is already "pip" on the plain path, so a hardcoded "pip" after
+/// it doubled up as "pip pip list" (#4050).
+fn prog_label(base_cmd: &str) -> &'static str {
+    if base_cmd == "uv" { "uv pip" } else { "pip" }
 }
 
 fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
@@ -65,15 +79,15 @@ fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, Str
     }
 
     if verbose > 0 {
-        eprintln!("Running: {} pip list --format=json", base_cmd);
+        eprintln!("Running: {} list --format=json", prog_label(base_cmd));
     }
 
     let result = exec_capture(&mut cmd)
-        .with_context(|| format!("Failed to run {} pip list", base_cmd))?;
+        .with_context(|| format!("Failed to run {} list", prog_label(base_cmd)))?;
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    let filtered = filter_pip_list(&result.stdout);
+    let filtered = never_worse(&raw, &filter_pip_list(&result.stdout)).to_string();
     println!("{}", filtered);
 
     Ok((raw, filtered, result.exit_code))
@@ -93,15 +107,18 @@ fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String,
     }
 
     if verbose > 0 {
-        eprintln!("Running: {} pip list --outdated --format=json", base_cmd);
+        eprintln!(
+            "Running: {} list --outdated --format=json",
+            prog_label(base_cmd)
+        );
     }
 
     let result = exec_capture(&mut cmd)
-        .with_context(|| format!("Failed to run {} pip list --outdated", base_cmd))?;
+        .with_context(|| format!("Failed to run {} list --outdated", prog_label(base_cmd)))?;
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    let filtered = filter_pip_outdated(&result.stdout);
+    let filtered = never_worse(&raw, &filter_pip_outdated(&result.stdout)).to_string();
     println!("{}", filtered);
 
     Ok((raw, filtered, result.exit_code))
@@ -119,11 +136,11 @@ fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(Stri
     }
 
     if verbose > 0 {
-        eprintln!("Running: {} pip {}", base_cmd, args.join(" "));
+        eprintln!("Running: {} {}", prog_label(base_cmd), args.join(" "));
     }
 
     let result = exec_capture(&mut cmd)
-        .with_context(|| format!("Failed to run {} pip {}", base_cmd, args.join(" ")))?;
+        .with_context(|| format!("Failed to run {} {}", prog_label(base_cmd), args.join(" ")))?;
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
@@ -148,7 +165,6 @@ fn filter_pip_list(output: &str) -> String {
 
     let mut result = String::new();
     result.push_str(&format!("pip list: {} packages\n", packages.len()));
-    result.push_str("═══════════════════════════════════════\n");
 
     // Group by first letter for easier scanning
     let mut by_letter: std::collections::HashMap<char, Vec<&Package>> =
@@ -162,16 +178,21 @@ fn filter_pip_list(output: &str) -> String {
     let mut letters: Vec<_> = by_letter.keys().collect();
     letters.sort();
 
+    // `pip list` is an inventory query — dependency audits need every package
+    // visible. The compression here is structural (drop the alignment padding,
+    // group by initial); the per-group cap is just a safety bound for
+    // pathological environments, not a normal-case truncation.
+    const MAX_PER_LETTER: usize = CAP_INVENTORY;
     for letter in letters {
         let pkgs = by_letter.get(letter).unwrap();
         result.push_str(&format!("\n[{}]\n", letter.to_uppercase()));
 
-        for pkg in pkgs.iter().take(10) {
+        for pkg in pkgs.iter().take(MAX_PER_LETTER) {
             result.push_str(&format!("  {} ({})\n", pkg.name, pkg.version));
         }
 
-        if pkgs.len() > 10 {
-            result.push_str(&format!("  ... +{} more\n", pkgs.len() - 10));
+        if pkgs.len() > MAX_PER_LETTER {
+            result.push_str(&format!("  ... +{} more\n", pkgs.len() - MAX_PER_LETTER));
         }
     }
 
@@ -193,9 +214,9 @@ fn filter_pip_outdated(output: &str) -> String {
 
     let mut result = String::new();
     result.push_str(&format!("pip outdated: {} packages\n", packages.len()));
-    result.push_str("═══════════════════════════════════════\n");
 
-    for (i, pkg) in packages.iter().take(20).enumerate() {
+    const MAX_PIP_PACKAGES: usize = CAP_LIST;
+    for (i, pkg) in packages.iter().take(MAX_PIP_PACKAGES).enumerate() {
         let latest = pkg.latest_version.as_deref().unwrap_or("unknown");
         result.push_str(&format!(
             "{}. {} ({} → {})\n",
@@ -206,8 +227,11 @@ fn filter_pip_outdated(output: &str) -> String {
         ));
     }
 
-    if packages.len() > 20 {
-        result.push_str(&format!("\n... +{} more packages\n", packages.len() - 20));
+    if packages.len() > MAX_PIP_PACKAGES {
+        result.push_str(&format!(
+            "\n... +{} more packages\n",
+            packages.len() - MAX_PIP_PACKAGES
+        ));
     }
 
     result.push_str("\n[hint] Run `pip install --upgrade <package>` to update\n");
@@ -218,6 +242,12 @@ fn filter_pip_outdated(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_prog_label_never_doubles_pip() {
+        assert_eq!(prog_label("pip"), "pip");
+        assert_eq!(prog_label("uv"), "uv pip");
+    }
 
     #[test]
     fn test_filter_pip_list() {

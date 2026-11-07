@@ -1,6 +1,6 @@
 //! Reads Claude Code session logs from disk and streams their command history.
 
-use crate::hooks::constants::CLAUDE_DIR;
+use crate::hooks::init::resolve_claude_dir;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
@@ -16,6 +16,10 @@ pub struct ExtractedCommand {
     pub output_len: Option<usize>,
     #[allow(dead_code)]
     pub session_id: String,
+    /// The Claude Code `tool_use_id` for this Bash call — the same id the
+    /// PreToolUse hook receives, letting hook-decision logs join back to this
+    /// exact transcript entry.
+    pub tool_use_id: String,
     /// Actual output content (first ~1000 chars for error detection)
     pub output_content: Option<String>,
     /// Whether the tool_result indicated an error
@@ -41,44 +45,67 @@ pub trait SessionProvider {
 
 pub struct ClaudeProvider;
 
-impl ClaudeProvider {
-    /// Get the base directory for Claude Code projects.
-    fn projects_dir() -> Result<PathBuf> {
-        let home = dirs::home_dir().context("could not determine home directory")?;
-        let dir = home.join(CLAUDE_DIR).join("projects");
-        if !dir.exists() {
-            anyhow::bail!(
-                "Claude Code projects directory not found: {}\nMake sure Claude Code has been used at least once.",
-                dir.display()
-            );
-        }
-        Ok(dir)
-    }
+/// Substring match of a project filter against a project directory name.
+///
+/// On Windows the match is case-insensitive: NTFS paths are case-insensitive
+/// and Claude Code encodes the project folder from whatever cwd casing it was
+/// launched with, so the same project can produce sibling folders like
+/// `E--proj` and `e--proj`, while `std::env::current_dir()` reports whatever
+/// casing the launching shell set (an uppercase drive letter under PowerShell).
+/// Either side can differ from the other, so both are lowered; a case-sensitive
+/// match finds zero sessions.
+fn dir_matches_filter(dir_name: &str, filter: &str) -> bool {
+    dir_matches_filter_impl(dir_name, filter, cfg!(windows))
+}
 
-    /// Encode a filesystem path to Claude Code's directory name format.
-    /// `/Users/foo/bar` → `-Users-foo-bar`
-    pub fn encode_project_path(path: &str) -> String {
-        path.replace('/', "-")
+fn dir_matches_filter_impl(dir_name: &str, filter: &str, case_insensitive: bool) -> bool {
+    if case_insensitive {
+        dir_name
+            .to_ascii_lowercase()
+            .contains(&filter.to_ascii_lowercase())
+    } else {
+        dir_name.contains(filter)
     }
 }
 
-impl SessionProvider for ClaudeProvider {
-    fn discover_sessions(
-        &self,
+impl ClaudeProvider {
+    /// Get the base directory for Claude Code projects.
+    fn projects_dir() -> Result<PathBuf> {
+        let claude_dir = resolve_claude_dir().context("could not determine claude directory")?;
+        Ok(claude_dir.join("projects"))
+    }
+
+    fn discover_sessions_in_projects_dir(
+        projects_dir: &Path,
         project_filter: Option<&str>,
         since_days: Option<u64>,
     ) -> Result<Vec<PathBuf>> {
-        let projects_dir = Self::projects_dir()?;
+        if !projects_dir
+            .try_exists()
+            .with_context(|| format!("failed to access {}", projects_dir.display()))?
+        {
+            return Ok(Vec::new());
+        }
+
+        // `days * 86400` can overflow u64 for a large user-supplied `--since` (same
+        // overflow class `core::utils::days_ago_cutoff` fixes for the hook_decisions
+        // query) — use checked_mul and fall back to the epoch, which for "days ago"
+        // naturally means "no lower bound", instead of panicking. Kept as its own
+        // SystemTime-based implementation rather than reusing days_ago_cutoff
+        // directly: this filters on file mtimes (SystemTime), not chrono
+        // DateTime<Utc>, and days_ago_cutoff's MIN_UTC fallback wouldn't convert to
+        // a valid SystemTime anyway. If this overflow-clamping logic needs a fix,
+        // check whether the same fix applies to days_ago_cutoff too.
         let cutoff = since_days.map(|days| {
-            SystemTime::now()
-                .checked_sub(Duration::from_secs(days * 86400))
+            days.checked_mul(86400)
+                .and_then(|secs| SystemTime::now().checked_sub(Duration::from_secs(secs)))
                 .unwrap_or(SystemTime::UNIX_EPOCH)
         });
 
         let mut sessions = Vec::new();
 
         // List project directories
-        let entries = fs::read_dir(&projects_dir)
+        let entries = fs::read_dir(projects_dir)
             .with_context(|| format!("failed to read {}", projects_dir.display()))?;
 
         for entry in entries.flatten() {
@@ -90,7 +117,7 @@ impl SessionProvider for ClaudeProvider {
             // Apply project filter: substring match on directory name
             if let Some(filter) = project_filter {
                 let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !dir_name.contains(filter) {
+                if !dir_matches_filter(dir_name, filter) {
                     continue;
                 }
             }
@@ -107,14 +134,12 @@ impl SessionProvider for ClaudeProvider {
                 }
 
                 // Apply mtime filter
-                if let Some(cutoff_time) = cutoff {
-                    if let Ok(meta) = fs::metadata(file_path) {
-                        if let Ok(mtime) = meta.modified() {
-                            if mtime < cutoff_time {
-                                continue;
-                            }
-                        }
-                    }
+                if let Some(cutoff_time) = cutoff
+                    && let Ok(meta) = fs::metadata(file_path)
+                    && let Ok(mtime) = meta.modified()
+                    && mtime < cutoff_time
+                {
+                    continue;
                 }
 
                 sessions.push(file_path.to_path_buf());
@@ -122,6 +147,44 @@ impl SessionProvider for ClaudeProvider {
         }
 
         Ok(sessions)
+    }
+
+    /// Encode a filesystem path to Claude Code's directory name format.
+    ///
+    /// Claude Code replaces `/`, `.`, `_`, `\`, `:`, ` `, `[`, `]`, and any
+    /// non-ASCII character with `-` when computing the project directory slug
+    /// under `~/.claude/projects/`.
+    ///
+    /// `/Users/foo/bar`          → `-Users-foo-bar`
+    /// `/Users/first.last/bar`   → `-Users-first-last-bar`
+    /// `/home/chris/2_project`   → `-home-chris-2-project`
+    /// `C:\Users\foo\bar`        → `C--Users-foo-bar`
+    pub fn encode_project_path(path: &str) -> String {
+        // The drive-letter `:` matters on Windows: every cwd carries one, and if
+        // it isn't sanitized the slug (`C:-...`) never matches Claude's real
+        // folder (`C--...`), so `rtk discover` finds zero sessions (#2919).
+        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\', ' ', '[', ']', ':'];
+
+        path.chars()
+            .map(|c| {
+                if !c.is_ascii() || SANITIZED_CHARS.contains(&c) {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect()
+    }
+}
+
+impl SessionProvider for ClaudeProvider {
+    fn discover_sessions(
+        &self,
+        project_filter: Option<&str>,
+        since_days: Option<u64>,
+    ) -> Result<Vec<PathBuf>> {
+        let projects_dir = Self::projects_dir()?;
+        Self::discover_sessions_in_projects_dir(&projects_dir, project_filter, since_days)
     }
 
     fn extract_commands(&self, path: &Path) -> Result<Vec<ExtractedCommand>> {
@@ -169,18 +232,17 @@ impl SessionProvider for ClaudeProvider {
                         for block in content {
                             if block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
                                 && block.get("name").and_then(|n| n.as_str()) == Some("Bash")
-                            {
-                                if let (Some(id), Some(cmd)) = (
+                                && let (Some(id), Some(cmd)) = (
                                     block.get("id").and_then(|i| i.as_str()),
                                     block.pointer("/input/command").and_then(|c| c.as_str()),
-                                ) {
-                                    pending_tool_uses.push((
-                                        id.to_string(),
-                                        cmd.to_string(),
-                                        sequence_counter,
-                                    ));
-                                    sequence_counter += 1;
-                                }
+                                )
+                            {
+                                pending_tool_uses.push((
+                                    id.to_string(),
+                                    cmd.to_string(),
+                                    sequence_counter,
+                                ));
+                                sequence_counter += 1;
                             }
                         }
                     }
@@ -191,28 +253,26 @@ impl SessionProvider for ClaudeProvider {
                         entry.pointer("/message/content").and_then(|c| c.as_array())
                     {
                         for block in content {
-                            if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
-                                if let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str())
-                                {
-                                    // Get content, length, and error status
-                                    let content =
-                                        block.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                            if block.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+                                && let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str())
+                            {
+                                // Get content, length, and error status
+                                let content =
+                                    block.get("content").and_then(|c| c.as_str()).unwrap_or("");
 
-                                    let output_len = content.len();
-                                    let is_error = block
-                                        .get("is_error")
-                                        .and_then(|e| e.as_bool())
-                                        .unwrap_or(false);
+                                let output_len = content.len();
+                                let is_error = block
+                                    .get("is_error")
+                                    .and_then(|e| e.as_bool())
+                                    .unwrap_or(false);
 
-                                    // Store first ~1000 chars of content for error detection
-                                    let content_preview: String =
-                                        content.chars().take(1000).collect();
+                                // Store first ~1000 chars of content for error detection
+                                let content_preview: String = content.chars().take(1000).collect();
 
-                                    tool_results.insert(
-                                        id.to_string(),
-                                        (output_len, content_preview, is_error),
-                                    );
-                                }
+                                tool_results.insert(
+                                    id.to_string(),
+                                    (output_len, content_preview, is_error),
+                                );
                             }
                         }
                     }
@@ -232,6 +292,7 @@ impl SessionProvider for ClaudeProvider {
                 command,
                 output_len,
                 session_id: session_id.clone(),
+                tool_use_id: tool_id,
                 output_content,
                 is_error,
                 sequence_index,
@@ -338,10 +399,172 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_project_path_dot_in_username() {
+        // Claude Code replaces both '/' and '.' with '-'.
+        // A cwd like /Users/first.last must produce the same slug as
+        // Claude's projects directory (-Users-first-last), otherwise
+        // `rtk discover` finds zero sessions for that project.
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/Users/first.last/my-project"),
+            "-Users-first-last-my-project"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_multiple_dots() {
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/Users/a.b.c/proj"),
+            "-Users-a-b-c-proj"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_underscore() {
+        // Claude Code also replaces '_' with '-' (https://github.com/anthropics/claude-code/issues/24067)
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/home/chris/2_project-files/proj"),
+            "-home-chris-2-project-files-proj"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_non_ascii() {
+        // Non-ASCII characters are each replaced with '-' (https://github.com/anthropics/claude-code/issues/40946)
+        // '/home/user/' + '外' + '主' + '/app' -> '-home-user' + '-' + '-' + '-' + '-' + 'app'
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/home/user/\u{5916}\u{4e3b}/app"),
+            "-home-user----app"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_windows() {
+        // Windows backslashes AND the drive-letter colon are replaced with '-'.
+        // A real `C:\Users\foo\bar` dir lands in ~/.claude/projects/C--Users-foo-bar,
+        // so keeping the colon (C:-...) made `rtk discover` find zero sessions on
+        // Windows (#2919).
+        assert_eq!(
+            ClaudeProvider::encode_project_path(r"C:\Users\foo\bar"),
+            "C--Users-foo-bar"
+        );
+    }
+
+    #[test]
+    fn test_dir_matches_filter_case_sensitive() {
+        assert!(dir_matches_filter_impl("-Users-foo-rtk", "rtk", false));
+        assert!(!dir_matches_filter_impl("-Users-foo-RTK", "rtk", false));
+    }
+
+    #[test]
+    fn test_dir_matches_filter_case_insensitive_windows() {
+        // Uppercase cwd drive letter vs lowercase history folder
+        assert!(dir_matches_filter_impl(
+            "e--PROJECT-XXX-XXX-xxxx",
+            "E--PROJECT-XXX-XXX-xxxx",
+            true
+        ));
+        // And the reverse: lowercase cwd vs uppercase folder
+        assert!(dir_matches_filter_impl(
+            "E--PROJECT-app",
+            "e--PROJECT-app",
+            true
+        ));
+        assert!(!dir_matches_filter_impl("e--PROJECT-app", "e--OTHER", true));
+    }
+
+    #[test]
     fn test_match_project_filter() {
         let encoded = ClaudeProvider::encode_project_path("/Users/foo/Sites/rtk");
         assert!(encoded.contains("rtk"));
         assert!(encoded.contains("Sites"));
+    }
+
+    #[test]
+    fn test_encode_path_with_spaces() {
+        // Even if run on Unix, encoding should replace backslashes to match Claude's behavior
+        assert_eq!(
+            ClaudeProvider::encode_project_path(
+                r"/home/user/projects/[QZX-7K42] - Análise Genérica de Exemplo"
+            ),
+            "-home-user-projects--QZX-7K42----An-lise-Gen-rica-de-Exemplo"
+        );
+    }
+
+    #[test]
+    fn test_discover_sessions_missing_projects_dir_returns_empty() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let missing_projects_dir = temp_home
+            .path()
+            .join(crate::hooks::constants::CLAUDE_DIR)
+            .join("projects");
+
+        let sessions = ClaudeProvider::discover_sessions_in_projects_dir(
+            &missing_projects_dir,
+            None,
+            Some(30),
+        )
+        .unwrap();
+
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_discover_sessions_applies_project_filter() {
+        let projects_dir = tempfile::tempdir().unwrap();
+        let matching_project = projects_dir.path().join("-Users-test-rtk");
+        let other_project = projects_dir.path().join("-Users-test-other");
+        std::fs::create_dir_all(&matching_project).unwrap();
+        std::fs::create_dir_all(&other_project).unwrap();
+        std::fs::write(matching_project.join("matching.jsonl"), "").unwrap();
+        std::fs::write(other_project.join("other.jsonl"), "").unwrap();
+
+        let sessions = ClaudeProvider::discover_sessions_in_projects_dir(
+            projects_dir.path(),
+            Some("rtk"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].file_name().and_then(|name| name.to_str()),
+            Some("matching.jsonl")
+        );
+    }
+
+    #[test]
+    fn test_discover_sessions_project_filter_case_follows_platform() {
+        // The default filter comes from `current_dir()`, whose drive-letter casing
+        // can differ from the folder Claude Code created (#2919): the walk matches
+        // case-insensitively on Windows and exactly elsewhere. Drives the
+        // `cfg!(windows)` wrapper, which the `_impl` tests cannot reach.
+        let projects_dir = tempfile::tempdir().unwrap();
+        for name in ["E--PROJECT-app", "-Users-test-other"] {
+            let dir = projects_dir.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("session.jsonl"), "").unwrap();
+        }
+
+        let sessions = ClaudeProvider::discover_sessions_in_projects_dir(
+            projects_dir.path(),
+            Some("e--project-app"),
+            None,
+        )
+        .unwrap();
+
+        let expected = if cfg!(windows) { 1 } else { 0 };
+        assert_eq!(sessions.len(), expected);
+    }
+
+    #[test]
+    fn test_discover_sessions_existing_non_directory_returns_error() {
+        let projects_file = tempfile::NamedTempFile::new().unwrap();
+
+        let err =
+            ClaudeProvider::discover_sessions_in_projects_dir(projects_file.path(), None, None)
+                .unwrap_err();
+
+        assert!(err.to_string().contains("failed to read"));
     }
 
     #[test]

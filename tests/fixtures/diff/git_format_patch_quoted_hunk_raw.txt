@@ -1,0 +1,25 @@
+From 5874a89c1803e1a900f945fc9ca35023436fe1fc Mon Sep 17 00:00:00 2001
+From: t <a@b.c>
+Date: Mon, 7 Sep 2026 09:02:01 -0400
+Subject: [PATCH] fix f
+
+The old hunk was:
+@@ -1 +1 @@
+-x
++y
+
+and that is why.
+---
+ f | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/f b/f
+index 587be6b..975fbec 100644
+--- a/f
++++ b/f
+@@ -1 +1 @@
+-x
++y
+-- 
+2.54.0.windows.1
+

@@ -1,0 +1,64 @@
+[filters.pulumi-up]
+description = "Compact Pulumi up (apply) output"
+match_command = "^pulumi\\s+up(\\s|$)"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Updating \\(",
+  "^Previewing update",
+  "^View in Browser",
+  "^View Live:",
+  "^Duration:",
+  "^Permalink:",
+  "^\\s*Type\\s+Name\\s+",
+  "^Loading policy packs",
+  "^@ (Previewing update|Updating)",
+  "^More information at:",
+  "^Use `pulumi ",
+  "^\\s+\\+\\s+.*\\bcreating\\s+\\(",
+  "^\\s+~\\s+.*\\bupdating\\s+\\(",
+  "^\\s{4,}at\\s+\\S+\\s*\\(",
+  "^\\s{4,}at\\s+/",
+  "^\\s+at\\s+processTicksAndRejections",
+  "^\\s+promise:\\s+Promise",
+  "^\\s+\\[Circular",
+  "^\\s*<ref\\s+\\*\\d",
+]
+on_empty = "pulumi up: no changes"
+
+[[tests.pulumi-up]]
+name = "strips update header and url banner"
+input = """
+Updating (dev)
+
+View in Browser (Ctrl+O): https://app.pulumi.com/org/my-proj/dev/updates/42
+
+     Type                          Name              Status
+ +   pulumi:pulumi:Stack           my-proj-dev       created
+ +   └─ aws:s3:Bucket              my-bucket         created
+
+Outputs:
+    bucket_name: "my-bucket-abc123"
+
+Resources:
+    + 2 created
+
+Duration: 15s
+"""
+expected = """ +   pulumi:pulumi:Stack           my-proj-dev       created
+ +   └─ aws:s3:Bucket              my-bucket         created
+Outputs:
+    bucket_name: \"my-bucket-abc123\"
+Resources:
+    + 2 created"""
+
+[[tests.pulumi-up]]
+name = "on_empty when all noise stripped"
+input = """
+Updating (dev)
+
+View in Browser (Ctrl+O): https://app.pulumi.com/org/my-proj/dev/updates/42
+
+Duration: 2s
+"""
+expected = "pulumi up: no changes"

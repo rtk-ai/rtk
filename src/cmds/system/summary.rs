@@ -1,36 +1,58 @@
 //! Runs a command and produces a heuristic summary of its output.
 
-use crate::core::stream::exec_capture;
+use crate::core::guard::never_worse;
+use crate::core::stream::exec_capture_unguarded;
 use crate::core::tracking;
+use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::truncate;
 use anyhow::{Context, Result};
 use regex::Regex;
-use std::process::Command;
+
+const MAX_SUMMARY_LIST: usize = CAP_WARNINGS;
+const MAX_SUMMARY_KEYS: usize = CAP_WARNINGS;
 
 /// Run a command and provide a heuristic summary
-pub fn run(command: &str, verbose: u8) -> Result<i32> {
+pub fn run(command: &[String], shell: Option<&str>, verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let command_display = crate::core::shell::display_command(command);
+    let program = crate::core::shell::program_name(command, shell);
 
     if verbose > 0 {
-        eprintln!("Running and summarizing: {}", command);
+        eprintln!("Running and summarizing: {}", command_display);
     }
 
-    let mut cmd = if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.args(["/C", command]);
-        c
-    } else {
-        let mut c = Command::new("sh");
-        c.args(["-c", command]);
-        c
+    // A program that cannot be run is summarized like any other failed run,
+    // carrying the code the shell RTK replaced would have returned.
+    let report_unrunnable = |outcome: crate::core::shell::Unrunnable| {
+        let summary = summarize_output(&outcome.message, &command_display, false);
+        let shown = never_worse(&outcome.message, &summary);
+        println!("{}", shown);
+        timer.track(&command_display, "rtk summary", &outcome.message, shown);
+        outcome.code
     };
-    let result = exec_capture(&mut cmd).context("Failed to execute command")?;
+
+    let result = match crate::core::shell::command_from_args(command, shell)
+        .context("Failed to prepare summary command")?
+    {
+        crate::core::shell::Launch::Ready(mut cmd) => match exec_capture_unguarded(&mut cmd) {
+            Ok(result) => result,
+            Err(error) => {
+                let error = error.context("Failed to execute command");
+                match crate::core::shell::spawn_failure(program, &error) {
+                    Some(outcome) => return Ok(report_unrunnable(outcome)),
+                    None => return Err(error),
+                }
+            }
+        },
+        crate::core::shell::Launch::Unrunnable(outcome) => return Ok(report_unrunnable(outcome)),
+    };
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    let summary = summarize_output(&raw, command, result.success());
-    println!("{}", summary);
-    timer.track(command, "rtk summary", &raw, &summary);
+    let summary = summarize_output(&raw, &command_display, result.success());
+    let shown = never_worse(&raw, &summary);
+    println!("{}", shown);
+    timer.track(&command_display, "rtk summary", &raw, shown);
     Ok(result.exit_code)
 }
 
@@ -131,11 +153,10 @@ fn summarize_tests(output: &str, result: &mut Vec<String>) {
                 failures.push(line.to_string());
             }
         }
-        if lower.contains("skipped") || lower.contains("ignored") {
-            if let Some(n) = extract_number(&lower, "skipped").or(extract_number(&lower, "ignored"))
-            {
-                skipped = n;
-            }
+        if (lower.contains("skipped") || lower.contains("ignored"))
+            && let Some(n) = extract_number(&lower, "skipped").or(extract_number(&lower, "ignored"))
+        {
+            skipped = n;
         }
     }
 
@@ -229,11 +250,11 @@ fn summarize_list(output: &str, result: &mut Vec<String>) {
     let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
     result.push(format!("List ({} items):", lines.len()));
 
-    for line in lines.iter().take(10) {
+    for line in lines.iter().take(MAX_SUMMARY_LIST) {
         result.push(format!("   • {}", truncate(line, 70)));
     }
-    if lines.len() > 10 {
-        result.push(format!("   ... +{} more", lines.len() - 10));
+    if lines.len() > MAX_SUMMARY_LIST {
+        result.push(format!("   ... +{} more", lines.len() - MAX_SUMMARY_LIST));
     }
 }
 
@@ -248,11 +269,14 @@ fn summarize_json(output: &str, result: &mut Vec<String>) {
             }
             serde_json::Value::Object(obj) => {
                 result.push(format!("   Object with {} keys:", obj.len()));
-                for key in obj.keys().take(10) {
+                for key in obj.keys().take(MAX_SUMMARY_KEYS) {
                     result.push(format!("   • {}", key));
                 }
-                if obj.len() > 10 {
-                    result.push(format!("   ... +{} more keys", obj.len() - 10));
+                if obj.len() > MAX_SUMMARY_KEYS {
+                    result.push(format!(
+                        "   ... +{} more keys",
+                        obj.len() - MAX_SUMMARY_KEYS
+                    ));
                 }
             }
             _ => {

@@ -1,0 +1,24 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/home/user/.claude/projects/example-project/00000000-0000-0000-0000-000000000000.jsonl",
+  "cwd": "/home/user/project",
+  "prompt_id": "00000000-0000-0000-0000-000000000000",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "/home/user/project/data_nested.json"
+  },
+  "tool_response": {
+    "type": "text",
+    "file": {
+      "filePath": "/home/user/project/data_nested.json",
+      "content": "{\n  \"config\": {\n    \"server\": {\n      \"host\": \"localhost\",\n      \"port\": 8080,\n      \"tls\": {\n        \"cert\": \"/etc/ssl/a.pem\",\n        \"protocols\": [\n          \"TLSv1.2\",\n          \"TLSv1.3\"\n        ]\n      }\n    },\n    \"features\": {\n      \"auth\": {\n        \"providers\": [\n          {\n            \"name\": \"oauth\",\n            \"scopes\": [\n              \"read\",\n              \"write\"\n            ]\n          },\n          {\n            \"name\": \"apikey\"\n          }\n        ]\n      },\n      \"cache\": {\n        \"ttl\": 300,\n        \"backends\": [\n          {\n            \"kind\": \"redis\",\n            \"url\": \"redis://x:6379\"\n          }\n        ]\n      }\n    },\n    \"limits\": [\n      {\n        \"path\": \"/api\",\n        \"rpm\": 100\n      },\n      {\n        \"path\": \"/admin\",\n        \"rpm\": 10,\n        \"burst\": 3\n      }\n    ]\n  }\n}",
+      "numLines": 51,
+      "startLine": 1,
+      "totalLines": 51
+    }
+  },
+  "tool_use_id": "toolu_01EDxHpScakiwena16EQjmMa",
+  "duration_ms": 2
+}

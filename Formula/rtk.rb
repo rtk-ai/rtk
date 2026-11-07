@@ -7,7 +7,7 @@ class Rtk < Formula
   desc "High-performance CLI proxy to minimize LLM token consumption"
   homepage "https://www.rtk-ai.app"
   version "0.1.0"
-  license "MIT"
+  license all_of: ["Apache-2.0", "BUSL-1.1"]
 
   on_macos do
     on_intel do
@@ -23,12 +23,12 @@ class Rtk < Formula
 
   on_linux do
     on_intel do
-      url "https://github.com/rtk-ai/rtk/releases/download/v#{version}/rtk-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/rtk-ai/rtk/releases/download/v#{version}/rtk-x86_64-unknown-linux-musl.tar.gz"
       sha256 "PLACEHOLDER_SHA256_LINUX_INTEL"
     end
 
     on_arm do
-      url "https://github.com/rtk-ai/rtk/releases/download/v#{version}/rtk-aarch64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/rtk-ai/rtk/releases/download/v#{version}/rtk-aarch64-unknown-linux-musl.tar.gz"
       sha256 "PLACEHOLDER_SHA256_LINUX_ARM"
     end
   end

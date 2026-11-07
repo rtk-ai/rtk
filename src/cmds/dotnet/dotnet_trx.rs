@@ -2,8 +2,8 @@
 
 use crate::binlog::{FailedTest, TestSummary};
 use chrono::{DateTime, FixedOffset};
-use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -253,22 +253,16 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
                             .unwrap_or_else(|| "unknown".to_string());
                     }
                 }
-                b"ErrorInfo" => {
-                    if in_failed_result {
-                        in_error_info = true;
-                    }
+                b"ErrorInfo" if in_failed_result => {
+                    in_error_info = true;
                 }
-                b"Message" => {
-                    if in_failed_result && in_error_info {
-                        capture_field = Some(CaptureField::Message);
-                        message_buf.clear();
-                    }
+                b"Message" if in_failed_result && in_error_info => {
+                    capture_field = Some(CaptureField::Message);
+                    message_buf.clear();
                 }
-                b"StackTrace" => {
-                    if in_failed_result && in_error_info {
-                        capture_field = Some(CaptureField::StackTrace);
-                        stack_buf.clear();
-                    }
+                b"StackTrace" if in_failed_result && in_error_info => {
+                    capture_field = Some(CaptureField::StackTrace);
+                    stack_buf.clear();
                 }
                 _ => {}
             },
@@ -332,34 +326,32 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
                 b"ErrorInfo" => {
                     in_error_info = false;
                 }
-                b"UnitTestResult" => {
-                    if in_failed_result {
-                        let mut details = Vec::new();
+                b"UnitTestResult" if in_failed_result => {
+                    let mut details = Vec::new();
 
-                        let message = message_buf.trim();
-                        if !message.is_empty() {
-                            details.push(message.to_string());
-                        }
-
-                        let stack = stack_buf.trim();
-                        if !stack.is_empty() {
-                            let stack_lines: Vec<&str> = stack.lines().take(3).collect();
-                            if !stack_lines.is_empty() {
-                                details.push(stack_lines.join("\n"));
-                            }
-                        }
-
-                        summary.failed_tests.push(FailedTest {
-                            name: failed_test_name.clone(),
-                            details,
-                        });
-
-                        in_failed_result = false;
-                        in_error_info = false;
-                        capture_field = None;
-                        message_buf.clear();
-                        stack_buf.clear();
+                    let message = message_buf.trim();
+                    if !message.is_empty() {
+                        details.push(message.to_string());
                     }
+
+                    let stack = stack_buf.trim();
+                    if !stack.is_empty() {
+                        let stack_lines: Vec<&str> = stack.lines().take(3).collect();
+                        if !stack_lines.is_empty() {
+                            details.push(stack_lines.join("\n"));
+                        }
+                    }
+
+                    summary.failed_tests.push(FailedTest {
+                        name: failed_test_name.clone(),
+                        details,
+                    });
+
+                    in_failed_result = false;
+                    in_error_info = false;
+                    capture_field = None;
+                    message_buf.clear();
+                    stack_buf.clear();
                 }
                 _ => {}
             },
@@ -394,6 +386,18 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// Force a file's mtime instead of relying on write ordering: filesystem
+    /// mtime granularity (1 s on some CI filesystems, 2 s on FAT) can make two
+    /// files written microseconds apart indistinguishable.
+    fn set_mtime(path: &Path, time: SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open for mtime")
+            .set_modified(time)
+            .expect("set mtime");
+    }
 
     #[test]
     fn test_parse_trx_content_extracts_passed_counts() {
@@ -504,8 +508,9 @@ mod tests {
         let old_trx = testresults_dir.join("old.trx");
         let new_trx = testresults_dir.join("new.trx");
         std::fs::write(&old_trx, "old").expect("write old");
-        std::thread::sleep(Duration::from_millis(5));
+        set_mtime(&old_trx, SystemTime::now() - Duration::from_secs(10));
         std::fs::write(&new_trx, "new").expect("write new");
+        set_mtime(&new_trx, SystemTime::now() + Duration::from_secs(10));
 
         let found = find_recent_trx_in_dir(&testresults_dir).expect("should find newest trx");
         assert_eq!(found, new_trx);
@@ -564,14 +569,17 @@ mod tests {
 
         let trx_old = r#"<?xml version="1.0" encoding="utf-8"?>
 <TestRun><ResultSummary><Counters total="2" executed="2" passed="2" failed="0" /></ResultSummary></TestRun>"#;
-        std::fs::write(trx_dir.join("old.trx"), trx_old).expect("write old trx");
-        std::thread::sleep(Duration::from_millis(5));
+        let old_path = trx_dir.join("old.trx");
+        std::fs::write(&old_path, trx_old).expect("write old trx");
+        set_mtime(&old_path, SystemTime::now() - Duration::from_secs(10));
+
         let since = SystemTime::now();
-        std::thread::sleep(Duration::from_millis(5));
 
         let trx_new = r#"<?xml version="1.0" encoding="utf-8"?>
 <TestRun><ResultSummary><Counters total="3" executed="3" passed="2" failed="1" /></ResultSummary></TestRun>"#;
-        std::fs::write(trx_dir.join("new.trx"), trx_new).expect("write new trx");
+        let new_path = trx_dir.join("new.trx");
+        std::fs::write(&new_path, trx_new).expect("write new trx");
+        set_mtime(&new_path, SystemTime::now() + Duration::from_secs(10));
 
         let summary = parse_trx_files_in_dir_since(&trx_dir, Some(since)).expect("merged summary");
         assert_eq!(summary.total, 3);
