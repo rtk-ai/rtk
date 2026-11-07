@@ -6,6 +6,7 @@ pub mod args_utils;
 pub mod call_context;
 #[cfg(feature = "engine")]
 pub mod classify;
+pub mod cmdline;
 pub mod config;
 pub mod constants;
 pub mod display_helpers;
