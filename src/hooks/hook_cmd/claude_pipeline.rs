@@ -247,7 +247,7 @@ fn runs_rtk(cmd: &str) -> bool {
 }
 
 fn changes_directory(cmd: &str) -> bool {
-    crate::discover::lexer::split_on_operators(cmd, false)
+    crate::discover::lexer::split_on_operators(cmd)
         .iter()
         .any(|segment| {
             segment
@@ -257,7 +257,7 @@ fn changes_directory(cmd: &str) -> bool {
 }
 
 fn sh_can_run(cmd: &str, program_exists: impl Fn(&str) -> bool) -> bool {
-    crate::discover::lexer::split_on_operators(cmd, false)
+    crate::discover::lexer::split_on_operators(cmd)
         .iter()
         .all(|segment| {
             segment
@@ -344,6 +344,24 @@ mod tests {
     }
 
     #[test]
+    fn a_cd_glued_to_its_subshell_stays_a_swap() {
+        assert!(!changes_directory("(cd sub && git log -3)"));
+    }
+
+    #[test]
+    fn a_line_is_cut_at_operators_and_nothing_else() {
+        use crate::discover::lexer::split_on_operators;
+        assert_eq!(
+            split_on_operators(" a && b; c | d || e "),
+            ["a", "b", "c", "d", "e"]
+        );
+        for line in ["a & b", "(a) 2>&1", "a 'b;c'", "a \\; b", "x\ny"] {
+            assert_eq!(split_on_operators(line), [line]);
+        }
+        assert!(split_on_operators(" ; ").is_empty());
+    }
+
+    #[test]
     fn a_command_that_moves_the_shell_is_not_swapped() {
         for cmd in [
             "cd sub && ./run-suite.sh",
@@ -352,6 +370,7 @@ mod tests {
             "pushd sub && ./run-suite.sh",
             "popd || ./run-suite.sh",
             "./run-suite.sh | tee out; cd sub",
+            "# note\ncd sub && git status",
         ] {
             assert!(!decide(cmd, PermissionVerdict::Allow, &[]), "{cmd}");
         }
@@ -371,6 +390,8 @@ mod tests {
             "FOO=1",
             "=x git status",
             "a-b=1 git status",
+            "./run-suite.sh @(a|b)",
+            "${ git status; }",
         ] {
             assert!(!sh_can_run(cmd, only_git), "{cmd}");
         }
@@ -381,6 +402,9 @@ mod tests {
             "FOO=1 ./run-suite.sh",
             "FOO=1 BAR=2 git status",
             "git status | ./run-suite.sh",
+            "./run-suite.sh & wait",
+            "./run-suite.sh & # note",
+            "(./run-suite.sh) 2>&1",
         ] {
             assert!(sh_can_run(cmd, only_git), "{cmd}");
         }
