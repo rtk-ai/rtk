@@ -474,19 +474,24 @@ fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
 }
 
 fn asks_for_usage(stem: &str, args: &[String]) -> bool {
+    use crate::cmds::rust::cargo_cmd::{self, CargoCommand};
+
     // Cargo may put its selector and global options before the subcommand.
     // Resolve aliases too, so `cargo --locked t -- --help` remains libtest help.
-    let cargo = (stem == "cargo")
-        .then(|| crate::cmds::rust::cargo_args::parse(args))
-        .flatten();
-    let first = cargo
-        .as_ref()
-        .map(|c| c.subcommand)
-        .or_else(|| args.first().map(String::as_str));
-    let spelling = help_spelling(stem, first);
+    let cargo = (stem == "cargo").then(|| cargo_cmd::parse(args)).flatten();
+    let first = args.first().map(String::as_str);
+    let mut spelling = help_spelling(stem, first);
+    if let Some(invocation) = &cargo {
+        spelling.past_boundary = matches!(
+            invocation.command,
+            CargoCommand::Test | CargoCommand::Nextest
+        );
+    }
     let takes_value = |kind: TokenKind, name: &str| {
         let cargo_install_version = stem == "cargo"
-            && first == Some("install")
+            && cargo
+                .as_ref()
+                .is_some_and(|c| c.command == CargoCommand::Install)
             && kind == TokenKind::Long
             && name == "version";
         let cargo_global_value = stem == "cargo"

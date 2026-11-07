@@ -9,11 +9,102 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::sync::LazyLock;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CargoCommand {
+    Build,
+    Test,
+    Clippy,
+    Check,
+    Install,
+    Nextest,
+    Fmt,
+}
+
+impl CargoCommand {
+    /// Canonical spelling for classification and display; execution retains the
+    /// user's original arguments, including aliases.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Build => "build",
+            Self::Test => "test",
+            Self::Clippy => "clippy",
+            Self::Check => "check",
+            Self::Install => "install",
+            Self::Nextest => "nextest",
+            Self::Fmt => "fmt",
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct CargoInvocation {
+    pub subcommand_index: usize,
+    pub command: CargoCommand,
+}
+
+/// Shared by shell classification and execution. Only consume documented global
+/// options: an unknown option, missing value, or special operation stays native.
+pub fn parse(args: &[impl AsRef<OsStr>]) -> Option<CargoInvocation> {
+    let mut index = 0;
+    if args.first()?.as_ref().to_str()?.starts_with('+') {
+        if args[0].as_ref().to_str()?.len() == 1 {
+            return None;
+        }
+        index += 1;
+    }
+    loop {
+        let arg = args.get(index)?.as_ref().to_str()?;
+        match arg {
+            "--locked" | "--offline" | "--frozen" | "--quiet" | "--verbose" => {}
+            "--config" | "--color" | "-C" | "-Z" => {
+                index += 1;
+                let value = args.get(index)?.as_ref();
+                // -Zscript changes the grammar: the next positional is a Rust
+                // source file, even when its name happens to be `check`.
+                if arg == "-Z" && value.to_str()?.split('=').next() == Some("script") {
+                    return None;
+                }
+            }
+            _ if arg.starts_with("--config=") || arg.starts_with("--color=") => {
+                if arg.split_once('=')?.1.is_empty() {
+                    return None;
+                }
+            }
+            _ if arg.starts_with("-C") && arg.len() > 2 => {}
+            _ if arg.starts_with("-Z") && arg.len() > 2 => {
+                if arg[2..].split('=').next() == Some("script") {
+                    return None;
+                }
+            }
+            _ if arg.starts_with('-')
+                && arg.len() > 1
+                && arg[1..].bytes().all(|b| matches!(b, b'v' | b'q')) => {}
+            _ => {
+                let command = match arg {
+                    "build" | "b" => CargoCommand::Build,
+                    "check" | "c" => CargoCommand::Check,
+                    "test" | "t" => CargoCommand::Test,
+                    "clippy" => CargoCommand::Clippy,
+                    "install" => CargoCommand::Install,
+                    "nextest" => CargoCommand::Nextest,
+                    "fmt" => CargoCommand::Fmt,
+                    _ => return None,
+                };
+                return Some(CargoInvocation {
+                    subcommand_index: index,
+                    command,
+                });
+            }
+        }
+        index += 1;
+    }
+}
+
 pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
-    let Some(invocation) = super::cargo_args::parse(args) else {
+    let Some(invocation) = parse(args) else {
         return run_passthrough(args, verbose);
     };
     let Some(rest) = args[invocation.subcommand_index + 1..]
@@ -26,14 +117,14 @@ pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
     // Keep the original spelling (including aliases) and all prefix options in
     // their original positions. The canonical name only selects the filter.
     let prefix = &args[..=invocation.subcommand_index];
-    match invocation.subcommand {
-        "build" => run_build(prefix, &rest, verbose),
-        "test" => run_test(prefix, &rest, verbose),
-        "clippy" => run_clippy(prefix, &rest, verbose),
-        "check" => run_check(prefix, &rest, verbose),
-        "install" => run_install(prefix, &rest, verbose),
-        "nextest" => run_nextest(prefix, &rest, verbose),
-        _ => run_passthrough(args, verbose),
+    match invocation.command {
+        CargoCommand::Build => run_build(prefix, &rest, verbose),
+        CargoCommand::Test => run_test(prefix, &rest, verbose),
+        CargoCommand::Clippy => run_clippy(prefix, &rest, verbose),
+        CargoCommand::Check => run_check(prefix, &rest, verbose),
+        CargoCommand::Install => run_install(prefix, &rest, verbose),
+        CargoCommand::Nextest => run_nextest(prefix, &rest, verbose),
+        CargoCommand::Fmt => run_passthrough(args, verbose),
     }
 }
 
@@ -1513,6 +1604,67 @@ mod tests {
     use super::*;
     use crate::core::args_utils::restore_double_dash_with_raw;
 
+    #[test]
+    fn consumes_option_values_and_resolves_aliases() {
+        for (args, index, command) in [
+            (vec!["--config", "check", "t"], 2, CargoCommand::Test),
+            (
+                vec!["+nightly", "-Z", "unstable-options", "-C", "some path", "c"],
+                5,
+                CargoCommand::Check,
+            ),
+            (
+                vec![
+                    "--config=a=1",
+                    "--config",
+                    "b=2",
+                    "--color=never",
+                    "--locked",
+                    "--offline",
+                    "--frozen",
+                    "-vv",
+                    "b",
+                ],
+                8,
+                CargoCommand::Build,
+            ),
+            (
+                vec!["-Zunstable-options", "-Csome path", "-q", "clippy"],
+                3,
+                CargoCommand::Clippy,
+            ),
+        ] {
+            assert_eq!(
+                parse(&args),
+                Some(CargoInvocation {
+                    subcommand_index: index,
+                    command
+                }),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_flags_and_special_operations_stay_native() {
+        for args in [
+            vec!["--config"],
+            vec!["--color="],
+            vec!["--future-option", "check"],
+            vec!["+stable", "--help"],
+            vec!["--version"],
+            vec!["--list"],
+            vec!["--explain", "check"],
+            vec!["-Zscript", "check"],
+            vec!["+nightly", "-Z", "script", "check"],
+            vec!["metadata"],
+            vec!["+", "check"],
+            vec!["--", "check"],
+            vec!["--config", "check"],
+        ] {
+            assert_eq!(parse(&args), None, "{args:?}");
+        }
+    }
     #[test]
     fn test_restore_double_dash_with_separator() {
         // rtk cargo test -- --nocapture → clap gives ["--nocapture"]
