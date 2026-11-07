@@ -83,6 +83,7 @@ impl<'a> Token<'a> {
     /// Whether this short token occupies its whole argument, with neither
     /// cluster members nor an attached value. A separate linked value is fine.
     /// `tokens` must be the complete token list this token came from.
+    #[allow(dead_code)] // Available to tools whose short flags cannot be clustered.
     pub fn is_standalone_short(&self, tokens: &[Token<'_>]) -> bool {
         self.kind == TokenKind::Short
             && self.attached.is_none()
@@ -465,26 +466,30 @@ pub fn tokenize_grammar<'a, T: AsRef<str>>(
     tokenize_scan(args, dialect, takes_value)
 }
 
-/// Groups the mutable scan state threaded through [`tokenize_scan`]'s helper methods
-/// (`push_atomic_flag`/`link_next_value`), so a future piece of shared state means adding one
-/// field instead of a parameter to every helper and every call site.
-struct Scanner<'a, 'p, T> {
+/// Incremental tokenizer. Each call consumes one argument and any separate value it owns.
+/// Callers can change the value grammar between arguments without scanning any argument twice.
+/// Token links and source indices always address the complete invocation.
+pub struct Tokenizer<'a, T> {
     tokens: Vec<Token<'a>>,
     args: &'a [T],
     i: usize,
     dialect: Dialect,
     emitted_dash_dash: bool,
-    takes_value: &'p dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
 }
 
-impl<'a, 'p, T: AsRef<str>> Scanner<'a, 'p, T> {
+impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
     /// Pushes one atomic (non-clustering) flag token — used for `--flag` in every dialect, and
     /// for `-flag`/`/flag` where the dialect says so. `rest` is the flag text with its prefix
     /// already stripped; `prefix` records which one it was. Only the `/flag` spelling is barred
     /// from consuming a separate value: an MSBuild switch attaches its value with `:`
     /// (`/bl:x.binlog`), so `/r` (MSBuild's `restore`) must not swallow the token after it the
     /// way dotnet's own `-r <rid>` does.
-    fn push_atomic_flag(&mut self, rest: &'a str, prefix: FlagPrefix) {
+    fn push_atomic_flag(
+        &mut self,
+        rest: &'a str,
+        prefix: FlagPrefix,
+        takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+    ) {
         let (name, attached) = split_attached(rest, self.dialect);
         let flag_index = self.tokens.len();
         let source_index = self.i;
@@ -496,7 +501,7 @@ impl<'a, 'p, T: AsRef<str>> Scanner<'a, 'p, T> {
 
         if attached.is_none() && prefix != FlagPrefix::Slash {
             // `solo_only` cannot apply here: a Long flag is always the whole argument.
-            if let Some(spec) = (self.takes_value)(TokenKind::Long, name)
+            if let Some(spec) = (takes_value)(TokenKind::Long, name)
                 && spec.attachment != Attachment::AttachedOnly
                 && self.link_next_value(flag_index, self.i, spec)
             {
@@ -534,51 +539,66 @@ impl<'a, 'p, T: AsRef<str>> Scanner<'a, 'p, T> {
     }
 }
 
-/// Core implementation shared by both public entry points.
-fn tokenize_scan<'a, T: AsRef<str>>(
-    args: &'a [T],
-    dialect: Dialect,
-    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
-) -> Vec<Token<'a>> {
-    let mut scanner = Scanner {
-        tokens: Vec::with_capacity(args.len()),
-        args,
-        i: 0,
-        dialect,
-        emitted_dash_dash: false,
-        takes_value,
-    };
+impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
+    pub fn new(args: &'a [T], dialect: Dialect) -> Self {
+        Self {
+            tokens: Vec::with_capacity(args.len()),
+            args,
+            i: 0,
+            dialect,
+            emitted_dash_dash: false,
+        }
+    }
 
-    while scanner.i < scanner.args.len() {
-        let arg = scanner.args[scanner.i].as_ref();
+    pub fn tokens(&self) -> &[Token<'a>] {
+        &self.tokens
+    }
 
-        if scanner.emitted_dash_dash && !scanner.dialect.classifies_past_dash_dash() {
-            scanner.tokens.push(positional(arg, scanner.i));
-            scanner.i += 1;
-            continue;
+    /// Begin the grammar of a forwarded program after its owner's `--`. Existing tokens
+    /// remain intact; a later `--` belongs to the new region and ends its option parsing.
+    pub fn begin_region(&mut self, dialect: Dialect) {
+        self.dialect = dialect;
+        self.emitted_dash_dash = false;
+    }
+
+    /// Append tokens for the next argument (and its value), returning their indices. Supply
+    /// the complete `tokens()` slice to `Token::value`, since links are invocation-wide.
+    pub fn next_argument(
+        &mut self,
+        takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+    ) -> Option<std::ops::Range<usize>> {
+        if self.i >= self.args.len() {
+            return None;
+        }
+        let start = self.tokens.len();
+        let arg = self.args[self.i].as_ref();
+
+        if self.emitted_dash_dash && !self.dialect.classifies_past_dash_dash() {
+            self.tokens.push(positional(arg, self.i));
+            self.i += 1;
+            return Some(start..self.tokens.len());
         }
 
         if arg == "--" {
-            if scanner.emitted_dash_dash {
+            if self.emitted_dash_dash {
                 // A second (or later) literal "--" is never itself the boundary — it's just
                 // ordinary text at this point, under every dialect.
-                scanner.tokens.push(positional(arg, scanner.i));
+                self.tokens.push(positional(arg, self.i));
             } else {
-                scanner
-                    .tokens
-                    .push(token(TokenKind::DashDash, "", scanner.i, FlagPrefix::Dash));
-                scanner.emitted_dash_dash = true;
+                self.tokens
+                    .push(token(TokenKind::DashDash, "", self.i, FlagPrefix::Dash));
+                self.emitted_dash_dash = true;
             }
-            scanner.i += 1;
-            continue;
+            self.i += 1;
+            return Some(start..self.tokens.len());
         }
 
         if let Some(rest) = arg.strip_prefix("--") {
-            scanner.push_atomic_flag(rest, FlagPrefix::DashDash);
-            continue;
+            self.push_atomic_flag(rest, FlagPrefix::DashDash, takes_value);
+            return Some(start..self.tokens.len());
         }
 
-        if scanner.dialect.slash_flags
+        if self.dialect.slash_flags
             && let Some(rest) = arg.strip_prefix('/')
         {
             // A real MSBuild switch name never contains another '/' -- without this guard,
@@ -587,60 +607,56 @@ fn tokenize_scan<'a, T: AsRef<str>>(
             // genuine switch by structure alone; this pure function has no I/O to resolve it
             // the way real MSBuild does (a filesystem check), but the impact is narrow --
             // only the loose flag lookup ([`has_flag`]) is affected.
-            let (name_part, _) = split_attached(rest, scanner.dialect);
+            let (name_part, _) = split_attached(rest, self.dialect);
             if !rest.is_empty() && !name_part.contains('/') {
-                scanner.push_atomic_flag(rest, FlagPrefix::Slash);
-                continue;
+                self.push_atomic_flag(rest, FlagPrefix::Slash, takes_value);
+                return Some(start..self.tokens.len());
             }
         }
 
         if arg.len() > 1 && arg.starts_with('-') {
-            if scanner.dialect.single_dash_is_atomic() {
+            if self.dialect.single_dash_is_atomic() {
                 // Under `AtomicAliasingLong` the single-dash spelling *is* the `--` flag, so it
                 // has to answer to `has_double_dash_flag` as well.
-                let prefix = match scanner.dialect.single_dash {
+                let prefix = match self.dialect.single_dash {
                     SingleDash::AtomicAliasingLong => FlagPrefix::DashDash,
                     SingleDash::Cluster | SingleDash::Atomic => FlagPrefix::Dash,
                 };
-                scanner.push_atomic_flag(&arg[1..], prefix);
-                continue;
+                self.push_atomic_flag(&arg[1..], prefix, takes_value);
+                return Some(start..self.tokens.len());
             }
 
             let cluster = &arg[1..];
 
-            if scanner.dialect.numeric_shortcut && is_digit_run(cluster) {
-                scanner.tokens.push(token(
-                    TokenKind::Short,
-                    cluster,
-                    scanner.i,
-                    FlagPrefix::Dash,
-                ));
-                scanner.i += 1;
-                continue;
+            if self.dialect.numeric_shortcut && is_digit_run(cluster) {
+                self.tokens
+                    .push(token(TokenKind::Short, cluster, self.i, FlagPrefix::Dash));
+                self.i += 1;
+                return Some(start..self.tokens.len());
             }
 
             let mut consumed_next = false;
-            let source_index = scanner.i;
+            let source_index = self.i;
 
             for (offset, ch) in cluster.char_indices() {
                 let char_len = ch.len_utf8();
                 let char_text = &cluster[offset..offset + char_len];
-                let flag_index = scanner.tokens.len();
-                scanner.tokens.push(token(
+                let flag_index = self.tokens.len();
+                self.tokens.push(token(
                     TokenKind::Short,
                     char_text,
                     source_index,
                     FlagPrefix::Dash,
                 ));
 
-                if let Some(spec) = (scanner.takes_value)(TokenKind::Short, char_text) {
+                if let Some(spec) = (takes_value)(TokenKind::Short, char_text) {
                     let remainder = &cluster[offset + char_len..];
                     if !remainder.is_empty() {
                         // Clap's parse_short_arg strips exactly one '=' for a value-taking
                         // option; a boolean flag does not claim the rest of its cluster.
                         // https://github.com/clap-rs/clap/blob/v4.6.7/clap_builder/src/parser/parser.rs#L969-L987
-                        scanner.tokens[flag_index].attached =
-                            Some(if scanner.dialect.short_value_equals {
+                        self.tokens[flag_index].attached =
+                            Some(if self.dialect.short_value_equals {
                                 remainder.strip_prefix('=').unwrap_or(remainder)
                             } else {
                                 remainder
@@ -656,22 +672,32 @@ fn tokenize_scan<'a, T: AsRef<str>>(
                         };
                         if takes_separate {
                             consumed_next =
-                                scanner.link_next_value(flag_index, source_index + 1, spec);
+                                self.link_next_value(flag_index, source_index + 1, spec);
                         }
                     }
                     break;
                 }
             }
 
-            scanner.i += if consumed_next { 2 } else { 1 };
-            continue;
+            self.i += if consumed_next { 2 } else { 1 };
+            return Some(start..self.tokens.len());
         }
 
-        scanner.tokens.push(positional(arg, scanner.i));
-        scanner.i += 1;
+        self.tokens.push(positional(arg, self.i));
+        self.i += 1;
+        Some(start..self.tokens.len())
     }
+}
 
-    scanner.tokens
+/// Core implementation shared by both batch entry points.
+fn tokenize_scan<'a, T: AsRef<str>>(
+    args: &'a [T],
+    dialect: Dialect,
+    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+) -> Vec<Token<'a>> {
+    let mut tokenizer = Tokenizer::new(args, dialect);
+    while tokenizer.next_argument(takes_value).is_some() {}
+    tokenizer.tokens
 }
 
 /// Splits `s` into `(name, attached_value)` on the first separator allowed by the dialect's

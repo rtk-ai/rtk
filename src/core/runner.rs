@@ -474,21 +474,28 @@ fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
 }
 
 fn asks_for_usage(stem: &str, args: &[String]) -> bool {
-    use crate::cmds::rust::cargo_cmd::{self, CargoInvocation};
+    use crate::cmds::rust::cargo_cmd::{self, CargoCommand, CargoInvocation};
 
     // Standalone callers use Cargo's prepared metadata too. The Cargo execution
     // path handles help before entering this runner, so it does not parse twice.
     if stem == "cargo"
         && let Some(invocation) = CargoInvocation::parse(args)
     {
-        return invocation.requests_help();
+        return invocation.help()
+            || invocation.unstable_help()
+            || match invocation.command() {
+                CargoCommand::Clippy(options) => options.version(),
+                CargoCommand::Test(options) => options.harness().help(),
+                CargoCommand::Nextest(options) => options.version() || options.harness().help(),
+                _ => false,
+            };
     }
     let first = args.first().map(String::as_str);
     let spelling = help_spelling(stem, first);
     let takes_value = |kind: TokenKind, name: &str| {
-        // Reuse Cargo's arities for unsupported commands too. --version takes
-        // a value only for install; otherwise it requests the version page.
-        if stem == "cargo" && (name != "version" || first == Some("install")) {
+        // Supported commands use their prepared semantics above. For unknown
+        // invocations we only know Cargo's global arities, not a command schema.
+        if stem == "cargo" {
             return cargo_cmd::option_value(kind, name);
         }
         let git_message = stem == "git"
@@ -1811,6 +1818,14 @@ mod requests_help_tests {
                         let mut argv: Vec<String> = base.iter().map(|s| s.to_string()).collect();
                         argv.insert(at, meta.to_string());
                         checked += 1;
+                        let expected = if *tool == "cargo"
+                            && meta == "--version"
+                            && argv.first().is_some_and(|a| a == "build")
+                        {
+                            false
+                        } else {
+                            expected
+                        };
                         assert_eq!(requests_help_args(tool, &argv), expected, "{tool} {argv:?}");
 
                         // The same tokens past the boundary are operands, never a request.
@@ -1877,8 +1892,8 @@ mod requests_help_tests {
         ));
         assert!(!asks("cargo", &["install", "ripgrep", "--version=1.2.3"]));
         assert!(
-            asks("cargo", &["install", "--version"]),
-            "alone it still asks"
+            !asks("cargo", &["install", "--version"]),
+            "a missing crate version is not a version request"
         );
         assert!(asks("cargo", &["build", "--help=never"]));
         assert!(asks("prettier", &["--help=x"]));

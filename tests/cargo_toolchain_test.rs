@@ -226,3 +226,48 @@ exit 101
         assert!(text.contains("Checking demo"), "{args:?}: {text}");
     }
 }
+
+#[test]
+fn parsed_information_modes_are_interpreted_by_command_runners() {
+    let dir = common::tempdir();
+    let cargo = dir.path().join("cargo");
+    let page = "Requested information: this is neither a build diagnostic nor a test result.\nEvery line of this output must be preserved exactly by the command runner.\n";
+    fs::write(&cargo, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CARGO_ARGV_FILE\"\nprintf '%s' '{page}'\nexit 37\n")).unwrap();
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(std::iter::once(dir.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    let argv_file = dir.path().join("argv");
+    for args in [
+        vec!["check", "--unit-graph"],
+        vec!["build", "-Zhelp"],
+        vec!["clippy", "--version"],
+        vec!["clippy", "-V"],
+        vec!["clippy", "--explain", "clippy::needless_return"],
+        vec!["install", "--list"],
+        vec!["install", "--message-format=json"],
+        vec!["nextest", "list"],
+        vec!["nextest", "show-config"],
+        vec!["nextest", "run", "--message-format=libtest-json"],
+        vec!["nextest", "run", "--cargo-message-format=json"],
+        vec!["test", "--", "--list"],
+        vec!["test", "--", "--format=json"],
+        vec!["test", "--", "--help"],
+    ] {
+        let output = common::rtk_command()
+            .arg("cargo")
+            .args(&args)
+            .env("PATH", &path)
+            .env("CARGO_ARGV_FILE", &argv_file)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(37), "{args:?}: {output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), page, "{args:?}");
+        assert_eq!(
+            fs::read_to_string(&argv_file).unwrap(),
+            format!("{}\n", args.join("\n")),
+            "{args:?}"
+        );
+    }
+}
