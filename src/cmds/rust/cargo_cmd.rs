@@ -71,28 +71,59 @@ struct FilterMetadata {
     requests_help: bool,
 }
 
-/// Describe only value-taking options needed by RTK's routing and metadata:
-///
-/// - `--config`, `--color`, `-C`, `-Z`: skip their values when locating the command;
-/// - `--message-format`: select human or JSON output handling;
-/// - `--version`: distinguish `cargo install`'s crate version from a version request.
-///
-/// Other command-specific options stay opaque; this is not Cargo's full schema.
-/// Command discovery declines unknown prefix options rather than guessing their arity.
-///
-/// `Some(ValueSpec::value())` tells the tokenizer to consume one value, either
-/// attached (`--config=file`, `-Zflag`) or in the next argument (`--config file`),
-/// and associate it with the option. `None` supplies no value-consumption rule.
-/// The tokenizer handles the syntax; Cargo validates the values.
+/// Only option roles needed for command discovery and filter metadata. Ordinary
+/// globals are grouped because RTK only skips them; Cargo validates their values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CargoOption {
+    GlobalFlag,
+    GlobalValue,
+    Unstable,
+    MessageFormat,
+    Version,
+    Help,
+}
+
+impl CargoOption {
+    /// One definition of recognized spellings, shared by tokenization and token
+    /// interpretation. Unknown options remain opaque after the command; before
+    /// it, discovery declines rather than guessing their arity.
+    /// https://doc.rust-lang.org/cargo/commands/cargo.html#options
+    fn from_name(kind: TokenKind, name: &str) -> Option<Self> {
+        match (kind, name) {
+            (TokenKind::Long, "locked" | "offline" | "frozen" | "quiet" | "verbose")
+            | (TokenKind::Short, "q" | "v") => Some(Self::GlobalFlag),
+            (TokenKind::Long, "config" | "color") | (TokenKind::Short, "C") => {
+                Some(Self::GlobalValue)
+            }
+            (TokenKind::Short, "Z") => Some(Self::Unstable),
+            (TokenKind::Long, "message-format") => Some(Self::MessageFormat),
+            (TokenKind::Long, "version") => Some(Self::Version),
+            (TokenKind::Long, "help" | "?" | "h") | (TokenKind::Short, "h") => Some(Self::Help),
+            _ => None,
+        }
+    }
+
+    /// Link values only where RTK needs to skip them to find the command or
+    /// interpret format/help metadata. This is not Cargo's full option schema.
+    /// `ValueSpec::value()` consumes an attached or following value and links it
+    /// to the option; `None` supplies no value-consumption rule.
+    fn value_spec(self) -> Option<ValueSpec> {
+        match self {
+            Self::GlobalValue | Self::Unstable | Self::MessageFormat | Self::Version => {
+                Some(ValueSpec::value())
+            }
+            Self::GlobalFlag | Self::Help => None,
+        }
+    }
+
+    fn allowed_before_command(self) -> bool {
+        matches!(self, Self::GlobalFlag | Self::GlobalValue | Self::Unstable)
+    }
+}
+
+/// Adapt Cargo's option definitions to the shared tokenizer's value handler.
 pub(crate) fn option_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    matches!(
-        (kind, name),
-        (
-            TokenKind::Long,
-            "config" | "color" | "message-format" | "version"
-        ) | (TokenKind::Short, "C" | "Z")
-    )
-    .then(ValueSpec::value)
+    CargoOption::from_name(kind, name).and_then(CargoOption::value_spec)
 }
 
 impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
@@ -167,25 +198,19 @@ fn find_command<'a>(
             // https://rust-lang.github.io/rustup/overrides.html#toolchain-override-shorthand
             (TokenKind::Positional, name) if token.source_index == 0 && name.starts_with('+') => {}
             (TokenKind::Positional, _) => break token,
-            // Only prefix options need recognition: unknown arities could
-            // make an option value look like the command.
-            // https://doc.rust-lang.org/cargo/commands/cargo.html#common-options
-            (
-                TokenKind::Long,
-                "config" | "color" | "locked" | "offline" | "frozen" | "quiet" | "verbose",
-            )
-            | (TokenKind::Short, "C" | "v" | "q") => {}
-            (TokenKind::Short, "Z") => {
-                // Script mode changes command interpretation; leave it native.
-                // https://doc.rust-lang.org/cargo/reference/unstable.html#script
-                if token
-                    .value(all_tokens)
-                    .is_some_and(|v| v.trim_start_matches('=').split('=').next() == Some("script"))
-                {
-                    return None;
+            _ => match CargoOption::from_name(token.kind, token.text) {
+                Some(CargoOption::Unstable) => {
+                    // Script mode changes command interpretation; leave it native.
+                    // https://doc.rust-lang.org/cargo/reference/unstable.html#script
+                    if token.value(all_tokens).is_some_and(|v| {
+                        v.trim_start_matches('=').split('=').next() == Some("script")
+                    }) {
+                        return None;
+                    }
                 }
-            }
-            _ => return None,
+                Some(option) if option.allowed_before_command() => {}
+                _ => return None,
+            },
         }
     };
     // Canonical names have one source; aliases are separate.
@@ -219,19 +244,20 @@ fn read_filter_metadata<'a>(
             requests_help |= is_help_argument(token.text);
             continue;
         }
-        let value = token.value(all_tokens);
-        match (token.kind, token.text) {
-            (TokenKind::DashDash, _) => {
-                // Only libtest/nextest interpret the tail as test arguments.
-                // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
-                // https://nexte.st/docs/running/
-                if !matches!(command, CargoCommand::Test | CargoCommand::Nextest) {
-                    break;
-                }
-                forwarded = true;
+        if token.kind == TokenKind::DashDash {
+            // Cargo options end here. Only inspect forwarded test arguments for
+            // help, so the test-output filter cannot compact the help page.
+            // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
+            // https://nexte.st/docs/running/
+            if !matches!(command, CargoCommand::Test | CargoCommand::Nextest) {
+                break;
             }
-            (TokenKind::Long, "message-format") => {
-                if let Some(value) = value {
+            forwarded = true;
+            continue;
+        }
+        match CargoOption::from_name(token.kind, token.text) {
+            Some(CargoOption::MessageFormat) => {
+                if let Some(value) = token.value(all_tokens) {
                     message_format = if value.contains("json") {
                         MessageFormat::Json
                     } else {
@@ -241,10 +267,11 @@ fn read_filter_metadata<'a>(
             }
             // install --version takes a crate version, not a help request.
             // https://doc.rust-lang.org/cargo/commands/cargo-install.html#install-options
-            (TokenKind::Long, "version") if command == CargoCommand::Install && value.is_some() => {
-            }
-            (TokenKind::Long, name) if is_help_option_name(name) => requests_help = true,
-            (TokenKind::Short, "h") if token.is_standalone_short(all_tokens) => {
+            Some(CargoOption::Version)
+                if command == CargoCommand::Install && token.value(all_tokens).is_some() => {}
+            Some(CargoOption::Help | CargoOption::Version)
+                if token.kind != TokenKind::Short || token.is_standalone_short(all_tokens) =>
+            {
                 requests_help = true
             }
             _ => {}
@@ -256,17 +283,16 @@ fn read_filter_metadata<'a>(
     }
 }
 
-fn is_help_option_name(name: &str) -> bool {
-    matches!(name, "help" | "version" | "?" | "h")
-}
-
 // Past -- the POSIX tokenizer emits opaque positionals, so forwarded test
 // arguments retain their spelling in Token::text rather than option names.
 fn is_help_argument(arg: &str) -> bool {
     arg == "-h"
-        || arg
-            .strip_prefix("--")
-            .is_some_and(|s| is_help_option_name(s.split('=').next().unwrap_or_default()))
+        || arg.strip_prefix("--").is_some_and(|s| {
+            matches!(
+                CargoOption::from_name(TokenKind::Long, s.split('=').next().unwrap_or_default()),
+                Some(CargoOption::Help | CargoOption::Version)
+            )
+        })
 }
 
 pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
@@ -1773,7 +1799,17 @@ mod tests {
 
     #[test]
     fn only_the_prefix_needs_option_recognition() {
-        assert!(CargoInvocation::parse(&["--future-option", "check"]).is_none());
+        for option in [
+            "--future-option",
+            "--message-format=json",
+            "--help",
+            "--version",
+        ] {
+            assert!(
+                CargoInvocation::parse(&[option, "check"]).is_none(),
+                "{option}"
+            );
+        }
         let args = [
             "check",
             "--future-option",
@@ -1816,6 +1852,11 @@ mod tests {
             (vec!["install", "ripgrep", "--version", "1.2.3"], false),
             (vec!["install", "ripgrep", "--version=1.2.3"], false),
             (vec!["build", "--", "--help"], false),
+            (vec!["install", "--", "--version"], false),
+            // Forwarded help bypasses the filter; Cargo's value rules do not
+            // apply to test-runner arguments after the boundary.
+            (vec!["test", "--", "--config", "--help"], true),
+            (vec!["nextest", "run", "--", "--help"], true),
             (vec!["test", "--", "--", "--help"], false),
         ] {
             assert_eq!(
