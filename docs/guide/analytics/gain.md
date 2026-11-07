@@ -307,7 +307,9 @@ The two sections are never merged because the data quality differs:
 - **SQLITE (exact)**: reads go through `rtk recall <hash>`, the only access path, so the count is exact.
 - **TEE (approximate)**: in legacy [tee mode](../getting-started/configuration.md#recall-system), reads are shell commands (`tail`, `cat`, `grep`, …) observed by the rewrite hook before execution. Editor or assistant file-tool reads are invisible, denied commands are not counted, and the per-file dedup window is finite — so the `≥` rate is approximate, not exact. A high rate is still a reliable signal that the cap is too aggressive.
 
-Stats survive entry eviction and retention cleanup: calibration data is kept even after the underlying outputs are purged.
+Stats survive output-entry eviction and retention cleanup. Separately, statistics are capped at 500 `(filter, mode)` rows across both modes so dynamic command names cannot grow the database indefinitely. When a new row exceeds this limit, RTK drops the row with the fewest elisions plus recalls (oldest insertion breaks ties), keeping the newly added row. Existing oversized stores are trimmed when opened.
+
+Counters for retained rows continue accumulating, but an evicted row's history is discarded, not added to another filter. If that filter appears again its counters restart, so these are bounded calibration statistics, not lifetime totals. A recall of an older output can therefore have no retained matching elision.
 
 ## Troubleshooting
 
