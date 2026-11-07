@@ -55,6 +55,7 @@ fn sample_invocation(documented: &str) -> Option<String> {
         "diff" => "diff a b".to_string(),
         "aws" => "aws sts get-caller-identity".to_string(),
         "curl" => "curl https://example.com".to_string(),
+        "gcc" | "g++" | "clang" | "clang++" => format!("{documented} -c main.c"),
         other => other.to_string(),
     };
     Some(cmd)

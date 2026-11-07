@@ -121,6 +121,7 @@ listing into `head`, `tail`, or `cat`.
 | Command | What changes |
 |---------|--------------|
 | `make` | Errors and warnings highlighted, noise stripped |
+| `gcc`, `g++`, `clang`, `clang++` | Diagnostics grouped by file with their notes, source snippets stripped; `-E`/`-M`/`-MM` passed through |
 
 ## Files and Search
 
