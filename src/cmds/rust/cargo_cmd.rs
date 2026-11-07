@@ -113,7 +113,7 @@ impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
             .copied()
             .filter(|t| !matches!(t.kind, TokenKind::Positional) || t.linked.is_none());
         let (command, command_args_start) = find_command(&mut remaining, &tokens)?;
-        let metadata = read_filter_metadata(command, remaining, &tokens, &words);
+        let metadata = read_filter_metadata(command, remaining, &tokens);
         Some(Self {
             args,
             command_args: &args[command_args_start..],
@@ -205,7 +205,6 @@ fn read_filter_metadata<'a>(
     command: CargoCommand,
     remaining: impl Iterator<Item = Token<'a>>,
     all_tokens: &[Token<'a>],
-    words: &[impl AsRef<str>],
 ) -> FilterMetadata {
     let mut message_format = MessageFormat::Human;
     let mut requests_help = false;
@@ -244,7 +243,10 @@ fn read_filter_metadata<'a>(
             // https://doc.rust-lang.org/cargo/commands/cargo-install.html#install-options
             (TokenKind::Long, "version") if command == CargoCommand::Install && value.is_some() => {
             }
-            _ if is_help_argument(words[token.source_index].as_ref()) => requests_help = true,
+            (TokenKind::Long, name) if is_help_option_name(name) => requests_help = true,
+            (TokenKind::Short, "h") if token.is_standalone_short(all_tokens) => {
+                requests_help = true
+            }
             _ => {}
         }
     }
@@ -254,12 +256,17 @@ fn read_filter_metadata<'a>(
     }
 }
 
+fn is_help_option_name(name: &str) -> bool {
+    matches!(name, "help" | "version" | "?" | "h")
+}
+
+// Past -- the POSIX tokenizer emits opaque positionals, so forwarded test
+// arguments retain their spelling in Token::text rather than option names.
 fn is_help_argument(arg: &str) -> bool {
     arg == "-h"
-        || matches!(
-            arg.split('=').next(),
-            Some("--help" | "--version" | "--?" | "--h")
-        )
+        || arg
+            .strip_prefix("--")
+            .is_some_and(|s| is_help_option_name(s.split('=').next().unwrap_or_default()))
 }
 
 pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
@@ -1798,6 +1805,12 @@ mod tests {
         for (args, expected) in [
             (vec!["--locked", "t", "--", "--help"], true),
             (vec!["check", "--help"], true),
+            (vec!["check", "-h"], true),
+            (vec!["check", "--help=never"], true),
+            (vec!["check", "--h"], true),
+            (vec!["check", "-vh"], false),
+            (vec!["check", "-hh"], false),
+            (vec!["check", "-h=value"], false),
             (vec!["install", "--version"], true),
             (vec!["check", "--config", "--help"], false),
             (vec!["install", "ripgrep", "--version", "1.2.3"], false),

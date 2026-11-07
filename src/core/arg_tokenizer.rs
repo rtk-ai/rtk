@@ -80,6 +80,20 @@ impl<'a> Token<'a> {
         })
     }
 
+    /// Whether this short token occupies its whole argument, with neither
+    /// cluster members nor an attached value. A separate linked value is fine.
+    /// `tokens` must be the complete token list this token came from.
+    pub fn is_standalone_short(&self, tokens: &[Token<'_>]) -> bool {
+        self.kind == TokenKind::Short
+            && self.attached.is_none()
+            && tokens
+                .iter()
+                .filter(|t| t.source_index == self.source_index)
+                .take(2)
+                .count()
+                == 1
+    }
+
     /// True for a genuine free-standing positional: `Positional` kind, not itself consumed as
     /// some preceding flag's separate-token value (`Token::linked`).
     pub fn is_free_positional(&self) -> bool {
@@ -653,6 +667,34 @@ mod tests {
 
     fn owned(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn standalone_short_flags_are_distinct_from_clusters_and_values() {
+        for (args, expected) in [
+            (vec!["-h"], true),
+            (vec!["-vh"], false),
+            (vec!["-hh"], false),
+            (vec!["-h=value"], false),
+        ] {
+            let tokens = tokenize(&args);
+            for token in tokens
+                .iter()
+                .filter(|t| t.kind == TokenKind::Short && t.text == "h")
+            {
+                assert_eq!(token.is_standalone_short(&tokens), expected, "{args:?}");
+            }
+        }
+        let args = ["-C", "some path"];
+        let tokens = tokenize_grammar(
+            &args,
+            &|kind, name| (kind == TokenKind::Short && name == "C").then(ValueSpec::value),
+            Dialect::Posix,
+        );
+        assert!(tokens[0].is_standalone_short(&tokens));
+        assert!(!tokens[1].is_standalone_short(&tokens));
+        let tokens = tokenize(&["--help", "help"]);
+        assert!(tokens.iter().all(|t| !t.is_standalone_short(&tokens)));
     }
 
     #[test]
