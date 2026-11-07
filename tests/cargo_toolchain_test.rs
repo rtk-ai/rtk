@@ -38,6 +38,7 @@ fn toolchain_rewrites_preserve_selector_and_arguments() {
 fn global_options_and_aliases_rewrite_without_changing_shell_text() {
     for command in [
         "cargo --locked check",
+        "cargo --config=-- check",
         // The command is identifiable even when Cargo will reject a value.
         "cargo + check",
         "cargo --color= check",
@@ -78,6 +79,10 @@ fn global_options_and_aliases_rewrite_without_changing_shell_text() {
     }
     for command in [
         "cargo --config",
+        "cargo --config -- check",
+        "cargo --color -- check",
+        "cargo -C -- check",
+        "cargo -Z -- check",
         "cargo --color",
         "cargo --config check",
         "cargo -C check",

@@ -81,7 +81,9 @@ pub(crate) fn option_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
             "config" | "color" | "message-format" | "version"
         ) | (TokenKind::Short, "C" | "Z")
     )
-    .then(|| ValueSpec::value().claiming_dash_dash())
+    // A separate -- ends options, even when the preceding option lacks a
+    // value. Literal -- values must be attached, e.g. --config=--.
+    .then(ValueSpec::value)
 }
 
 impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
@@ -1704,6 +1706,53 @@ mod tests {
             .chain(args.iter().map(OsString::from))
             .collect();
         CargoInvocation::parse(&argv).unwrap().message_format() == MessageFormat::Json
+    }
+
+    #[test]
+    fn standalone_dashdash_is_not_an_option_value() {
+        for option in ["--config", "--color", "-C", "-Z"] {
+            assert!(
+                CargoInvocation::parse(&[option, "--", "check"]).is_none(),
+                "{option}"
+            );
+        }
+        for option in [
+            "--config",
+            "--color",
+            "--message-format",
+            "--version",
+            "-C",
+            "-Z",
+        ] {
+            let args = [option, "--", "check"];
+            let tokens = arg_tokenizer::tokenize_grammar(&args, &option_value, Dialect::Posix);
+            assert_eq!(tokens[0].value(&tokens), None, "{option}");
+            assert_eq!(tokens[1].kind, TokenKind::DashDash, "{option}");
+        }
+        for args in [
+            vec!["check", "--config", "--", "--message-format=json"],
+            vec!["check", "--message-format", "--", "--message-format=json"],
+        ] {
+            assert_eq!(
+                CargoInvocation::parse(&args).unwrap().message_format(),
+                MessageFormat::Human,
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn attached_dashdash_remains_an_option_value() {
+        for option in ["--config=--", "--color=--", "-C--", "-Z--"] {
+            let args = [option, "check"];
+            let invocation =
+                CargoInvocation::parse(&args).expect("attached values do not end options");
+            assert_eq!(invocation.command(), CargoCommand::Check);
+            assert_eq!(
+                invocation.to_command().get_args().collect::<Vec<_>>(),
+                args.iter().map(OsStr::new).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
