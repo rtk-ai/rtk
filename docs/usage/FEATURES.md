@@ -188,6 +188,8 @@ rtk find [args...]
 
 Supports both RTK syntax and native `find` syntax (`-name`, `-type`, etc.).
 
+`rtk find '*.rs' src` keeps the RTK syntax: the first argument is a pattern only when it contains `*` or `?`. Any other positional is a `find` path, whether it exists or not, so `rtk find stale.log -delete` targets that one file. Search for a literal name with `rtk find . -name README.md` or `rtk find src -name README.md`. Pass a file name that contains `*` or `?` with a `./` prefix (`rtk find ./file*.log`).
+
 **Before / After:**
 ```
 # find . -name "*.rs" (30 lines)            # rtk find "*.rs" . (8 lines)
