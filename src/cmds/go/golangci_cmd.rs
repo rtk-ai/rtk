@@ -11,7 +11,7 @@ use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 
 fn is_subcommand(name: &str) -> bool {
     matches!(
@@ -103,14 +103,14 @@ fn run_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct RunInvocation {
-    global_args: Vec<String>,
-    run_args: Vec<String>,
+pub(super) struct RunInvocation<T = String> {
+    global_args: Vec<T>,
+    run_args: Vec<T>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Invocation {
-    FilteredRun(RunInvocation),
+pub(super) enum Invocation<T = String> {
+    FilteredRun(RunInvocation<T>),
     Passthrough,
 }
 
@@ -245,10 +245,28 @@ fn run_passthrough(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 fn classify_invocation(args: &[String]) -> Invocation {
-    match find_subcommand_index(args) {
-        Some(idx) if args[idx] == "run" => Invocation::FilteredRun(RunInvocation {
+    classify_args(args, false)
+}
+
+/// The Go wrapper also accepts package arguments without an explicit run subcommand.
+pub(super) fn classify_go_tool_invocation(args: &[OsString]) -> Invocation<OsString> {
+    classify_args(args, true)
+}
+
+fn classify_args<T: AsRef<OsStr> + Clone>(args: &[T], implicit_run: bool) -> Invocation<T> {
+    // Parse a text view, but slice the original argv so non-UTF-8 paths survive execution.
+    let text_args: Vec<_> = args
+        .iter()
+        .map(|arg| arg.as_ref().to_string_lossy())
+        .collect();
+    match find_subcommand_index(&text_args) {
+        Some(idx) if text_args[idx] == "run" => Invocation::FilteredRun(RunInvocation {
             global_args: args[..idx].to_vec(),
             run_args: args[idx + 1..].to_vec(),
+        }),
+        None if implicit_run => Invocation::FilteredRun(RunInvocation {
+            global_args: Vec::new(),
+            run_args: args.to_vec(),
         }),
         _ => Invocation::Passthrough,
     }
@@ -257,7 +275,7 @@ fn classify_invocation(args: &[String]) -> Invocation {
 /// Finds the index in `args` of the first non-flag token, stopping (and returning `None`)
 /// entirely at `--` or at a non-flag token that isn't a recognized subcommand — mirroring
 /// golangci-lint's own arg parsing just enough to locate `run`, not fully replicate it.
-fn find_subcommand_index(args: &[String]) -> Option<usize> {
+fn find_subcommand_index<T: AsRef<str>>(args: &[T]) -> Option<usize> {
     let tokens = arg_tokenizer::tokenize_grammar(args, &global_takes_value, Dialect::Posix);
 
     for token in &tokens {
@@ -276,16 +294,24 @@ fn find_subcommand_index(args: &[String]) -> Option<usize> {
     None
 }
 
-fn build_filtered_args(invocation: &RunInvocation, version: u32) -> Vec<String> {
+pub(super) fn build_filtered_args<T>(invocation: &RunInvocation<T>, version: u32) -> Vec<T>
+where
+    T: AsRef<OsStr> + Clone + From<&'static str>,
+{
     let mut args = invocation.global_args.clone();
-    args.push("run".to_string());
+    args.push("run".into());
 
-    if !has_output_flag(&invocation.run_args) {
+    let run_text: Vec<_> = invocation
+        .run_args
+        .iter()
+        .map(|arg| arg.as_ref().to_string_lossy())
+        .collect();
+    if !has_output_flag(&run_text) {
         if version >= 2 {
-            args.push("--output.json.path".to_string());
-            args.push("stdout".to_string());
+            args.push("--output.json.path".into());
+            args.push("stdout".into());
         } else {
-            args.push("--out-format=json".to_string());
+            args.push("--out-format=json".into());
         }
     }
 
@@ -315,7 +341,7 @@ const OUTPUT_PATH_FLAGS: &[&str] = &[
 /// interleave and the json parse would choke on whichever landed first. A *file* sink for some
 /// other format takes nothing away from stdout, so RTK still injects there or it is left with
 /// nothing to parse.
-fn has_output_flag(args: &[String]) -> bool {
+fn has_output_flag<T: AsRef<str>>(args: &[T]) -> bool {
     let tokens = arg_tokenizer::tokenize_grammar(args, &run_takes_value, Dialect::Posix);
     tokens.iter().any(|t| {
         if t.kind != TokenKind::Long {
@@ -688,7 +714,7 @@ mod tests {
 
     #[test]
     fn test_build_filtered_args_does_not_duplicate_run() {
-        let invocation = RunInvocation {
+        let invocation: RunInvocation = RunInvocation {
             global_args: vec![],
             run_args: vec!["./...".into()],
         };
