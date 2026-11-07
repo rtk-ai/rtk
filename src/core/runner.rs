@@ -474,7 +474,7 @@ fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
 }
 
 fn asks_for_usage(stem: &str, args: &[String]) -> bool {
-    use crate::cmds::rust::cargo_cmd::CargoInvocation;
+    use crate::cmds::rust::cargo_cmd::{self, CargoInvocation};
 
     // Standalone callers use Cargo's prepared metadata too. The Cargo execution
     // path handles help before entering this runner, so it does not parse twice.
@@ -486,25 +486,18 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
     let first = args.first().map(String::as_str);
     let spelling = help_spelling(stem, first);
     let takes_value = |kind: TokenKind, name: &str| {
-        // install --version selects a crate version, not Cargo's version page.
-        // https://doc.rust-lang.org/cargo/commands/cargo-install.html#install-options
-        let cargo_install_version = stem == "cargo"
-            && first == Some("install")
-            && kind == TokenKind::Long
-            && name == "version";
-        let cargo_global_value = stem == "cargo"
-            && match kind {
-                TokenKind::Long => matches!(name, "config" | "color"),
-                TokenKind::Short => matches!(name, "C" | "Z"),
-                _ => false,
-            };
+        // Reuse Cargo's arities for unsupported commands too. --version takes
+        // a value only for install; otherwise it requests the version page.
+        if stem == "cargo" && (name != "version" || first == Some("install")) {
+            return cargo_cmd::option_value(kind, name);
+        }
         let git_message = stem == "git"
             && match kind {
                 TokenKind::Short => matches!(name, "m" | "F"),
                 TokenKind::Long => matches!(name, "message" | "file"),
                 _ => false,
             };
-        (cargo_install_version || cargo_global_value || git_message).then(ValueSpec::value)
+        git_message.then(ValueSpec::value)
     };
     let tokens = arg_tokenizer::tokenize_grammar(args, &takes_value, spelling.dialect);
     if names_usage(

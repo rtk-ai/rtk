@@ -1,5 +1,6 @@
 //! Filters cargo output — build errors, test results, clippy warnings.
 
+use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
 use crate::core::runner;
 use crate::core::shell::display_args;
 use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
@@ -65,155 +66,116 @@ pub struct CargoInvocation<'a, T = OsString> {
     requests_help: bool,
 }
 
+// One option-arity table for Cargo parsing and standalone help checks. The
+// shared tokenizer handles clusters, attached values, and value consumption.
+pub(crate) fn option_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    matches!(
+        (kind, name),
+        (
+            TokenKind::Long,
+            "config" | "color" | "message-format" | "version"
+        ) | (TokenKind::Short, "C" | "Z")
+    )
+    .then(|| ValueSpec::value().claiming_dash_dash())
+}
+
 impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
-    /// Locate a known command and prepare filter metadata, without validating
-    /// Cargo's parameters. Unknown option arities and script mode stay native.
+    /// Identify a command and collect RTK metadata; Cargo validates the values.
     /// <https://doc.rust-lang.org/cargo/commands/cargo.html#options>
     pub fn parse(args: &'a [T]) -> Option<Self> {
-        let mut index = 0;
-        // Rustup interprets +toolchain only as the FIRST argument after cargo,
-        // before Cargo's global options. Do not recognize it later in the loop.
-        // https://rust-lang.github.io/rustup/overrides.html#toolchain-override-shorthand
-        if args.first()?.as_ref().to_str()?.starts_with('+') {
-            index += 1;
-        }
+        // This text view is for recognition only. Execution retains the original
+        // OS arguments, including non-UTF-8 paths; no conversion can drop them.
+        let words: Vec<_> = args
+            .iter()
+            .map(|arg| arg.as_ref().to_string_lossy())
+            .collect();
+        let tokens = arg_tokenizer::tokenize_grammar(&words, &option_value, Dialect::Posix);
         let mut command = None;
         let mut command_args = &args[args.len()..];
         let mut message_format = MessageFormat::Human;
         let mut requests_help = false;
-        let mut cargo_options = true;
-        while let Some(raw) = args.get(index) {
-            let Some(arg) = raw.as_ref().to_str() else {
-                command?;
-                index += 1;
-                continue;
-            };
-            if let Some(kind) = command {
-                // Continue over the unvisited tail, preparing filtering and help
-                // metadata in this same pass. Do not revisit the prefix or make
-                // the shared runner reconstruct and parse the invocation again.
-                if !cargo_options {
-                    if arg == "--" {
-                        break;
-                    }
-                    if matches!(kind, CargoCommand::Test | CargoCommand::Nextest) {
-                        requests_help |= is_help_argument(arg);
-                    }
-                } else {
-                    match arg {
-                        // Arguments after -- belong to libtest (or nextest's
-                        // emulated test argument syntax), not Cargo.
-                        // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
-                        // https://nexte.st/docs/running/
-                        "--" => cargo_options = false,
-                        "--config" | "--color" | "-C" | "-Z" => index += 1,
-                        // install --version selects the crate version.
-                        // https://doc.rust-lang.org/cargo/commands/cargo-install.html#install-options
-                        "--version" if kind == CargoCommand::Install => {
-                            index += 1;
-                            // Without a value it still names Cargo's version
-                            // request; preserve the native response unchanged.
-                            requests_help |= args.get(index).is_none();
-                        }
-                        _ if kind == CargoCommand::Install && arg.starts_with("--version=") => {}
-                        "--message-format" => {
-                            index += 1;
-                            if let Some(value) = args.get(index).and_then(|s| s.as_ref().to_str()) {
-                                message_format = if value.contains("json") {
-                                    MessageFormat::Json
-                                } else {
-                                    MessageFormat::Human
-                                };
-                            }
-                        }
-                        _ if arg.starts_with("--message-format=") => {
-                            message_format = if arg["--message-format=".len()..].contains("json") {
-                                MessageFormat::Json
-                            } else {
-                                MessageFormat::Human
-                            };
-                        }
-                        _ => requests_help |= is_help_argument(arg),
-                    }
-                }
-                index += 1;
+        let mut forwarded = false;
+        for token in &tokens {
+            if token.kind == TokenKind::Positional && token.linked.is_some() {
                 continue;
             }
-            match arg {
-                "--locked" | "--offline" | "--frozen" | "--quiet" | "--verbose" => {}
-                // Consume the following token even when it looks like a command.
-                // Repeated --config options are allowed; preserve their order.
-                // https://doc.rust-lang.org/cargo/commands/cargo.html#common-options
-                // https://doc.rust-lang.org/cargo/commands/cargo.html#display-options
-                "--config" | "--color" => {
-                    index += 1;
+            // Rustup recognizes +toolchain only immediately after cargo.
+            // https://rust-lang.github.io/rustup/overrides.html#toolchain-override-shorthand
+            if token.kind == TokenKind::Positional
+                && token.source_index == 0
+                && token.text.starts_with('+')
+            {
+                continue;
+            }
+            if forwarded {
+                if token.text == "--" {
+                    break;
                 }
-                // Long options can carry their value in the same token, separated
-                // by '='. The whole suffix is a value; Cargo validates it.
-                _ if arg.starts_with("--config=") || arg.starts_with("--color=") => {}
-                // Scan short-option clusters left-to-right. Flags (v/q) can repeat;
-                // an option taking a value consumes the remainder of the token, or
-                // the next argument when no attached value remains. Never interpret
-                // characters inside a value as more options (e.g. -Cvery/quiet).
-                // https://docs.rs/clap/latest/clap/struct.Arg.html#method.short
-                _ if arg.starts_with('-') && arg.len() > 1 => {
-                    let mut options = arg[1..].chars();
-                    while let Some(option) = options.next() {
-                        match option {
-                            // Cargo supports -vv; Cargo validates conflicts with -q.
-                            // https://doc.rust-lang.org/cargo/commands/cargo.html#display-options
-                            'v' | 'q' => {}
-                            // -C must precede the command and requires nightly with
-                            // -Z unstable-options. Cargo enforces those constraints.
-                            // https://doc.rust-lang.org/cargo/commands/cargo.html#common-options
-                            'C' => {
-                                if options.as_str().is_empty() {
-                                    index += 1;
-                                }
-                                break;
-                            }
-                            // -Z has its own case because script mode enables direct
-                            // source-file execution, which RTK leaves to Cargo.
-                            // Accept -Z flag, -Zflag, and -Z=flag spellings.
-                            // https://doc.rust-lang.org/cargo/reference/unstable.html#script
-                            'Z' => {
-                                let value = if options.as_str().is_empty() {
-                                    index += 1;
-                                    args.get(index)?.as_ref().to_str()?
-                                } else {
-                                    options
-                                        .as_str()
-                                        .strip_prefix('=')
-                                        .unwrap_or(options.as_str())
-                                };
-                                if value.split('=').next() == Some("script") {
-                                    return None;
-                                }
-                                break;
-                            }
-                            // Unknown short flags (and unrecognized --long options)
-                            // stay native instead of guessing how many values follow.
-                            _ => return None,
-                        }
-                    }
-                }
-                _ => {
-                    // Resolve Cargo's built-in aliases separately. Full names come
-                    // from as_str(), so their spellings have one source of truth.
+                requests_help |= is_help_argument(token.text);
+                continue;
+            }
+            let value = token.value(&tokens);
+            match (token.kind, token.text) {
+                (TokenKind::Positional, name) if command.is_none() => {
+                    // Canonical names have one source; aliases are separate.
                     // https://doc.rust-lang.org/cargo/reference/config.html#alias
-                    let kind = match arg {
+                    command = Some(match name {
                         "b" => CargoCommand::Build,
                         "c" => CargoCommand::Check,
                         "t" => CargoCommand::Test,
-                        name => CargoCommand::ALL
-                            .into_iter()
-                            .find(|command| name == command.as_str())?,
-                    };
-                    command = Some(kind);
-                    command_args = &args[index + 1..];
+                        name => CargoCommand::ALL.into_iter().find(|c| c.as_str() == name)?,
+                    });
+                    command_args = &args[token.source_index + 1..];
                 }
+                (TokenKind::Positional, _) => {}
+                (TokenKind::DashDash, _) => {
+                    // libtest/nextest own the tail; other Cargo commands do not.
+                    // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
+                    // https://nexte.st/docs/running/
+                    if !matches!(command?, CargoCommand::Test | CargoCommand::Nextest) {
+                        break;
+                    }
+                    forwarded = true;
+                }
+                // Global options use the same rules before and after the command.
+                // --config values retain their original order; -C requires nightly
+                // and -Z unstable-options. Native Cargo enforces those constraints.
+                // https://doc.rust-lang.org/cargo/commands/cargo.html#common-options
+                (
+                    TokenKind::Long,
+                    "config" | "color" | "locked" | "offline" | "frozen" | "quiet" | "verbose",
+                )
+                | (TokenKind::Short, "C" | "v" | "q") => {}
+                (TokenKind::Short, "Z") => {
+                    // Script mode changes command interpretation; leave it native.
+                    // https://doc.rust-lang.org/cargo/reference/unstable.html#script
+                    if command.is_none()
+                        && value.is_some_and(|v| {
+                            v.trim_start_matches('=').split('=').next() == Some("script")
+                        })
+                    {
+                        return None;
+                    }
+                }
+                (TokenKind::Long, "message-format") if command.is_some() => {
+                    if let Some(value) = value {
+                        message_format = if value.contains("json") {
+                            MessageFormat::Json
+                        } else {
+                            MessageFormat::Human
+                        };
+                    }
+                }
+                // install --version takes a crate version, not a help request.
+                // https://doc.rust-lang.org/cargo/commands/cargo-install.html#install-options
+                (TokenKind::Long, "version")
+                    if command == Some(CargoCommand::Install) && value.is_some() => {}
+                _ if command.is_some() && is_help_argument(words[token.source_index].as_ref()) => {
+                    requests_help = true;
+                }
+                _ if command.is_none() => return None, // Unknown prefix arity: do not guess.
+                _ => {} // Command-specific arguments are Cargo's responsibility.
             }
-            index += 1;
         }
         Some(Self {
             args,
@@ -1857,6 +1819,8 @@ mod tests {
             vec!["--color="],
             vec!["--config="],
             vec!["-", "check"],
+            vec!["-+", "check"],
+            vec!["--+", "check"],
             vec!["-vX", "check"],
             vec!["-vC"],
             vec!["-vZ"],
