@@ -236,24 +236,43 @@ fn format_warnings_only(tool: &str, warnings: &[&GccDiagnostic]) -> String {
             diags.len(),
             if diags.len() == 1 { "" } else { "s" }
         ));
-        for d in diags {
-            let flag_str = d.flag.as_deref().unwrap_or("");
-            if flag_str.is_empty() {
-                result.push_str(&format!("  L{}: {}\n", d.line, d.message));
-            } else {
-                result.push_str(&format!("  L{}: {} [{}]\n", d.line, d.message, flag_str));
-            }
-            push_notes(&mut result, d);
-        }
+        push_grouped(&mut result, diags, "");
         result.push('\n');
     }
 
     result.trim().to_string()
 }
 
-fn push_notes(result: &mut String, d: &GccDiagnostic) {
-    for note in &d.notes {
-        result.push_str(&format!("    note {}\n", note));
+/// One line per distinct message in a file, listing every line it occurs on
+/// (`L119,121,136: …`). The same error repeated through a header or macro
+/// would otherwise cost a full line per occurrence. A diagnostic with notes
+/// keeps its own line, since its notes belong to that occurrence.
+fn push_grouped(result: &mut String, diags: &[&GccDiagnostic], label: &str) {
+    let mut groups: Vec<(Vec<usize>, &GccDiagnostic)> = Vec::new();
+    for d in diags {
+        let same = groups.iter_mut().find(|(_, g)| {
+            d.notes.is_empty() && g.notes.is_empty() && g.message == d.message && g.flag == d.flag
+        });
+        match same {
+            Some((lines, _)) => lines.push(d.line),
+            None => groups.push((vec![d.line], d)),
+        }
+    }
+    for (lines, d) in groups {
+        let lines = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let flag = d
+            .flag
+            .as_deref()
+            .map(|f| format!(" [{}]", f))
+            .unwrap_or_default();
+        result.push_str(&format!("  L{}: {}{}{}\n", lines, label, d.message, flag));
+        for note in &d.notes {
+            result.push_str(&format!("    note {}\n", note));
+        }
     }
 }
 
@@ -299,16 +318,7 @@ fn format_build_failed(
             diags.len(),
             if diags.len() == 1 { "" } else { "s" }
         ));
-        for d in *diags {
-            match d.flag.as_deref() {
-                Some(flag) => result.push_str(&format!(
-                    "  L{}: [error] {} [{}]\n",
-                    d.line, d.message, flag
-                )),
-                None => result.push_str(&format!("  L{}: [error] {}\n", d.line, d.message)),
-            }
-            push_notes(&mut result, d);
-        }
+        push_grouped(&mut result, diags, "[error] ");
         result.push('\n');
     }
 
@@ -660,6 +670,41 @@ lobject.h:119:30: note: in definition of macro 'setobj'
         let result = filter_gcc_output(input);
         assert!(result.contains("did you mean 'top'?"), "got:\n{}", result);
         assert!(!result.contains("macro"), "got:\n{}", result);
+    }
+
+    #[test]
+    fn test_repeated_message_grouped_on_one_line() {
+        let input = "\
+ldo.c:119:21: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+ldo.c:121:7: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+ldo.c:136:3: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+ldo.c:200:3: error: 'CallInfo' has no member named 'x'
+";
+        let result = filter_gcc_output(input);
+        assert!(result.contains("4 errors"), "got:\n{}", result);
+        assert!(
+            result.contains("  L119,121,136: [error] 'lua_State' has no member named 'topp'"),
+            "got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("  L200: [error] 'CallInfo'"),
+            "got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_with_notes_not_grouped() {
+        let input = "\
+c.cpp:3:13: error: no matching function for call to 'g'
+c.cpp:1:6: note: candidate function not viable
+c.cpp:4:13: error: no matching function for call to 'g'
+c.cpp:1:6: note: candidate function not viable
+";
+        let result = filter_gcc_output(input);
+        assert!(result.contains("  L3: [error]"), "got:\n{}", result);
+        assert!(result.contains("  L4: [error]"), "got:\n{}", result);
     }
 
     #[test]
