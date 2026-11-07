@@ -1023,6 +1023,10 @@ mod tests {
         assert!(is_codex_hook_command(
             "\"C:\\Program Files\\rtk.exe\" hook codex"
         ));
+        // Windows file names are case-insensitive: `RTK.EXE` is `rtk.exe`.
+        assert!(is_codex_hook_command(
+            r#""C:\Program Files\RTK.EXE" hook codex"#
+        ));
     }
 
     #[test]
