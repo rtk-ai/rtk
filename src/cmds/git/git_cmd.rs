@@ -1098,8 +1098,19 @@ fn diff_header_path(line: &str) -> String {
     }
     match rest.split(" b/").nth(1) {
         Some(path) => path.to_string(),
-        None => unquote_path(rest),
+        None => lone_space_destination(rest).unwrap_or_else(|| unquote_path(rest)),
     }
+}
+
+/// The second path of a prefix-less rename header, `old.txt new.txt`.
+///
+/// Only when the remainder holds a single space: that space is then the
+/// separator, whatever the paths look like. With more, a space may belong to a
+/// path and the split cannot be told from one, so the caller keeps the whole
+/// remainder rather than guess.
+fn lone_space_destination(rest: &str) -> Option<String> {
+    let (_, dst) = rest.split_once(' ')?;
+    (!dst.contains(' ')).then(|| unquote_path(dst))
 }
 
 /// The path a `diff --git` header names twice, split at the midpoint.
@@ -1113,9 +1124,11 @@ fn diff_header_path(line: &str) -> String {
 ///
 /// `None` for a rename, whose halves differ past their first component, and for
 /// anything else the two halves disagree on; both fall through to the ` b/`
-/// split. A `--no-prefix` rename between two directories is the one shape this
-/// cannot tell from a prefix pair — space-separated paths with no prefix are
-/// ambiguous by construction — and it reads as the shared trailing path.
+/// split, then to the lone-space split of a `--no-prefix` rename. A
+/// `--no-prefix` rename between two directories that keeps the trailing path,
+/// `x/f y/f`, is the one shape this cannot tell from a prefix pair —
+/// space-separated paths with no prefix are ambiguous by construction — and it
+/// reads as the shared trailing path.
 fn same_path_twice(rest: &str) -> Option<String> {
     if rest.len().is_multiple_of(2) {
         return None;
@@ -5280,6 +5293,32 @@ mod tests {
         assert_eq!(
             diff_header_path("diff --git a/old.txt b/new.txt"),
             "new.txt"
+        );
+    }
+
+    #[test]
+    fn test_diff_header_path_names_the_destination_of_a_no_prefix_rename() {
+        // `--no-prefix` leaves neither a ` b/` nor equal halves to split on, and
+        // the rename's two paths differ; the destination is still the second.
+        assert_eq!(diff_header_path("diff --git old.txt new.txt"), "new.txt");
+        assert_eq!(
+            diff_header_path("diff --git a.txt longer.txt"),
+            "longer.txt"
+        );
+        assert_eq!(
+            diff_header_path("diff --git src/old.rs lib/new.rs"),
+            "lib/new.rs"
+        );
+        // A quoted destination is decoded like any other quoted path.
+        assert_eq!(
+            diff_header_path(r#"diff --git old.txt "\303\251t.txt""#),
+            "ét.txt"
+        );
+        // With a space inside a path, the separator cannot be told from it, so
+        // the whole remainder is kept rather than guessing a wrong split.
+        assert_eq!(
+            diff_header_path("diff --git old name.txt new name.txt"),
+            "old name.txt new name.txt"
         );
     }
 
