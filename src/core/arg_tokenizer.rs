@@ -22,8 +22,8 @@ pub enum TokenKind {
     /// One character of a `-x` / `-xyz` short-option cluster (see `Token::text`, without the
     /// leading `-`). A run of only digits (`-20`) is a widely-used shorthand for a numeric
     /// value in its own right (git log/head/tail's `-N` count) rather than a cluster of
-    /// per-digit boolean flags, so it is kept as one `Short` token with the whole digit run as
-    /// `text`, never decomposed.
+    /// per-digit boolean flags, so dialects with [`Dialect::numeric_shortcut`] keep it as one
+    /// token. Clap instead treats each digit as an ordinary short-option character.
     Short,
 }
 
@@ -216,7 +216,7 @@ fn is_double_dash_flag(t: &Token<'_>, dialect: Dialect, name: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SingleDash {
     /// A cluster of one-character flags, scanned char by char (`-rn` is `-r -n`). A run of only
-    /// digits is exempt — see [`TokenKind::Short`]. git, cargo, rg, golangci-lint, gradle.
+    /// digits can be exempt — see [`Dialect::numeric_shortcut`]. git, rg, golangci-lint, gradle.
     Cluster,
     /// One atomic flag name, distinct from its `--` spelling. dotnet's legacy MSBuild switches,
     /// maven's `-pl`/`-gs`/`-amd`. Tagged `TokenKind::Long` despite the single dash — these are
@@ -280,18 +280,43 @@ pub struct Dialect {
     pub name_case: NameCase,
     /// Whether `/flag` is a switch spelling (MSBuild's own) rather than a path.
     pub slash_flags: bool,
+    /// Whether a digit-only short argument (`-20`) stays one token instead of clustering.
+    pub numeric_shortcut: bool,
+    /// Whether `-ovalue` and `-o=value` both attach `value` to a value-taking short option.
+    pub short_value_equals: bool,
+    /// Default for separate values beginning with `-` (except a lone `-` and the `--`
+    /// boundary). [`ValueSpec::allow_hyphen_values`] can opt in when this is false.
+    pub allow_hyphen_values: bool,
 }
 
 // Presets read as grammar names at their call sites, not as constants.
 #[allow(non_upper_case_globals)]
 impl Dialect {
-    /// GNU/POSIX-ish: git, cargo, rg, golangci-lint.
+    /// GNU/POSIX-ish: git, rg, golangci-lint.
     pub const Posix: Self = Self {
         single_dash: SingleDash::Cluster,
         attach: Attach::Equals,
         dash_dash: DashDashRole::EndsOptions,
         name_case: NameCase::Sensitive,
         slash_flags: false,
+        numeric_shortcut: true,
+        short_value_equals: false,
+        allow_hyphen_values: true,
+    };
+
+    /// Clap's default option syntax: ordinary short clusters (including digits),
+    /// `-o=value` as well as `-ovalue`, and no separate dash-prefixed values by default.
+    /// A lone `-` is still a value; `--` ends option recognition.
+    ///
+    /// This is a tokenizer, not Clap's command parser. The caller supplies option arities;
+    /// subcommands, validation, value delimiters, and multiple values per occurrence are not
+    /// modeled here. `require_equals` is not implied by this preset.
+    /// <https://docs.rs/clap/4.6.7/clap/_concepts/index.html#argument-parsing>
+    pub const Clap: Self = Self {
+        numeric_shortcut: false,
+        short_value_equals: true,
+        allow_hyphen_values: false,
+        ..Self::Posix
     };
 
     /// MSBuild/dotnet-CLI-ish. `-flag`, `--flag` and `/flag` are all one atomic flag name, so
@@ -302,6 +327,7 @@ impl Dialect {
         dash_dash: DashDashRole::Forwards,
         name_case: NameCase::Folded,
         slash_flags: true,
+        ..Self::Posix
     };
 
     /// Apache commons-cli: POSIX, except that a short option is a whole multi-character word
@@ -358,6 +384,9 @@ pub struct ValueSpec {
     /// end-of-options boundary. A per-tool split, confirmed against each: grep and rg let any
     /// value-taking flag swallow it, git and cargo reject it whichever flag is asking.
     pub claims_dash_dash: bool,
+    /// Accept any separate dash-prefixed value even when the dialect rejects them by
+    /// default. Use the builder to also let this option consume a literal `--`.
+    pub allow_hyphen_values: bool,
 }
 
 impl ValueSpec {
@@ -367,6 +396,7 @@ impl ValueSpec {
         Self {
             attachment: Attachment::AttachedOrSeparate { solo_only: false },
             claims_dash_dash: false,
+            allow_hyphen_values: false,
         }
     }
 
@@ -375,6 +405,7 @@ impl ValueSpec {
         Self {
             attachment: Attachment::AttachedOnly,
             claims_dash_dash: false,
+            allow_hyphen_values: false,
         }
     }
 
@@ -384,12 +415,25 @@ impl ValueSpec {
         Self {
             attachment: Attachment::AttachedOrSeparate { solo_only: true },
             claims_dash_dash: false,
+            allow_hyphen_values: false,
         }
     }
 
     /// Lets a literal `--` be this flag's value instead of the end-of-options boundary.
     pub const fn claiming_dash_dash(self) -> Self {
         Self {
+            claims_dash_dash: true,
+            ..self
+        }
+    }
+
+    /// Like Clap's `Arg::allow_hyphen_values(true)`: an option waiting for a value consumes
+    /// even a known flag or a literal `--`. Attached values are unrestricted already.
+    /// <https://docs.rs/clap/4.6.7/clap/struct.Arg.html#method.allow_hyphen_values>
+    #[allow(dead_code)] // Supported override; Cargo's current option subset uses the default.
+    pub const fn allow_hyphen_values(self) -> Self {
+        Self {
+            allow_hyphen_values: true,
             claims_dash_dash: true,
             ..self
         }
@@ -470,6 +514,14 @@ impl<'a, 'p, T: AsRef<str>> Scanner<'a, 'p, T> {
             return false;
         };
         if next.as_ref() == "--" && !self.emitted_dash_dash && !spec.claims_dash_dash {
+            return false;
+        }
+        if next.as_ref() != "--"
+            && next.as_ref() != "-"
+            && next.as_ref().starts_with('-')
+            && !self.dialect.allow_hyphen_values
+            && !spec.allow_hyphen_values
+        {
             return false;
         }
         let token_index = self.tokens.len();
@@ -556,7 +608,7 @@ fn tokenize_scan<'a, T: AsRef<str>>(
 
             let cluster = &arg[1..];
 
-            if is_digit_run(cluster) {
+            if scanner.dialect.numeric_shortcut && is_digit_run(cluster) {
                 scanner.tokens.push(token(
                     TokenKind::Short,
                     cluster,
@@ -584,7 +636,15 @@ fn tokenize_scan<'a, T: AsRef<str>>(
                 if let Some(spec) = (scanner.takes_value)(TokenKind::Short, char_text) {
                     let remainder = &cluster[offset + char_len..];
                     if !remainder.is_empty() {
-                        scanner.tokens[flag_index].attached = Some(remainder);
+                        // Clap's parse_short_arg strips exactly one '=' for a value-taking
+                        // option; a boolean flag does not claim the rest of its cluster.
+                        // https://github.com/clap-rs/clap/blob/v4.6.7/clap_builder/src/parser/parser.rs#L969-L987
+                        scanner.tokens[flag_index].attached =
+                            Some(if scanner.dialect.short_value_equals {
+                                remainder.strip_prefix('=').unwrap_or(remainder)
+                            } else {
+                                remainder
+                            });
                     } else {
                         // is_solo: offset == 0 with an empty remainder means this char is the
                         // *entire* cluster (the arg was e.g. just "-n"); a later offset, or any
@@ -660,6 +720,9 @@ mod frozen;
 
 #[cfg(test)]
 mod differential;
+
+#[cfg(test)]
+mod clap_tests;
 
 #[cfg(test)]
 mod tests {

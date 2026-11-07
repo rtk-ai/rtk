@@ -456,10 +456,10 @@ struct HelpSpelling {
 fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
     HelpSpelling {
         short_h: !matches!(stem, "psql" | "ls" | "tree" | "grep"),
-        dialect: if stem == "dotnet" {
-            Dialect::Msbuild
-        } else {
-            Dialect::Posix
+        dialect: match stem {
+            "dotnet" => Dialect::Msbuild,
+            "cargo" => Dialect::Clap,
+            _ => Dialect::Posix,
         },
         past_boundary: stem == "npx"
             || matches!(
@@ -1844,7 +1844,8 @@ mod requests_help_tests {
         ));
         assert!(asks("cargo", &["--locked", "test", "--", "-h"]));
         assert!(!asks("cargo", &["--offline", "b", "--", "--help"]));
-        assert!(!asks("cargo", &["--config", "--help", "check"]));
+        assert!(asks("cargo", &["--config", "--help", "check"]));
+        assert!(!asks("cargo", &["--config=--help", "check"]));
         assert!(!asks(
             "cargo",
             &["+stable", "install", "ripgrep", "--version", "1.2.3"]

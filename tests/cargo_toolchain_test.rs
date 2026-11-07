@@ -56,6 +56,7 @@ fn global_options_and_aliases_rewrite_without_changing_shell_text() {
         "cargo --verbose --quiet check",
         r#"cargo +nightly -Z unstable-options -C 'some path' c"#,
         "cargo +nightly -Zunstable-options -Csome-path check",
+        "cargo +nightly -Z=unstable-options -C=some-path check",
         "cargo b",
         "cargo c",
         "cargo t -- --nocapture",
@@ -139,6 +140,7 @@ exit 101
         vec!["--config", "net.retry=2", "--config=build.jobs=1"],
         vec!["+nightly", "-Z", "unstable-options", "-C", "some path"],
         vec!["+nightly", "-Zunstable-options", "-Csome path"],
+        vec!["+nightly", "-Z=unstable-options", "-C=some path"],
         vec!["+nightly", "-vvZunstable-options", "-Cvery/quiet"],
         vec!["+nightly", "-vCsome path", "-Z=unstable-options"],
     ] {
@@ -202,6 +204,7 @@ exit 101
         vec!["--config", "check", "metadata"],
         vec!["--locked", "t", "--", "--help"],
         vec!["--color", "never", "b", "--help"],
+        vec!["check", "--color", "--help"],
     ] {
         let output = common::rtk_command()
             .arg("cargo")

@@ -136,7 +136,7 @@ impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
             .iter()
             .map(|arg| arg.as_ref().to_string_lossy())
             .collect();
-        let tokens = arg_tokenizer::tokenize_grammar(&words, &option_value, Dialect::Posix);
+        let tokens = arg_tokenizer::tokenize_grammar(&words, &option_value, Dialect::Clap);
         // Values are already linked to their options by the tokenizer. Walk
         // one iterator in two disjoint regions: discovery, then metadata.
         let mut remaining = tokens
@@ -202,9 +202,10 @@ fn find_command<'a>(
                 Some(CargoOption::Unstable) => {
                     // Script mode changes command interpretation; leave it native.
                     // https://doc.rust-lang.org/cargo/reference/unstable.html#script
-                    if token.value(all_tokens).is_some_and(|v| {
-                        v.trim_start_matches('=').split('=').next() == Some("script")
-                    }) {
+                    if token
+                        .value(all_tokens)
+                        .is_some_and(|v| v.split('=').next() == Some("script"))
+                    {
                         return None;
                     }
                 }
@@ -283,7 +284,7 @@ fn read_filter_metadata<'a>(
     }
 }
 
-// Past -- the POSIX tokenizer emits opaque positionals, so forwarded test
+// Past -- the tokenizer emits opaque positionals, so forwarded test
 // arguments retain their spelling in Token::text rather than option names.
 fn is_help_argument(arg: &str) -> bool {
     arg == "-h"
@@ -1767,7 +1768,7 @@ mod tests {
             "-Z",
         ] {
             let args = [option, "--", "check"];
-            let tokens = arg_tokenizer::tokenize_grammar(&args, &option_value, Dialect::Posix);
+            let tokens = arg_tokenizer::tokenize_grammar(&args, &option_value, Dialect::Clap);
             assert_eq!(tokens[0].value(&tokens), None, "{option}");
             assert_eq!(tokens[1].kind, TokenKind::DashDash, "{option}");
         }
@@ -1848,7 +1849,11 @@ mod tests {
             (vec!["check", "-hh"], false),
             (vec!["check", "-h=value"], false),
             (vec!["install", "--version"], true),
-            (vec!["check", "--config", "--help"], false),
+            // A separate dash-prefixed argument is not a config value. Cargo
+            // reports the missing value; passthrough preserves that diagnostic.
+            (vec!["check", "--config", "--help"], true),
+            (vec!["check", "--config=--help"], false),
+            (vec!["clippy", "--version", "--help"], true),
             (vec!["install", "ripgrep", "--version", "1.2.3"], false),
             (vec!["install", "ripgrep", "--version=1.2.3"], false),
             (vec!["build", "--", "--help"], false),
@@ -1888,8 +1893,7 @@ mod tests {
     #[test]
     fn message_format_respects_values_and_test_argument_boundary() {
         for args in [
-            vec!["--config", "--message-format=json", "check"],
-            vec!["check", "--config", "--message-format=json"],
+            vec!["check", "--config=--message-format=json"],
             vec!["test", "--", "--message-format=json"],
         ] {
             assert_eq!(
@@ -1897,6 +1901,15 @@ mod tests {
                 MessageFormat::Human
             );
         }
+        // The separate option is not consumed as a config value, even though
+        // Cargo will reject the missing config value before running anything.
+        assert!(CargoInvocation::parse(&["--config", "--message-format=json", "check"]).is_none());
+        assert_eq!(
+            CargoInvocation::parse(&["check", "--config", "--message-format=json"])
+                .unwrap()
+                .message_format(),
+            MessageFormat::Json
+        );
     }
 
     #[cfg(unix)]
