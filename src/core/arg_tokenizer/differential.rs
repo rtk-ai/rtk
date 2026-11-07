@@ -80,13 +80,11 @@ fn grammars(dialect: Dialect) -> [Grammar; 3] {
             .iter()
             .filter_map(|&(kind, name)| {
                 let spec = specs(name)[index]?;
-                let whole = ValueSpec {
-                    attachment: spec.attachment.whole_argument(),
-                    ..spec
-                };
+                let whole = spec.whole_argument();
                 Some(match (dialect.single_dash, kind) {
                     (SingleDash::Cluster, TokenKind::Short) => Flag::short(name).takes(spec),
-                    (SingleDash::Cluster, _) => Flag::long(name).takes(whole),
+                    (SingleDash::Whole, TokenKind::Short) => Flag::short(name).takes(whole),
+                    (SingleDash::Cluster | SingleDash::Whole, _) => Flag::long(name).takes(whole),
                     (SingleDash::Atomic | SingleDash::AtomicAliasingLong, _) => {
                         Flag::atomic(Box::leak(vec![name].into_boxed_slice())).takes(whole)
                     }

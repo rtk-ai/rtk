@@ -319,6 +319,10 @@ pub enum SingleDash {
     /// One atomic flag name, and the same flag as its `--` spelling — the token carries
     /// `double_dash: true` whichever prefix was typed. Go's `flag` package.
     AtomicAliasingLong,
+    /// One whole option, read as the `Short` flag of that name and distinct from its `--`
+    /// spelling: `-pp` is the flag `pp`, never `-p -p`. Its flags are getopt flags whose short
+    /// spelling may be several characters. bash reads a reserved word's options so (`time -p`).
+    Whole,
 }
 
 /// Which separator attaches a value to a flag name (`--flag=v`).
@@ -329,6 +333,11 @@ pub enum Attach {
     /// `=` or `:`, whichever comes first — `--logger:trx` and `--logger=trx` are both valid
     /// dotnet CLI syntax.
     EqualsOrColon,
+    /// None: a spelling that is the whole argument (a long one, an atomic name, or a short one
+    /// under [`SingleDash::Whole`]) is its name whole (`--p=1` is the flag `p=1`), and its value,
+    /// if it takes one, is the next argument. A short flag in a cluster still takes the rest of
+    /// the cluster (`-M50`).
+    Never,
 }
 
 /// What a literal `--` does to the arguments after it.
@@ -458,19 +467,6 @@ pub enum Attachment {
     AttachedOrSeparate { solo_only: bool },
 }
 
-impl Attachment {
-    /// This attachment for a spelling that is always the whole argument, where `solo_only`
-    /// has nothing left to restrict.
-    const fn whole_argument(self) -> Self {
-        match self {
-            Attachment::AttachedOrSeparate { .. } => {
-                Attachment::AttachedOrSeparate { solo_only: false }
-            }
-            Attachment::AttachedOnly => Attachment::AttachedOnly,
-        }
-    }
-}
-
 /// How one flag takes its value ([`Flag::value`]). Held in an `Option`, so "takes no value" is
 /// `None` and there is one table per tool rather than one per question asked about the same
 /// flag.
@@ -516,6 +512,25 @@ impl ValueSpec {
             claims_dash_dash: true,
             ..self
         }
+    }
+
+    /// This value for a spelling that is always the whole argument, where `solo_only` has
+    /// nothing left to restrict.
+    const fn whole_argument(self) -> Self {
+        Self {
+            attachment: match self.attachment {
+                Attachment::AttachedOrSeparate { .. } => {
+                    Attachment::AttachedOrSeparate { solo_only: false }
+                }
+                Attachment::AttachedOnly => Attachment::AttachedOnly,
+            },
+            ..self
+        }
+    }
+
+    /// Whether this value only ever attaches ([`Attachment::AttachedOnly`]).
+    const fn is_attached_only(self) -> bool {
+        matches!(self.attachment, Attachment::AttachedOnly)
     }
 
     /// Whether a `Short` flag takes a separate value only when it is the whole argument.
@@ -611,10 +626,7 @@ impl Flag {
         Self {
             short_value: if has_short { Some(spec) } else { None },
             long_value: if has_whole {
-                Some(ValueSpec {
-                    attachment: spec.attachment.whole_argument(),
-                    ..spec
-                })
+                Some(spec.whole_argument())
             } else {
                 None
             },
@@ -663,13 +675,15 @@ impl Flag {
         }
     }
 
-    /// Whether a grammar under `single_dash` can read this flag's spelling. A getopt flag needs
-    /// clustering, where `-x` is a `Short` token; an atomic flag needs the opposite, where every
-    /// name is a whole word. One `match` on the axis, so a new axis value has to say which
-    /// spellings it reads before anything compiles.
+    /// Whether a grammar under `single_dash` can read this flag's spelling. A getopt flag needs a
+    /// dialect where `-x` is a `Short` token (clustering, or each argument whole); an atomic flag
+    /// needs one where every name is a whole word read as `Long`. One `match` on the axis, so a
+    /// new axis value has to say which spellings it reads before anything compiles.
     const fn fits(&self, single_dash: SingleDash) -> bool {
         match single_dash {
-            SingleDash::Cluster => matches!(self.spelling, Spelling::Getopt { .. }),
+            SingleDash::Cluster | SingleDash::Whole => {
+                matches!(self.spelling, Spelling::Getopt { .. })
+            }
             SingleDash::Atomic | SingleDash::AtomicAliasingLong => {
                 matches!(self.spelling, Spelling::Atomic(_))
             }
@@ -689,32 +703,89 @@ impl Flag {
 pub struct Grammar {
     dialect: Dialect,
     flags: &'static [&'static [Flag]],
+    /// Whether an all-digit `-N`, given as a whole argument, is one of this grammar's flags
+    /// ([`Grammar::numeric`]).
+    numeric: bool,
 }
+
+/// The flag an all-digit `-N` is under a [`Grammar::numeric`] grammar: it has no spelling of
+/// its own, so no declared flag and no name a caller asks about is ever it.
+static NUMERIC: Flag = Flag {
+    spelling: Spelling::Getopt {
+        short: None,
+        long: None,
+    },
+    short_value: None,
+    long_value: None,
+};
 
 impl Grammar {
     /// The grammar of `flags`, read under `dialect`.
     ///
     /// Every flag must be spelled in a form `dialect` can read ([`Flag::fits`]): getopt flags
-    /// ([`Flag::short`], [`Flag::long`], [`Flag::pair`]) under a clustering dialect, where `-x`
-    /// is a `Short` token; atomic flags ([`Flag::atomic`]) under an atomic one, where every name
-    /// is a whole word read as `Long`. Any other flag could never match a token as declared, so
-    /// the call panics on it. Evaluated in a `const` or `static` initializer, as every grammar of
-    /// this crate is, the panic is a compile error; a call evaluated at run time panics at run
-    /// time.
+    /// ([`Flag::short`], [`Flag::long`], [`Flag::pair`]) under a getopt dialect
+    /// ([`SingleDash::Cluster`] or [`SingleDash::Whole`]), where `-x` is a `Short` token; atomic
+    /// flags ([`Flag::atomic`]) under an atomic one, where every name is a whole word read as
+    /// `Long`. Any other flag could never match a token as declared, so the call panics on it.
+    /// It panics too on a value spec the dialect could never apply: a solo-only one under
+    /// [`SingleDash::Whole`], where every spelling is the whole argument, and an attached-only one
+    /// on a whole-argument spelling under [`Attach::Never`], where nothing attaches. A short
+    /// spelling in a cluster still takes the rest of the cluster, but a pair's long spelling
+    /// records the same spec, so a pair is refused too: declare its short spelling alone.
+    /// Evaluated in a `const` or `static` initializer, as every grammar of this crate is, the
+    /// panic is a compile error; a call evaluated at run time panics at run time.
     pub const fn new(dialect: Dialect, flags: &'static [&'static [Flag]]) -> Self {
+        let short_is_whole = matches!(dialect.single_dash, SingleDash::Whole);
+        let attaches_nothing = matches!(dialect.attach, Attach::Never);
         let mut table = 0;
         while table < flags.len() {
             let mut flag = 0;
             while flag < flags[table].len() {
+                let declared = &flags[table][flag];
+                let short = declared.value(TokenKind::Short);
+                let long = declared.value(TokenKind::Long);
                 assert!(
-                    flags[table][flag].fits(dialect.single_dash),
-                    "a clustering dialect reads Flag::short/long/pair, an atomic one Flag::atomic"
+                    declared.fits(dialect.single_dash),
+                    "a getopt dialect (Cluster, Whole) reads Flag::short/long/pair, \
+                     an atomic one Flag::atomic"
+                );
+                assert!(
+                    !(short_is_whole && matches!(short, Some(spec) if spec.is_solo_only())),
+                    "under SingleDash::Whole every spelling is the whole argument: \
+                     declare ValueSpec::value()"
+                );
+                let long_attaches = matches!(long, Some(spec) if spec.is_attached_only());
+                let short_attaches = matches!(short, Some(spec) if spec.is_attached_only());
+                assert!(
+                    !(attaches_nothing && (long_attaches || (short_is_whole && short_attaches))),
+                    "under Attach::Never a whole argument attaches no value: \
+                     declare ValueSpec::value()"
                 );
                 flag += 1;
             }
             table += 1;
         }
-        Self { dialect, flags }
+        Self {
+            dialect,
+            flags,
+            numeric: false,
+        }
+    }
+
+    /// This grammar, with an all-digit `-N` given as a whole argument read as one of its own
+    /// flags, as `nice -5` reads it: [`tokenize_grammar`] gives such a token a [`Token::flag`].
+    /// A digit inside a cluster (`-5n`) is no such flag. Only a clustering dialect reads a digit
+    /// run apart from the flags it declares, so the call panics under any other, a compile
+    /// error in the `const` that declares the grammar.
+    pub const fn numeric(self) -> Self {
+        assert!(
+            matches!(self.dialect.single_dash, SingleDash::Cluster),
+            "only a clustering dialect reads `-N` as a digit run"
+        );
+        Self {
+            numeric: true,
+            ..self
+        }
     }
 
     /// The declared flag that a `kind` token named `name` is, if any: a `Short` token matches a
@@ -811,7 +882,7 @@ pub fn tokenize_grammar<'a, T: AsRef<str>>(args: &'a [T], grammar: &Grammar) -> 
         }
 
         if let Some(rest) = arg.strip_prefix("--") {
-            scanner.push_atomic_flag(rest, FlagPrefix::DashDash);
+            scanner.push_atomic_flag(rest, TokenKind::Long, FlagPrefix::DashDash);
             continue;
         }
 
@@ -826,7 +897,7 @@ pub fn tokenize_grammar<'a, T: AsRef<str>>(args: &'a [T], grammar: &Grammar) -> 
             // only the loose flag lookup ([`has_flag`]) is affected.
             let (name_part, _) = split_attached(rest, scanner.grammar.dialect);
             if !rest.is_empty() && !name_part.contains('/') {
-                scanner.push_atomic_flag(rest, FlagPrefix::Slash);
+                scanner.push_atomic_flag(rest, TokenKind::Long, FlagPrefix::Slash);
                 continue;
             }
         }
@@ -834,20 +905,23 @@ pub fn tokenize_grammar<'a, T: AsRef<str>>(args: &'a [T], grammar: &Grammar) -> 
         if arg.len() > 1 && arg.starts_with('-') {
             if scanner.grammar.dialect.single_dash_is_one_word() {
                 // Under `AtomicAliasingLong` the single-dash spelling *is* the `--` flag, so it
-                // has to answer to `has_double_dash_flag` as well.
-                let prefix = match scanner.grammar.dialect.single_dash {
-                    SingleDash::AtomicAliasingLong => FlagPrefix::DashDash,
-                    SingleDash::Cluster | SingleDash::Atomic => FlagPrefix::Dash,
+                // has to answer to `has_double_dash_flag` as well. Under `Whole` it is the
+                // `Short` flag of that name.
+                let (kind, prefix) = match scanner.grammar.dialect.single_dash {
+                    SingleDash::Whole => (TokenKind::Short, FlagPrefix::Dash),
+                    SingleDash::AtomicAliasingLong => (TokenKind::Long, FlagPrefix::DashDash),
+                    SingleDash::Cluster | SingleDash::Atomic => (TokenKind::Long, FlagPrefix::Dash),
                 };
-                scanner.push_atomic_flag(&arg[1..], prefix);
+                scanner.push_atomic_flag(&arg[1..], kind, prefix);
                 continue;
             }
 
             let cluster = &arg[1..];
 
             if is_digit_run(cluster) {
+                let numeric = scanner.grammar.numeric.then_some(&NUMERIC);
                 scanner.tokens.push(Token {
-                    flag: scanner.grammar.flag(TokenKind::Short, cluster),
+                    flag: scanner.grammar.flag(TokenKind::Short, cluster).or(numeric),
                     ..scanner.token(TokenKind::Short, cluster, scanner.i, FlagPrefix::Dash)
                 });
                 scanner.i += 1;
@@ -912,30 +986,31 @@ struct Scanner<'a, 'g, T> {
 }
 
 impl<'a, 'g, T: AsRef<str>> Scanner<'a, 'g, T> {
-    /// Pushes one atomic (non-clustering) `Long` flag token — `--flag` in every dialect, and
-    /// `-flag`/`/flag` where the dialect's axes say so. `rest` is the flag text with its prefix
+    /// Pushes one atomic (non-clustering) flag token of `kind` — `--flag` (`Long`) in every
+    /// dialect, and `-flag`/`/flag` where the dialect's axes say so (`Short` under
+    /// [`SingleDash::Whole`], `Long` otherwise). `rest` is the flag text with its prefix
     /// already stripped; `prefix` records which one it was. The value attaches after one of the
     /// dialect's [`Attach`] separators (`--flag=v`, `/flag:v`) or, failing that, is the next
     /// argument. Only the `/flag` spelling is barred from consuming a separate value: an
     /// MSBuild switch attaches its value with `:` (`/bl:x.binlog`), so `/r` (MSBuild's
     /// `restore`) must not swallow the token after it the way dotnet's own `-r <rid>` does.
-    fn push_atomic_flag(&mut self, rest: &'a str, prefix: FlagPrefix) {
+    fn push_atomic_flag(&mut self, rest: &'a str, kind: TokenKind, prefix: FlagPrefix) {
         let (name, attached) = split_attached(rest, self.grammar.dialect);
         let flag_index = self.tokens.len();
         let source_index = self.i;
-        let flag = self.grammar.flag(TokenKind::Long, name);
+        let flag = self.grammar.flag(kind, name);
         self.tokens.push(Token {
             attached,
             flag,
-            ..self.token(TokenKind::Long, name, source_index, prefix)
+            ..self.token(kind, name, source_index, prefix)
         });
         self.i += 1;
 
-        // `solo_only` cannot apply here: an atomic flag is always the whole argument.
+        // `solo_only` cannot apply here: the flag is always the whole argument.
         if attached.is_none()
             && prefix != FlagPrefix::Slash
-            && let Some(spec) = flag.and_then(|flag| flag.value(TokenKind::Long))
-            && spec.attachment != Attachment::AttachedOnly
+            && let Some(spec) = flag.and_then(|flag| flag.value(kind))
+            && !spec.is_attached_only()
             && self.link_next_value(flag_index, self.i, spec)
         {
             self.i += 1;
@@ -996,6 +1071,7 @@ fn split_attached(s: &str, dialect: Dialect) -> (&str, Option<&str>) {
     let sep_pos = match dialect.attach {
         Attach::Equals => s.find('='),
         Attach::EqualsOrColon => s.find(['=', ':']),
+        Attach::Never => None,
     };
     match sep_pos {
         Some(pos) => (&s[..pos], Some(&s[pos + 1..])),
@@ -1125,6 +1201,27 @@ mod tests {
 
     /// No declared flags, MSBuild dialect.
     const MSBUILD_BARE: Grammar = Grammar::new(Dialect::Msbuild, &[]);
+    /// dotnet's `--logger <value>`, MSBuild dialect.
+    const LOGGER: Grammar = Grammar::new(
+        Dialect::Msbuild,
+        &[&[Flag::atomic(&["logger"]).takes(ValueSpec::value())]],
+    );
+    /// dotnet's `--results-directory <dir>`, MSBuild dialect.
+    const RESULTS_DIRECTORY: Grammar = Grammar::new(
+        Dialect::Msbuild,
+        &[&[Flag::atomic(&["results-directory"]).takes(ValueSpec::value())]],
+    );
+    /// Posix, with each argument read whole and no attached values.
+    const WHOLE: Dialect = Dialect {
+        single_dash: SingleDash::Whole,
+        attach: Attach::Never,
+        ..Dialect::Posix
+    };
+    /// Posix, with no attached values.
+    const POSIX_ATTACHING_NOTHING: Dialect = Dialect {
+        attach: Attach::Never,
+        ..Dialect::Posix
+    };
     /// git's `--grep <pattern>`.
     const GREP_LONG: Grammar = Grammar::new(
         Dialect::Posix,
@@ -1291,10 +1388,6 @@ mod tests {
         // Msbuild is the dialect that keeps classifying flags after the boundary, so it's the
         // one where a flag could even encounter a second "--" as its candidate value.
         let args = owned(&["--", "--logger", "--"]);
-        const LOGGER: Grammar = Grammar::new(
-            Dialect::Msbuild,
-            &[&[Flag::atomic(&["logger"]).takes(ValueSpec::value())]],
-        );
         let tokens = tokenize_grammar(&args, &LOGGER);
 
         assert_eq!(tokens[0].kind, TokenKind::DashDash);
@@ -1444,6 +1537,36 @@ mod tests {
         assert_eq!(tokens[0].text, "20");
     }
 
+    /// A numeric grammar gives a whole-argument `-N` a flag, and nothing else: a digit in a
+    /// cluster, a `+N` and a `-N` under a grammar that is not numeric stay undeclared.
+    #[test]
+    fn a_numeric_grammar_declares_a_whole_argument_digit_run() {
+        const N: &[Flag] = &[Flag::short("n").takes(ValueSpec::value())];
+        const NUMERIC: Grammar = Grammar::new(Dialect::Posix, &[N]).numeric();
+        const PLAIN: Grammar = Grammar::new(Dialect::Posix, &[N]);
+        let declared = |grammar: &Grammar, args: &[&str]| -> Vec<(String, bool)> {
+            let args = owned(args);
+            tokenize_grammar(&args, grammar)
+                .iter()
+                .map(|t| (t.text.to_string(), t.flag.is_some()))
+                .collect()
+        };
+        assert_eq!(declared(&NUMERIC, &["-5"]), [("5".into(), true)]);
+        assert_eq!(declared(&NUMERIC, &["-19"]), [("19".into(), true)]);
+        assert_eq!(
+            declared(&NUMERIC, &["-5n", "10"]),
+            [
+                ("5".into(), false),
+                ("n".into(), true),
+                ("10".into(), false)
+            ]
+        );
+        assert_eq!(declared(&NUMERIC, &["+5"]), [("+5".into(), false)]);
+        assert_eq!(declared(&PLAIN, &["-5"]), [("5".into(), false)]);
+        let args = owned(&["-5"]);
+        assert_eq!(tokenize_grammar(&args, &NUMERIC)[0].value_spec(), None);
+    }
+
     #[test]
     fn bare_single_dash_is_positional() {
         let args = owned(&["-"]);
@@ -1575,10 +1698,6 @@ mod tests {
     #[test]
     fn msbuild_separate_token_value_still_works() {
         let args = owned(&["--results-directory", "/tmp/out"]);
-        const RESULTS_DIRECTORY: Grammar = Grammar::new(
-            Dialect::Msbuild,
-            &[&[Flag::atomic(&["results-directory"]).takes(ValueSpec::value())]],
-        );
         let tokens = tokenize_grammar(&args, &RESULTS_DIRECTORY);
 
         assert_eq!(tokens.len(), 2);
@@ -1605,10 +1724,6 @@ mod tests {
         // still link to its flag even though it's past `--`, matching real forwarded-flag
         // semantics (unlike Posix, where nothing after `--` is ever a flag at all).
         let args = owned(&["--", "--results-directory", "/tmp/out"]);
-        const RESULTS_DIRECTORY: Grammar = Grammar::new(
-            Dialect::Msbuild,
-            &[&[Flag::atomic(&["results-directory"]).takes(ValueSpec::value())]],
-        );
         let tokens = tokenize_grammar(&args, &RESULTS_DIRECTORY);
 
         assert_eq!(tokens[0].kind, TokenKind::DashDash);
@@ -1745,10 +1860,6 @@ mod tests {
         // double_dash_flag_value, which only reports the first match, every occurrence must be
         // checkable.
         let args = owned(&["--logger:console;verbosity=normal", "--logger", "trx"]);
-        const LOGGER: Grammar = Grammar::new(
-            Dialect::Msbuild,
-            &[&[Flag::atomic(&["logger"]).takes(ValueSpec::value())]],
-        );
         let tokens = tokenize_grammar(&args, &LOGGER);
 
         let values: Vec<&str> = double_dash_flag_values(&tokens, &LOGGER, "logger").collect();
@@ -2018,7 +2129,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a clustering dialect reads Flag::short/long/pair")]
+    #[should_panic(expected = "a getopt dialect (Cluster, Whole) reads Flag::short/long/pair")]
     fn a_clustering_dialect_refuses_an_atomic_flag() {
         // Under getopt `-pl` is the cluster `-p -l`, so an atomic `pl` could never match.
         static TABLES: &[&[Flag]] = &[&[Flag::atomic(&["pl", "projects"])]];
@@ -2366,6 +2477,95 @@ mod tests {
         assert_takes_value_table(
             &G,
             &[(TokenKind::Long, &["grep"], Some(ValueSpec::value()))],
+        );
+    }
+
+    /// Under [`SingleDash::Whole`] and [`Attach::Never`] each argument is one option, compared
+    /// whole: no clustering, no attached value, and `--` ends the options.
+    #[test]
+    fn a_whole_dialect_reads_each_argument_whole() {
+        static P: Flag = Flag::short("p");
+        const EXACT: Grammar = Grammar::new(WHOLE, &[&[Flag::short("p")]]);
+        let args = ["-p", "-pp", "-p=1", "--p", "--", "-p"];
+        let tokens = tokenize_grammar(&args, &EXACT);
+        let read: Vec<(TokenKind, &str, bool)> = tokens
+            .iter()
+            .map(|t| (t.kind, t.text, t.flag == Some(&P)))
+            .collect();
+        assert_eq!(
+            read,
+            [
+                (TokenKind::Short, "p", true),
+                (TokenKind::Short, "pp", false),
+                (TokenKind::Short, "p=1", false),
+                (TokenKind::Long, "p", false),
+                (TokenKind::DashDash, "", false),
+                (TokenKind::Positional, "-p", false),
+            ]
+        );
+        assert!(tokens.iter().all(|t| t.attached.is_none()));
+    }
+
+    #[test]
+    #[should_panic(expected = "only a clustering dialect reads `-N` as a digit run")]
+    fn only_a_clustering_dialect_reads_a_numeric_flag() {
+        let _ = Grammar::new(Dialect::CommonsCli, &[]).numeric();
+    }
+
+    #[test]
+    fn a_whole_dialect_takes_a_separate_value() {
+        const O: Grammar = Grammar::new(WHOLE, &[&[Flag::short("o").takes(ValueSpec::value())]]);
+        let args = owned(&["-o", "out", "-o=x", "cmd"]);
+        let tokens = tokenize_grammar(&args, &O);
+        assert_eq!(tokens[0].value(&tokens), Some("out"));
+        assert_eq!((tokens[2].kind, tokens[2].text), (TokenKind::Short, "o=x"));
+        assert_eq!(tokens[2].flag, None);
+        assert_eq!(tokens[3].kind, TokenKind::Positional);
+    }
+
+    #[test]
+    #[should_panic(expected = "under SingleDash::Whole every spelling is the whole argument")]
+    fn a_whole_dialect_refuses_a_solo_only_value() {
+        static FLAGS: &[&[Flag]] = &[&[Flag::short("o").takes(ValueSpec::solo_only())]];
+        let _ = Grammar::new(WHOLE, FLAGS);
+    }
+
+    #[test]
+    #[should_panic(expected = "under Attach::Never a whole argument attaches no value")]
+    fn a_dialect_attaching_nothing_refuses_an_attached_only_value() {
+        static FLAGS: &[&[Flag]] = &[&[Flag::short("o").takes(ValueSpec::attached_only())]];
+        let _ = Grammar::new(WHOLE, FLAGS);
+    }
+
+    #[test]
+    fn a_cluster_attaching_nothing_keeps_an_attached_only_short_value() {
+        const G: Grammar = Grammar::new(
+            POSIX_ATTACHING_NOTHING,
+            &[&[Flag::short("M").takes(ValueSpec::attached_only())]],
+        );
+        let args = owned(&["-M50", "x"]);
+        let tokens = tokenize_grammar(&args, &G);
+        assert_eq!(tokens[0].value(&tokens), Some("50"));
+        assert_eq!(tokens[1].kind, TokenKind::Positional);
+    }
+
+    #[test]
+    #[should_panic(expected = "under Attach::Never a whole argument attaches no value")]
+    fn a_dialect_attaching_nothing_refuses_an_attached_only_long_value() {
+        static FLAGS: &[&[Flag]] = &[&[Flag::long("x").takes(ValueSpec::attached_only())]];
+        let _ = Grammar::new(POSIX_ATTACHING_NOTHING, FLAGS);
+    }
+
+    #[test]
+    #[should_panic(expected = "under Attach::Never a whole argument attaches no value")]
+    fn a_dialect_attaching_nothing_refuses_an_attached_only_atomic_value() {
+        static FLAGS: &[&[Flag]] = &[&[Flag::atomic(&["x"]).takes(ValueSpec::attached_only())]];
+        let _ = Grammar::new(
+            Dialect {
+                attach: Attach::Never,
+                ..Dialect::CommonsCli
+            },
+            FLAGS,
         );
     }
 }
