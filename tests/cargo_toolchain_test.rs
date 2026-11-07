@@ -86,6 +86,8 @@ fn global_options_and_aliases_rewrite_without_changing_shell_text() {
         "cargo --list",
         "cargo --explain check",
         "cargo +nightly -Zscript check",
+        "cargo +nightly -vvZscript check",
+        "cargo +nightly -Z=script check",
         "cargo +nightly -Z script check",
         "cargo --config check metadata",
     ] {
@@ -131,6 +133,8 @@ exit 101
         vec!["--config", "net.retry=2", "--config=build.jobs=1"],
         vec!["+nightly", "-Z", "unstable-options", "-C", "some path"],
         vec!["+nightly", "-Zunstable-options", "-Csome path"],
+        vec!["+nightly", "-vvZunstable-options", "-Cvery/quiet"],
+        vec!["+nightly", "-vCsome path", "-Z=unstable-options"],
     ] {
         for subcommand in [
             "build", "check", "clippy", "test", "b", "c", "t", "metadata", "fmt", "install",

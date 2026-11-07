@@ -24,6 +24,16 @@ pub enum CargoCommand {
 }
 
 impl CargoCommand {
+    const ALL: [Self; 7] = [
+        Self::Build,
+        Self::Test,
+        Self::Clippy,
+        Self::Check,
+        Self::Install,
+        Self::Nextest,
+        Self::Fmt,
+    ];
+
     /// Canonical spelling for classification and display; execution retains the
     /// user's original arguments, including aliases.
     pub fn as_str(self) -> &'static str {
@@ -65,50 +75,79 @@ pub fn parse(args: &[impl AsRef<OsStr>]) -> Option<CargoInvocation> {
         let arg = args.get(index)?.as_ref().to_str()?;
         match arg {
             "--locked" | "--offline" | "--frozen" | "--quiet" | "--verbose" => {}
-            // Each option consumes a value, even if that value looks like a
-            // subcommand. -C must precede the command and requires nightly
-            // with -Z unstable-options; leave enforcement to native Cargo.
+            // Consume the following token even when it looks like a command.
+            // Repeated --config options are allowed; preserve their order.
             // https://doc.rust-lang.org/cargo/commands/cargo.html#common-options
             // https://doc.rust-lang.org/cargo/commands/cargo.html#display-options
-            "--config" | "--color" | "-C" | "-Z" => {
+            "--config" | "--color" => {
                 index += 1;
-                let value = args.get(index)?.as_ref();
-                // -Zscript enables direct Rust source-file execution. Leave
-                // this mode to Cargo rather than guessing a command filter.
-                // https://doc.rust-lang.org/cargo/reference/unstable.html#script
-                if arg == "-Z" && value.to_str()?.split('=').next() == Some("script") {
-                    return None;
-                }
+                args.get(index)?;
             }
+            // Long options can carry their value in the same token, separated
+            // by '='. Split once: a config value can itself contain '='.
             _ if arg.starts_with("--config=") || arg.starts_with("--color=") => {
                 if arg.split_once('=')?.1.is_empty() {
                     return None;
                 }
             }
-            _ if arg.starts_with("-C") && arg.len() > 2 => {}
-            _ if arg.starts_with("-Z") && arg.len() > 2 => {
-                if arg[2..].split('=').next() == Some("script") {
-                    return None;
+            // Scan short-option clusters left-to-right. Flags (v/q) can repeat;
+            // an option taking a value consumes the remainder of the token, or
+            // the next argument when no attached value remains. Never interpret
+            // characters inside a value as more options (e.g. -Cvery/quiet).
+            // https://docs.rs/clap/latest/clap/struct.Arg.html#method.short
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                let mut options = arg[1..].chars();
+                while let Some(option) = options.next() {
+                    match option {
+                        // Cargo supports -vv; Cargo validates conflicts with -q.
+                        // https://doc.rust-lang.org/cargo/commands/cargo.html#display-options
+                        'v' | 'q' => {}
+                        // -C must precede the command and requires nightly with
+                        // -Z unstable-options. Cargo enforces those constraints.
+                        // https://doc.rust-lang.org/cargo/commands/cargo.html#common-options
+                        'C' => {
+                            if options.as_str().is_empty() {
+                                index += 1;
+                                args.get(index)?;
+                            }
+                            break;
+                        }
+                        // -Z has its own case because script mode enables direct
+                        // source-file execution, which RTK leaves to Cargo.
+                        // Accept -Z flag, -Zflag, and -Z=flag spellings.
+                        // https://doc.rust-lang.org/cargo/reference/unstable.html#script
+                        'Z' => {
+                            let value = if options.as_str().is_empty() {
+                                index += 1;
+                                args.get(index)?.as_ref().to_str()?
+                            } else {
+                                options
+                                    .as_str()
+                                    .strip_prefix('=')
+                                    .unwrap_or(options.as_str())
+                            };
+                            if value.is_empty() || value.split('=').next() == Some("script") {
+                                return None;
+                            }
+                            break;
+                        }
+                        // Unknown short flags (and unrecognized --long options)
+                        // stay native instead of guessing how many values follow.
+                        _ => return None,
+                    }
                 }
             }
-            // Cargo supports repeated verbosity (-vv). Consume only v/q
-            // clusters here; native Cargo still validates flag combinations.
-            // https://doc.rust-lang.org/cargo/commands/cargo.html#display-options
-            _ if arg.starts_with('-')
-                && arg.len() > 1
-                && arg[1..].bytes().all(|b| matches!(b, b'v' | b'q')) => {}
             _ => {
-                // Resolve Cargo's built-in b/c/t aliases for filter selection.
+                // Resolve Cargo's built-in aliases separately. Full names come
+                // from as_str(), so their spellings have one source of truth.
                 // https://doc.rust-lang.org/cargo/reference/config.html#alias
                 let command = match arg {
-                    "build" | "b" => CargoCommand::Build,
-                    "check" | "c" => CargoCommand::Check,
-                    "test" | "t" => CargoCommand::Test,
-                    "clippy" => CargoCommand::Clippy,
-                    "install" => CargoCommand::Install,
-                    "nextest" => CargoCommand::Nextest,
-                    "fmt" => CargoCommand::Fmt,
-                    _ => return None,
+                    "b" => CargoCommand::Build,
+                    "c" => CargoCommand::Check,
+                    "t" => CargoCommand::Test,
+                    name => CargoCommand::ALL
+                        .into_iter()
+                        .find(|command| name == command.as_str())?,
                 };
                 return Some(CargoInvocation {
                     subcommand_index: index,
@@ -1630,6 +1669,21 @@ mod tests {
         for (args, index, command) in [
             (vec!["--config", "check", "t"], 2, CargoCommand::Test),
             (
+                vec!["+nightly", "-vvZunstable-options", "-Cvery/quiet", "b"],
+                3,
+                CargoCommand::Build,
+            ),
+            (
+                vec!["+nightly", "-vC", "some path", "-Z=unstable-options", "c"],
+                4,
+                CargoCommand::Check,
+            ),
+            (
+                vec!["+nightly", "-vZ", "unstable-options", "check"],
+                3,
+                CargoCommand::Check,
+            ),
+            (
                 vec!["+nightly", "-Z", "unstable-options", "-C", "some path", "c"],
                 5,
                 CargoCommand::Check,
@@ -1671,6 +1725,14 @@ mod tests {
         for args in [
             vec!["--config"],
             vec!["--color="],
+            vec!["--config="],
+            vec!["-", "check"],
+            vec!["-vX", "check"],
+            vec!["-vC"],
+            vec!["-vZ"],
+            vec!["-Z=", "check"],
+            vec!["-Z=script", "check"],
+            vec!["+nightly", "-vvZscript", "check"],
             vec!["--future-option", "check"],
             vec!["+stable", "--help"],
             vec!["--version"],
