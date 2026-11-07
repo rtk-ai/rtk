@@ -125,7 +125,7 @@ It happens on Claude Code's own hook only — every other host, and `rtk rewrite
 Commands RTK doesn't recognize run through passthrough — output is unchanged, usage is tracked:
 
 ```bash
-rtk bypass make install
+rtk bypass cargo run
 ```
 
 ## Next steps
