@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rtk hook muse",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
