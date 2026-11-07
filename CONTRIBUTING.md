@@ -86,6 +86,8 @@ Commands that produce **text output** (typically 100+ tokens) whose bytes can be
 
 When implementing a new filter/cmds, be aware of the [Design Philosophy](#design-philosophy) above.
 
+RTK also provides an engine with pipelines and a daemon, allowing you to build beyond bash compression (smart routing and delegation, cache optimization, compression, ...)
+
 ### Out of Scope
 
 - Interactive TUIs (htop, vim, less): not batch-mode compatible
@@ -93,6 +95,13 @@ When implementing a new filter/cmds, be aware of the [Design Philosophy](#design
 - Trivial commands: not worth the overhead and may loose important informations
 - Commands with no text output: nothing to compress
 - Others features not related to a LLM-proxy like RTK
+
+RTK Open Source should not conflicts with [RTK Pro](pro.rtk-ai.app) features, example of features not accepted in RTK Open Source:
+
+- Secret redaction, PII masking (conflict with RTK Pro Shield)
+- Blocking dangerous commands or action (conflict with RTK Pro Policies)
+
+If any hesitation of whether a feature can be accepted or not, you can reach us to discuss about this on our [Discord](https://discord.com/invite/RySmvNF5kF)
 
 ### TOML vs Rust: Which One?
 

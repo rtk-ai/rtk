@@ -569,6 +569,56 @@ fn duplicate_monday_retry_rows_sum_without_initial_spending() {
     assert_duplicate_mondays_are_summed("period", true);
 }
 
+fn duplicated_month_fixture() -> String {
+    let mut value: Value =
+        serde_json::from_str(&duplicated_monday_fixture("month")).expect("parse test fixture");
+    let mut rows = value["weekly"].take();
+    for row in rows.as_array_mut().expect("fixture rows") {
+        row["month"] = json!("2026-09");
+    }
+    json!({"monthly": rows}).to_string()
+}
+
+#[test]
+fn duplicate_legacy_month_rows_sum_every_metric() {
+    let sandbox = Sandbox::new();
+    sandbox.seed(&[("2026-09-28", 1)]);
+    let duplicates = duplicated_month_fixture();
+    sandbox.stub(&[(&duplicates, 0)]);
+    let out = sandbox
+        .command()
+        .args(["cc-economics", "--monthly", "--format", "json"])
+        .output()
+        .expect("run monthly economics CLI");
+    assert_success(&out);
+    assert_eq!(
+        fs::read_to_string(sandbox.root.path().join("calls")).expect("read call log"),
+        "<monthly><--json><--since><20250101>\n"
+    );
+    let report: Value = serde_json::from_slice(&out.stdout).expect("valid monthly JSON");
+    let rows = report["monthly"].as_array().expect("monthly rows");
+    assert_eq!(rows.len(), 1, "duplicate months belong to one joined row");
+    assert_eq!(rows[0]["label"], "2026-09");
+    // `totals` is what the default summary prints, built from the same rows.
+    for section in [&rows[0], &report["totals"]] {
+        for (key, expected) in [
+            ("cc_input_tokens", 408),
+            ("cc_output_tokens", 82),
+            ("cc_cache_create_tokens", 120),
+            ("cc_cache_read_tokens", 630),
+            ("cc_active_tokens", 490),
+            ("cc_total_tokens", 3000),
+            ("rtk_commands", 1),
+            ("rtk_saved_tokens", 800),
+        ] {
+            assert_eq!(section[key], expected, "{key}: {section}");
+        }
+        assert_metric(section, "cc_cost", 40.0);
+        assert_metric(section, "blended_cpt", 40.0 / 3000.0);
+        assert_metric(section, "active_cpt", 40.0 / 490.0);
+    }
+}
+
 #[test]
 fn non_monday_daily_key_joins_with_exactly_one_call() {
     let sandbox = Sandbox::new();
