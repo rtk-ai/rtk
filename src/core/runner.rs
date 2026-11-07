@@ -481,6 +481,10 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
     let cargo = (stem == "cargo").then(|| cargo_cmd::parse(args)).flatten();
     let first = args.first().map(String::as_str);
     let mut spelling = help_spelling(stem, first);
+    // cargo test passes arguments after -- to libtest; nextest emulates its
+    // argument syntax. Preserve their usage output instead of filtering it.
+    // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
+    // https://nexte.st/docs/running/
     if let Some(invocation) = &cargo {
         spelling.past_boundary = matches!(
             invocation.command,
@@ -488,6 +492,8 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
         );
     }
     let takes_value = |kind: TokenKind, name: &str| {
+        // install --version selects a crate version, not Cargo's version page.
+        // https://doc.rust-lang.org/cargo/commands/cargo-install.html#install-options
         let cargo_install_version = stem == "cargo"
             && cargo
                 .as_ref()

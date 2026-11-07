@@ -47,8 +47,14 @@ pub struct CargoInvocation {
 
 /// Shared by shell classification and execution. Only consume documented global
 /// options: an unknown option, missing value, or special operation stays native.
+/// This is RTK's routing policy, not a replacement for Cargo's validation.
+/// Cargo's option arities and special operations are documented at
+/// <https://doc.rust-lang.org/cargo/commands/cargo.html#options>.
 pub fn parse(args: &[impl AsRef<OsStr>]) -> Option<CargoInvocation> {
     let mut index = 0;
+    // Rustup interprets +toolchain only as the FIRST argument after cargo,
+    // before Cargo's global options. Do not recognize it later in the loop.
+    // https://rust-lang.github.io/rustup/overrides.html#toolchain-override-shorthand
     if args.first()?.as_ref().to_str()?.starts_with('+') {
         if args[0].as_ref().to_str()?.len() == 1 {
             return None;
@@ -59,11 +65,17 @@ pub fn parse(args: &[impl AsRef<OsStr>]) -> Option<CargoInvocation> {
         let arg = args.get(index)?.as_ref().to_str()?;
         match arg {
             "--locked" | "--offline" | "--frozen" | "--quiet" | "--verbose" => {}
+            // Each option consumes a value, even if that value looks like a
+            // subcommand. -C must precede the command and requires nightly
+            // with -Z unstable-options; leave enforcement to native Cargo.
+            // https://doc.rust-lang.org/cargo/commands/cargo.html#common-options
+            // https://doc.rust-lang.org/cargo/commands/cargo.html#display-options
             "--config" | "--color" | "-C" | "-Z" => {
                 index += 1;
                 let value = args.get(index)?.as_ref();
-                // -Zscript changes the grammar: the next positional is a Rust
-                // source file, even when its name happens to be `check`.
+                // -Zscript enables direct Rust source-file execution. Leave
+                // this mode to Cargo rather than guessing a command filter.
+                // https://doc.rust-lang.org/cargo/reference/unstable.html#script
                 if arg == "-Z" && value.to_str()?.split('=').next() == Some("script") {
                     return None;
                 }
@@ -79,10 +91,15 @@ pub fn parse(args: &[impl AsRef<OsStr>]) -> Option<CargoInvocation> {
                     return None;
                 }
             }
+            // Cargo supports repeated verbosity (-vv). Consume only v/q
+            // clusters here; native Cargo still validates flag combinations.
+            // https://doc.rust-lang.org/cargo/commands/cargo.html#display-options
             _ if arg.starts_with('-')
                 && arg.len() > 1
                 && arg[1..].bytes().all(|b| matches!(b, b'v' | b'q')) => {}
             _ => {
+                // Resolve Cargo's built-in b/c/t aliases for filter selection.
+                // https://doc.rust-lang.org/cargo/reference/config.html#alias
                 let command = match arg {
                     "build" | "b" => CargoCommand::Build,
                     "check" | "c" => CargoCommand::Check,
@@ -116,6 +133,10 @@ pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
     };
     // Keep the original spelling (including aliases) and all prefix options in
     // their original positions. The canonical name only selects the filter.
+    // In particular, repeated --config values merge left-to-right:
+    // https://doc.rust-lang.org/cargo/reference/config.html#command-line-overrides
+    // Keep -- too: cargo test sends the following arguments to the test binary.
+    // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
     let prefix = &args[..=invocation.subcommand_index];
     match invocation.command {
         CargoCommand::Build => run_build(prefix, &rest, verbose),
