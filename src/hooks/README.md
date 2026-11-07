@@ -11,7 +11,7 @@ Owns: `rtk init` installation flows (Claude Code by default, `--agent <AgentTarg
 Does **not** own: the deployed hook scripts themselves (that's `hooks/`), the rewrite pattern registry (that's `discover/`), or command filtering (that's `cmds/`).
 
 Boundary notes:
-- `decision.rs` is the single place RTK decides what a hook should do with a command — deny, defer, rewrite-and-allow, or rewrite-and-ask. All three entry points route through it: the in-process `rtk hook <agent>` hosts (`hook_cmd.rs`), the `rtk rewrite` subprocess path (`rewrite_cmd.rs`), and the `rtk hook check` diagnostic (`main.rs`). Add a gate there, not in a caller.
+- `decision.rs` is the single place RTK decides what a hook should do with a command — deny, defer, rewrite-and-allow, or rewrite-and-ask. All three entry points route through it: the in-process `rtk hook <agent>` hosts (`hook_cmd.rs`), the `rtk rewrite` subprocess path (`rewrite_cmd.rs`), and the `rtk hook check` diagnostic (`lib.rs`). Add a gate there, not in a caller.
 - `rewrite_cmd.rs` is a thin CLI bridge — it exists to serve hooks (hooks call `rtk rewrite` as a subprocess) and renders `decision.rs`'s verdict as the exit codes those delegates branch on.
 - `trust.rs` gates project-local TOML filter execution. It lives here because the trust workflow is tied to hook-installed filter discovery, not to the core filter engine.
 
@@ -112,14 +112,14 @@ Claude Code's rule sources never reach the hook at all (`--settings`,
 `cd`'d away from), so a rule in one of those becomes a prompt rather than a
 refusal. The user docs say so.
 
-The decision records a wrap it built as an `AskRewrite` whose `AskOwner` is
-`Hook`, and only that carries the explicit ask. A command the user typed as
+The decision records a wrap it built as a `Rewrite` whose `Approval` is `Ask`,
+and only that carries the explicit ask. A command the user typed as
 `rtk run --shell fish -c ...` that the rules only rewrote around keeps its
 normal permission decision, also when the rewrite drops a leading line
 continuation; the hook does not infer wrap ownership from the resulting string.
 
 **It is offered only on `rtk hook claude`** (`DenyRules` and
-`check_claude_hook_command` in `permissions.rs`), and only when every Claude Code
+`HostRules::claude_hook` in `permissions.rs`), and only when every Claude Code
 settings file RTK reads parsed and none of them has a deny rule. Once the
 script reaches a fish, RTK's own view of it stops describing what runs: fish
 starts a command where the bash-shaped segmenter does not look — the condition
@@ -191,7 +191,7 @@ commands. For those:
 | Ask | `permissions.ask` rule matched | 3 | Rewrite + let host tool prompt user |
 | Allow | `permissions.allow` rule matched | 0 | Rewrite + auto-allow |
 | Default | No rule matched | 3 | Rewrite + let host tool prompt user |
-| Defer | `permissions.deny` rule matched inside a shell wrapper | 1 | Passthrough — command runs as without RTK |
+| Defer | `permissions.deny` rule matched inside a shell wrapper, or rules RTK cannot judge (OpenCode) | 1 | Passthrough — command runs as without RTK |
 
 A deny or ask rule is matched against each segment as written, without the grammar a split leaves (`{`, `!`, `(`), and past each leading assignment or wrapper in turn (`registry::matching_readings`): `env HUSKY=0 git push` is read as `HUSKY=0 git push` and as `git push`, as Claude Code reads it. A reading need not be what the shell runs (`nohup HUSKY=0 git push` makes nohup look for a program named `HUSKY=0`), so it can only make a verdict stricter. Past 32 prefixes the command behind them is unread, and where a deny or ask rule exists the verdict is at least Ask. An allow rule matches the segment as written only, so a wrapper never inherits the allow of the command it runs.
 
@@ -226,7 +226,8 @@ rewrite`, since it is inherited by every child process. See `decision.rs`'s
 
 ### Implementation
 
-- `permissions.rs` — loads deny/ask/allow rules, evaluates precedence, returns `PermissionVerdict`
+- `permissions.rs` — `HostRules`: loads a host's rules once (deny/ask/allow lists, or OpenCode's ordered last-match-wins list), evaluates them, returns `PermissionVerdict`
+- `decision.rs` — `decide_for_host`: what a hook does with a command under those rules, shared by every `rtk hook <agent>` processor and `rtk hook check`
 - `rewrite_cmd.rs` — maps verdict to exit code (consumed by shell hook)
 - `hook_cmd.rs` — maps decisions to each agent's JSON protocol, including Codex `updatedInput`
 - `discover/shell_wrapper.rs` — shares conservative script-span parsing between rewrite and permission checks
@@ -236,4 +237,4 @@ rewrite`, since it is inherited by every child process. See `decision.rs`'s
 Hook processors in `hook_cmd.rs` must return `Ok(())` on every path — success, no-match, parse error, and unexpected input. Returning `Err` propagates to `main()` and exits non-zero, which blocks the agent's command from executing. This violates the non-blocking guarantee documented in `hooks/README.md`.
 
 ## Adding New Functionality
-To add support for a new AI coding agent: (1) add the hook installation logic to `src/hooks/init/` following the existing agent patterns, (2) if the agent requires a custom hook protocol (like Gemini's `BeforeTool` or Vibe's `pre_tool`), add a processor function in `hook_cmd.rs` and a matching `HookCommands::<Agent>` variant + `AgentTarget::<Agent>` enum entry in `main.rs`, (3) if the agent has installable permission surfaces (denylist / allowlist), wire them into `permissions.rs::check_command_for` via a new `Host::<Agent>` variant, and (4) update `integrity.rs` with the expected hash for the new hook file. Add an `is_configured()` probe to the agent's init module that covers every scope its `rtk init` writes (global and project), make it reachable from `hook_check` (the module is `pub(crate)` in `init/mod.rs`), and list it in `hook_check.rs::AGENT_PROBES`, so that `rtk gain` and the daily reminder stop reporting a missing hook for users of that agent. Only the Claude Code hook has an outdated-hook warning path. Test by running `rtk init` in a fresh environment and verifying the hook rewrites commands correctly in the target agent.
+To add support for a new AI coding agent: (1) add the hook installation logic to `src/hooks/init/` following the existing agent patterns, (2) if the agent requires a custom hook protocol (like Gemini's `BeforeTool` or Vibe's `pre_tool`), add a processor function in `hook_cmd.rs` that decides through `decide_hook_action` (the host's `HostRules`, then `decision::decide_for_host`), a matching `HookCommands::<Agent>` variant + `AgentTarget::<Agent>` enum entry in `src/lib.rs`, and the agent's arm in `decision.rs::AgentPath::lookup` so `rtk hook check --agent <agent>` gives the hook's answer, (3) if the agent has installable permission surfaces (denylist / allowlist), load them in `permissions.rs::HostRules::load` via a new `Host::<Agent>` variant, and say in `permissions.rs::judges_final_command` whether the host judges the command its hook hands back, and (4) update `integrity.rs` with the expected hash for the new hook file. Add an `is_configured()` probe to the agent's init module that covers every scope its `rtk init` writes (global and project), make it reachable from `hook_check` (the module is `pub(crate)` in `init/mod.rs`), and list it in `hook_check.rs::AGENT_PROBES`, so that `rtk gain` and the daily reminder stop reporting a missing hook for users of that agent. Only the Claude Code hook has an outdated-hook warning path. Test by running `rtk init` in a fresh environment and verifying the hook rewrites commands correctly in the target agent.
