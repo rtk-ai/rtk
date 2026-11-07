@@ -11,6 +11,7 @@ pub mod constants;
 pub mod display_helpers;
 pub mod filter;
 pub mod guard;
+pub mod invocation;
 #[cfg(feature = "engine")]
 pub mod pipeline_cmd;
 #[cfg(feature = "engine")]
