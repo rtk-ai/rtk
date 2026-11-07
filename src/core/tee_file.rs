@@ -342,17 +342,14 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    #[allow(unsafe_code)]
     fn test_write_tee_file_owner_only_under_permissive_umask() {
         use std::os::unix::fs::PermissionsExt;
 
-        // nosemgrep: unsafe-block
-        let previous = unsafe { libc::umask(0o000) };
         let tmpdir = tempfile::tempdir().unwrap();
         let tee_dir = tmpdir.path().join("tee");
-        let written = write_tee_file("secret\n", "grep", &tee_dir, MAX_FILE_SIZE, 20);
-        // nosemgrep: unsafe-block
-        unsafe { libc::umask(previous) };
+        let written = crate::core::test_isolation::with_umask(0o000, || {
+            write_tee_file("secret\n", "grep", &tee_dir, MAX_FILE_SIZE, 20)
+        });
 
         let path = written.expect("tee file written");
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
