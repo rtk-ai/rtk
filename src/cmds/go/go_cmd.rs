@@ -204,16 +204,6 @@ fn detect_go_tool_golangci_version() -> u32 {
     }
 }
 
-fn has_golangci_format_flag(args: &[OsString]) -> bool {
-    args.iter().any(|a| {
-        let s = a.to_string_lossy();
-        s == "--out-format"
-            || s.starts_with("--out-format=")
-            || s == "--output.json.path"
-            || s.starts_with("--output.json.path=")
-    })
-}
-
 /// Known `go tool` subcommands that RTK provides filtered output for.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum GoTool {
@@ -240,6 +230,15 @@ fn match_go_tool(args: &[OsString]) -> Option<(GoTool, &[OsString])> {
     None
 }
 
+// helper to remove a leading "run" from golangci-lint args, if present, to avoid duplicating the subcommand.
+fn strip_leading_golangci_run(args: &[OsString]) -> &[OsString] {
+    if args.first().is_some_and(|arg| arg == "run") {
+        &args[1..]
+    } else {
+        args
+    }
+}
+
 /// Run `go tool golangci-lint` and filter its output via the golangci JSON filter.
 /// Reusing parts of golangci_cmd.
 fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
@@ -247,10 +246,20 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
 
     let version = detect_go_tool_golangci_version();
 
+    // The shared argument helpers operate on String arguments.
+    let string_args: Vec<String> = args
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+
+    let has_format = golangci_cmd::has_output_flag(&string_args);
+    let stdout_report = golangci_cmd::has_stdout_output_flag(&string_args);
+
     let mut cmd = resolved_command("go");
     cmd.arg("tool").arg("golangci-lint");
 
-    let has_format = has_golangci_format_flag(args);
+    // Remove an existing leading "run" to avoid duplicating the subcommand.
+    let args = strip_leading_golangci_run(args);
 
     if !has_format {
         if version >= 2 {
@@ -267,11 +276,10 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
     }
 
     if verbose > 0 {
-        if version >= 2 {
-            eprintln!("Running: go tool golangci-lint run --output.json.path stdout");
-        } else {
-            eprintln!("Running: go tool golangci-lint run --out-format=json");
-        }
+        eprintln!(
+            "Running: go tool golangci-lint run {}",
+            string_args.join(" ")
+        );
     }
 
     let CaptureResult {
@@ -279,18 +287,31 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         stderr,
         exit_code,
     } = exec_capture(&mut cmd).context("Failed to run go tool golangci-lint")?;
+
     let raw = format!("{}\n{}", stdout, stderr);
 
-    // v2 outputs JSON on first line + trailing text; v1 outputs just JSON
-    let json_output = if version >= 2 {
-        stdout.lines().next().unwrap_or("")
+    // A user-directed stdout report is not RTK's JSON output.
+    // Preserve it verbatim instead of trying to parse it as JSON.
+    let shown = if stdout_report {
+        stdout.clone()
     } else {
-        &*stdout
+        // v2 outputs JSON on the first line + trailing text; v1 outputs just JSON.
+        let json_output = if version >= 2 {
+            stdout.lines().next().unwrap_or("")
+        } else {
+            &stdout
+        };
+
+        let filtered = golangci_cmd::filter_golangci_json(json_output, version);
+        never_worse(&raw, &filtered).to_string()
     };
 
-    let filtered = golangci_cmd::filter_golangci_json(json_output, version);
-    let shown = never_worse(&raw, &filtered);
-    println!("{}", shown);
+    if stdout_report {
+        // Do not add or remove newlines from a user-requested report.
+        print!("{shown}");
+    } else {
+        println!("{shown}");
+    }
 
     if !stderr.trim().is_empty() && verbose > 0 {
         eprintln!("{}", stderr.trim());
@@ -300,160 +321,13 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
         "go tool golangci-lint",
         "rtk go tool golangci-lint",
         &raw,
-        shown,
+        &shown,
     );
 
     // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
     // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL)
     Ok(if exit_code == 1 { 0 } else { exit_code })
 }
-
-fn is_pipe_test_action(action: &str) -> bool {
-    matches!(
-        action,
-        "start" | "run" | "pause" | "cont" | "pass" | "bench" | "fail" | "output" | "skip"
-    )
-}
-
-fn pipe_event(line: &str) -> Option<GoTestEvent> {
-    let event: GoTestEvent = serde_json::from_str(line).ok()?;
-    let supported = match event.action.as_str() {
-        "build-output" => event.import_path.is_some() && event.output.is_some(),
-        "build-fail" => event.import_path.is_some(),
-        action => is_pipe_test_action(action) && (action != "output" || event.output.is_some()),
-    };
-    if supported
-        && is_pipe_test_action(&event.action)
-        && event.package.is_none()
-        && event.test.is_none()
-        && event.output.is_none()
-    {
-        // Package-less lifecycle records can contain just Action/Time/Elapsed.
-        // Unknown fields on a metadata-only log must not lose their diagnostics
-        // merely because the log uses the same verb or timestamp as test2json.
-        let fields: serde_json::Map<String, serde_json::Value> = serde_json::from_str(line).ok()?;
-        if fields
-            .keys()
-            .any(|key| !matches!(key.as_str(), "Action" | "Time" | "Elapsed"))
-        {
-            return None;
-        }
-    }
-    supported.then_some(event)
-}
-
-fn pipe_test_evidence(event: &GoTestEvent) -> bool {
-    // test2json may omit both Package and Time. Bare lifecycle records are
-    // accepted within a stream, but a lone {"Action":"pass"} is not evidence.
-    is_pipe_test_action(&event.action)
-        && (event.package.is_some()
-            || event.test.is_some()
-            || event.time.is_some()
-            || event.output.is_some()
-            || event.elapsed.is_some())
-}
-
-fn pipe_event_line(index: usize, line: &str) -> &str {
-    if index == 0 {
-        line.strip_prefix('\u{feff}').unwrap_or(line).trim()
-    } else {
-        line.trim()
-    }
-}
-
-/// Auto-detect only a leading Go stream, not events quoted inside other text.
-/// Cold-cache downloads may precede events; arbitrary prose, Markdown fences and
-/// diff headers must instead keep the whole input on the lossless fallback path.
-/// Build events alone are not a test report and must retain their diagnostics.
-pub(crate) fn is_go_test_json(input: &str) -> bool {
-    for (index, line) in input.lines().enumerate() {
-        let line = pipe_event_line(index, line);
-        if line.is_empty() || line.starts_with("go: downloading ") {
-            continue;
-        }
-        let Some(event) = pipe_event(line) else {
-            return false;
-        };
-        if pipe_test_evidence(&event) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Reduce piped test events while retaining unrelated or unrecognized records.
-/// This adapter deliberately leaves the runner's reducer and completeness
-/// semantics unchanged; a partial stream still reports only the events seen.
-pub(crate) fn filter_go_test_pipe(input: &str) -> String {
-    let records: Vec<_> = input
-        .split_inclusive('\n')
-        .enumerate()
-        .map(|(index, raw)| {
-            let line = pipe_event_line(index, raw);
-            (raw, line, pipe_event(line))
-        })
-        .collect();
-    if !records
-        .iter()
-        .any(|(_, _, event)| event.as_ref().is_some_and(pipe_test_evidence))
-    {
-        return input.to_string();
-    }
-
-    // The reducer renders build output only for a matching package-level fail.
-    // Unmatched build records must not disappear beside otherwise valid tests.
-    let mut failed_packages = std::collections::HashSet::new();
-    let repeated_build_failure = records
-        .iter()
-        .filter_map(|(_, _, event)| event.as_ref())
-        .filter(|event| {
-            event.action == "fail" && event.test.is_none() && event.failed_build.is_some()
-        })
-        .any(|event| !failed_packages.insert(event.package.as_deref().unwrap_or("unknown")));
-    let mut represented_builds: HashMap<_, _> = records
-        .iter()
-        .enumerate()
-        .filter_map(|(index, (_, _, event))| event.as_ref().map(|event| (index, event)))
-        .filter(|(_, event)| event.action == "fail" && event.test.is_none())
-        .filter_map(|(index, event)| event.failed_build.as_deref().map(|path| (path, index)))
-        .collect();
-    // A later build failure for the same package can replace earlier errors in
-    // the reducer. Retain all build records when that representation is lossy.
-    if repeated_build_failure {
-        represented_builds.clear();
-    }
-    let mut events = String::new();
-    let mut residual = String::new();
-    let mut has_residual = false;
-    for (index, (raw, line, event)) in records.iter().enumerate() {
-        let consumed = event.as_ref().is_some_and(|event| {
-            if matches!(event.action.as_str(), "build-output" | "build-fail") {
-                event.import_path.as_deref().is_some_and(|path| {
-                    represented_builds
-                        .get(path)
-                        .is_some_and(|fail_index| index < *fail_index)
-                })
-            } else {
-                true
-            }
-        });
-        if consumed {
-            events.push_str(line);
-            events.push('\n');
-        } else {
-            // This also keeps CRLF and an unterminated final fragment intact.
-            residual.push_str(raw);
-            has_residual |= !line.is_empty();
-        }
-    }
-    let mut shown = filter_go_test_json(&events);
-    if has_residual {
-        shown.push('\n');
-        shown.push_str(&residual);
-    }
-    shown
-}
-
 /// Parse go test -json output (NDJSON format)
 pub(crate) fn filter_go_test_json(output: &str) -> String {
     let mut packages: HashMap<String, PackageResult> = HashMap::new();
@@ -1306,12 +1180,50 @@ utils.go:15:5: unreachable code"#;
         args.iter().map(OsString::from).collect()
     }
 
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_string()).collect()
+    }
+
     #[test]
     fn test_match_go_tool_golangci_lint() {
         let args = os(&["tool", "golangci-lint", "run", "./..."]);
         let (tool, rest) = match_go_tool(&args).expect("should match");
         assert_eq!(tool, GoTool::GolangciLint);
         assert_eq!(rest.len(), 2); // ["run", "./..."]
+    }
+
+    #[test]
+    fn test_strip_leading_golangci_run() {
+        assert_eq!(
+            strip_leading_golangci_run(&os(&["run", "./..."])),
+            os(&["./..."])
+        );
+    }
+
+    #[test]
+    fn test_strip_leading_golangci_run_without_run() {
+        assert_eq!(strip_leading_golangci_run(&os(&["./..."])), os(&["./..."]));
+    }
+
+    #[test]
+    fn test_strip_leading_golangci_run_preserves_remaining_args() {
+        assert_eq!(
+            strip_leading_golangci_run(&os(&["run", "--verbose", "./..."])),
+            os(&["--verbose", "./..."])
+        );
+    }
+
+    #[test]
+    fn test_strip_leading_golangci_run_only_removes_leading_run() {
+        assert_eq!(
+            strip_leading_golangci_run(&os(&["./...", "run"])),
+            os(&["./...", "run"])
+        );
+    }
+
+    #[test]
+    fn test_strip_leading_golangci_run_empty_args() {
+        assert!(strip_leading_golangci_run(&os(&[])).is_empty());
     }
 
     #[test]
@@ -1332,8 +1244,10 @@ utils.go:15:5: unreachable code"#;
 
     #[test]
     fn test_has_golangci_format_flag_v1() {
-        assert!(has_golangci_format_flag(&os(&["--out-format=json"])));
-        assert!(has_golangci_format_flag(&os(&[
+        assert!(golangci_cmd::has_output_flag(&strings(&[
+            "--out-format=json"
+        ])));
+        assert!(golangci_cmd::has_output_flag(&strings(&[
             "./...",
             "--out-format",
             "json"
@@ -1342,20 +1256,20 @@ utils.go:15:5: unreachable code"#;
 
     #[test]
     fn test_has_golangci_format_flag_v2() {
-        assert!(has_golangci_format_flag(&os(&[
+        assert!(golangci_cmd::has_output_flag(&strings(&[
             "--output.json.path",
             "stdout"
         ])));
-        assert!(has_golangci_format_flag(&os(&[
+        assert!(golangci_cmd::has_output_flag(&strings(&[
             "--output.json.path=stdout"
         ])));
     }
 
     #[test]
     fn test_has_golangci_format_flag_absent() {
-        assert!(!has_golangci_format_flag(&os(&["run", "./..."])));
-        assert!(!has_golangci_format_flag(&os(&[])));
-        assert!(!has_golangci_format_flag(&os(&["--fix"])));
+        assert!(!golangci_cmd::has_output_flag(&strings(&["run", "./..."])));
+        assert!(!golangci_cmd::has_output_flag(&strings(&[])));
+        assert!(!golangci_cmd::has_output_flag(&strings(&["--fix"])));
     }
 
     #[test]

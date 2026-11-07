@@ -218,20 +218,30 @@ fn run_filtered(original_args: &[String], invocation: &RunInvocation, verbose: u
         );
     }
 
+    let stdout_report = has_stdout_output_flag(&invocation.run_args);
+    let mut opts = crate::core::runner::RunOptions::stdout_only();
+    if stdout_report {
+        opts = opts.no_trailing_newline();
+    }
+
     let exit_code = runner::run_filtered(
         cmd,
         "golangci-lint",
         &display_args(original_args),
         |stdout| {
-            // v2 outputs JSON on first line + trailing text; v1 outputs just JSON
-            let json_output = if version >= 2 {
-                stdout.lines().next().unwrap_or("")
+            if stdout_report {
+                stdout.to_string()
             } else {
-                stdout
-            };
-            filter_golangci_json(json_output, version)
+                // v2 outputs JSON on first line + trailing text; v1 outputs just JSON
+                let json_output = if version >= 2 {
+                    stdout.lines().next().unwrap_or("")
+                } else {
+                    stdout
+                };
+                filter_golangci_json(json_output, version)
+            }
         },
-        crate::core::runner::RunOptions::stdout_only(),
+        opts,
     )?;
 
     // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
@@ -315,7 +325,7 @@ const OUTPUT_PATH_FLAGS: &[&str] = &[
 /// interleave and the json parse would choke on whichever landed first. A *file* sink for some
 /// other format takes nothing away from stdout, so RTK still injects there or it is left with
 /// nothing to parse.
-fn has_output_flag(args: &[String]) -> bool {
+pub(crate) fn has_output_flag(args: &[String]) -> bool {
     let tokens = arg_tokenizer::tokenize_grammar(args, &run_takes_value, Dialect::Posix);
     tokens.iter().any(|t| {
         if t.kind != TokenKind::Long {
@@ -327,6 +337,32 @@ fn has_output_flag(args: &[String]) -> bool {
                 OUTPUT_PATH_FLAGS.contains(&other)
                     && t.value(&tokens).is_none_or(|dest| dest == "stdout")
             }
+        }
+    })
+}
+
+/// True when the user explicitly directed an output report to stdout.
+///
+/// In v2: any `--output.<format>.path` whose destination is `stdout`.
+/// In v1: `--out-format` where the destination is stdout (or unspecified, which defaults to stdout).
+/// File destinations like `--output.text.path report.txt` or `--output.json.path report.json`
+/// are not stdout reports.
+pub(crate) fn has_stdout_output_flag(args: &[String]) -> bool {
+    let tokens = arg_tokenizer::tokenize_grammar(args, &run_takes_value, Dialect::Posix);
+    tokens.iter().any(|t| {
+        if t.kind != TokenKind::Long {
+            return false;
+        }
+        match t.text {
+            "out-format" => match t.value(&tokens) {
+                Some(val) => val.split(',').any(|part| match part.split_once(':') {
+                    Some((_, dest)) => dest == "stdout" || dest.is_empty(),
+                    None => true,
+                }),
+                None => true,
+            },
+            other if OUTPUT_PATH_FLAGS.contains(&other) => t.value(&tokens) == Some("stdout"),
+            _ => false,
         }
     })
 }
@@ -994,5 +1030,62 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_has_stdout_output_flag_v1() {
+        assert!(has_stdout_output_flag(&["--out-format=json".to_string()]));
+        assert!(has_stdout_output_flag(&[
+            "--out-format".to_string(),
+            "json".to_string(),
+        ]));
+        assert!(has_stdout_output_flag(&[
+            "--out-format=checkstyle".to_string(),
+        ]));
+        assert!(has_stdout_output_flag(&[
+            "--out-format=json:stdout".to_string(),
+        ]));
+        assert!(!has_stdout_output_flag(&[
+            "--out-format=json:report.json".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn test_has_stdout_output_flag_v2() {
+        assert!(has_stdout_output_flag(&[
+            "--output.text.path".to_string(),
+            "stdout".to_string(),
+        ]));
+        assert!(has_stdout_output_flag(&[
+            "--output.text.path=stdout".to_string(),
+        ]));
+        assert!(has_stdout_output_flag(&[
+            "--output.json.path".to_string(),
+            "stdout".to_string(),
+        ]));
+        assert!(has_stdout_output_flag(&[
+            "--output.json.path=stdout".to_string(),
+        ]));
+        assert!(!has_stdout_output_flag(&[
+            "--output.text.path".to_string(),
+            "report.txt".to_string(),
+        ]));
+        assert!(!has_stdout_output_flag(&[
+            "--output.json.path".to_string(),
+            "report.json".to_string(),
+        ]));
+        assert!(!has_stdout_output_flag(&[
+            "--output.json.path=report.json".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn test_has_stdout_output_flag_absent() {
+        assert!(!has_stdout_output_flag(&[
+            "run".to_string(),
+            "./...".to_string(),
+        ]));
+        assert!(!has_stdout_output_flag(&[]));
+        assert!(!has_stdout_output_flag(&["--fix".to_string()]));
     }
 }
