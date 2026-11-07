@@ -1122,55 +1122,49 @@ fn run_codex_inner(input: &str) -> Option<String> {
 /// Run the Cursor Agent hook natively.
 pub fn run_cursor() -> Result<()> {
     let input = read_stdin_limited()?;
+    let output = run_cursor_inner_impl(&input, |cmd| {
+        decide_hook_action(cmd, permissions::Host::Cursor, None)
+    });
+    let _ = writeln!(io::stdout(), "{output}");
+    Ok(())
+}
 
-    let input = strip_leading_bom(&input).trim();
-    if input.is_empty() {
-        let _ = writeln!(io::stdout(), "{{}}");
-        return Ok(());
-    }
-
-    let v: Value = match serde_json::from_str(input) {
-        Ok(v) => v,
-        Err(_) => {
-            let _ = writeln!(io::stdout(), "{{}}");
-            return Ok(());
-        }
+/// Parse the Cursor payload, decide, and render the reply: `{}` (no opinion)
+/// for anything RTK does not rewrite, including a payload it cannot read.
+/// `run_cursor` and the tests share it, so the tests exercise the parsing and
+/// rendering that ship; only the decision is passed in.
+fn run_cursor_inner_impl(input: &str, decide: impl Fn(&str) -> HookDecision) -> String {
+    let Some(v) = hook_payload(input).ok().flatten() else {
+        return "{}".to_string();
     };
-
-    let cmd = match v
+    let Some(cmd) = v
         .pointer("/tool_input/command")
         .and_then(|c| c.as_str())
         .filter(|c| !c.is_empty())
-    {
-        Some(c) => c.to_string(),
-        None => {
-            let _ = writeln!(io::stdout(), "{{}}");
-            return Ok(());
-        }
+    else {
+        return "{}".to_string();
     };
 
-    let output = match decide_hook_action(&cmd, permissions::Host::Cursor, None) {
+    match decide(cmd) {
         HookDecision::Rewrite {
             command: rewritten,
             approval,
         } => {
             if approval.is_allow() {
-                audit_log("rewrite", &cmd, &rewritten);
+                audit_log("rewrite", cmd, &rewritten);
                 cursor_allow(&rewritten)
             } else {
-                audit_log("ask", &cmd, &rewritten);
+                audit_log("ask", cmd, &rewritten);
                 cursor_ask(&rewritten)
             }
         }
         other => {
             if matches!(other, HookDecision::Deny) {
-                audit_log("deny", &cmd, "");
+                audit_log("deny", cmd, "");
             }
             "{}".to_string()
         }
-    };
-    let _ = writeln!(io::stdout(), "{output}");
-    Ok(())
+    }
 }
 
 fn cursor_allow(rewritten: &str) -> String {
@@ -1203,40 +1197,13 @@ fn run_cursor_inner_with_rules(
     ask_rules: &[String],
     allow_rules: &[String],
 ) -> String {
-    let input = strip_leading_bom(input);
-    let v: Value = match serde_json::from_str(input) {
-        Ok(v) => v,
-        Err(_) => return "{}".to_string(),
-    };
-
-    let cmd = match v
-        .pointer("/tool_input/command")
-        .and_then(|c| c.as_str())
-        .filter(|c| !c.is_empty())
-    {
-        Some(c) => c.to_string(),
-        None => return "{}".to_string(),
-    };
-
     let rules = permissions::HostRules::lists(
         permissions::Host::Cursor,
         deny_rules,
         ask_rules,
         allow_rules,
     );
-    match decide_with_host_rules(&cmd, &rules, None) {
-        HookDecision::Rewrite {
-            command: rewritten,
-            approval,
-        } => {
-            if approval.is_allow() {
-                cursor_allow(&rewritten)
-            } else {
-                cursor_ask(&rewritten)
-            }
-        }
-        _ => "{}".to_string(),
-    }
+    run_cursor_inner_impl(input, |cmd| decide_with_host_rules(cmd, &rules, None))
 }
 
 // ── Factory Droid PreToolUse hook ──────────────────────────────
@@ -1246,7 +1213,7 @@ fn run_cursor_inner_with_rules(
 // deny lists and otherwise rewrites via `updatedInput` with no
 // `permissionDecision` — the verdict stays with Droid's native flow.
 
-fn process_droid_payload(v: &Value) -> Option<Value> {
+fn process_hook_payload(v: &Value) -> Option<Value> {
     let cmd = droid_execute_command(v)?;
     droid_response_from_decision(
         v,
@@ -1343,7 +1310,7 @@ fn opencode_answer(cmd: &str, rules: &permissions::HostRules) -> Value {
 pub fn run_droid() -> Result<()> {
     let input = read_stdin_limited()?;
 
-    let v = match droid_payload(&input) {
+    let v = match hook_payload(&input) {
         Ok(Some(v)) => v,
         Ok(None) => return Ok(()),
         Err(e) => {
@@ -1352,18 +1319,18 @@ pub fn run_droid() -> Result<()> {
         }
     };
 
-    if let Some(output) = process_droid_payload(&v) {
+    if let Some(output) = process_hook_payload(&v) {
         let _ = writeln!(io::stdout(), "{output}");
     }
     Ok(())
 }
 
-/// Normalize and parse a raw Droid PreToolUse payload: strip a leading BOM
-/// (Windows hosts prepend one), trim, and report an empty payload as nothing
-/// to do. Shared by `run_droid` and the test entry points so droid's own
-/// tests exercise the real BOM handling rather than a stripped-down copy of
-/// the parse.
-fn droid_payload(input: &str) -> serde_json::Result<Option<Value>> {
+/// Normalize and parse a raw PreToolUse payload: strip a leading BOM (Windows
+/// hosts prepend one), trim, and report an empty payload as nothing to do.
+/// Shared by the Droid and Cursor hooks and the test entry points, so their
+/// tests exercise the real BOM handling rather than a stripped-down copy of the
+/// parse.
+fn hook_payload(input: &str) -> serde_json::Result<Option<Value>> {
     let input = strip_leading_bom(input).trim();
     if input.is_empty() {
         return Ok(None);
@@ -1385,7 +1352,7 @@ fn run_droid_inner_with_rules(
     ask_rules: &[String],
     allow_rules: &[String],
 ) -> Option<String> {
-    let v: Value = droid_payload(input).ok().flatten()?;
+    let v: Value = hook_payload(input).ok().flatten()?;
     let cmd = droid_execute_command(&v)?;
     let rules =
         permissions::HostRules::lists(permissions::Host::Droid, deny_rules, ask_rules, allow_rules);
@@ -3246,24 +3213,16 @@ mod tests {
 
     // --- Gemini rendering ---
 
-    fn gemini_render(cmd: &str, deny: &[String], ask: &[String], allow: &[String]) -> String {
-        match decide_with_rules(cmd, deny, ask, allow) {
-            HookDecision::Deny => {
-                r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string()
-            }
-            HookDecision::Rewrite {
-                command: r,
-                approval,
-            } => {
-                let decision = if approval.is_allow() {
-                    "allow"
-                } else {
-                    "ask_user"
-                };
-                gemini_json(decision, Some(&r))
-            }
-            HookDecision::Defer => gemini_json("ask_user", None),
-        }
+    /// The Gemini hook's reply to `cmd` under these rules, through the same
+    /// parse and render path as `run_gemini`.
+    fn gemini_render(cmd: &str, deny: &[String], ask: &[String], allow: &[String]) -> Value {
+        let payload = json!({
+            "tool_name": "run_shell_command",
+            "tool_input": { "command": cmd }
+        });
+        let reply = run_gemini_inner_with_rules(&payload.to_string(), deny, ask, allow)
+            .expect("the payload is valid JSON");
+        serde_json::from_str(&reply).expect("the reply is valid JSON")
     }
 
     #[test]
@@ -3310,8 +3269,7 @@ mod tests {
 
     #[test]
     fn test_gemini_allow_emits_rewrite() {
-        let v: Value =
-            serde_json::from_str(&gemini_render("git status", &[], &[], &all_allowed())).unwrap();
+        let v = gemini_render("git status", &[], &[], &all_allowed());
         assert_eq!(v["decision"], "allow");
         assert_eq!(
             v["hookSpecificOutput"]["tool_input"]["command"],
@@ -3321,32 +3279,20 @@ mod tests {
 
     #[test]
     fn test_gemini_default_asks_user() {
-        let v: Value = serde_json::from_str(&gemini_render("git status", &[], &[], &[])).unwrap();
+        let v = gemini_render("git status", &[], &[], &[]);
         assert_eq!(v["decision"], "ask_user");
     }
 
     #[test]
     fn test_gemini_substitution_asks_user_without_rewrite() {
-        let v: Value = serde_json::from_str(&gemini_render(
-            "git status `rm -rf /tmp/x`",
-            &[],
-            &[],
-            &all_allowed(),
-        ))
-        .unwrap();
+        let v = gemini_render("git status `rm -rf /tmp/x`", &[], &[], &all_allowed());
         assert_eq!(v["decision"], "ask_user");
         assert!(v.get("hookSpecificOutput").is_none());
     }
 
     #[test]
     fn test_gemini_deny_decision() {
-        let v: Value = serde_json::from_str(&gemini_render(
-            "rm -rf /tmp/x",
-            &["rm -rf".to_string()],
-            &[],
-            &[],
-        ))
-        .unwrap();
+        let v = gemini_render("rm -rf /tmp/x", &["rm -rf".to_string()], &[], &[]);
         assert_eq!(v["decision"], "deny");
     }
 
@@ -3395,7 +3341,7 @@ mod tests {
         // Cursor). run_droid stripped it, but the test entry point re-parsed
         // without stripping, so the strip had no coverage at all: deleting it
         // left every test green while BOM-prefixed droid payloads silently
-        // stopped being rewritten. Both paths now share droid_payload.
+        // stopped being rewritten. Both paths now share hook_payload.
         let input = format!("\u{feff}{}", droid_input("Execute", "git status"));
         let out = run_droid_inner(&input).expect("BOM-prefixed payload must parse");
         let v: Value = serde_json::from_str(&out).unwrap();
@@ -3863,13 +3809,12 @@ mod tests {
 
     #[test]
     fn test_gemini_shell_wrapper_asks_user_with_rewrite() {
-        let v: Value = serde_json::from_str(&gemini_render(
+        let v = gemini_render(
             r#"zsh -c "git status && cargo test""#,
             &[],
             &[],
             &all_allowed(),
-        ))
-        .unwrap();
+        );
         assert_eq!(v["decision"], "ask_user");
         assert_eq!(
             v["hookSpecificOutput"]["tool_input"]["command"],
