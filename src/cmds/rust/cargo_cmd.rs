@@ -71,8 +71,19 @@ struct FilterMetadata {
     requests_help: bool,
 }
 
-// One option-arity table for Cargo parsing and standalone help checks. The
-// shared tokenizer handles clusters, attached values, and value consumption.
+/// Describe only value-taking options needed by RTK's routing and metadata:
+///
+/// - `--config`, `--color`, `-C`, `-Z`: skip their values when locating the command;
+/// - `--message-format`: select human or JSON output handling;
+/// - `--version`: distinguish `cargo install`'s crate version from a version request.
+///
+/// Other command-specific options stay opaque; this is not Cargo's full schema.
+/// Command discovery declines unknown prefix options rather than guessing their arity.
+///
+/// `Some(ValueSpec::value())` tells the tokenizer to consume one value, either
+/// attached (`--config=file`, `-Zflag`) or in the next argument (`--config file`),
+/// and associate it with the option. `None` supplies no value-consumption rule.
+/// The tokenizer handles the syntax; Cargo validates the values.
 pub(crate) fn option_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
     matches!(
         (kind, name),
@@ -81,8 +92,6 @@ pub(crate) fn option_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
             "config" | "color" | "message-format" | "version"
         ) | (TokenKind::Short, "C" | "Z")
     )
-    // A separate -- ends options, even when the preceding option lacks a
-    // value. Literal -- values must be attached, e.g. --config=--.
     .then(ValueSpec::value)
 }
 
