@@ -24,11 +24,7 @@ fn toolchain_rewrites_preserve_selector_and_arguments() {
             );
         }
     }
-    for command in [
-        "cargo +stable metadata",
-        "cargo +stable checker",
-        "cargo + check",
-    ] {
+    for command in ["cargo +stable metadata", "cargo +stable checker"] {
         let output = common::rtk_command()
             .args(["rewrite", command])
             .output()
@@ -42,6 +38,11 @@ fn toolchain_rewrites_preserve_selector_and_arguments() {
 fn global_options_and_aliases_rewrite_without_changing_shell_text() {
     for command in [
         "cargo --locked check",
+        // The command is identifiable even when Cargo will reject a value.
+        "cargo + check",
+        "cargo --color= check",
+        "cargo --config= check",
+        "cargo -Z= check",
         "cargo --offline test",
         "cargo --frozen build",
         "cargo --config net.retry=2 --config=build.jobs=1 b",

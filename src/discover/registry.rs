@@ -465,9 +465,9 @@ fn normalize_cargo_command(cmd: &str) -> String {
     }
     let words = shell_split(cmd);
     if words.first().map(String::as_str) == Some("cargo")
-        && let Some(invocation) = crate::cmds::rust::cargo_cmd::parse(&words[1..])
+        && let Some(invocation) = crate::cmds::rust::cargo_cmd::CargoInvocation::parse(&words[1..])
     {
-        return format!("cargo {}", invocation.command.as_str());
+        return format!("cargo {}", invocation.command().as_str());
     }
     cmd.to_owned()
 }

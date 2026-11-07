@@ -474,11 +474,13 @@ fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
 }
 
 fn asks_for_usage(stem: &str, args: &[String]) -> bool {
-    use crate::cmds::rust::cargo_cmd::{self, CargoCommand};
+    use crate::cmds::rust::cargo_cmd::{CargoCommand, CargoInvocation};
 
     // Cargo may put its selector and global options before the subcommand.
     // Resolve aliases too, so `cargo --locked t -- --help` remains libtest help.
-    let cargo = (stem == "cargo").then(|| cargo_cmd::parse(args)).flatten();
+    let cargo = (stem == "cargo")
+        .then(|| CargoInvocation::parse(args))
+        .flatten();
     let first = args.first().map(String::as_str);
     let mut spelling = help_spelling(stem, first);
     // cargo test passes arguments after -- to libtest; nextest emulates its
@@ -487,7 +489,7 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
     // https://nexte.st/docs/running/
     if let Some(invocation) = &cargo {
         spelling.past_boundary = matches!(
-            invocation.command,
+            invocation.command(),
             CargoCommand::Test | CargoCommand::Nextest
         );
     }
@@ -497,7 +499,7 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
         let cargo_install_version = stem == "cargo"
             && cargo
                 .as_ref()
-                .is_some_and(|c| c.command == CargoCommand::Install)
+                .is_some_and(|c| c.command() == CargoCommand::Install)
             && kind == TokenKind::Long
             && name == "version";
         let cargo_global_value = stem == "cargo"

@@ -10,6 +10,7 @@ use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
+use std::process::Command;
 use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,141 +50,187 @@ impl CargoCommand {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct CargoInvocation {
-    pub subcommand_index: usize,
-    pub command: CargoCommand,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageFormat {
+    Human,
+    Json,
 }
 
-/// Shared by shell classification and execution. Only consume documented global
-/// options: an unknown option, missing value, or special operation stays native.
-/// This is RTK's routing policy, not a replacement for Cargo's validation.
-/// Cargo's option arities and special operations are documented at
-/// <https://doc.rust-lang.org/cargo/commands/cargo.html#options>.
-pub fn parse(args: &[impl AsRef<OsStr>]) -> Option<CargoInvocation> {
-    let mut index = 0;
-    // Rustup interprets +toolchain only as the FIRST argument after cargo,
-    // before Cargo's global options. Do not recognize it later in the loop.
-    // https://rust-lang.github.io/rustup/overrides.html#toolchain-override-shorthand
-    if args.first()?.as_ref().to_str()?.starts_with('+') {
-        if args[0].as_ref().to_str()?.len() == 1 {
-            return None;
-        }
-        index += 1;
-    }
-    loop {
-        let arg = args.get(index)?.as_ref().to_str()?;
-        match arg {
-            "--locked" | "--offline" | "--frozen" | "--quiet" | "--verbose" => {}
-            // Consume the following token even when it looks like a command.
-            // Repeated --config options are allowed; preserve their order.
-            // https://doc.rust-lang.org/cargo/commands/cargo.html#common-options
-            // https://doc.rust-lang.org/cargo/commands/cargo.html#display-options
-            "--config" | "--color" => {
-                index += 1;
-                args.get(index)?;
-            }
-            // Long options can carry their value in the same token, separated
-            // by '='. Split once: a config value can itself contain '='.
-            _ if arg.starts_with("--config=") || arg.starts_with("--color=") => {
-                if arg.split_once('=')?.1.is_empty() {
-                    return None;
+impl MessageFormat {
+    // Inspect only options that affect filtering; leave accepted values and
+    // conflicts to Cargo. `--` ends Cargo's options, and --config/--color
+    // consume values even if those values look like --message-format flags.
+    fn parse(args: &[impl AsRef<OsStr>]) -> Self {
+        let mut format = Self::Human;
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
+            let Some(arg) = arg.as_ref().to_str() else {
+                continue;
+            };
+            let value = match arg {
+                "--" => break,
+                "--config" | "--color" | "-C" | "-Z" => {
+                    iter.next();
+                    continue;
                 }
+                "--message-format" => iter.next().and_then(|s| s.as_ref().to_str()),
+                _ => arg.strip_prefix("--message-format="),
+            };
+            if let Some(value) = value {
+                format = if value.contains("json") {
+                    Self::Json
+                } else {
+                    Self::Human
+                };
             }
-            // Scan short-option clusters left-to-right. Flags (v/q) can repeat;
-            // an option taking a value consumes the remainder of the token, or
-            // the next argument when no attached value remains. Never interpret
-            // characters inside a value as more options (e.g. -Cvery/quiet).
-            // https://docs.rs/clap/latest/clap/struct.Arg.html#method.short
-            _ if arg.starts_with('-') && arg.len() > 1 => {
-                let mut options = arg[1..].chars();
-                while let Some(option) = options.next() {
-                    match option {
-                        // Cargo supports -vv; Cargo validates conflicts with -q.
-                        // https://doc.rust-lang.org/cargo/commands/cargo.html#display-options
-                        'v' | 'q' => {}
-                        // -C must precede the command and requires nightly with
-                        // -Z unstable-options. Cargo enforces those constraints.
-                        // https://doc.rust-lang.org/cargo/commands/cargo.html#common-options
-                        'C' => {
-                            if options.as_str().is_empty() {
-                                index += 1;
-                                args.get(index)?;
+        }
+        format
+    }
+}
+
+#[derive(Debug)]
+pub struct CargoInvocation<'a, T = OsString> {
+    args: &'a [T],
+    command_args: &'a [T],
+    command: CargoCommand,
+    message_format: MessageFormat,
+}
+
+impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
+    /// Locate a known command and prepare filter metadata, without validating
+    /// Cargo's parameters. Unknown option arities and script mode stay native.
+    /// <https://doc.rust-lang.org/cargo/commands/cargo.html#options>
+    pub fn parse(args: &'a [T]) -> Option<Self> {
+        let mut index = 0;
+        // Rustup interprets +toolchain only as the FIRST argument after cargo,
+        // before Cargo's global options. Do not recognize it later in the loop.
+        // https://rust-lang.github.io/rustup/overrides.html#toolchain-override-shorthand
+        if args.first()?.as_ref().to_str()?.starts_with('+') {
+            index += 1;
+        }
+        loop {
+            let arg = args.get(index)?.as_ref().to_str()?;
+            match arg {
+                "--locked" | "--offline" | "--frozen" | "--quiet" | "--verbose" => {}
+                // Consume the following token even when it looks like a command.
+                // Repeated --config options are allowed; preserve their order.
+                // https://doc.rust-lang.org/cargo/commands/cargo.html#common-options
+                // https://doc.rust-lang.org/cargo/commands/cargo.html#display-options
+                "--config" | "--color" => {
+                    index += 1;
+                }
+                // Long options can carry their value in the same token, separated
+                // by '='. The whole suffix is a value; Cargo validates it.
+                _ if arg.starts_with("--config=") || arg.starts_with("--color=") => {}
+                // Scan short-option clusters left-to-right. Flags (v/q) can repeat;
+                // an option taking a value consumes the remainder of the token, or
+                // the next argument when no attached value remains. Never interpret
+                // characters inside a value as more options (e.g. -Cvery/quiet).
+                // https://docs.rs/clap/latest/clap/struct.Arg.html#method.short
+                _ if arg.starts_with('-') && arg.len() > 1 => {
+                    let mut options = arg[1..].chars();
+                    while let Some(option) = options.next() {
+                        match option {
+                            // Cargo supports -vv; Cargo validates conflicts with -q.
+                            // https://doc.rust-lang.org/cargo/commands/cargo.html#display-options
+                            'v' | 'q' => {}
+                            // -C must precede the command and requires nightly with
+                            // -Z unstable-options. Cargo enforces those constraints.
+                            // https://doc.rust-lang.org/cargo/commands/cargo.html#common-options
+                            'C' => {
+                                if options.as_str().is_empty() {
+                                    index += 1;
+                                }
+                                break;
                             }
-                            break;
-                        }
-                        // -Z has its own case because script mode enables direct
-                        // source-file execution, which RTK leaves to Cargo.
-                        // Accept -Z flag, -Zflag, and -Z=flag spellings.
-                        // https://doc.rust-lang.org/cargo/reference/unstable.html#script
-                        'Z' => {
-                            let value = if options.as_str().is_empty() {
-                                index += 1;
-                                args.get(index)?.as_ref().to_str()?
-                            } else {
-                                options
-                                    .as_str()
-                                    .strip_prefix('=')
-                                    .unwrap_or(options.as_str())
-                            };
-                            if value.is_empty() || value.split('=').next() == Some("script") {
-                                return None;
+                            // -Z has its own case because script mode enables direct
+                            // source-file execution, which RTK leaves to Cargo.
+                            // Accept -Z flag, -Zflag, and -Z=flag spellings.
+                            // https://doc.rust-lang.org/cargo/reference/unstable.html#script
+                            'Z' => {
+                                let value = if options.as_str().is_empty() {
+                                    index += 1;
+                                    args.get(index)?.as_ref().to_str()?
+                                } else {
+                                    options
+                                        .as_str()
+                                        .strip_prefix('=')
+                                        .unwrap_or(options.as_str())
+                                };
+                                if value.split('=').next() == Some("script") {
+                                    return None;
+                                }
+                                break;
                             }
-                            break;
+                            // Unknown short flags (and unrecognized --long options)
+                            // stay native instead of guessing how many values follow.
+                            _ => return None,
                         }
-                        // Unknown short flags (and unrecognized --long options)
-                        // stay native instead of guessing how many values follow.
-                        _ => return None,
                     }
                 }
+                _ => {
+                    // Resolve Cargo's built-in aliases separately. Full names come
+                    // from as_str(), so their spellings have one source of truth.
+                    // https://doc.rust-lang.org/cargo/reference/config.html#alias
+                    let command = match arg {
+                        "b" => CargoCommand::Build,
+                        "c" => CargoCommand::Check,
+                        "t" => CargoCommand::Test,
+                        name => CargoCommand::ALL
+                            .into_iter()
+                            .find(|command| name == command.as_str())?,
+                    };
+                    return Some(Self {
+                        args,
+                        command_args: &args[index + 1..],
+                        command,
+                        message_format: MessageFormat::parse(&args[index + 1..]),
+                    });
+                }
             }
-            _ => {
-                // Resolve Cargo's built-in aliases separately. Full names come
-                // from as_str(), so their spellings have one source of truth.
-                // https://doc.rust-lang.org/cargo/reference/config.html#alias
-                let command = match arg {
-                    "b" => CargoCommand::Build,
-                    "c" => CargoCommand::Check,
-                    "t" => CargoCommand::Test,
-                    name => CargoCommand::ALL
-                        .into_iter()
-                        .find(|command| name == command.as_str())?,
-                };
-                return Some(CargoInvocation {
-                    subcommand_index: index,
-                    command,
-                });
-            }
+            index += 1;
         }
-        index += 1;
+    }
+
+    pub fn command(&self) -> CargoCommand {
+        self.command
+    }
+
+    pub fn message_format(&self) -> MessageFormat {
+        self.message_format
+    }
+
+    /// Preserve the original argv, including aliases, --, and configuration order.
+    /// <https://doc.rust-lang.org/cargo/reference/config.html#command-line-overrides>
+    /// <https://doc.rust-lang.org/cargo/commands/cargo-test.html#description>
+    pub fn to_command(&self) -> Command {
+        let mut cmd = resolved_command("cargo");
+        cmd.args(self.args.iter().map(AsRef::as_ref));
+        cmd
+    }
+
+    fn display_args(&self) -> String {
+        display_args(
+            &self
+                .command_args
+                .iter()
+                .map(|s| s.as_ref().to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+        )
     }
 }
 
 pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
-    let Some(invocation) = parse(args) else {
+    let Some(invocation) = CargoInvocation::parse(args) else {
         return run_passthrough(args, verbose);
     };
-    let Some(rest) = args[invocation.subcommand_index + 1..]
-        .iter()
-        .map(|s| s.to_str().map(str::to_owned))
-        .collect::<Option<Vec<_>>>()
-    else {
-        return run_passthrough(args, verbose);
-    };
-    // Keep the original spelling (including aliases) and all prefix options in
-    // their original positions. The canonical name only selects the filter.
-    // In particular, repeated --config values merge left-to-right:
-    // https://doc.rust-lang.org/cargo/reference/config.html#command-line-overrides
-    // Keep -- too: cargo test sends the following arguments to the test binary.
-    // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
-    let prefix = &args[..=invocation.subcommand_index];
-    match invocation.command {
-        CargoCommand::Build => run_build(prefix, &rest, verbose),
-        CargoCommand::Test => run_test(prefix, &rest, verbose),
-        CargoCommand::Clippy => run_clippy(prefix, &rest, verbose),
-        CargoCommand::Check => run_check(prefix, &rest, verbose),
-        CargoCommand::Install => run_install(prefix, &rest, verbose),
-        CargoCommand::Nextest => run_nextest(prefix, &rest, verbose),
+    match invocation.command() {
+        CargoCommand::Build => run_build(&invocation, verbose),
+        CargoCommand::Test => run_test(&invocation, verbose),
+        CargoCommand::Clippy => run_clippy(&invocation, verbose),
+        CargoCommand::Check => run_check(&invocation, verbose),
+        CargoCommand::Install => run_install(&invocation, verbose),
+        CargoCommand::Nextest => run_nextest(&invocation, verbose),
         CargoCommand::Fmt => run_passthrough(args, verbose),
     }
 }
@@ -417,22 +464,12 @@ impl BlockHandler for CargoTestHandler {
 
 /// Generic cargo command runner with filtering.
 /// The raw Cargo argument tail already contains its original `--` separators.
-fn run_cargo_filtered<F>(
-    subcommand: &str,
-    prefix: &[OsString],
-    args: &[String],
-    verbose: u8,
-    filter_fn: F,
-) -> Result<i32>
+fn run_cargo_filtered<F>(invocation: &CargoInvocation<'_>, verbose: u8, filter_fn: F) -> Result<i32>
 where
     F: Fn(&str) -> String,
 {
-    let mut cmd = resolved_command("cargo");
-    cmd.args(prefix);
-
-    for arg in args {
-        cmd.arg(arg);
-    }
+    let cmd = invocation.to_command();
+    let subcommand = invocation.command().as_str();
 
     if verbose > 0 {
         eprintln!("Running: {:?}", cmd);
@@ -441,7 +478,7 @@ where
     runner::run_filtered(
         cmd,
         &format!("cargo {}", subcommand),
-        &display_args(args),
+        &invocation.display_args(),
         filter_fn,
         runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
     )
@@ -450,21 +487,15 @@ where
 /// Same as `run_cargo_filtered` but the filter also receives the child exit code,
 /// so it can tell a genuine failure from a clean run when no diagnostics parse.
 fn run_cargo_filtered_with_exit<F>(
-    subcommand: &str,
-    prefix: &[OsString],
-    args: &[String],
+    invocation: &CargoInvocation<'_>,
     verbose: u8,
     filter_fn: F,
 ) -> Result<i32>
 where
     F: Fn(&str, i32) -> String,
 {
-    let mut cmd = resolved_command("cargo");
-    cmd.args(prefix);
-
-    for arg in args {
-        cmd.arg(arg);
-    }
+    let cmd = invocation.to_command();
+    let subcommand = invocation.command().as_str();
 
     if verbose > 0 {
         eprintln!("Running: {:?}", cmd);
@@ -473,25 +504,19 @@ where
     runner::run_filtered_with_exit(
         cmd,
         &format!("cargo {}", subcommand),
-        &display_args(args),
+        &invocation.display_args(),
         filter_fn,
         runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
     )
 }
 
 fn run_cargo_streamed(
-    subcommand: &str,
-    prefix: &[OsString],
-    args: &[String],
+    invocation: &CargoInvocation<'_>,
     verbose: u8,
     filter: Box<dyn StreamFilter>,
 ) -> Result<i32> {
-    let mut cmd = resolved_command("cargo");
-    cmd.args(prefix);
-
-    for arg in args {
-        cmd.arg(arg);
-    }
+    let cmd = invocation.to_command();
+    let subcommand = invocation.command().as_str();
 
     if verbose > 0 {
         eprintln!("Running: {:?}", cmd);
@@ -500,37 +525,20 @@ fn run_cargo_streamed(
     runner::run_streamed(
         cmd,
         &format!("cargo {}", subcommand),
-        &display_args(args),
+        &invocation.display_args(),
         filter,
         runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
     )
 }
 
-fn has_json_message_format(args: &[String]) -> bool {
-    let mut json = false;
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        if let Some(val) = arg.strip_prefix("--message-format=") {
-            json = val.contains("json");
-        } else if arg == "--message-format"
-            && let Some(val) = iter.next()
-        {
-            json = val.contains("json");
-        }
-    }
-    json
-}
-
-fn run_build(prefix: &[OsString], args: &[String], verbose: u8) -> Result<i32> {
-    if has_json_message_format(args) {
-        return run_cargo_filtered_with_exit("build", prefix, args, verbose, |o, exit| {
+fn run_build(invocation: &CargoInvocation<'_>, verbose: u8) -> Result<i32> {
+    if invocation.message_format() == MessageFormat::Json {
+        return run_cargo_filtered_with_exit(invocation, verbose, |o, exit| {
             filter_cargo_build_labeled(o, "build", exit)
         });
     }
     run_cargo_streamed(
-        "build",
-        prefix,
-        args,
+        invocation,
         verbose,
         Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
             "build",
@@ -538,43 +546,33 @@ fn run_build(prefix: &[OsString], args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
-fn run_test(prefix: &[OsString], args: &[String], verbose: u8) -> Result<i32> {
+fn run_test(invocation: &CargoInvocation<'_>, verbose: u8) -> Result<i32> {
     // No json branch here on purpose: --message-format=json only reformats the
     // build phase, the test harness output stays human-readable. CargoTestHandler
     // reads both — it aggregates the `test result:` lines and, on a compile error,
     // parses the json diagnostics in format_summary.
     run_cargo_streamed(
-        "test",
-        prefix,
-        args,
+        invocation,
         verbose,
         Box::new(BlockStreamFilter::new(CargoTestHandler::new())),
     )
 }
 
-fn run_clippy(prefix: &[OsString], args: &[String], verbose: u8) -> Result<i32> {
-    if has_json_message_format(args) {
-        return run_cargo_filtered_with_exit(
-            "clippy",
-            prefix,
-            args,
-            verbose,
-            filter_cargo_clippy_json,
-        );
+fn run_clippy(invocation: &CargoInvocation<'_>, verbose: u8) -> Result<i32> {
+    if invocation.message_format() == MessageFormat::Json {
+        return run_cargo_filtered_with_exit(invocation, verbose, filter_cargo_clippy_json);
     }
-    run_cargo_filtered("clippy", prefix, args, verbose, filter_cargo_clippy)
+    run_cargo_filtered(invocation, verbose, filter_cargo_clippy)
 }
 
-fn run_check(prefix: &[OsString], args: &[String], verbose: u8) -> Result<i32> {
-    if has_json_message_format(args) {
-        return run_cargo_filtered_with_exit("check", prefix, args, verbose, |o, exit| {
+fn run_check(invocation: &CargoInvocation<'_>, verbose: u8) -> Result<i32> {
+    if invocation.message_format() == MessageFormat::Json {
+        return run_cargo_filtered_with_exit(invocation, verbose, |o, exit| {
             filter_cargo_build_labeled(o, "check", exit)
         });
     }
     run_cargo_streamed(
-        "check",
-        prefix,
-        args,
+        invocation,
         verbose,
         Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
             "check",
@@ -582,12 +580,12 @@ fn run_check(prefix: &[OsString], args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
-fn run_install(prefix: &[OsString], args: &[String], verbose: u8) -> Result<i32> {
-    run_cargo_filtered("install", prefix, args, verbose, filter_cargo_install)
+fn run_install(invocation: &CargoInvocation<'_>, verbose: u8) -> Result<i32> {
+    run_cargo_filtered(invocation, verbose, filter_cargo_install)
 }
 
-fn run_nextest(prefix: &[OsString], args: &[String], verbose: u8) -> Result<i32> {
-    run_cargo_filtered("nextest", prefix, args, verbose, filter_cargo_nextest)
+fn run_nextest(invocation: &CargoInvocation<'_>, verbose: u8) -> Result<i32> {
+    run_cargo_filtered(invocation, verbose, filter_cargo_nextest)
 }
 
 /// Format crate name + version into a display string
@@ -1664,6 +1662,61 @@ mod tests {
     use super::*;
     use crate::core::args_utils::restore_double_dash_with_raw;
 
+    fn has_json_message_format(args: &[String]) -> bool {
+        let argv: Vec<OsString> = std::iter::once(OsString::from("check"))
+            .chain(args.iter().map(OsString::from))
+            .collect();
+        CargoInvocation::parse(&argv).unwrap().message_format() == MessageFormat::Json
+    }
+
+    #[test]
+    fn invocation_leaves_parameter_validation_to_cargo() {
+        for args in [
+            vec!["+", "check"],
+            vec!["--color=", "check"],
+            vec!["--config=", "check"],
+            vec!["-Z=", "check"],
+            vec!["-vq", "check"],
+        ] {
+            let invocation = CargoInvocation::parse(&args).expect("command can be located");
+            assert_eq!(invocation.command(), CargoCommand::Check);
+            assert_eq!(
+                invocation.to_command().get_args().collect::<Vec<_>>(),
+                args.iter().map(OsStr::new).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn message_format_respects_values_and_test_argument_boundary() {
+        for args in [
+            vec!["--config", "--message-format=json", "check"],
+            vec!["check", "--config", "--message-format=json"],
+            vec!["test", "--", "--message-format=json"],
+        ] {
+            assert_eq!(
+                CargoInvocation::parse(&args).unwrap().message_format(),
+                MessageFormat::Human
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invocation_preserves_non_utf8_arguments() {
+        use std::os::unix::ffi::OsStringExt;
+        let args = vec![
+            OsString::from("check"),
+            OsString::from("--manifest-path"),
+            OsString::from_vec(vec![0xff]),
+        ];
+        let invocation = CargoInvocation::parse(&args).unwrap();
+        assert_eq!(
+            invocation.to_command().get_args().collect::<Vec<_>>(),
+            args.iter().map(OsString::as_os_str).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn consumes_option_values_and_resolves_aliases() {
         for (args, index, command) in [
@@ -1709,13 +1762,20 @@ mod tests {
                 CargoCommand::Clippy,
             ),
         ] {
+            let invocation = CargoInvocation::parse(&args).expect("known command");
+            assert_eq!(invocation.command(), command, "{args:?}");
             assert_eq!(
-                parse(&args),
-                Some(CargoInvocation {
-                    subcommand_index: index,
-                    command
-                }),
-                "{args:?}"
+                invocation.to_command().get_args().collect::<Vec<_>>(),
+                args.iter().map(OsStr::new).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                invocation.display_args(),
+                display_args(
+                    &args[index + 1..]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                )
             );
         }
     }
@@ -1730,7 +1790,6 @@ mod tests {
             vec!["-vX", "check"],
             vec!["-vC"],
             vec!["-vZ"],
-            vec!["-Z=", "check"],
             vec!["-Z=script", "check"],
             vec!["+nightly", "-vvZscript", "check"],
             vec!["--future-option", "check"],
@@ -1741,11 +1800,10 @@ mod tests {
             vec!["-Zscript", "check"],
             vec!["+nightly", "-Z", "script", "check"],
             vec!["metadata"],
-            vec!["+", "check"],
             vec!["--", "check"],
             vec!["--config", "check"],
         ] {
-            assert_eq!(parse(&args), None, "{args:?}");
+            assert!(CargoInvocation::parse(&args).is_none(), "{args:?}");
         }
     }
     #[test]
