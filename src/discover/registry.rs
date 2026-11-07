@@ -8,13 +8,16 @@ use std::sync::LazyLock;
 
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 use super::shell_wrapper::parse_shell_wrapper;
+use crate::core::arg_tokenizer::{self, TokenKind as ArgKind};
 use crate::core::cmdline::lexer::{
-    CaseTracker, ParsedToken, PipeKind, QuoteScan, SubstitutionDepth, TokenKind,
-    ansi_c_quote_defeats_lexer, coalesce_words, contains_unattestable_construct_in,
-    glued_to_a_word, is_crlf_at, is_word_boundary_whitespace, opens_function_definition,
-    redirect_has_file_target, shell_split, split_for_classify, split_for_permissions, tokenize,
-    tokenize_with_newlines, word_spans,
+    CaseTracker, PipeKind, QuoteScan, SubstitutionDepth, Token, TokenKind, Word,
+    ansi_c_quote_defeats_lexer, contains_unattestable_construct_in, content_span,
+    function_definition_closer, glued_to_a_word, is_ifs, join_continuations,
+    redirect_has_file_target, shell_split, split_for_classify, split_for_permissions, split_ifs,
+    squeeze_blanks, tokenize, tokenize_trimmed, tokens_until, trim_ifs, trim_ifs_end,
+    trim_ifs_start, without_comments, words,
 };
+use crate::core::cmdline::rtk::rtk_invocation;
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
 
@@ -67,7 +70,7 @@ static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 });
 /// One assignment word, in bash's own sense: a name of letters, digits and `_`
 /// not starting with a digit, then `=` or `+=`, in any case. The value is
-/// whatever the rest of the word is, since [`word_spans`] has already decided
+/// whatever the rest of the word is, since [`words`] has already decided
 /// where the word ends — quotes included.
 ///
 /// Anything else before the `=` makes the word a command: bash runs `1a=b`,
@@ -77,31 +80,33 @@ static ENV_ASSIGN: LazyLock<Regex> =
 // Git global options that appear before the subcommand: -C <path>, -c <key=val>,
 // --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
 static GIT_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(?:(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+").unwrap()
+    Regex::new(r"^(?:(?:-C[ \t\n]+[^ \t\n]+|-c[ \t\n]+[^ \t\n]+|--git-dir(?:=[^ \t\n]+|[ \t\n]+[^ \t\n]+)|--work-tree(?:=[^ \t\n]+|[ \t\n]+[^ \t\n]+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)[ \t\n]+)+").unwrap()
 });
 // Strip pnpm global options that precede the subcommand so `pnpm -r install`,
 // `pnpm --filter @app install`, `pnpm -w list` route to the same rules as their
 // bare forms. Only a fixed, known set is stripped — never an unknown `-x`, so a
 // non-install flag-first command can't be mis-rewritten into a filter with savings.
 static PNPM_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(?:(?:-r|--recursive|-w|--workspace-root|--filter(?:=\S+|\s+\S+)|-F(?:=\S+|\s+\S+))\s+)+").unwrap()
+    Regex::new(r"^(?:(?:-r|--recursive|-w|--workspace-root|--filter(?:=[^ \t\n]+|[ \t\n]+[^ \t\n]+)|-F(?:=[^ \t\n]+|[ \t\n]+[^ \t\n]+))[ \t\n]+)+").unwrap()
 });
-// Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
+// Issue #1362: each capture expects a SINGLE file argument (`[^ \t\n]+$`). Multi-file
 // invocations like `head -3 a b c` fail to match so the segment is passed through
 // to the native `head`/`tail` binary — which already handles multi-file with
 // `==> name <==` banners that a single `rtk read` window cannot reproduce.
-static HEAD_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap());
+static HEAD_N: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^head[ \t\n]+-(\d+)[ \t\n]+([^ \t\n]+)$").unwrap());
 static HEAD_LINES: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap());
+    LazyLock::new(|| Regex::new(r"^head[ \t\n]+--lines=(\d+)[ \t\n]+([^ \t\n]+)$").unwrap());
 // `-n N` and `--lines N` are the spellings `tail` already accepted below; `head`
 // silently fell through to no rewrite at all without them.
 static HEAD_N_SPACE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^head\s+-n\s+(\d+)\s+(\S+)$").unwrap());
+    LazyLock::new(|| Regex::new(r"^head[ \t\n]+-n[ \t\n]+(\d+)[ \t\n]+([^ \t\n]+)$").unwrap());
 static HEAD_LINES_SPACE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^head\s+--lines\s+(\d+)\s+(\S+)$").unwrap());
+    LazyLock::new(|| Regex::new(r"^head[ \t\n]+--lines[ \t\n]+(\d+)[ \t\n]+([^ \t\n]+)$").unwrap());
 // Bare `head FILE` means ten lines, not the whole file. Restricted to a single
 // operand: multi-file and optioned forms stay with the native binary.
-static HEAD_BARE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^head\s+(\S+)$").unwrap());
+static HEAD_BARE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^head[ \t\n]+([^ \t\n]+)$").unwrap());
 
 /// Re-attach a trailing redirect to a rewritten head/tail command.
 ///
@@ -115,7 +120,7 @@ static HEAD_BARE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^head\s+(\S+)$
 /// descriptor-duplication form such as `1>&2` and demote the descriptor number
 /// into an argument.
 fn join_redirect_suffix(rewritten: &str, redirect_suffix: &str) -> String {
-    if redirect_suffix.is_empty() || redirect_suffix.starts_with(char::is_whitespace) {
+    if redirect_suffix.is_empty() || redirect_suffix.starts_with(is_ifs) {
         format!("{}{}", rewritten, redirect_suffix)
     } else {
         format!("{} {}", rewritten, redirect_suffix)
@@ -150,13 +155,14 @@ fn is_single_file_operand(operand: &str) -> bool {
             || matches!(c, '.' | '_' | '/' | '-' | '~' | '+' | '@' | ':' | ',' | '=')
     })
 }
-static TAIL_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^tail\s+-(\d+)\s+(\S+)$").unwrap());
+static TAIL_N: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^tail[ \t\n]+-(\d+)[ \t\n]+([^ \t\n]+)$").unwrap());
 static TAIL_N_SPACE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap());
+    LazyLock::new(|| Regex::new(r"^tail[ \t\n]+-n[ \t\n]+(\d+)[ \t\n]+([^ \t\n]+)$").unwrap());
 static TAIL_LINES_EQ: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap());
+    LazyLock::new(|| Regex::new(r"^tail[ \t\n]+--lines=(\d+)[ \t\n]+([^ \t\n]+)$").unwrap());
 static TAIL_LINES_SPACE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^tail\s+--lines\s+(\d+)\s+(\S+)$").unwrap());
+    LazyLock::new(|| Regex::new(r"^tail[ \t\n]+--lines[ \t\n]+(\d+)[ \t\n]+([^ \t\n]+)$").unwrap());
 
 const GOLANGCI_GLOBAL_OPT_WITH_VALUE: &[&str] = &[
     "-c",
@@ -175,8 +181,20 @@ struct GolangciRunParts<'a> {
 
 /// Classify a single (already-split) command.
 pub fn classify_command(cmd: &str) -> Classification {
-    let trimmed = cmd.trim();
+    let (trimmed, tokens) = tokenize_trimmed(cmd);
+    classify_trimmed(trimmed, &tokens)
+}
+
+/// [`classify_command`] for a command with no blanks at either end, given its
+/// own tokens.
+fn classify_trimmed(trimmed: &str, tokens: &[Token<'_>]) -> Classification {
     if trimmed.is_empty() {
+        return Classification::Ignored;
+    }
+
+    // A command that runs rtk is not an opportunity: the report counts it as
+    // already rtk, unless it is `rtk proxy`.
+    if rtk_invocation(&words(trimmed, tokens)).is_some() {
         return Classification::Ignored;
     }
 
@@ -193,7 +211,7 @@ pub fn classify_command(cmd: &str) -> Classification {
     }
 
     // Strip env prefixes (env VAR=val, VAR=val); sudo is left untouched (#146)
-    let cmd_clean = split_env_prefix(trimmed).1;
+    let cmd_clean = split_env_prefix_in(trimmed, tokens).1;
     if cmd_clean.is_empty() {
         return Classification::Ignored;
     }
@@ -226,21 +244,13 @@ pub fn classify_command(cmd: &str) -> Classification {
     let cmd_clean = cmd_normalized.as_str();
 
     // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
-    if cmd_clean.starts_with("cat ")
-        || cmd_clean.starts_with("head ")
-        || cmd_clean.starts_with("tail ")
-    {
-        let has_redirect = cmd_clean
-            .split_whitespace()
+    if matches!(split_ifs(cmd_clean).next(), Some("cat" | "head" | "tail")) {
+        let has_redirect = split_ifs(cmd_clean)
             .skip(1)
             .any(|t| t.starts_with('>') || t == "<" || t.starts_with(">>"));
         if has_redirect {
             return Classification::Unsupported {
-                base_command: cmd_clean
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("cat")
-                    .to_string(),
+                base_command: split_ifs(cmd_clean).next().unwrap_or("cat").to_string(),
             };
         }
     }
@@ -253,13 +263,9 @@ pub fn classify_command(cmd: &str) -> Classification {
         // Extract subcommand for savings override and status detection
         let (savings, status) = if let Some(caps) = COMPILED[idx].captures(cmd_clean) {
             if let Some(sub) = caps.get(1) {
-                // Collapse internal whitespace so a two-word capture ("pm  ls")
+                // One space between words, so a two-word capture ("pm  ls")
                 // still matches its single-spaced key in the tables below.
-                let subcmd_owned = sub
-                    .as_str()
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                let subcmd_owned = squeeze_blanks(sub.as_str());
                 let subcmd = subcmd_owned.as_str();
                 // Check if this subcommand has a special status
                 let status = rule
@@ -313,7 +319,7 @@ pub fn classify_command(cmd: &str) -> Classification {
 
 /// Extract the base command (first word, or first two if it looks like a subcommand pattern).
 fn extract_base_command(cmd: &str) -> &str {
-    let parts: Vec<&str> = cmd.splitn(3, is_word_boundary_whitespace).collect();
+    let parts: Vec<&str> = cmd.splitn(3, is_ifs).collect();
     match parts.len() {
         0 => "",
         1 => parts[0],
@@ -323,12 +329,12 @@ fn extract_base_command(cmd: &str) -> &str {
             if !second.starts_with('-') && !second.contains('/') && !second.contains('.') {
                 // Return "cmd subcmd"
                 let end = cmd
-                    .find(is_word_boundary_whitespace)
+                    .find(is_ifs)
                     .and_then(|i| {
                         let rest = &cmd[i..];
-                        let trimmed = rest.trim_start();
+                        let trimmed = trim_ifs_start(rest);
                         trimmed
-                            .find(is_word_boundary_whitespace)
+                            .find(is_ifs)
                             .map(|j| i + (rest.len() - trimmed.len()) + j)
                     })
                     .unwrap_or(cmd.len());
@@ -356,7 +362,7 @@ pub struct ChainPart<'a> {
 }
 
 pub fn split_command_chain_parts(cmd: &str) -> Vec<ChainPart<'_>> {
-    let trimmed = cmd.trim();
+    let trimmed = trim_ifs(cmd);
     if trimmed.is_empty() {
         return vec![];
     }
@@ -410,8 +416,8 @@ pub(crate) fn stages_the_rewriter_reaches(
     normalized_prefixes: &[String],
 ) -> Vec<bool> {
     // The rewrite emits the line with its continuations joined, so read it the same.
-    let joined = collapse_line_continuations(full);
-    let before = split_command_chain(&joined);
+    let joined = join_continuations(full);
+    let before = split_command_chain(joined.as_deref().unwrap_or(full));
     let Some(rewritten) = rewrite_command_precompiled(full, excluded, normalized_prefixes) else {
         return vec![false; before.len()];
     };
@@ -434,11 +440,11 @@ fn normalize_php_tool_command(cmd: &str) -> String {
 /// normalizes to its bare name. Only meaningful for the resolved tools, where
 /// a `php` prefix is always the interpreter (never `php artisan`/`run-tests.php`).
 fn strip_php_wrapper(cmd: &str) -> &str {
-    cmd.strip_prefix("php ").map_or(cmd, str::trim_start)
+    cmd.strip_prefix("php ").map_or(cmd, trim_ifs_start)
 }
 
 fn normalize_php_tool_command_with_dirs(cmd: &str, bin_dirs: &[std::path::PathBuf]) -> String {
-    let first_space = cmd.find(is_word_boundary_whitespace);
+    let first_space = cmd.find(is_ifs);
     let first_word = match first_space {
         Some(pos) => &cmd[..pos],
         None => cmd,
@@ -480,7 +486,7 @@ fn matches_php_tool_path(word: &str, bin_dir: &Path, tool: &str) -> bool {
 }
 
 fn normalize_php_tool_path(path: &str) -> String {
-    let mut normalized = path.trim().replace('\\', "/");
+    let mut normalized = trim_ifs(path).replace('\\', "/");
     while let Some(stripped) = normalized.strip_prefix("./") {
         normalized = stripped.to_string();
     }
@@ -506,7 +512,7 @@ fn strip_git_global_opts(cmd: &str) -> String {
     }
     let after_git = &cmd[4..]; // skip "git "
     let stripped = GIT_GLOBAL_OPT.replace(after_git, "");
-    format!("git {}", stripped.trim())
+    format!("git {}", trim_ifs(&stripped))
 }
 
 /// Strip pnpm global options before the subcommand (mirror of `strip_git_global_opts`).
@@ -519,14 +525,14 @@ fn strip_pnpm_global_opts(cmd: &str) -> String {
     // rewrite also matches: `pnpm\t-r install` is left alone here and stays
     // Unsupported on both sides, rather than being classified `rtk pnpm` on a
     // shape the rewrite declines (#3275). Extra spaces are still tolerated via
-    // `trim_start` (`pnpm  -r  install`), since `PNPM_GLOBAL_OPT` is
+    // `trim_ifs_start` (`pnpm  -r  install`), since `PNPM_GLOBAL_OPT` is
     // `^`-anchored and a leading space would skip the strip.
     if !cmd.starts_with("pnpm ") {
         return cmd.to_string();
     }
-    let after_pnpm = cmd[5..].trim_start(); // skip "pnpm ", then any extra spaces
+    let after_pnpm = trim_ifs_start(&cmd[5..]); // skip "pnpm ", then any extra blanks
     let stripped = PNPM_GLOBAL_OPT.replace(after_pnpm, "");
-    format!("pnpm {}", stripped.trim())
+    format!("pnpm {}", trim_ifs(&stripped))
 }
 
 /// True when `cmd` (already normalized) routes to the `rtk pnpm` rule rather than
@@ -556,13 +562,13 @@ fn strip_golangci_global_opts(cmd: &str) -> String {
 fn parse_golangci_run_parts(cmd: &str) -> Option<GolangciRunParts<'_>> {
     let tokens = split_token_spans(cmd);
     let first = tokens.first()?;
-    if first.0 != "golangci-lint" && first.0 != "golangci" {
+    if first.text != "golangci-lint" && first.text != "golangci" {
         return None;
     }
 
     let mut i = 1;
     while i < tokens.len() {
-        let token = tokens[i].0;
+        let token = tokens[i].text;
 
         if token == "--" {
             return None;
@@ -570,12 +576,14 @@ fn parse_golangci_run_parts(cmd: &str) -> Option<GolangciRunParts<'_>> {
 
         if !token.starts_with('-') {
             if token == "run" {
+                // Each segment ends where its last word does, so an escaped
+                // blank there stays in it.
                 let global_segment = if i > 1 {
-                    cmd[tokens[1].1..tokens[i].1].trim()
+                    &cmd[tokens[1].start..tokens[i - 1].end]
                 } else {
                     ""
                 };
-                let run_segment = cmd[tokens[i].1..].trim();
+                let run_segment = &cmd[tokens[i].start..tokens[tokens.len() - 1].end];
                 return Some(GolangciRunParts {
                     global_segment,
                     run_segment,
@@ -623,14 +631,14 @@ fn golangci_flag_takes_separate_value(arg: &str, flag: &str) -> bool {
 /// Quote-aware word splitting for golangci-lint's flag/value parsing: "was
 /// there a space here", not shell syntax — an unquoted glob like `*.yml`
 /// must stay one word rather than split on `*`.
-fn split_token_spans(cmd: &str) -> Vec<(&str, usize)> {
-    coalesce_words(cmd, &tokenize(cmd))
+fn split_token_spans(cmd: &str) -> Vec<Word<'_>> {
+    words(cmd, &tokenize(cmd))
 }
 
 /// Normalize absolute binary paths: `/usr/bin/grep -rn foo` → `grep -rn foo` (#485)
 /// Only strips if the first word contains a `/` (Unix path).
 fn strip_absolute_path(cmd: &str) -> String {
-    let first_space = cmd.find(is_word_boundary_whitespace);
+    let first_space = cmd.find(is_ifs);
     let first_word = match first_space {
         Some(pos) => &cmd[..pos],
         None => cmd,
@@ -674,7 +682,10 @@ fn is_analytics_env_wrapper_token(value: &str) -> bool {
 ///   stops — no scanning into wrapper arguments (`ssh host docker …`)
 pub fn strip_disabled_prefix_for_analytics(cmd: &str) -> (&str, &str) {
     let trimmed = cmd.trim();
-    let tokens = tokenize(trimmed);
+    let tokens: Vec<Token<'_>> = tokenize(trimmed)
+        .into_iter()
+        .filter(|t| !t.is_blank())
+        .collect();
 
     let mut disabled_index = None;
     for (i, token) in tokens.iter().enumerate() {
@@ -687,7 +698,7 @@ pub fn strip_disabled_prefix_for_analytics(cmd: &str) -> (&str, &str) {
             disabled_index = Some(i);
             break;
         }
-        if !is_analytics_env_wrapper_token(&token.value) {
+        if !is_analytics_env_wrapper_token(token.value) {
             // A real command word before RTK_DISABLED= (e.g. `docker run -e
             // RTK_DISABLED=1 …`) — not an RTK bypass prefix.
             return split_env_prefix(trimmed);
@@ -707,7 +718,7 @@ pub fn strip_disabled_prefix_for_analytics(cmd: &str) -> (&str, &str) {
         if token.kind != TokenKind::Arg {
             break;
         }
-        if is_analytics_env_wrapper_token(&token.value) {
+        if is_analytics_env_wrapper_token(token.value) {
             i += 1;
             continue;
         }
@@ -746,24 +757,30 @@ pub fn cmd_has_rtk_disabled_prefix(cmd: &str) -> bool {
 /// because `rtk` is not on root's `secure_path`, and where it is, it would run
 /// rtk as root (#146).
 pub fn split_env_prefix(cmd: &str) -> (&str, &str) {
-    let trimmed = cmd.trim();
-    let words = word_spans(trimmed);
+    split_env_prefix_in(cmd, &tokenize(cmd))
+}
+
+/// [`split_env_prefix`] over `cmd`'s own `tokens`, for a caller that already
+/// lexed it. Both halves end where a word does, so a trailing escaped blank
+/// (`f\ `) stays in the command.
+fn split_env_prefix_in<'a>(cmd: &'a str, tokens: &[Token<'a>]) -> (&'a str, &'a str) {
+    let words = words(cmd, tokens);
+    let (Some(first), Some(last)) = (words.first(), words.last()) else {
+        return ("", "");
+    };
 
     let consumed = words
         .iter()
-        .take_while(|(from, to)| {
-            let word = &trimmed[*from..*to];
-            word == "env" || ENV_ASSIGN.is_match(word)
-        })
+        .take_while(|word| word.text == "env" || ENV_ASSIGN.is_match(word.text))
         .count();
     if consumed == 0 {
-        return ("", trimmed);
+        return ("", &cmd[first.start..last.end]);
     }
 
     // Up to where the command starts, not where the last assignment ends, so
     // that whoever puts the two back together need not know what separated them.
-    let end = words.get(consumed).map_or(trimmed.len(), |(from, _)| *from);
-    (&trimmed[..end], trimmed[end..].trim())
+    let end = words.get(consumed).map_or(last.end, |word| word.start);
+    (&cmd[first.start..end], &cmd[end..last.end])
 }
 
 /// The command behind the first word of `cmd`, when that word is `env` or an
@@ -773,18 +790,20 @@ pub fn split_env_prefix(cmd: &str) -> (&str, &str) {
 /// assignment that is a whole statement (`MSG="chore: rm -rf build"`) runs
 /// nothing.
 fn split_env_word(cmd: &str) -> Option<&str> {
-    let trimmed = cmd.trim();
-    let words = word_spans(trimmed);
-    let &(from, to) = words.first()?;
-    let word = &trimmed[from..to];
-    if word != "env" && !ENV_ASSIGN.is_match(word) {
+    let tokens = tokenize(cmd);
+    let words = words(cmd, &tokens);
+    let (first, last) = (words.first()?, words.last()?);
+    if first.text != "env" && !ENV_ASSIGN.is_match(first.text) {
         return None;
     }
-    words.get(1).map(|&(next, _)| trimmed[next..].trim())
+    words.get(1).map(|next| &cmd[next.start..last.end])
 }
 
-fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
-    let tokens = tokenize(cmd);
+/// Splits the trailing redirects off `cmd`, given its own `tokens`, as
+/// `(command, redirects)`. The command ends where its last word does, and the
+/// redirects keep the blanks in front of them.
+fn strip_trailing_redirects<'a>(cmd: &'a str, tokens: &[Token<'a>]) -> (&'a str, &'a str) {
+    let tokens: Vec<&Token<'a>> = tokens.iter().filter(|t| !t.is_blank()).collect();
     if tokens.is_empty() {
         return (cmd, "");
     }
@@ -813,29 +832,10 @@ fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
         return (cmd, "");
     }
 
-    let cut = tokens[redir_boundary].offset;
-    let cmd_part = cmd[..cut].trim_end();
-    let redir_part = &cmd[cmd_part.len()..];
-    (cmd_part, redir_part)
-}
-
-/// Matches a bash line-continuation: a backslash immediately followed by
-/// `\n` or `\r\n`, *plus* any horizontal whitespace on the line before AND
-/// after the break. This is what bash already collapses to a single space
-/// before executing the command — rtk's hook matcher needs to do the same
-/// so commands authored across multiple lines still hit the rewrite rules.
-/// Consuming the trailing whitespace prevents double spaces in cases like
-/// `git diff \<NL>HEAD~1`.
-static LINE_CONTINUATION_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?m)[ \t\x0B\x0C]*\\\r?\n[ \t\x0B\x0C]*").unwrap());
-
-static BASH_JOIN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\\r?\n").unwrap());
-
-/// Replace every bash line continuation with a single space, mirroring what
-/// bash does before dispatching the command. Returns a borrowed `&str` when the
-/// input contains no continuations, so the common fast path allocates nothing.
-pub(crate) fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
-    LINE_CONTINUATION_RE.replace_all(s, " ")
+    let cut = redir_boundary
+        .checked_sub(1)
+        .map_or(0, |last| tokens[last].end());
+    cmd.split_at(cut)
 }
 
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
@@ -906,21 +906,13 @@ pub(crate) fn rewrite_command_precompiled(
     compiled: &[ExcludePattern],
     normalized_prefixes: &[String],
 ) -> Option<String> {
-    // Bash joins `\<NL>` with nothing, so `<<` or `$((` can arrive split across
-    // a continuation; the space-join below would erase them (#3188 review).
-    if cmd.contains('\\') {
-        let joined = BASH_JOIN_RE.replace_all(cmd, "");
-        if has_heredoc(&joined) || joined.contains("$((") {
-            return None;
-        }
-    }
-
-    // Bash line continuations (`\<NL>`, `\<CRLF>`) and the leading whitespace that
-    // follows are syntactically equivalent to a single space, but `cmd.trim()` does
-    // not unwrap them so a leading backslash-newline used to defeat the whole matcher.
-    // Normalize first, then trim. See issue #1564.
-    let normalized = collapse_line_continuations(cmd);
-    let trimmed = normalized.trim();
+    // The pre-pass runs before the blanks at either end are left out, so
+    // nothing it leaves sits in front of the command, where it would hide the
+    // command from every rule (#1564). It joins a continuation with nothing
+    // where bash does, so a `<<` or `$((` split across one is whole again for
+    // the checks below (#3188 review).
+    let normalized = join_continuations(cmd).ok()?;
+    let (trimmed, tokens) = tokenize_trimmed(&normalized);
     if trimmed.is_empty() {
         return None;
     }
@@ -930,31 +922,34 @@ pub(crate) fn rewrite_command_precompiled(
     }
 
     if trimmed.contains('\n') {
-        return rewrite_multiline_block(trimmed, compiled, normalized_prefixes);
+        return rewrite_multiline_block(trimmed, &tokens, compiled, normalized_prefixes);
     }
 
-    rewrite_single(trimmed, compiled, normalized_prefixes)
+    rewrite_single(trimmed, &tokens, compiled, normalized_prefixes)
 }
 
-/// Rewrite one logical command line (no unquoted newlines).
+/// Rewrite one logical command line (no unquoted newlines), given with no
+/// blanks at either end and with its own tokens.
 fn rewrite_single(
     trimmed: &str,
+    tokens: &[Token<'_>],
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
 ) -> Option<String> {
-    // Simple (non-compound) already-RTK command — return as-is.
-    // For compound commands that start with "rtk" (e.g. "rtk git add . && cargo test"),
-    // fall through to rewrite_compound so the remaining segments get rewritten.
-    let has_compound = trimmed.contains("&&")
-        || trimmed.contains("||")
-        || trimmed.contains(';')
-        || trimmed.contains('|')
-        || trimmed.contains(" & ");
-    if !has_compound && (trimmed.starts_with("rtk ") || trimmed == "rtk") {
+    // A command that runs rtk is returned as it is, unless an unquoted `&&`,
+    // `||`, `;`, `|` or `&` joins another command to it: that one
+    // (`rtk git add . && cargo test`) goes to rewrite_compound, which rewrites
+    // the other commands.
+    let has_compound = tokens.iter().any(|token| match token.kind {
+        TokenKind::Operator | TokenKind::Pipe(_) => true,
+        TokenKind::Shellism => token.value == "&",
+        _ => false,
+    });
+    if !has_compound && rtk_invocation(&words(trimmed, tokens)).is_some() {
         return Some(trimmed.to_string());
     }
 
-    rewrite_compound(trimmed, excluded, transparent_prefixes, 0)
+    rewrite_compound(trimmed, tokens, excluded, transparent_prefixes, 0)
 }
 
 /// Shell keywords that open or close a multi-line construct. A line inside a
@@ -964,25 +959,6 @@ const BLOCK_KEYWORDS: &[&str] = &[
     "for", "while", "until", "if", "then", "else", "elif", "fi", "do", "done", "case", "esac",
     "select", "function", "coproc", "{", "}", "(", ")",
 ];
-
-/// Byte offset where an unquoted `#` at the start of a word begins a trailing
-/// comment, if any. The lexer has no comment state, so the independence checks
-/// must ignore comment text themselves: `git log | # keep pipeline` continues
-/// the pipeline across the newline even though the line ends in comment text.
-fn comment_start(line: &str) -> Option<usize> {
-    let bytes = line.as_bytes();
-    // `#` starts a comment at any word start, incl. after an operator
-    // byte — but not after `{`: `${#var}` is an expansion (#3188 review).
-    QuoteScan::new(line).significant().find_map(|c| {
-        (c.byte == b'#'
-            && !c.in_single
-            && !c.in_double
-            && (c.index == 0
-                || bytes[c.index - 1].is_ascii_whitespace()
-                || matches!(bytes[c.index - 1], b'|' | b'&' | b';' | b'(' | b')')))
-        .then_some(c.index)
-    })
-}
 
 /// Unquoted `(`/`)` or `{`/`}` that don't balance within the line: an array
 /// literal (`arr=(one`), function body (`foo() {`), or group spans lines, so
@@ -1019,8 +995,8 @@ fn line_has_unbalanced_test_brackets(code: &str) -> bool {
             continue;
         }
         let i = c.index;
-        let word_start = i == 0 || bytes[i - 1].is_ascii_whitespace();
-        let word_end = bytes.get(i + 2).is_none_or(|b| b.is_ascii_whitespace());
+        let word_start = i == 0 || is_ifs(char::from(bytes[i - 1]));
+        let word_end = bytes.get(i + 2).is_none_or(|&b| is_ifs(char::from(b)));
         if bytes.get(i + 1) == Some(&c.byte) && word_start && word_end {
             depth += if c.byte == b'[' { 1 } else { -1 };
             if depth < 0 {
@@ -1046,12 +1022,14 @@ enum LineRole {
 }
 
 fn classify_line(line: &str) -> LineRole {
-    if line.is_empty() || line.starts_with('#') {
+    // Comment text is not code: `git log | # keep pipeline` continues the
+    // pipeline across the newline even though the line ends in comment text.
+    let without = without_comments(line);
+    let code = trim_ifs_end(&without);
+    if code.is_empty() {
         return LineRole::Passive;
     }
-    let comment = comment_start(line);
-    let code = comment.map_or(line, |i| line[..i].trim_end());
-    let first = code.split_whitespace().next().unwrap_or("");
+    let first = split_ifs(code).next().unwrap_or("");
     if BLOCK_KEYWORDS.contains(&first) {
         return LineRole::Unsafe;
     }
@@ -1065,9 +1043,9 @@ fn classify_line(line: &str) -> LineRole {
         return LineRole::Unsafe;
     }
     if CONTINUATION_OPS.iter().any(|op| code.ends_with(op)) {
-        // An operator behind a trailing comment can't be joined textually:
-        // the comment-blind tokenizer would read the comment as command words.
-        return if comment.is_some() {
+        // An operator behind a trailing comment can't be joined textually: the
+        // comment would take in the line joined after it.
+        return if without.len() < line.len() {
             LineRole::Unsafe
         } else {
             LineRole::ContinuesNext
@@ -1085,24 +1063,25 @@ fn classify_line(line: &str) -> LineRole {
 /// joining is not byte-preserving: separators inside a joined unit collapse
 /// to single spaces (see `test_blank_line_inside_continuation_joins`);
 /// any line [`classify_line`] marks unsafe passes the whole block through.
-/// Blank lines and comment lines are preserved verbatim, as is indentation
-/// and the original separator bytes (`\n` vs `\r\n`).
+/// Blank lines are preserved verbatim, as is indentation.
+/// A line ends at its `\n` only: the `\r` of a CRLF is the last byte of the
+/// line's last word, as bash reads it.
 ///
 /// If any newline byte was swallowed by quote state, the block passes through
-/// untouched. The lexer has no comment awareness, so an apostrophe in a `#`
-/// comment opens quote state and hides the rest of the block — rewriting (or
-/// prefixing) such a block would act on lines no permission verdict was
-/// computed for. Passthrough hands the original command to the agent's native
-/// permission handling instead. Genuine quoted newlines (multi-line commit
-/// messages) also land here; forgoing that rewrite is the safe trade.
+/// untouched: rewriting (or prefixing) such a block would act on lines no
+/// permission verdict was computed for. Passthrough hands the original command to
+/// the agent's native permission handling instead. Genuine quoted newlines
+/// (multi-line commit messages) also land here; forgoing that rewrite is the safe
+/// trade.
 fn rewrite_multiline_block(
     cmd: &str,
+    tokens: &[Token<'_>],
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
 ) -> Option<String> {
-    let newline_offsets: Vec<usize> = tokenize_with_newlines(cmd)
+    let newline_offsets: Vec<usize> = tokens
         .iter()
-        .filter(|t| t.kind == TokenKind::Operator && t.value == "\n")
+        .filter(|t| t.kind == TokenKind::Newline)
         .map(|t| t.offset)
         .collect();
 
@@ -1110,22 +1089,15 @@ fn rewrite_multiline_block(
         return None;
     }
 
-    // The lexer emits a newline token for each `\n` and for the `\r` of a CRLF
-    // pair (CRLF = two tokens), but NOT for a lone `\r` (a bare CR is not a
-    // separator). Count exactly that set here, so the parity check flags only
-    // newlines the lexer swallowed via quote state — never a lone CR.
-    let bytes = cmd.as_bytes();
-    let raw_breaks = bytes
-        .iter()
-        .enumerate()
-        .filter(|&(i, &b)| b == b'\n' || is_crlf_at(bytes, i))
-        .count();
+    // The lexer emits a `Newline` for each `\n` it reads as syntax, so a
+    // difference in count is a newline swallowed by quote state or an escape.
+    let raw_breaks = cmd.bytes().filter(|&b| b == b'\n').count();
     if raw_breaks != newline_offsets.len() {
         // Every newline swallowed by quote state with quotes balanced at EOF
         // is one logical command (a multi-line commit message), not a hidden
         // extra line; rewrite it whole, as develop always did (#3319 fuzz).
         if newline_offsets.is_empty() && quotes_balanced(cmd) {
-            return rewrite_single(cmd, excluded, transparent_prefixes);
+            return rewrite_single(cmd, tokens, excluded, transparent_prefixes);
         }
         return None;
     }
@@ -1140,7 +1112,7 @@ fn rewrite_multiline_block(
 
     let roles: Vec<LineRole> = segments
         .iter()
-        .map(|(_, seg)| classify_line(seg.trim()))
+        .map(|(_, seg)| classify_line(trim_ifs(seg)))
         .collect();
     if roles.contains(&LineRole::Unsafe) {
         return None;
@@ -1165,15 +1137,15 @@ fn rewrite_multiline_block(
         let mut end = i;
         while roles[end] == LineRole::ContinuesNext {
             let mut next = end + 1;
-            while next < segments.len() && segments[next].1.trim().is_empty() {
+            while next < segments.len() && trim_ifs(segments[next].1).is_empty() {
                 next += 1;
             }
             if next >= segments.len() {
                 break;
             }
             if roles[next] == LineRole::Passive {
-                // Comment line inside a continuation: the comment-blind
-                // tokenizer would join it as command words (#3188 review).
+                // Comment line inside a continuation: joined textually, the comment
+                // would take in the lines after it (#3188 review).
                 return None;
             }
             end = next;
@@ -1187,11 +1159,13 @@ fn rewrite_multiline_block(
             let (last_off, last_seg) = segments[end];
             &cmd[seg_off..last_off + last_seg.len()]
         };
-        let line = unit.trim();
-        match rewrite_single(line, excluded, transparent_prefixes) {
+        let (line, line_tokens) = tokenize_trimmed(unit);
+        match rewrite_single(line, &line_tokens, excluded, transparent_prefixes) {
             Some(rewritten) if rewritten != line => {
                 any_changed = true;
-                let indent = &unit[..unit.len() - unit.trim_start().len()];
+                // A unit starts after a newline, which nothing escapes, so its
+                // leading blanks are all bare.
+                let indent = &unit[..unit.len() - trim_ifs_start(unit).len()];
                 result.push_str(indent);
                 result.push_str(&rewritten);
                 result.push_str(&unit[indent.len() + line.len()..]);
@@ -1215,7 +1189,7 @@ struct PipelineAnalysis {
 
 fn analyze_pipeline(
     cmd: &str,
-    tokens: &[ParsedToken],
+    tokens: &[Token<'_>],
     segment_start: usize,
     first_pipe_offset: usize,
 ) -> PipelineAnalysis {
@@ -1229,6 +1203,11 @@ fn analyze_pipeline(
         .map(|token| token.offset);
     let end_offset = next_clause_offset.unwrap_or(cmd.len());
 
+    // A stage ends where its last word does, which keeps an escaped blank:
+    // `head\ ` is the program `head␠`, not a safe consumer.
+    let stage_text = |start: usize, end: usize| {
+        content_span(tokens, start, end).map(|(from, to)| &cmd[from..to])
+    };
     let mut stage_start = segment_start;
     let mut final_stage_start = None;
     let mut has_supported_structure = true;
@@ -1251,23 +1230,22 @@ fn analyze_pipeline(
             continue;
         };
 
-        if cmd[stage_start..token.offset].trim().is_empty() || kind == PipeKind::StdoutAndStderr {
+        let stage = stage_text(stage_start, token.offset);
+        if stage.is_none() || kind == PipeKind::StdoutAndStderr {
             has_supported_structure = false;
         }
-        if token.offset > first_pipe_offset
-            && !is_safe_pipe_consumer(cmd[stage_start..token.offset].trim())
-        {
+        if token.offset > first_pipe_offset && !stage.is_some_and(is_safe_pipe_consumer) {
             consumers_all_safe = false;
         }
 
-        stage_start = token.offset + token.value.len();
+        stage_start = token.end();
         final_stage_start = Some(stage_start);
     }
 
-    if cmd[stage_start..end_offset].trim().is_empty() {
-        has_supported_structure = false;
-    } else if !is_safe_pipe_consumer(cmd[stage_start..end_offset].trim()) {
-        consumers_all_safe = false;
+    match stage_text(stage_start, end_offset) {
+        None => has_supported_structure = false,
+        Some(stage) if !is_safe_pipe_consumer(stage) => consumers_all_safe = false,
+        Some(_) => {}
     }
 
     PipelineAnalysis {
@@ -1282,8 +1260,10 @@ fn analyze_pipeline(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rewrite_pipeline_stage(
     cmd: &str,
+    tokens: &[Token<'_>],
     stage_start: usize,
     stage_end: usize,
     context: RewriteContext,
@@ -1291,7 +1271,8 @@ fn rewrite_pipeline_stage(
     transparent_prefixes: &[String],
     shell_wrapper_depth: usize,
 ) -> Option<String> {
-    let stage = cmd[stage_start..stage_end].trim();
+    let (from, to) = content_span(tokens, stage_start, stage_end)?;
+    let stage = &cmd[from..to];
 
     rewrite_segment_inner(
         stage,
@@ -1306,6 +1287,7 @@ fn rewrite_pipeline_stage(
 
 fn rewrite_pipeline_final_stage(
     cmd: &str,
+    tokens: &[Token<'_>],
     segment_start: usize,
     analysis: PipelineAnalysis,
     excluded: &[ExcludePattern],
@@ -1316,6 +1298,7 @@ fn rewrite_pipeline_final_stage(
 
     rewrite_pipeline_stage(
         cmd,
+        tokens,
         final_stage_start,
         analysis.end_offset,
         RewriteContext::PipelineFinal,
@@ -1329,14 +1312,16 @@ fn rewrite_pipeline_final_stage(
         // final stage's own range, which the rewrite returns trimmed.
         let head = &cmd[segment_start..final_stage_start];
         let stage = &cmd[final_stage_start..analysis.end_offset];
-        let lead = &stage[..stage.len() - stage.trim_start().len()];
-        format!("{}{}{}", head.trim_start(), lead, rewritten)
+        let lead = &stage[..stage.len() - trim_ifs_start(stage).len()];
+        format!("{}{}{}", trim_ifs_start(head), lead, rewritten)
     })
 }
 
 // #3171
+#[allow(clippy::too_many_arguments)]
 fn rewrite_pipeline_producer(
     cmd: &str,
+    tokens: &[Token<'_>],
     segment_start: usize,
     first_pipe_offset: usize,
     analysis: PipelineAnalysis,
@@ -1348,23 +1333,27 @@ fn rewrite_pipeline_producer(
         return None;
     }
 
-    rewrite_pipeline_stage(
+    let rewritten = rewrite_pipeline_stage(
         cmd,
+        tokens,
         segment_start,
         first_pipe_offset,
         RewriteContext::PipelineProducer,
         excluded,
         transparent_prefixes,
         shell_wrapper_depth,
-    )
-    .map(|rewritten| {
-        // The gap between the producer and the `|` sits in neither piece:
-        // the rewrite is trimmed and the tail starts at the pipe itself.
-        let producer = &cmd[segment_start..first_pipe_offset];
-        let gap = &producer[producer.trim_end().len()..];
-        let tail = &cmd[first_pipe_offset..analysis.end_offset];
-        format!("{}{}{}", rewritten, gap, tail.trim_end())
-    })
+    )?;
+    // The gap between the producer and the `|` sits in neither piece: the
+    // rewrite ends where the producer's last word does, and the tail starts at
+    // the pipe itself and ends where the last stage's last word does.
+    let (_, producer_end) = content_span(tokens, segment_start, first_pipe_offset)?;
+    let (_, tail_end) = content_span(tokens, first_pipe_offset, analysis.end_offset)?;
+    Some(format!(
+        "{}{}{}",
+        rewritten,
+        &cmd[producer_end..first_pipe_offset],
+        &cmd[first_pipe_offset..tail_end]
+    ))
 }
 
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each
@@ -1378,39 +1367,43 @@ fn rewrite_pipeline_producer(
 /// The rewrite replaces a command, not the text around it. Emitting the gaps
 /// from the source rather than rebuilding them is what keeps `echo 1;;esac`
 /// and `a  &&  b` intact: an operator's own spacing is nobody's to normalise.
+#[allow(clippy::too_many_arguments)]
 fn emit_segment(
     out: &mut String,
     cmd: &str,
+    tokens: &[Token<'_>],
     start: usize,
     end: usize,
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
     shell_wrapper_depth: usize,
 ) -> bool {
-    let raw = &cmd[start..end];
-    let trimmed = raw.trim();
-    let lead = raw.len() - raw.trim_start().len();
+    let Some((from, to)) = content_span(tokens, start, end) else {
+        out.push_str(&cmd[start..end]);
+        return false;
+    };
+    let command = &cmd[from..to];
 
-    out.push_str(&raw[..lead]);
-    let rewritten = rewrite_segment(trimmed, excluded, transparent_prefixes, shell_wrapper_depth)
-        .unwrap_or_else(|| trimmed.to_string());
+    out.push_str(&cmd[start..from]);
+    let rewritten = rewrite_segment(command, excluded, transparent_prefixes, shell_wrapper_depth)
+        .unwrap_or_else(|| command.to_string());
     out.push_str(&rewritten);
-    out.push_str(&raw[lead + trimmed.len()..]);
-    rewritten != trimmed
+    out.push_str(&cmd[to..end]);
+    rewritten != command
 }
 
 fn rewrite_compound(
     cmd: &str,
+    tokens: &[Token<'_>],
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
     shell_wrapper_depth: usize,
 ) -> Option<String> {
-    let tokens = tokenize(cmd);
     let has_pipe = tokens
         .iter()
         .any(|token| matches!(token.kind, TokenKind::Pipe(_)));
     let has_opaque_grouping = tokens.iter().any(|token| {
-        token.kind == TokenKind::Shellism && matches!(token.value.as_str(), "(" | ")" | "{" | "}")
+        token.kind == TokenKind::Shellism && matches!(token.value, "(" | ")" | "{" | "}")
     });
     if has_pipe && has_opaque_grouping {
         return None;
@@ -1423,7 +1416,9 @@ fn rewrite_compound(
     let mut cases = CaseTracker::default();
 
     for (index, tok) in tokens.iter().enumerate() {
-        if tok.offset < seg_start {
+        // A blank ends nothing here: a newline that reaches this loop follows
+        // an operator that joined two lines, so it only separates words.
+        if tok.offset < seg_start || tok.is_blank() {
             continue;
         }
         // `$( )`, `<( )` and `>( )` all run a command in service of the outer
@@ -1436,7 +1431,7 @@ fn rewrite_compound(
         }
         // Nothing but whitespace since the last boundary means this token is
         // the command, which is where `case` is the keyword and not a word.
-        let at_command_position = cmd[seg_start..tok.offset].trim().is_empty();
+        let at_command_position = trim_ifs(&cmd[seg_start..tok.offset]).is_empty();
         let in_case_pattern = cases.in_pattern();
         cases.observe(tok, at_command_position);
         match tok.kind {
@@ -1444,25 +1439,28 @@ fn rewrite_compound(
                 any_changed |= emit_segment(
                     &mut result,
                     cmd,
+                    tokens,
                     seg_start,
                     tok.offset,
                     excluded,
                     transparent_prefixes,
                     shell_wrapper_depth,
                 );
-                seg_start = tok.offset + tok.value.len();
+                seg_start = tok.end();
                 result.push_str(&cmd[tok.offset..seg_start]);
             }
             TokenKind::Pipe(_) => {
-                let analysis = analyze_pipeline(cmd, &tokens, seg_start, tok.offset);
-                // The pipeline rewriters work on trimmed text, so the gap on
-                // either side is emitted here rather than rebuilt by them.
-                let raw_pipeline = &cmd[seg_start..analysis.end_offset];
-                let lead = raw_pipeline.len() - raw_pipeline.trim_start().len();
-                let pipeline = raw_pipeline.trim();
-                result.push_str(&raw_pipeline[..lead]);
+                let analysis = analyze_pipeline(cmd, tokens, seg_start, tok.offset);
+                // The pipeline rewriters work on the pipeline without the blanks
+                // around it, so the gap on either side is emitted here rather
+                // than rebuilt by them. The `|` itself is text, so the span is
+                // never empty.
+                let (from, to) = content_span(tokens, seg_start, analysis.end_offset)
+                    .unwrap_or((seg_start, analysis.end_offset));
+                result.push_str(&cmd[seg_start..from]);
                 let rewritten_pipeline = rewrite_pipeline_final_stage(
                     cmd,
+                    tokens,
                     seg_start,
                     analysis,
                     excluded,
@@ -1472,6 +1470,7 @@ fn rewrite_compound(
                 .or_else(|| {
                     rewrite_pipeline_producer(
                         cmd,
+                        tokens,
                         seg_start,
                         tok.offset,
                         analysis,
@@ -1485,9 +1484,9 @@ fn rewrite_compound(
                     any_changed = true;
                     result.push_str(&rewritten);
                 } else {
-                    result.push_str(pipeline);
+                    result.push_str(&cmd[from..to]);
                 }
-                result.push_str(&raw_pipeline[lead + pipeline.len()..]);
+                result.push_str(&cmd[to..analysis.end_offset]);
 
                 match analysis.next_clause_offset {
                     Some(next_clause_offset) => {
@@ -1505,25 +1504,25 @@ fn rewrite_compound(
             TokenKind::Shellism if tok.value == "(" && in_case_pattern => {}
             // `ls() { …; }` names a function, so the word before the pair runs
             // nothing: it stays as written, and the body is read as usual.
-            TokenKind::Shellism
-                if tok.value == "(" && opens_function_definition(&tokens, index) =>
-            {
-                let pair_end = tokens[index + 1].offset + tokens[index + 1].value.len();
+            TokenKind::Shellism if function_definition_closer(tokens, index).is_some() => {
+                let closer = function_definition_closer(tokens, index)?;
+                let pair_end = tokens[closer].end();
                 result.push_str(&cmd[seg_start..pair_end]);
                 seg_start = pair_end;
             }
-            TokenKind::Shellism if tok.value == "(" && glued_to_a_word(&tokens, index) => {}
-            TokenKind::Shellism if matches!(tok.value.as_str(), "&" | "(" | ")") => {
+            TokenKind::Shellism if tok.value == "(" && glued_to_a_word(tokens, index) => {}
+            TokenKind::Shellism if matches!(tok.value, "&" | "(" | ")") => {
                 any_changed |= emit_segment(
                     &mut result,
                     cmd,
+                    tokens,
                     seg_start,
                     tok.offset,
                     excluded,
                     transparent_prefixes,
                     shell_wrapper_depth,
                 );
-                seg_start = tok.offset + tok.value.len();
+                seg_start = tok.end();
                 result.push_str(&cmd[tok.offset..seg_start]);
             }
             _ => {}
@@ -1533,6 +1532,7 @@ fn rewrite_compound(
     any_changed |= emit_segment(
         &mut result,
         cmd,
+        tokens,
         seg_start,
         cmd.len(),
         excluded,
@@ -1810,7 +1810,7 @@ pub(crate) fn compile_exclude_patterns(patterns: &[String]) -> Vec<ExcludePatter
             let anchored = if trimmed.starts_with('^') {
                 trimmed.to_string()
             } else {
-                format!(r"^{}($|\s)", regex::escape(trimmed))
+                format!(r"^{}($|[ \t\n])", regex::escape(trimmed))
             };
             Some(match Regex::new(&anchored) {
                 Ok(re) => ExcludePattern::Regex(re),
@@ -1866,7 +1866,10 @@ fn rewrite_shell_wrapper(
     shell_wrapper_depth: usize,
 ) -> Option<String> {
     let wrapper = parse_shell_wrapper(command)?;
-    let script = wrapper.script(command)?;
+    // The shell the wrapper starts joins the continuations a single-quoted
+    // script carries, which the line around it kept as written.
+    let script = join_continuations(wrapper.script(command)?).ok()?;
+    let script = script.as_ref();
     if script.contains(['\n', '\r'])
         || has_heredoc(script)
         || script.contains("$((")
@@ -1880,6 +1883,7 @@ fn rewrite_shell_wrapper(
 
     let rewritten = rewrite_compound(
         script,
+        &tokenize(script),
         excluded,
         transparent_prefixes,
         shell_wrapper_depth + 1,
@@ -1918,6 +1922,39 @@ fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
     })
 }
 
+/// Whether every command on `cmd`, as far as it reads, is one the user opted out of,
+/// through an `RTK_DISABLED=` prefix or `exclude_commands`.
+pub(crate) fn line_opts_out(cmd: &str, excluded: &[String]) -> bool {
+    line_opts_out_at(cmd, &compile_exclude_patterns(excluded), 0)
+}
+
+fn line_opts_out_at(cmd: &str, excluded: &[ExcludePattern], depth: usize) -> bool {
+    if depth >= MAX_PREFIX_DEPTH {
+        return false;
+    }
+    // Every reading has to agree: what reads as a comment on one may be a command. A
+    // comment read as code is a `:`, which runs nothing.
+    let joined = join_continuations(cmd);
+    crate::core::cmdline::lexer::every_reading(&joined)
+        .iter()
+        .all(|reading| {
+            let segments = crate::core::cmdline::lexer::split_for_permissions(reading);
+            let commands: Vec<_> = segments
+                .iter()
+                .filter(|segment| !segment.starts_with(':'))
+                .collect();
+            !commands.is_empty()
+                && commands.iter().all(|segment| {
+                    let (env_prefix, command) = split_env_prefix(segment);
+                    prefix_contains_rtk_disabled(env_prefix)
+                        || is_excluded(command, excluded)
+                        || parse_shell_wrapper(command)
+                            .and_then(|wrapper| wrapper.script(command).map(str::to_string))
+                            .is_some_and(|script| line_opts_out_at(&script, excluded, depth + 1))
+                })
+        })
+}
+
 /// Whether `cmd` is a quoted shell wrapper whose script runs a command the
 /// user opted out of, through an `RTK_DISABLED=` prefix or `exclude_commands`.
 /// A routable wrapper must not fall through to its own filter then, since that
@@ -1940,7 +1977,7 @@ fn shell_wrapper_script_opts_out(cmd: &str, excluded: &[ExcludePattern], depth: 
             if env_prefix.contains("RTK_DISABLED=") || is_excluded(rest, excluded) {
                 return true;
             }
-            match strip_process_wrapper_prefix(rest) {
+            match strip_process_wrapper_prefix(rest, &tokenize(rest)) {
                 Some((_, inner)) => seg = inner,
                 None => return shell_wrapper_script_opts_out(rest, excluded, depth + 1),
             }
@@ -2000,7 +2037,7 @@ fn collect_shell_wrapper_positions<'a>(
         }
     }
 
-    if let Some((_, rest)) = strip_process_wrapper_prefix(trimmed) {
+    if let Some((_, rest)) = strip_process_wrapper_prefix(trimmed, &tokenize(trimmed)) {
         collect_shell_wrapper_positions(rest, transparent_prefixes, depth + 1, positions);
         return;
     }
@@ -2024,7 +2061,7 @@ fn rewrite_segment_inner(
     depth: usize,
     shell_wrapper_depth: usize,
 ) -> Option<String> {
-    let trimmed = seg.trim();
+    let (trimmed, tokens) = tokenize_trimmed(seg);
     if trimmed.is_empty() {
         return None;
     }
@@ -2043,7 +2080,7 @@ fn rewrite_segment_inner(
         return None;
     }
 
-    let (env_prefix, rest_after_env) = split_env_prefix(trimmed);
+    let (env_prefix, rest_after_env) = split_env_prefix_in(trimmed, &tokens);
     if !env_prefix.is_empty() {
         // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely. The
         // warning that goes with it (#508) is raised by `rewrite_command`,
@@ -2100,7 +2137,7 @@ fn rewrite_segment_inner(
     }
 
     // #2375
-    if let Some((prefix, rest)) = strip_process_wrapper_prefix(trimmed) {
+    if let Some((prefix, rest)) = strip_process_wrapper_prefix(trimmed, &tokens) {
         return rewrite_segment_inner(
             rest,
             excluded,
@@ -2126,6 +2163,10 @@ fn rewrite_segment_inner(
             if rest.is_empty() {
                 return None;
             }
+            // A prefix matched as text can end inside a token, and a fresh lex
+            // of the rest can end its last word before the outer lex did: the
+            // blanks between the two ends are kept as written.
+            let tail = &rest[tokenize_trimmed(rest).0.len()..];
             return rewrite_segment_inner(
                 rest,
                 excluded,
@@ -2136,10 +2177,11 @@ fn rewrite_segment_inner(
             )
             .map(|rewritten| {
                 format!(
-                    "{}{}{}",
+                    "{}{}{}{}",
                     prefix,
                     prefix_gap(trimmed, prefix, rest),
-                    rewritten
+                    rewritten,
+                    tail
                 )
             });
         }
@@ -2147,15 +2189,22 @@ fn rewrite_segment_inner(
 
     // Strip trailing stderr/stdout redirects before matching (#530)
     // e.g. "git status 2>&1" → match "git status", re-append " 2>&1"
-    let (cmd_part, redirect_suffix) = strip_trailing_redirects(trimmed);
+    let (cmd_part, redirect_suffix) = strip_trailing_redirects(trimmed, &tokens);
+    let cmd_tokens = tokens_until(&tokens, cmd_part.len());
+    // The program, as bash ends its name: at a space, a tab or a newline.
+    let cmd_words = words(cmd_part, cmd_tokens);
+    let program = cmd_words.first().map_or("", |word| word.text);
 
     // Already RTK — pass through unchanged
-    if cmd_part.starts_with("rtk ") || cmd_part == "rtk" {
+    if rtk_invocation(&cmd_words).is_some() {
         return Some(trimmed.to_string());
     }
 
+    // A bare `head` or `tail` reads its input and has no line range to map, so
+    // only one with arguments takes this branch.
     if context == RewriteContext::Normal
-        && (cmd_part.starts_with("head ") || cmd_part.starts_with("tail "))
+        && cmd_words.len() > 1
+        && matches!(program, "head" | "tail")
     {
         // head/tail rewrite to `rtk read`, so honour exclude_commands here too:
         // this branch returns before the checks below. Any env prefix has already
@@ -2166,20 +2215,15 @@ fn rewrite_segment_inner(
         return rewrite_line_range(cmd_part).map(|r| join_redirect_suffix(&r, redirect_suffix));
     }
 
-    // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
-    // semantics than rtk read or no equivalent at all. Only `-n` (line numbers)
-    // maps correctly to `rtk read -n`. Skip rewrite for any other flag.
-    if let Some(cmd_args) = cmd_part.strip_prefix("cat ") {
-        let args = cmd_args.trim_start();
-        if args.starts_with('-') && !args.starts_with("-n ") && !args.starts_with("-n\t") {
-            return None;
-        }
+    // A bare `cat` has no options to check and goes on to the filters.
+    if program == "cat" && cmd_words.len() > 1 && !cat_options_map_to_read(cmd_part) {
+        return None;
     }
 
     // Use classify_command for correct ignore/prefix handling
-    let rtk_equivalent = match classify_command(cmd_part) {
+    let rtk_equivalent = match classify_trimmed(cmd_part, cmd_tokens) {
         Classification::Supported { rtk_equivalent, .. } => {
-            let cmd_clean = split_env_prefix(cmd_part).1;
+            let cmd_clean = split_env_prefix_in(cmd_part, cmd_tokens).1;
             if !excluded.is_empty()
                 && (is_excluded(cmd_clean, excluded)
                     || is_excluded(&tool_form(cmd_clean, rtk_equivalent), excluded))
@@ -2196,11 +2240,11 @@ fn rewrite_segment_inner(
             if crate::core::toml_filter::toml_disabled() {
                 return None;
             }
-            let normalized = strip_absolute_path(cmd_part.trim());
+            let normalized = strip_absolute_path(cmd_part);
             if is_excluded(&normalized, excluded) {
                 return None;
             }
-            let base = normalized.split_whitespace().next().unwrap_or("");
+            let base = normalized.split(is_ifs).next().unwrap_or("");
             if crate::core::toml_filter::is_rtk_reserved_command(base) {
                 return None;
             }
@@ -2291,6 +2335,26 @@ fn rewrite_command_part(rule: &RtkRule, cmd_part: &str) -> Option<String> {
     None
 }
 
+/// Whether `cat` in `cmd` maps onto `rtk read`: it names at least one file,
+/// and every option it is given has an `rtk read` equivalent. Only `-n` (line
+/// numbers) does: most others (`-v`, `-A`, `-e`, `-t`, `-s`, `-b`,
+/// `--show-all`, …) mean something `rtk read` does not do, or nothing it
+/// accepts, and a `--` refuses too. Without a file `cat` reads its input,
+/// which `rtk read -n` does not. The arguments are read as `cat` receives
+/// them, so a quoted `'-A'` is an option.
+fn cat_options_map_to_read(cmd: &str) -> bool {
+    let args: Vec<String> = shell_split(cmd).into_iter().skip(1).collect();
+    let parsed = arg_tokenizer::tokenize(&args);
+    parsed.iter().any(|arg| arg.kind == ArgKind::Positional)
+        && parsed.iter().all(|arg| match arg.kind {
+            ArgKind::Positional => true,
+            ArgKind::Short => {
+                arg.text == "n" && args.get(arg.source_index).is_some_and(|a| a == "-n")
+            }
+            ArgKind::Long | ArgKind::DashDash => false,
+        })
+}
+
 /// The tool-name portion of a matched rewrite prefix: the shortest token-suffix of
 /// `prefix` that is itself a rewrite prefix of the same rule. That peels the wrapper
 /// (`npx`, `pnpm exec`, `python3 -m`, `bundle exec`) while keeping a subcommand the
@@ -2355,17 +2419,21 @@ fn tool_form(cmd_clean: &str, rtk_equivalent: &str) -> String {
         .unwrap_or(normalized)
 }
 
-fn strip_process_wrapper_prefix(cmd: &str) -> Option<(&str, &str)> {
-    strip_wrapper_prefix_from_any(&[PROCESS_WRAPPERS], cmd)
+fn strip_process_wrapper_prefix<'a>(
+    cmd: &'a str,
+    tokens: &[Token<'a>],
+) -> Option<(&'a str, &'a str)> {
+    strip_wrapper_prefix_from_any(&[PROCESS_WRAPPERS], cmd, tokens)
 }
 
-/// Peel one wrapper from any of `tables` off the front of `cmd`, giving
-/// `(wrapper text, wrapped command)`; `cmd` is tokenized once.
+/// Peel one wrapper from any of `tables` off the front of `cmd`, given its own
+/// `tokens`, as `(wrapper text, wrapped command)`.
 fn strip_wrapper_prefix_from_any<'a>(
     tables: &[&[ProcessWrapper]],
     cmd: &'a str,
+    tokens: &[Token<'a>],
 ) -> Option<(&'a str, &'a str)> {
-    let tokens = tokenize(cmd);
+    let tokens: Vec<Token<'a>> = tokens.iter().filter(|t| !t.is_blank()).copied().collect();
     let first = tokens.first()?;
     if first.kind != TokenKind::Arg {
         return None;
@@ -2373,16 +2441,17 @@ fn strip_wrapper_prefix_from_any<'a>(
     let wrapper = tables
         .iter()
         .flat_map(|table| table.iter())
-        .find(|candidate| candidate.name == command_basename(&first.value))?;
+        .find(|candidate| candidate.name == command_basename(first.value))?;
     let inner = wrapper_inner_command(wrapper, &tokens)?;
-    if tokens[..inner_index(&tokens, inner)]
-        .iter()
-        .any(|token| token.value == "rtk")
-    {
+    let inner_at = inner_index(&tokens, inner);
+    if tokens[..inner_at].iter().any(|token| token.value == "rtk") {
         return None;
     }
-    let prefix = cmd[..inner.offset].trim_end();
-    let rest = cmd[inner.offset..].trim_start();
+    // The wrapper ends where its last word does, so an escaped blank there
+    // stays with it.
+    let prefix_end = inner_at.checked_sub(1).map_or(0, |last| tokens[last].end());
+    let prefix = &cmd[..prefix_end];
+    let rest = &cmd[inner.offset..];
     if prefix.is_empty() || rest.is_empty() {
         return None;
     }
@@ -2461,8 +2530,13 @@ impl PeelStep {
                 .iter()
                 .find_map(|prefix| strip_word_prefix(cmd, prefix)),
             PeelStep::Wrapper => {
-                strip_wrapper_prefix_from_any(&[PROCESS_WRAPPERS, MATCH_ONLY_WRAPPERS], cmd)
-                    .map(|(_, inner)| inner)
+                let tokens = tokenize(cmd);
+                strip_wrapper_prefix_from_any(
+                    &[PROCESS_WRAPPERS, MATCH_ONLY_WRAPPERS],
+                    cmd,
+                    &tokens,
+                )
+                .map(|(_, inner)| inner.trim())
             }
         }
     }
@@ -2489,7 +2563,7 @@ pub(crate) struct MatchingReadings<'a> {
     pub(crate) complete: bool,
 }
 
-fn inner_index(tokens: &[ParsedToken], inner: &ParsedToken) -> usize {
+fn inner_index(tokens: &[Token<'_>], inner: &Token<'_>) -> usize {
     tokens
         .iter()
         .position(|token| token.offset == inner.offset)
@@ -2502,15 +2576,15 @@ fn command_basename(command: &str) -> &str {
 
 fn wrapper_inner_command<'a>(
     wrapper: &ProcessWrapper,
-    tokens: &'a [ParsedToken],
-) -> Option<&'a ParsedToken> {
+    tokens: &'a [Token<'a>],
+) -> Option<&'a Token<'a>> {
     let mut idx = 1;
     let mut options_done = false;
     let mut positionals = wrapper.positionals;
 
     loop {
         let token = arg_token(tokens, idx)?;
-        let arg = token.value.as_str();
+        let arg = token.value;
 
         if !options_done && arg == "--" {
             options_done = true;
@@ -2542,7 +2616,7 @@ fn wrapper_inner_command<'a>(
     }
 }
 
-fn arg_token(tokens: &[ParsedToken], idx: usize) -> Option<&ParsedToken> {
+fn arg_token<'a>(tokens: &'a [Token<'a>], idx: usize) -> Option<&'a Token<'a>> {
     tokens.get(idx).filter(|token| token.kind == TokenKind::Arg)
 }
 
@@ -2575,7 +2649,7 @@ fn prefix_gap<'a>(cmd: &'a str, prefix: &str, rest: &str) -> &'a str {
 }
 
 /// Bash separates words on space, tab and newline alike, and the rule
-/// patterns match `\s+`, so the boundary here is all three.
+/// patterns match `[ \t\n]+`, so the boundary here is all three.
 ///
 /// A newline is also a command terminator, so accepting one here would be
 /// wrong if it could arrive joining two commands. It cannot, by two separate
@@ -2594,9 +2668,9 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
         Some("")
     } else if cmd.len() > prefix.len()
         && cmd.starts_with(prefix)
-        && cmd[prefix.len()..].starts_with(is_word_boundary_whitespace)
+        && cmd[prefix.len()..].starts_with(is_ifs)
     {
-        Some(cmd[prefix.len()..].trim_start())
+        Some(trim_ifs_start(&cmd[prefix.len()..]))
     } else {
         None
     }
@@ -2610,6 +2684,38 @@ mod tests {
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
+    }
+
+    /// Each command of `rows` rewrites to its expected line, or to none.
+    #[track_caller]
+    fn assert_rewrites(rows: &[(&str, Option<&str>)]) {
+        for &(cmd, expected) in rows {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                expected,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// Each command of `rows` rewrites to its expected line.
+    #[track_caller]
+    fn assert_rewrites_to(rows: &[(&str, &str)]) {
+        for &(cmd, expected) in rows {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                Some(expected),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// Each of `cmds` is left as written.
+    #[track_caller]
+    fn assert_left_as_written(cmds: &[&str]) {
+        for &cmd in cmds {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+        }
     }
 
     #[test]
@@ -2971,10 +3077,13 @@ mod tests {
         }
 
         #[test]
-        fn test_crlf_separators_preserved() {
+        fn test_crlf_line_keeps_its_cr_in_the_last_word() {
+            // Bash runs `git status\r`: the `\r` is the last byte of `status\r`,
+            // a subcommand git does not have, so that line is left alone.
+            // Every separator byte is kept.
             assert_eq!(
                 rewrite_command_no_prefixes("git status\r\ngit log -3", &[]),
-                Some("rtk git status\r\nrtk git log -3".into())
+                Some("git status\r\nrtk git log -3".into())
             );
         }
 
@@ -3003,21 +3112,21 @@ mod tests {
         }
 
         #[test]
-        fn test_lone_cr_line_gets_a_single_prefix() {
-            // A bare `\r` is not a line break: bash keeps `git log` glued to the
-            // preceding word, so the whole first line is one command and takes
-            // one prefix. Only the `\n` starts a new line.
+        fn test_lone_cr_is_a_word_byte() {
+            // A bare `\r` is not a line break: bash keeps `git` glued to the
+            // preceding word, so the first line runs git with a `status\rgit`
+            // subcommand and is left alone. Only the `\n` starts a new line.
             assert_eq!(
                 rewrite_command_no_prefixes("git status\rgit log\ngit diff", &[]),
-                Some("rtk git status\rgit log\nrtk git diff".into())
+                Some("git status\rgit log\nrtk git diff".into())
             );
         }
 
         #[test]
         fn test_quoted_lone_cr_does_not_bail_out_the_block() {
-            // The raw-break parity check counts `\n` and the `\r` of a CRLF pair
-            // only. Counting a quoted lone `\r` too would make the block look
-            // like it hid a line from the lexer and send it through unrewritten.
+            // The raw-break parity check counts `\n` only. Counting a quoted
+            // lone `\r` too would make the block look like it hid a line from
+            // the lexer and send it through unrewritten.
             assert_eq!(
                 rewrite_command_no_prefixes("echo 'a\rb'\ngit log -3", &[]),
                 Some("echo 'a\rb'\nrtk git log -3".into())
@@ -3033,24 +3142,51 @@ mod tests {
         }
 
         #[test]
-        fn test_comment_apostrophe_swallowing_newline_passes_through() {
-            // The lexer has no comment state: the apostrophe in `don't` opens
-            // a quote that swallows the newline and hides the next line. The
-            // block must pass through so native permission handling sees the
-            // original command — never a partially rewritten one.
+        fn test_a_hash_inside_a_quoted_expansion_is_no_comment() {
             assert_eq!(
-                rewrite_command_no_prefixes("git status # don't\nrm -rf /tmp/x", &[]),
-                None
+                rewrite_command_no_prefixes("git status \"${x#v}\"; git log \"${#x}\"", &[])
+                    .as_deref(),
+                Some("rtk git status \"${x#v}\"; rtk git log \"${#x}\"")
             );
         }
 
         #[test]
-        fn test_comment_apostrophe_hidden_in_later_segment_passes_through() {
-            // Same hazard when a clean split point precedes the contaminated
-            // line: the swallowed-newline check is global, not per-segment.
+        fn test_a_comment_stays_in_the_rewrite() {
+            for (cmd, rewritten) in [
+                ("git status # note", "rtk git status # note"),
+                ("# note\ngit status", "# note\nrtk git status"),
+                (
+                    "git status # a\ngit diff # b",
+                    "rtk git status # a\nrtk git diff # b",
+                ),
+                ("git status 2>&1 # note", "rtk git status 2>&1 # note"),
+                (
+                    "git status; git diff # note",
+                    "rtk git status; rtk git diff # note",
+                ),
+            ] {
+                assert_eq!(
+                    rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                    Some(rewritten),
+                    "{cmd:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn test_a_comment_opens_no_quote() {
+            // The apostrophe is comment text, so the next line is a command.
             assert_eq!(
-                rewrite_command_no_prefixes("git log -3\ngit status # don't\nrm -rf /tmp/x", &[]),
-                None
+                rewrite_command_no_prefixes("git status # don't\ngit diff", &[]),
+                Some("rtk git status # don't\nrtk git diff".into())
+            );
+        }
+
+        #[test]
+        fn test_a_comment_in_a_later_line_opens_no_quote() {
+            assert_eq!(
+                rewrite_command_no_prefixes("git log -3\ngit status # don't\ngit diff", &[]),
+                Some("rtk git log -3\nrtk git status # don't\nrtk git diff".into())
             );
         }
 
@@ -3123,13 +3259,13 @@ mod tests {
                 );
             }
             let reported: Vec<_> =
-                crate::discover::lexer::split_for_classify("ls() { git status; }; ls")
+                crate::core::cmdline::lexer::split_for_classify("ls() { git status; }; ls")
                     .into_iter()
                     .map(|segment| segment.text)
                     .collect();
             assert_eq!(reported, ["{ git status", "}", "ls"]);
             let reported: Vec<_> =
-                crate::discover::lexer::split_for_classify("git status\nls() { echo; }")
+                crate::core::cmdline::lexer::split_for_classify("git status\nls() { echo; }")
                     .into_iter()
                     .map(|segment| segment.text)
                     .collect();
@@ -3635,7 +3771,16 @@ mod tests {
 
     #[test]
     fn test_classify_rtk_already() {
-        assert_eq!(classify_command("rtk git status"), Classification::Ignored);
+        for cmd in [
+            "rtk git status",
+            "rtk",
+            "rtk\tgit status",
+            "'rtk' git status",
+            "\\rtk git status",
+            "rtk proxy git status",
+        ] {
+            assert_eq!(classify_command(cmd), Classification::Ignored, "{cmd:?}");
+        }
     }
 
     #[test]
@@ -4302,6 +4447,72 @@ mod tests {
         );
     }
 
+    /// `rtk` is recognised as the first word, however bash ends that word and
+    /// quotes or escapes it, and only an unquoted operator makes the line more
+    /// than that one command.
+    #[test]
+    fn test_rewrite_already_rtk_reads_words_and_operators() {
+        for cmd in [
+            "rtk",
+            "rtk\tls",
+            "rtk  git status",
+            "rtk\tgit\tstatus",
+            "rtk grep 'a|b' src",
+            "rtk git commit -m \"a && b; c & d\"",
+            "rtk grep a\\|b src",
+            "'rtk' git status",
+            "\"rtk\" git status",
+            "\\rtk git status",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(cmd.to_string()),
+                "{cmd:?}"
+            );
+        }
+        for cmd in ["rtkx ls", "rtk\x0bls", "rtk\rls"] {
+            assert_ne!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(cmd.to_string()),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// A command joined to a leading `rtk` command is rewritten whatever blanks
+    /// sit around the operator: tabs, several spaces, or none.
+    #[test]
+    fn test_rewrite_after_rtk_for_every_operator_spacing() {
+        for gap in ["", " ", "  ", "\t", " \t"] {
+            for op in ["&&", "||", ";", "&"] {
+                let cmd = format!("rtk git status{gap}{op}{gap}git log");
+                assert_eq!(
+                    rewrite_command_no_prefixes(&cmd, &[]),
+                    Some(format!("rtk git status{gap}{op}{gap}rtk git log")),
+                    "{cmd:?}"
+                );
+            }
+            let cmd = format!("rtk ls{gap}|{gap}grep x");
+            assert_eq!(
+                rewrite_command_no_prefixes(&cmd, &[]),
+                Some(format!("rtk ls{gap}|{gap}rtk grep x")),
+                "{cmd:?}"
+            );
+        }
+        assert_rewrites_to(&[
+            ("rtk git status &git log", "rtk git status &rtk git log"),
+            ("rtk git status& git log", "rtk git status& rtk git log"),
+            (
+                "\\rtk git status && git log",
+                "\\rtk git status && rtk git log",
+            ),
+            (
+                "git log && 'rtk' git status",
+                "rtk git log && 'rtk' git status",
+            ),
+        ]);
+    }
+
     #[test]
     fn test_rewrite_background_single_amp() {
         assert_eq!(
@@ -4489,6 +4700,67 @@ mod tests {
         );
     }
 
+    /// `cat`'s options are read as `cat` receives them: wherever they sit, however
+    /// they are quoted, and after a tab as after a space.
+    #[test]
+    fn test_rewrite_cat_options_are_read_as_cat_receives_them() {
+        assert_left_as_written(&[
+            "cat\t-A f",
+            "cat f -A",
+            "cat '-A' f",
+            "cat -nA f",
+            "cat -- f",
+            "cat --number f",
+            "cat\t>out f",
+            "cat -n",
+        ]);
+        assert_rewrites_to(&[
+            ("cat\t-n f", "rtk read -n f"),
+            ("cat -n\tf", "rtk read -n\tf"),
+            ("cat f -n", "rtk read f -n"),
+        ]);
+    }
+
+    /// `head` and `tail` are recognised by their first word, which a tab ends as
+    /// a space does, so the line-range rewrite applies to both spellings.
+    #[test]
+    fn test_rewrite_head_tail_after_a_tab() {
+        assert_rewrites(&[
+            ("tail\t-n 5 f", Some("rtk read f --tail-lines 5")),
+            (
+                "head\t-3 file.txt",
+                Some("rtk read file.txt --head-lines 3"),
+            ),
+            ("head\tfile.txt", Some("rtk read file.txt --head-lines 10")),
+            ("tail\t-n 5 a b", None),
+            ("tail\t-f log", None),
+        ]);
+    }
+
+    /// A command ends where its last word does, and an escaped blank is part of
+    /// that word: bash reads `cat f\ ` as the file `f␠` and `head\ ` as the
+    /// program `head␠`. The rewrite keeps the blank, and a stage whose program is
+    /// `head␠` is no known consumer, so the producer in front of it stays too.
+    #[test]
+    fn test_an_escaped_trailing_blank_stays_in_its_word() {
+        assert_rewrites(&[
+            ("cat f\\ ", Some("rtk read f\\ ")),
+            ("cat f\\\t", Some("rtk read f\\\t")),
+            ("cat f\\  ", Some("rtk read f\\ ")),
+            ("FOO=1 cat f\\ ", Some("FOO=1 rtk read f\\ ")),
+            ("nice cat f\\ ", Some("nice rtk read f\\ ")),
+            (
+                "git status && cat f\\ ",
+                Some("rtk git status && rtk read f\\ "),
+            ),
+            ("git log | grep x\\ ", Some("git log | rtk grep x\\ ")),
+            ("ls\n  cat f\\ ", Some("rtk ls\n  rtk read f\\ ")),
+            ("git log | head\\ ", None),
+            ("golangci-lint run f\\ ", Some("rtk golangci-lint run f\\ ")),
+            ("cat 'f '", Some("rtk read 'f '")),
+        ]);
+    }
+
     #[test]
     fn test_rewrite_rg_pattern() {
         assert_eq!(
@@ -4588,13 +4860,10 @@ mod tests {
         let tokens = tokenize(";;esac");
         assert_eq!(tokens.len(), 2, ";;esac should lex as two tokens");
         assert_eq!(
-            (tokens[0].kind, tokens[0].value.as_str()),
+            (tokens[0].kind, tokens[0].value),
             (TokenKind::Operator, ";;")
         );
-        assert_eq!(
-            (tokens[1].kind, tokens[1].value.as_str()),
-            (TokenKind::Arg, "esac")
-        );
+        assert_eq!((tokens[1].kind, tokens[1].value), (TokenKind::Arg, "esac"));
         assert_eq!(tokens[1].offset, 2);
 
         // A separator followed by a real background operator is still two
@@ -5646,7 +5915,7 @@ mod tests {
     }
 
     /// Bash's `$IFS` is space, tab and newline, and the rule patterns match
-    /// `\s+`, so a tab-separated command classifies as Supported. The rewrite
+    /// `[ \t\n]+`, so a tab-separated command classifies as Supported. The rewrite
     /// then has to agree, or the hook reports coverage it does not deliver
     /// and the command streams raw (#4100).
     #[test]
@@ -6254,13 +6523,63 @@ mod tests {
 
     #[test]
     fn test_deno_pattern_does_not_match_subcommand_prefixes() {
-        // Without a trailing \b, "deno taskfoo" matches the "task" alternative.
+        // Without a terminator, "deno taskfoo" matches the "task" alternative.
         assert_eq!(rewrite_command_no_prefixes("deno taskfoo", &[]), None);
         assert_eq!(rewrite_command_no_prefixes("deno testify", &[]), None);
         assert_eq!(
             rewrite_command_no_prefixes("deno task build", &[]),
             Some("rtk deno task build".into())
         );
+    }
+
+    /// A rule's word ends at a space, a tab, a newline, the end of the line or
+    /// a metacharacter glued to it, never at a `\r`, a vertical tab, a form
+    /// feed, a non-breaking space or punctuation inside the word. The built-in
+    /// TOML filter a rule mirrors ends its words the same way, so neither
+    /// takes the command.
+    #[test]
+    fn test_rule_words_end_at_ifs() {
+        for (cmd, expected) in [
+            ("brew install\r", None),
+            ("brew install foo\r", Some("rtk brew install foo\r")),
+            ("make\r", None),
+            ("make\x0b-j4", None),
+            ("du\u{a0}-sh", None),
+            ("helm-docs", None),
+            ("ansible-playbook-grapher site.yml", None),
+            ("dotnet build-server shutdown", None),
+            ("bun install\x0c", None),
+            ("deno test\r", None),
+            ("mvn install:install-file -Dfile=a.jar", None),
+            ("mvn test-compile", Some("rtk mvn test-compile")),
+            (
+                "mvnd clean test-compile",
+                Some("rtk mvnd clean test-compile"),
+            ),
+            ("make>/dev/null", Some("rtk make>/dev/null")),
+            ("helm list", Some("rtk helm list")),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                expected.map(String::from),
+                "{cmd:?}"
+            );
+        }
+
+        // Classification reads a segment with its redirects kept.
+        for cmd in ["make>build.log", "brew install jq 2>&1", "du -sh>/dev/null"] {
+            assert!(
+                matches!(classify_command(cmd), Classification::Supported { .. }),
+                "{cmd:?}: {:?}",
+                classify_command(cmd)
+            );
+        }
+        for cmd in ["make\r", "helm-docs", "brew install\u{a0}"] {
+            assert!(
+                !matches!(classify_command(cmd), Classification::Supported { .. }),
+                "{cmd:?}"
+            );
+        }
     }
 
     #[test]
@@ -7730,9 +8049,9 @@ mod tests {
 
     /// Upstream PR #3199 review, finding 5 — `mvnd.cmd` (mvnd's Windows
     /// wrapper) must classify and rewrite to `rtk mvnd`, mirroring how the
-    /// mvn rule handles `mvnw.cmd`. `^mvnd\b` alone matches the `.` boundary
-    /// but can't then reach `\s+(compile|...)`, so it silently classified
-    /// as unsupported before `mvnd.cmd` was added to the pattern.
+    /// mvn rule handles `mvnw.cmd`. `mvnd` alone stops at the `.`, where
+    /// `[ \t\n]+(compile|...)` cannot follow, so the pattern names
+    /// `mvnd.cmd` itself.
     #[test]
     fn test_classify_mvnd_cmd_wrapper() {
         assert!(matches!(
@@ -8125,35 +8444,44 @@ mod tests {
     /// A rule matches against a whole command line, so a pattern that ends in
     /// a bare alternation matches any command whose subcommand merely *starts*
     /// with a listed one — `git branchless` routes into `rtk git` (#4009).
-    ///
     #[test]
     fn test_every_rule_pattern_is_anchored_at_both_ends() {
-        // The spellings in use. `\s+` and `\b` are the forms used by rules
-        // that take a whole command rather than a subcommand alternation.
+        // The spellings in use. `[ \t\n]+` is the form used by rules that take
+        // a whole command rather than a subcommand alternation. `\b`, `\s` and
+        // `\S` are not among them: they end a word at `\r`, a vertical tab, a
+        // form feed or a non-breaking space (and `\b` at any punctuation), where
+        // bash keeps reading it.
         const APPROVED_SUFFIXES: &[&str] = &[
-            r"(?:\s|$|[;|&()<>])",
+            r"(?:[ \t\n]|$|[;|&()<>])",
             // `:` ends the word too where a namespaced subcommand is the point:
             // `rake test:unit` and `rails test:system` are the task, not a
             // command that merely starts with `test`.
-            r"(?:[\s:]|$|[;|&()<>])",
-            r#"(?:[\s"']|$)"#,
-            r"(?:\s|$)",
-            r"(\s|$)",
-            r"\s+",
-            r"\b",
+            r"(?:[ \t\n:]|$|[;|&()<>])",
+            r#"(?:[ \t\n"']|$)"#,
+            r"(?:[ \t\n]|$)",
+            r"([ \t\n]|$)",
+            r"[ \t\n]+",
             r"$",
         ];
 
         // Pending #3676, which is what would give pnpm's bare script forms a
         // terminator. An entry that no longer matches any rule fails the check
         // below, so this cannot rot into a permanent exemption.
-        const PENDING: &[&str] = &[r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script)"];
+        const PENDING: &[&str] =
+            &[r"^pnpm[ \t\n]+(exec|i|install|list|ls|outdated|run|run-script)"];
 
         let mut unanchored_start = Vec::new();
+        let mut unicode_word_end = Vec::new();
         let mut unterminated = Vec::new();
         for rule in RULES {
             if !rule.pattern.starts_with('^') {
                 unanchored_start.push(rule.pattern);
+            }
+            if [r"\b", r"\s", r"\S"]
+                .iter()
+                .any(|escape| rule.pattern.contains(escape))
+            {
+                unicode_word_end.push(rule.pattern);
             }
             if PENDING.contains(&rule.pattern) {
                 continue;
@@ -8168,6 +8496,13 @@ mod tests {
             "patterns match against a whole command line, so one that does not \
              start with `^` fires on a path component or a wrapper argument: \
              {unanchored_start:#?}"
+        );
+        assert!(
+            unicode_word_end.is_empty(),
+            "`\\b`, `\\s` and `\\S` end a word at `\\r`, a vertical tab, a form \
+             feed or a non-breaking space, which bash reads as word bytes; spell \
+             a separator `[ \\t\\n]` and end the word with \
+             `(?:[ \\t\\n]|$|[;|&()<>])` instead: {unicode_word_end:#?}"
         );
         assert!(
             unterminated.is_empty(),
@@ -8484,6 +8819,12 @@ mod tests {
             ),
             // `sudo` is never stripped (#146).
             ("sudo docker ps", "", "sudo docker ps"),
+            // Both halves end where a word does: bare blanks around the line
+            // go, an escaped one stays with its word.
+            (" \tFOO=1  ls \t", "FOO=1  ", "ls"),
+            ("FOO=1 cat f\\ ", "FOO=1 ", "cat f\\ "),
+            ("FOO=a\\ ", "FOO=a\\ ", ""),
+            (" \t", "", ""),
         ] {
             assert_eq!(split_env_prefix(cmd), (prefix, rest), "{cmd}");
         }
@@ -8854,6 +9195,44 @@ mod tests {
             super::rewrite_command("RAILS_ENV=test bundle exec git status", &[], &prefixes),
             Some("RAILS_ENV=test bundle exec rtk git status".into())
         );
+    }
+
+    /// A prefix that ends inside a quote left open leaves the blanks at the end
+    /// of the line inside the command, and they are kept as written.
+    #[test]
+    fn test_transparent_prefix_ending_in_an_open_quote_keeps_trailing_blanks() {
+        for (prefix, cmd, expected) in [
+            ("x 'a", "x 'a ls -la & ", "x 'a rtk ls -la & "),
+            (
+                "sh -c \"",
+                "sh -c \" git status\t",
+                "sh -c \" rtk git status\t",
+            ),
+            (
+                "sh -c \"",
+                "sh -c \"\tgit status \t ",
+                "sh -c \"\trtk git status \t ",
+            ),
+        ] {
+            assert_eq!(
+                super::rewrite_command(cmd, &[], &[prefix.to_string()]),
+                Some(expected.to_string()),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// When the command behind such a prefix is left as it is, the line is not
+    /// rewritten: no byte of it changes.
+    #[test]
+    fn test_transparent_prefix_ending_in_an_open_quote_unchanged_is_no_rewrite() {
+        let prefixes = vec!["sh -c \"".to_string()];
+        for cmd in [
+            "sh -c \" timeout -s KILL 5 rtk nohup git\tstatus\r\t",
+            "sh -c \" rtk git status ",
+        ] {
+            assert_eq!(super::rewrite_command(cmd, &[], &prefixes), None, "{cmd:?}");
+        }
     }
 
     #[test]
@@ -9290,11 +9669,38 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_keeps_a_quoted_backslash_newline() {
+        // Inside single quotes `\` escapes nothing, so the message keeps both
+        // bytes; joining them would commit a different message.
+        assert_eq!(
+            rewrite_command_no_prefixes("git commit -m 'a\\\nb'", &[]),
+            Some("rtk git commit -m 'a\\\nb'".into())
+        );
+        // The shell a wrapper starts joins its script's continuation.
+        assert_eq!(
+            rewrite_command_no_prefixes("bash -c 'git \\\nstatus'", &[]),
+            Some("bash -c 'rtk git status'".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_refuses_a_continuation_bash_reads_otherwise() {
+        // Bash keeps the newline in `$[…]`, where joining it would make a
+        // substitution of `$(rm -rf Y)`.
+        assert_eq!(
+            rewrite_command_no_prefixes("ls -l \"$[$'$\\\n(rm -rf Y)']\"", &[]),
+            None
+        );
+    }
+
+    #[test]
     fn test_rewrite_leading_backslash_crlf() {
-        // CRLF line ending — same shape, Windows shells / Git Bash.
+        // Not a continuation: the `\` escapes the `\r`, and the `\n` after it
+        // ends that command, as bash runs it. The command on the next line is
+        // rewritten on its own.
         assert_eq!(
             rewrite_command_no_prefixes("\\\r\ngit diff HEAD~1", &[]),
-            Some("rtk git diff HEAD~1".into())
+            Some("\\\r\nrtk git diff HEAD~1".into())
         );
     }
 
@@ -9326,18 +9732,6 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("git diff HEAD~1", &[]),
             Some("rtk git diff HEAD~1".into())
-        );
-    }
-
-    #[test]
-    fn test_collapse_line_continuations_no_op() {
-        // Helper-level: no continuations → returns Borrowed (no
-        // allocation). We can only spot-check the equality here, but
-        // the `Cow::Borrowed` variant is implied by `replace_all`
-        // when no replacement occurs.
-        assert_eq!(
-            collapse_line_continuations("git diff HEAD~1"),
-            std::borrow::Cow::<str>::Borrowed("git diff HEAD~1"),
         );
     }
 

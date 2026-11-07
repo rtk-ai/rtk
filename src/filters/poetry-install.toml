@@ -1,6 +1,6 @@
 [filters.poetry-install]
 description = "Compact poetry install/lock/update output — strip downloads, short-circuit when up-to-date"
-match_command = "^poetry\\s+(install|lock|update)\\b"
+match_command = "^poetry[ \\t\\n]+(install|lock|update)(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

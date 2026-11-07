@@ -1,6 +1,8 @@
 use super::constants::{CONFIG_DIR, OPENCODE_SUBDIR};
 use super::permissions::PermissionVerdict;
-use crate::core::cmdline::lexer::{contains_unattestable_construct, split_for_permissions};
+use crate::core::cmdline::lexer::{
+    contains_unattestable_construct, join_continuations, split_for_permissions,
+};
 use crate::core::user_dirs;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -89,8 +91,24 @@ pub(crate) fn evaluate(cmd: &str, rules: &[Rule]) -> Option<Action> {
 }
 
 pub(crate) fn check_command_with_opencode_rules(cmd: &str, rules: &[Rule]) -> PermissionVerdict {
+    let line = match join_continuations(cmd) {
+        Ok(line) => line,
+        // A line too complex to say what runs: only a deny rule has a say, as in the gate.
+        Err(refused) => {
+            let denied = refused
+                .readings()
+                .iter()
+                .flat_map(|reading| split_for_permissions(reading))
+                .any(|segment| evaluate(segment, rules) == Some(Action::Deny));
+            return if denied {
+                PermissionVerdict::Deny
+            } else {
+                PermissionVerdict::TooComplex
+            };
+        }
+    };
     // `split_for_permissions` returns trimmed, non-empty segments only.
-    let actions: Vec<Option<Action>> = split_for_permissions(cmd)
+    let actions: Vec<Option<Action>> = split_for_permissions(&line)
         .iter()
         .map(|segment| evaluate(segment, rules))
         .collect();
@@ -99,7 +117,11 @@ pub(crate) fn check_command_with_opencode_rules(cmd: &str, rules: &[Rule]) -> Pe
         return PermissionVerdict::Deny;
     }
 
-    if contains_unattestable_construct(cmd) {
+    if contains_unattestable_construct(&line) {
+        return PermissionVerdict::Ask;
+    }
+
+    if actions.contains(&Some(Action::Ask)) {
         return PermissionVerdict::Ask;
     }
 
@@ -109,10 +131,6 @@ pub(crate) fn check_command_with_opencode_rules(cmd: &str, rules: &[Rule]) -> Pe
 
     if actions.iter().all(|a| *a == Some(Action::Allow)) {
         return PermissionVerdict::Allow;
-    }
-
-    if actions.contains(&Some(Action::Ask)) {
-        return PermissionVerdict::Ask;
     }
 
     PermissionVerdict::Default
@@ -411,6 +429,63 @@ fn read_config(path: &Path) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rule_reads_what_the_reader_calls_commands() {
+        let rule = |pattern: &str, action| Rule {
+            permission: "bash".to_string(),
+            pattern: pattern.to_string(),
+            action,
+        };
+        let deny = [rule("*", Action::Allow), rule("more*", Action::Deny)];
+        let ask = [rule("*", Action::Allow), rule("more*", Action::Ask)];
+        // Comment text is no command, whatever it holds.
+        for cmd in [
+            "echo a # note",
+            "echo a # note; more",
+            "echo a # it's; more",
+        ] {
+            for rules in [&deny, &ask] {
+                assert_eq!(
+                    check_command_with_opencode_rules(cmd, rules),
+                    PermissionVerdict::Allow,
+                    "{cmd:?}"
+                );
+            }
+        }
+        assert_eq!(
+            check_command_with_opencode_rules("# note; more", &ask),
+            PermissionVerdict::Default
+        );
+        // A `#` inside a word is the word's.
+        let url = [
+            rule("*", Action::Deny),
+            rule("curl http://a/#*", Action::Allow),
+        ];
+        assert_eq!(
+            check_command_with_opencode_rules("curl http://a/#x", &url),
+            PermissionVerdict::Allow
+        );
+        // A rule reads the line with its continuations joined, as bash runs it.
+        assert_eq!(
+            check_command_with_opencode_rules("echo a; mo\\\nre", &ask),
+            PermissionVerdict::Ask
+        );
+        // So does the check for what it cannot vouch for: bash makes this a substitution.
+        assert_eq!(
+            check_command_with_opencode_rules("echo $\\\n(a)", &ask),
+            PermissionVerdict::Ask
+        );
+        // On a line too complex to read, only a deny rule has a say.
+        assert_eq!(
+            check_command_with_opencode_rules("a[1 # 2]=b; more", &deny),
+            PermissionVerdict::Deny
+        );
+        assert_eq!(
+            check_command_with_opencode_rules("a[1 # 2]=b; more", &ask),
+            PermissionVerdict::TooComplex
+        );
+    }
 
     fn rule(pattern: &str, action: Action) -> Rule {
         Rule {
