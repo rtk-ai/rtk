@@ -50,7 +50,11 @@ rtk pipeline show rtk:posthook
 
 ```bash
 rtk pipeline validate
+rtk pipeline validate --agent codex --agent vibe   # what those agents cannot serve
+rtk pipeline validate --agent all                  # every supported agent
 ```
+
+With `--agent`, every rule position and `session_start` directive the named agent's hook cannot serve is listed with the reason the engine knows — the same lines `rtk init --agent <id>` prints when it registers the hooks. The per-agent table is [Agent Coverage](../resources/agent-coverage.md).
 
 `test` is the broader check — it parses, resolves and validates every pipeline file RTK loads, not just the active one. When RTK silently fell back because a file failed to load, `status` is where the reason is recorded:
 
@@ -87,7 +91,7 @@ rtk pipeline explain --tool Read --file big.json --ranged
 rtk pipeline explain --tool Grep < output.txt
 ```
 
-It reports the position, the rule that fired and why, the methods applied, tokens before and after, the recovery hint — and, for a rule that cannot run on your agent, which capability is missing.
+It reports the agent's capabilities for that call (whether its hook evaluates pipeline rules at all, whether it can rewrite, deny or only suggest, and whether the tool ever reaches a hook), the position, the rule that fired and why, the methods applied, tokens before and after, the recovery hint — and, for a rule that cannot run on your agent, which capability is missing.
 
 `--last` is usually the fastest route when something surprising just happened — it needs the decision log enabled.
 
