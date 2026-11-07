@@ -66,6 +66,8 @@ pub enum AgentTarget {
     Vibe,
     /// Oh My Pi (OMP)
     Omp,
+    /// DeepSeek Harness (DSH)
+    Dsh,
 }
 
 #[cfg(feature = "engine")]
@@ -2389,6 +2391,9 @@ where
     } else if agent == Some(AgentTarget::Vibe) {
         hooks::init::uninstall_vibe(ctx)?;
         Ok(0)
+    } else if agent == Some(AgentTarget::Dsh) {
+        hooks::init::uninstall_dsh(global, ctx)?;
+        Ok(0)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -3093,6 +3098,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_droid_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Vibe) {
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
+            } else if agent == Some(AgentTarget::Dsh) {
+                hooks::init::run_dsh_mode(global, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_cursor = agent == Some(AgentTarget::Cursor);

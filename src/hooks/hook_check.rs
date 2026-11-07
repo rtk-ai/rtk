@@ -26,6 +26,7 @@ const AGENT_PROBES: &[fn() -> bool] = &[
     super::init::opencode::is_configured,
     super::init::codex::is_configured,
     super::init::droid::is_configured,
+    super::init::dsh::is_configured,
     super::init::trae::is_configured,
     super::init::hermes::is_configured,
     super::init::pi::is_configured,
