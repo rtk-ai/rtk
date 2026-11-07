@@ -7,10 +7,11 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::LazyLock;
 
-// file:line:col: severity: message [-Wflag]
+// file:line:col: severity: message [-Wflag]; file may start with a Windows
+// drive letter (C:\src\a.c:12:3: error: ...)
 static DIAG: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^([^:\n]+):(\d+):\d+:\s*(fatal error|error|warning|note):\s+(.+?)(?:\s+\[(-\S+)\])?$",
+        r"^((?:[A-Za-z]:)?[^:\n]+):(\d+):\d+:\s*(fatal error|error|warning|note):\s+(.+?)(?:\s+\[(-\S+)\])?$",
     )
     .unwrap()
 });
@@ -224,7 +225,6 @@ fn format_warnings_only(tool: &str, warnings: &[&GccDiagnostic]) -> String {
         by_file.len(),
         if by_file.len() == 1 { "" } else { "s" }
     );
-    result.push_str("═══════════════════════════════════════\n");
 
     let mut files: Vec<(&&str, &Vec<&GccDiagnostic>)> = by_file.iter().collect();
     files.sort_by_key(|(f, _)| **f);
@@ -297,7 +297,6 @@ fn format_build_failed(
         warnings.len(),
         if warnings.len() == 1 { "" } else { "s" },
     );
-    result.push_str("═══════════════════════════════════════\n");
 
     for line in tool_errors {
         result.push_str(line);
@@ -371,6 +370,12 @@ mod tests {
             "errors" => include_str!("../../../tests/fixtures/gcc/build_errors.txt"),
             "success" => include_str!("../../../tests/fixtures/gcc/build_success.txt"),
             "clean" => include_str!("../../../tests/fixtures/gcc/build_clean.txt"),
+            // Real captures: lua with <string.h> removed and L->top renamed in ldo.c,
+            // kilo with -Wall -Wextra -Wconversion -Wshadow
+            "gcc16_lua" => include_str!("../../../tests/fixtures/gcc/gcc16_lua_errors.txt"),
+            "clang21_lua" => include_str!("../../../tests/fixtures/gcc/clang21_lua_errors.txt"),
+            "gcc16_kilo" => include_str!("../../../tests/fixtures/gcc/gcc16_kilo_warnings.txt"),
+            "clang21_kilo" => include_str!("../../../tests/fixtures/gcc/clang21_kilo_warnings.txt"),
             _ => panic!("unknown fixture: {}", name),
         }
     }
@@ -705,6 +710,91 @@ c.cpp:1:6: note: candidate function not viable
         let result = filter_gcc_output(input);
         assert!(result.contains("  L3: [error]"), "got:\n{}", result);
         assert!(result.contains("  L4: [error]"), "got:\n{}", result);
+    }
+
+    #[test]
+    fn test_windows_drive_letter_path() {
+        let input = "C:\\src\\main.c:12:3: error: 'x' undeclared (first use in this function)\n";
+        let result = filter_gcc_output(input);
+        assert!(
+            result.contains("C:\\src\\main.c (1 error)"),
+            "got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("L12: [error] 'x' undeclared"),
+            "got:\n{}",
+            result
+        );
+    }
+
+    fn savings(input: &str, output: &str) -> f64 {
+        100.0 - (count_tokens(output) as f64 / count_tokens(input) as f64 * 100.0)
+    }
+
+    #[test]
+    fn test_real_gcc16_lua_errors() {
+        let input = fixture("gcc16_lua");
+        let result = filter_gcc_output(input);
+        assert!(
+            result.starts_with("gcc: BUILD FAILED — 55 errors, 21 warnings"),
+            "got:\n{}",
+            result
+        );
+        // 45 occurrences of the same error in ldo.c fold into one line
+        assert!(
+            result.contains("ldo.c (45 errors)\n  L119,121,136,"),
+            "got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("note L28: include '<string.h>'"),
+            "got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("in expansion of macro"),
+            "got:\n{}",
+            result
+        );
+        let s = savings(input, &result);
+        assert!(s >= 60.0, "expected >=60% savings, got {:.1}%", s);
+    }
+
+    #[test]
+    fn test_real_clang21_lua_errors() {
+        let input = fixture("clang21_lua");
+        let result = filter_gcc_output(input);
+        assert!(result.contains("BUILD FAILED"), "got:\n{}", result);
+        assert!(
+            result.contains("no member named 'topp'"),
+            "got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("include the header <string.h>"),
+            "got:\n{}",
+            result
+        );
+        let s = savings(input, &result);
+        assert!(s >= 40.0, "expected >=40% savings, got {:.1}%", s);
+    }
+
+    #[test]
+    fn test_real_kilo_warnings() {
+        for name in ["gcc16_kilo", "clang21_kilo"] {
+            let input = fixture(name);
+            let result = filter_gcc_output(input);
+            assert!(result.contains("warnings in 1 file"), "{name}:\n{}", result);
+            assert!(!result.contains("BUILD FAILED"), "{name}:\n{}", result);
+            assert!(
+                result.contains("[-Wsign-conversion]"),
+                "{name}:\n{}",
+                result
+            );
+            let s = savings(input, &result);
+            assert!(s >= 60.0, "{name}: expected >=60% savings, got {:.1}%", s);
+        }
     }
 
     #[test]
