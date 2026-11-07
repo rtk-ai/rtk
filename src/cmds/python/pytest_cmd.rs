@@ -122,6 +122,9 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
     let mut test_files: Vec<String> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     let mut current_failure: Vec<String> = Vec::new();
+    // Lines after `--- Captured ... ---` belong to the test that failed. A banner
+    // the test printed can match `is_block_header` without being the next failure.
+    let mut in_capture = false;
     let mut xfail_lines: Vec<String> = Vec::new();
     let mut summary_line = String::new();
 
@@ -138,6 +141,7 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             && (trimmed.contains("FAILURES") || trimmed.contains("ERRORS"))
         {
             state = ParseState::Failures;
+            in_capture = false;
             if !current_failure.is_empty() {
                 failures.push(current_failure.join("\n"));
                 current_failure.clear();
@@ -182,14 +186,23 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                         current_failure.clear();
                     }
                     state = ParseState::TestProgress;
-                } else if is_block_header(trimmed) {
-                    // New failure section
+                    in_capture = false;
+                } else if is_block_header(trimmed)
+                    && (!in_capture || is_pytest_block_separator(line))
+                {
+                    // New failure section. Inside a captured block, only a separator
+                    // pytest itself prints ends the capture. The next failure's header
+                    // is one; `_____ stage one _____` is not.
                     if !current_failure.is_empty() {
                         failures.push(current_failure.join("\n"));
                         current_failure.clear();
                     }
+                    in_capture = false;
                     current_failure.push(trimmed.to_string());
                 } else if !trimmed.is_empty() && !trimmed.starts_with("===") {
+                    if is_captured_section(trimmed) {
+                        in_capture = true;
+                    }
                     current_failure.push(line.trim_end().to_string());
                 }
             }
@@ -415,6 +428,39 @@ fn is_block_header(line: &str) -> bool {
         .strip_prefix(' ')
         .and_then(|rest| rest.trim_end_matches('_').strip_suffix(' '))
         .is_some_and(|title| title.chars().any(|c| c != '_' && !c.is_whitespace()))
+}
+
+/// A separator pytest itself prints between failure blocks.
+///
+/// `TerminalWriter.sep` puts the title between `_` fills at column 0. The fill
+/// on the right is the fill on the left, or one `_` longer when that still fits.
+/// `get_terminal_width` never returns less than 40, and Windows then subtracts
+/// one, so a real separator is at least 39 columns. A shorter `_ title _` line
+/// is text a test printed.
+fn is_pytest_block_separator(line: &str) -> bool {
+    const MIN_SEPARATOR_WIDTH: usize = 39;
+    if line.chars().count() < MIN_SEPARATOR_WIDTH || line.starts_with(|c: char| c.is_whitespace()) {
+        return false;
+    }
+    let left = line.bytes().take_while(|byte| *byte == b'_').count();
+    let right = line.bytes().rev().take_while(|byte| *byte == b'_').count();
+    if left == 0 || right == 0 || left + right >= line.len() {
+        return false;
+    }
+    if right != left && right != left + 1 {
+        return false;
+    }
+    let core = &line[left..line.len() - right];
+    let Some(title) = core
+        .strip_prefix(' ')
+        .and_then(|rest| rest.strip_suffix(' '))
+    else {
+        return false;
+    };
+    !title.is_empty()
+        && !title.starts_with(|c: char| c.is_whitespace())
+        && !title.ends_with(|c: char| c.is_whitespace())
+        && title.chars().any(|ch| ch != '_' && !ch.is_whitespace())
 }
 
 fn frame_file(line: &str) -> Option<&str> {
@@ -1595,6 +1641,34 @@ Failures:
      test_du5.py:11: in test_after
      E   AssertionError: after dunder
      E   assert 0"#
+        );
+    }
+
+    #[test]
+    fn test_filter_pytest_captured_banner_is_not_a_failure() {
+        // Printed banners sit under the captured-stdout section. They match the
+        // loose header shape, and they are not the next failure (#4748).
+        let output = r#"=== FAILURES ===
+___ test_banner ___
+test_banner.py:6: in test_banner
+    assert 1 == 2, "real failure"
+E   AssertionError: real failure
+E   assert 1 == 2
+----------------------------- Captured stdout call -----------------------------
+_____ stage one _____
+_ stage two _
+E   not an error
+=== 1 failed in 0.01s ==="#;
+
+        assert_eq!(
+            filter_pytest_output(output),
+            r#"Pytest: 0 passed, 1 failed in 0.01s
+
+Failures:
+1. [FAIL] test_banner
+     test_banner.py:6: in test_banner
+     E   AssertionError: real failure
+     E   assert 1 == 2"#
         );
     }
 
