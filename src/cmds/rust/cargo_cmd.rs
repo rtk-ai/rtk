@@ -56,44 +56,13 @@ pub enum MessageFormat {
     Json,
 }
 
-impl MessageFormat {
-    // Inspect only options that affect filtering; leave accepted values and
-    // conflicts to Cargo. `--` ends Cargo's options, and --config/--color
-    // consume values even if those values look like --message-format flags.
-    fn parse(args: &[impl AsRef<OsStr>]) -> Self {
-        let mut format = Self::Human;
-        let mut iter = args.iter();
-        while let Some(arg) = iter.next() {
-            let Some(arg) = arg.as_ref().to_str() else {
-                continue;
-            };
-            let value = match arg {
-                "--" => break,
-                "--config" | "--color" | "-C" | "-Z" => {
-                    iter.next();
-                    continue;
-                }
-                "--message-format" => iter.next().and_then(|s| s.as_ref().to_str()),
-                _ => arg.strip_prefix("--message-format="),
-            };
-            if let Some(value) = value {
-                format = if value.contains("json") {
-                    Self::Json
-                } else {
-                    Self::Human
-                };
-            }
-        }
-        format
-    }
-}
-
 #[derive(Debug)]
 pub struct CargoInvocation<'a, T = OsString> {
     args: &'a [T],
     command_args: &'a [T],
     command: CargoCommand,
     message_format: MessageFormat,
+    requests_help: bool,
 }
 
 impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
@@ -108,8 +77,68 @@ impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
         if args.first()?.as_ref().to_str()?.starts_with('+') {
             index += 1;
         }
-        loop {
-            let arg = args.get(index)?.as_ref().to_str()?;
+        let mut command = None;
+        let mut command_args = &args[args.len()..];
+        let mut message_format = MessageFormat::Human;
+        let mut requests_help = false;
+        let mut cargo_options = true;
+        while let Some(raw) = args.get(index) {
+            let Some(arg) = raw.as_ref().to_str() else {
+                command?;
+                index += 1;
+                continue;
+            };
+            if let Some(kind) = command {
+                // Continue over the unvisited tail, preparing filtering and help
+                // metadata in this same pass. Do not revisit the prefix or make
+                // the shared runner reconstruct and parse the invocation again.
+                if !cargo_options {
+                    if arg == "--" {
+                        break;
+                    }
+                    if matches!(kind, CargoCommand::Test | CargoCommand::Nextest) {
+                        requests_help |= is_help_argument(arg);
+                    }
+                } else {
+                    match arg {
+                        // Arguments after -- belong to libtest (or nextest's
+                        // emulated test argument syntax), not Cargo.
+                        // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
+                        // https://nexte.st/docs/running/
+                        "--" => cargo_options = false,
+                        "--config" | "--color" | "-C" | "-Z" => index += 1,
+                        // install --version selects the crate version.
+                        // https://doc.rust-lang.org/cargo/commands/cargo-install.html#install-options
+                        "--version" if kind == CargoCommand::Install => {
+                            index += 1;
+                            // Without a value it still names Cargo's version
+                            // request; preserve the native response unchanged.
+                            requests_help |= args.get(index).is_none();
+                        }
+                        _ if kind == CargoCommand::Install && arg.starts_with("--version=") => {}
+                        "--message-format" => {
+                            index += 1;
+                            if let Some(value) = args.get(index).and_then(|s| s.as_ref().to_str()) {
+                                message_format = if value.contains("json") {
+                                    MessageFormat::Json
+                                } else {
+                                    MessageFormat::Human
+                                };
+                            }
+                        }
+                        _ if arg.starts_with("--message-format=") => {
+                            message_format = if arg["--message-format=".len()..].contains("json") {
+                                MessageFormat::Json
+                            } else {
+                                MessageFormat::Human
+                            };
+                        }
+                        _ => requests_help |= is_help_argument(arg),
+                    }
+                }
+                index += 1;
+                continue;
+            }
             match arg {
                 "--locked" | "--offline" | "--frozen" | "--quiet" | "--verbose" => {}
                 // Consume the following token even when it looks like a command.
@@ -172,7 +201,7 @@ impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
                     // Resolve Cargo's built-in aliases separately. Full names come
                     // from as_str(), so their spellings have one source of truth.
                     // https://doc.rust-lang.org/cargo/reference/config.html#alias
-                    let command = match arg {
+                    let kind = match arg {
                         "b" => CargoCommand::Build,
                         "c" => CargoCommand::Check,
                         "t" => CargoCommand::Test,
@@ -180,16 +209,23 @@ impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
                             .into_iter()
                             .find(|command| name == command.as_str())?,
                     };
-                    return Some(Self {
-                        args,
-                        command_args: &args[index + 1..],
-                        command,
-                        message_format: MessageFormat::parse(&args[index + 1..]),
-                    });
+                    command = Some(kind);
+                    command_args = &args[index + 1..];
                 }
             }
             index += 1;
         }
+        Some(Self {
+            args,
+            command_args,
+            command: command?,
+            message_format,
+            requests_help,
+        })
+    }
+
+    pub fn requests_help(&self) -> bool {
+        self.requests_help
     }
 
     pub fn command(&self) -> CargoCommand {
@@ -220,10 +256,21 @@ impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
     }
 }
 
+fn is_help_argument(arg: &str) -> bool {
+    arg == "-h"
+        || matches!(
+            arg.split('=').next(),
+            Some("--help" | "--version" | "--?" | "--h")
+        )
+}
+
 pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
     let Some(invocation) = CargoInvocation::parse(args) else {
         return run_passthrough(args, verbose);
     };
+    if invocation.requests_help() {
+        return run_passthrough(args, verbose);
+    }
     match invocation.command() {
         CargoCommand::Build => run_build(&invocation, verbose),
         CargoCommand::Test => run_test(&invocation, verbose),
@@ -480,7 +527,8 @@ where
         &format!("cargo {}", subcommand),
         &invocation.display_args(),
         filter_fn,
-        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
+        // Help intent was resolved once by CargoInvocation and handled in run().
+        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)).unguarded_help(),
     )
 }
 
@@ -506,7 +554,8 @@ where
         &format!("cargo {}", subcommand),
         &invocation.display_args(),
         filter_fn,
-        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
+        // Help intent was resolved once by CargoInvocation and handled in run().
+        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)).unguarded_help(),
     )
 }
 
@@ -527,7 +576,8 @@ fn run_cargo_streamed(
         &format!("cargo {}", subcommand),
         &invocation.display_args(),
         filter,
-        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
+        // Help intent was resolved once by CargoInvocation and handled in run().
+        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)).unguarded_help(),
     )
 }
 
@@ -1667,6 +1717,26 @@ mod tests {
             .chain(args.iter().map(OsString::from))
             .collect();
         CargoInvocation::parse(&argv).unwrap().message_format() == MessageFormat::Json
+    }
+
+    #[test]
+    fn prepares_help_intent_without_reparsing_arguments() {
+        for (args, expected) in [
+            (vec!["--locked", "t", "--", "--help"], true),
+            (vec!["check", "--help"], true),
+            (vec!["install", "--version"], true),
+            (vec!["check", "--config", "--help"], false),
+            (vec!["install", "ripgrep", "--version", "1.2.3"], false),
+            (vec!["install", "ripgrep", "--version=1.2.3"], false),
+            (vec!["build", "--", "--help"], false),
+            (vec!["test", "--", "--", "--help"], false),
+        ] {
+            assert_eq!(
+                CargoInvocation::parse(&args).unwrap().requests_help(),
+                expected,
+                "{args:?}"
+            );
+        }
     }
 
     #[test]

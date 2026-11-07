@@ -474,32 +474,22 @@ fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
 }
 
 fn asks_for_usage(stem: &str, args: &[String]) -> bool {
-    use crate::cmds::rust::cargo_cmd::{CargoCommand, CargoInvocation};
+    use crate::cmds::rust::cargo_cmd::CargoInvocation;
 
-    // Cargo may put its selector and global options before the subcommand.
-    // Resolve aliases too, so `cargo --locked t -- --help` remains libtest help.
-    let cargo = (stem == "cargo")
-        .then(|| CargoInvocation::parse(args))
-        .flatten();
-    let first = args.first().map(String::as_str);
-    let mut spelling = help_spelling(stem, first);
-    // cargo test passes arguments after -- to libtest; nextest emulates its
-    // argument syntax. Preserve their usage output instead of filtering it.
-    // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
-    // https://nexte.st/docs/running/
-    if let Some(invocation) = &cargo {
-        spelling.past_boundary = matches!(
-            invocation.command(),
-            CargoCommand::Test | CargoCommand::Nextest
-        );
+    // Standalone callers use Cargo's prepared metadata too. The Cargo execution
+    // path handles help before entering this runner, so it does not parse twice.
+    if stem == "cargo"
+        && let Some(invocation) = CargoInvocation::parse(args)
+    {
+        return invocation.requests_help();
     }
+    let first = args.first().map(String::as_str);
+    let spelling = help_spelling(stem, first);
     let takes_value = |kind: TokenKind, name: &str| {
         // install --version selects a crate version, not Cargo's version page.
         // https://doc.rust-lang.org/cargo/commands/cargo-install.html#install-options
         let cargo_install_version = stem == "cargo"
-            && cargo
-                .as_ref()
-                .is_some_and(|c| c.command() == CargoCommand::Install)
+            && first == Some("install")
             && kind == TokenKind::Long
             && name == "version";
         let cargo_global_value = stem == "cargo"
@@ -605,11 +595,13 @@ pub fn run(
     mode: RunMode<'_>,
     opts: RunOptions<'_>,
 ) -> Result<i32> {
-    let mode = if !opts.unguarded_help && requests_help(&cmd) {
-        RunMode::Passthrough
-    } else {
-        mode
-    };
+    // Passthrough already preserves native help; its arguments need no scan.
+    let mode =
+        if !matches!(&mode, RunMode::Passthrough) && !opts.unguarded_help && requests_help(&cmd) {
+            RunMode::Passthrough
+        } else {
+            mode
+        };
     let result = run_inner(cmd, tool_name, args_display, mode, opts);
     // #2375
     stream::die_by_relayed_signal();
