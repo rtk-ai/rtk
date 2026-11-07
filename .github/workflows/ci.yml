@@ -340,6 +340,57 @@ jobs:
 
       - run: cargo build --release
 
+  # ─── Claude Desktop plugin: only when the PR touches it ───
+
+  desktop-plugin:
+    name: desktop plugin
+    needs: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Touched by this PR?
+        id: touched
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if git diff --name-only "origin/${BASE_REF}...HEAD" | grep -qE '^(desktop-plugin/|\.github/workflows/(ci|release)\.yml$)'; then
+
+            echo "yes=true" >> $GITHUB_OUTPUT
+          else
+            echo "yes=false" >> $GITHUB_OUTPUT
+            echo "desktop-plugin/ unchanged, nothing to test"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.touched.outputs.yes == 'true'
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.touched.outputs.yes == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.touched.outputs.yes == 'true'
+        with:
+          node-version: 22
+
+      - name: Build rtk
+        if: steps.touched.outputs.yes == 'true'
+        run: cargo build --release
+
+      - name: Test the service
+        if: steps.touched.outputs.yes == 'true'
+        run: cd desktop-plugin/desktop-src && node --test 'test/*.test.mjs'
+
+      - name: Test the hooks against this rtk
+        if: steps.touched.outputs.yes == 'true'
+        run: RTK_BIN="$PWD/target/release/rtk" python3 desktop-plugin/test_hooks.py
+
+      - name: Build the plugin zip
+        if: steps.touched.outputs.yes == 'true'
+        run: sh desktop-plugin/build.sh --version 0.0.0-ci --rtk target/release/rtk --out desktop-plugin/dist
+
   # ─── AI Doc Review: develop PRs only ───
 
   doc-review:

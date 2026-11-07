@@ -1,0 +1,6 @@
+{
+  "name": "@receptron/laya",
+  "version": "0.0.0-test",
+  "type": "module",
+  "exports": "./index.mjs"
+}

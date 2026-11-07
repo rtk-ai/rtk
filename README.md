@@ -191,7 +191,7 @@ Four strategies applied per command type:
 
 ## Supported AI Tools
 
-RTK supports 18 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
+RTK supports 19 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents, reducing the bash output the agent reads where the agent supports command interception.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -215,6 +215,7 @@ RTK supports 18 AI coding tools. Each integration rewrites shell commands to `rt
 | **Factory Droid** | `rtk init -g --agent droid` (or per-project) | PreToolUse hook in `~/.factory/hooks.json` (matcher `Execute`) |
 | **Trae** | `rtk init --agent trae` | Native `PreToolUse` hook in `.trae/hooks.json` (`RunCommand`) |
 | **Trae (global)** | `rtk init -g --agent trae` | `~/.trae/hooks.json`, plus `~/.trae-cn/hooks.json` when that directory exists |
+| **Claude Desktop (Cowork)** | marketplace `rtk-ai/claude-plugins`, install **rtk** | Plugin, see [Claude Desktop](https://www.rtk-ai.app/guide/getting-started/claude-desktop) |
 
 For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents). The Hermes plugin source and tests live in `hooks/hermes/`; installed Hermes runtime files still live under `~/.hermes/plugins/rtk-rewrite/`.
 ## What RTK Covers
@@ -284,6 +285,16 @@ It is a separate binary under a separate licence (BUSL-1.1), shipped as its own 
 
 > Setup and subcommands: **[RTK Proxy](https://www.rtk-ai.app/guide/proxy/overview)** · what it compresses: **[What the Proxy Compresses](https://www.rtk-ai.app/guide/proxy/compression)** · settings and endpoints: **[Proxy Configuration](https://www.rtk-ai.app/guide/proxy/configuration)**
 
+## Claude Desktop
+
+Using Claude Desktop (Cowork)? Get RTK as a plugin, in three steps:
+
+1. In Claude, open **Customize › Plugins › Add › Add marketplace** and enter `rtk-ai/claude-plugins`.
+2. Install **rtk**, then quit and reopen Claude Desktop.
+3. In a task, type `/rtk-setup` once.
+
+That's it: in every task, Claude reads shorter command results and routine work goes to cheaper models. `/rtk-gain` shows what RTK saved, and updates come by themselves. Prefer a file? [Download the plugin](https://github.com/rtk-ai/rtk/releases/latest/download/rtk-desktop-plugin.zip) and use **Add › Upload plugin**. Details: **[Claude Desktop](https://www.rtk-ai.app/guide/getting-started/claude-desktop)**.
+
 ## The Engine (`pipeline.toml`)
 
 Everything RTK does — which commands get rewritten, what happens to a tool's output, what the proxy compresses — is expressed in one composable file. The engine (`engine/`, crate `rtk-engine`, BUSL-1.1) reads it, so the levers are configurable instead of hard-coded.
@@ -307,6 +318,7 @@ extends = ["rtk:posthook", "rtk:proxy"]
 | [Installation](https://www.rtk-ai.app/guide/getting-started/installation) | every install method, Windows, WSL, uninstall |
 | [Quick Start](https://www.rtk-ai.app/guide/getting-started/quick-start) | per-agent init, `--dry-run`, first savings |
 | [Supported Agents](https://www.rtk-ai.app/guide/getting-started/supported-agents) | setup detail, override controls, degradation |
+| [Claude Desktop](https://www.rtk-ai.app/guide/getting-started/claude-desktop) | RTK in Claude Desktop (Cowork): install, commands, what you will see |
 | [Agent Coverage](https://www.rtk-ai.app/guide/resources/agent-coverage) | what each agent's hook API lets RTK do |
 | [What RTK Optimizes](https://www.rtk-ai.app/guide/resources/what-rtk-covers) | every command and its filter |
 | [Configuration](https://www.rtk-ai.app/guide/getting-started/configuration) | `config.toml`, env vars, recall recovery |
