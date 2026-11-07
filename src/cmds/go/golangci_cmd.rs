@@ -204,6 +204,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
 fn run_filtered(original_args: &[String], invocation: &RunInvocation, verbose: u8) -> Result<i32> {
     let version = detect_major_version();
+    let user_output = has_output_flag(&invocation.run_args);
 
     let filtered_args = build_filtered_args(invocation, version);
     let mut cmd = resolved_command("golangci-lint");
@@ -222,15 +223,7 @@ fn run_filtered(original_args: &[String], invocation: &RunInvocation, verbose: u
         cmd,
         "golangci-lint",
         &display_args(original_args),
-        |stdout| {
-            // v2 outputs JSON on first line + trailing text; v1 outputs just JSON
-            let json_output = if version >= 2 {
-                stdout.lines().next().unwrap_or("")
-            } else {
-                stdout
-            };
-            filter_golangci_json(json_output, version)
-        },
+        |stdout| filter_golangci_output(stdout, version, user_output),
         crate::core::runner::RunOptions::stdout_only(),
     )?;
 
@@ -315,7 +308,7 @@ const OUTPUT_PATH_FLAGS: &[&str] = &[
 /// interleave and the json parse would choke on whichever landed first. A *file* sink for some
 /// other format takes nothing away from stdout, so RTK still injects there or it is left with
 /// nothing to parse.
-fn has_output_flag(args: &[String]) -> bool {
+pub(crate) fn has_output_flag(args: &[String]) -> bool {
     let tokens = arg_tokenizer::tokenize_grammar(args, &run_takes_value, Dialect::Posix);
     tokens.iter().any(|t| {
         if t.kind != TokenKind::Long {
@@ -329,6 +322,19 @@ fn has_output_flag(args: &[String]) -> bool {
             }
         }
     })
+}
+
+pub(crate) fn filter_golangci_output(stdout: &str, version: u32, user_output: bool) -> String {
+    if user_output {
+        return stdout.trim_end_matches('\n').to_string();
+    }
+    // v2 outputs JSON on first line + trailing text; v1 outputs just JSON
+    let json_output = if version >= 2 {
+        stdout.lines().next().unwrap_or("")
+    } else {
+        stdout
+    };
+    filter_golangci_json(json_output, version)
 }
 
 fn format_command(base: &str, args: &[String]) -> String {
@@ -994,5 +1000,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_filter_golangci_output_preserves_user_stdout_report() {
+        let sarif_report = "{\n  \"$schema\": \"https://json.schemastore.org/sarif-2.1.0.json\",\n  \"version\": \"2.1.0\",\n  \"runs\": []\n}\n";
+        let out_v2 = filter_golangci_output(sarif_report, 2, true);
+        assert_eq!(out_v2, sarif_report.trim_end_matches('\n'));
+        assert!(!out_v2.contains("JSON parse failed"));
+
+        let tab_report = "main.go:10:2\terrcheck\tError return value not checked\nmain.go:20:5\tgovet\tprintf format\n";
+        let out_v1 = filter_golangci_output(tab_report, 1, true);
+        assert_eq!(out_v1, tab_report.trim_end_matches('\n'));
     }
 }
