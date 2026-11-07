@@ -1,6 +1,7 @@
+use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::utils::{resolved_command, strip_ansi};
-use crate::core::{runner, tracking};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use regex::Regex;
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -17,6 +18,13 @@ static DIAG: LazyLock<Regex> = LazyLock::new(|| {
 // "In file included from …" / "In function 'foo':" / "At top level:"
 static CONTEXT_HDR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:In file included from|In function|At top level|from)\b").unwrap()
+});
+
+// Macro backtrace notes: gcc "in expansion of macro 'X'" / "in definition of
+// macro 'X'", clang "expanded from macro 'X'". Like the include chain, they
+// locate rather than explain, and they repeat for every error in a macro.
+static MACRO_NOTE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:in (?:expansion|definition) of macro|expanded from macro) ").unwrap()
 });
 
 // Driver/tool errors without a source location:
@@ -42,38 +50,24 @@ pub fn run(compiler: &str, args: &[String], verbose: u8) -> Result<i32> {
         return runner::run_passthrough(compiler, &os_args, verbose);
     }
 
-    let timer = tracking::TimedExecution::start();
-
     let mut cmd = resolved_command(compiler);
-    for arg in args {
-        cmd.arg(arg);
-    }
+    cmd.args(args);
 
     if verbose > 0 {
         eprintln!("Running: {} {}", compiler, args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .with_context(|| format!("Failed to run {}. Is it installed?", compiler))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    // gcc/g++ write diagnostics to stderr; combine so filter sees everything
-    let raw = format!("{}{}", stdout, stderr);
-    let clean = strip_ansi(&raw);
-
-    let filtered = filter_gcc_output(&clean);
-
-    println!("{}", filtered);
-
-    timer.track(compiler, &format!("rtk {}", compiler), &raw, &filtered);
-
-    Ok(if output.status.success() {
-        0
-    } else {
-        output.status.code().unwrap_or(1)
-    })
+    // Diagnostics go to stderr, so filter the combined output. On failure the
+    // full output is teed and its path appended; the runner prints the raw
+    // output instead when the summary would be longer.
+    let tool = compiler.to_string();
+    runner::run_filtered(
+        cmd,
+        compiler,
+        &display_args(args),
+        move |raw| filter_compiler_output(&tool, &strip_ansi(raw)),
+        runner::RunOptions::with_tee(compiler),
+    )
 }
 
 /// Severity level of a gcc diagnostic.
@@ -114,7 +108,9 @@ struct GccDiagnostic {
 /// attached inline so no information is lost.
 ///
 /// Returns a compact summary: header + grouped file sections.
-pub fn filter_gcc_output(output: &str) -> String {
+///
+/// `tool` (gcc, g++, clang, clang++) labels the header.
+pub fn filter_compiler_output(tool: &str, output: &str) -> String {
     let lines: Vec<&str> = output.lines().collect();
     let mut diagnostics: Vec<GccDiagnostic> = Vec::new();
     let mut make_errors: Vec<String> = Vec::new();
@@ -158,6 +154,9 @@ pub fn filter_gcc_output(output: &str) -> String {
             let file = &caps[1];
             let line_no: usize = caps[2].parse().unwrap_or(0);
             if severity == Severity::Note {
+                if MACRO_NOTE.is_match(&caps[4]) {
+                    continue;
+                }
                 // Attach to the diagnostic it explains; drop orphan notes
                 if let Some(parent) = diagnostics.last_mut() {
                     let note = if parent.file == file {
@@ -185,7 +184,7 @@ pub fn filter_gcc_output(output: &str) -> String {
     if diagnostics.is_empty() {
         let trimmed = output.trim();
         if trimmed.is_empty() {
-            return "gcc: Build succeeded with no warnings".to_string();
+            return format!("{}: Build succeeded with no warnings", tool);
         }
         return trimmed.to_string();
     }
@@ -202,23 +201,24 @@ pub fn filter_gcc_output(output: &str) -> String {
     // Only-warnings run (no errors) — build probably succeeded
     if errors.is_empty() && tool_errors.is_empty() && make_errors.is_empty() {
         if warnings.is_empty() {
-            return "gcc: Build succeeded with no warnings".to_string();
+            return format!("{}: Build succeeded with no warnings", tool);
         }
-        return format_warnings_only(&warnings);
+        return format_warnings_only(tool, &warnings);
     }
 
     // Build failed — show errors + summary + warnings summary
-    format_build_failed(&errors, &warnings, &tool_errors, &make_errors)
+    format_build_failed(tool, &errors, &warnings, &tool_errors, &make_errors)
 }
 
-fn format_warnings_only(warnings: &[&GccDiagnostic]) -> String {
+fn format_warnings_only(tool: &str, warnings: &[&GccDiagnostic]) -> String {
     let mut by_file: HashMap<&str, Vec<&GccDiagnostic>> = HashMap::new();
     for w in warnings {
         by_file.entry(w.file.as_str()).or_default().push(w);
     }
 
     let mut result = format!(
-        "gcc: {} warning{} in {} file{}\n",
+        "{}: {} warning{} in {} file{}\n",
+        tool,
         warnings.len(),
         if warnings.len() == 1 { "" } else { "s" },
         by_file.len(),
@@ -258,6 +258,7 @@ fn push_notes(result: &mut String, d: &GccDiagnostic) {
 }
 
 fn format_build_failed(
+    tool: &str,
     errors: &[&GccDiagnostic],
     warnings: &[&GccDiagnostic],
     tool_errors: &[String],
@@ -270,7 +271,8 @@ fn format_build_failed(
 
     let error_count = errors.len() + tool_errors.len();
     let mut result = format!(
-        "gcc: BUILD FAILED — {} error{}, {} warning{}\n",
+        "{}: BUILD FAILED — {} error{}, {} warning{}\n",
+        tool,
         error_count,
         if error_count == 1 { "" } else { "s" },
         warnings.len(),
@@ -298,7 +300,13 @@ fn format_build_failed(
             if diags.len() == 1 { "" } else { "s" }
         ));
         for d in *diags {
-            result.push_str(&format!("  L{}: [error] {}\n", d.line, d.message));
+            match d.flag.as_deref() {
+                Some(flag) => result.push_str(&format!(
+                    "  L{}: [error] {} [{}]\n",
+                    d.line, d.message, flag
+                )),
+                None => result.push_str(&format!("  L{}: [error] {}\n", d.line, d.message)),
+            }
             push_notes(&mut result, d);
         }
         result.push('\n');
@@ -340,6 +348,10 @@ mod tests {
 
     fn count_tokens(s: &str) -> usize {
         s.split_whitespace().count()
+    }
+
+    fn filter_gcc_output(output: &str) -> String {
+        filter_compiler_output("gcc", output)
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────
@@ -609,6 +621,45 @@ b.c:1:18: warning: unused variable 'unused' [-Wunused-variable]
             "got:\n{}",
             result
         );
+    }
+
+    #[test]
+    fn test_header_names_the_compiler() {
+        let input = "c.cpp:3:13: error: no matching function for call to 'g'\n";
+        let result = filter_compiler_output("clang++", input);
+        assert!(
+            result.starts_with("clang++: BUILD FAILED"),
+            "got:\n{}",
+            result
+        );
+        assert_eq!(
+            filter_compiler_output("g++", ""),
+            "g++: Build succeeded with no warnings"
+        );
+    }
+
+    #[test]
+    fn test_error_keeps_its_flag() {
+        let input = "kilo.c:350:27: error: implicit declaration of function 'strlen' [-Wimplicit-function-declaration]\n";
+        let result = filter_gcc_output(input);
+        assert!(
+            result.contains("[error] implicit declaration of function 'strlen' [-Wimplicit-function-declaration]"),
+            "got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_macro_backtrace_notes_dropped() {
+        let input = "\
+ldo.c:119:21: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+lobject.h:129:9: note: in expansion of macro 'setobj'
+ldo.c:119:5: note: in expansion of macro 'setobjs2s'
+lobject.h:119:30: note: in definition of macro 'setobj'
+";
+        let result = filter_gcc_output(input);
+        assert!(result.contains("did you mean 'top'?"), "got:\n{}", result);
+        assert!(!result.contains("macro"), "got:\n{}", result);
     }
 
     #[test]
