@@ -90,56 +90,21 @@ impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
             .map(|arg| arg.as_ref().to_string_lossy())
             .collect();
         let tokens = arg_tokenizer::tokenize_grammar(&words, &option_value, Dialect::Posix);
-        let mut command = None;
-        let mut command_args = &args[args.len()..];
-        let mut message_format = MessageFormat::Human;
-        let mut requests_help = false;
-        let mut forwarded = false;
-        for token in &tokens {
-            if token.kind == TokenKind::Positional && token.linked.is_some() {
-                continue;
-            }
-            // Rustup recognizes +toolchain only immediately after cargo.
-            // https://rust-lang.github.io/rustup/overrides.html#toolchain-override-shorthand
-            if token.kind == TokenKind::Positional
-                && token.source_index == 0
-                && token.text.starts_with('+')
-            {
-                continue;
-            }
-            if forwarded {
-                if token.text == "--" {
-                    break;
-                }
-                requests_help |= is_help_argument(token.text);
-                continue;
-            }
-            let value = token.value(&tokens);
+        // Values are already linked to their options by the tokenizer. Walk
+        // one iterator in two disjoint regions: discovery, then metadata.
+        let mut remaining = tokens
+            .iter()
+            .filter(|t| !matches!(t.kind, TokenKind::Positional) || t.linked.is_none());
+        let command_token = loop {
+            let token = remaining.next()?;
             match (token.kind, token.text) {
-                (TokenKind::Positional, name) if command.is_none() => {
-                    // Canonical names have one source; aliases are separate.
-                    // https://doc.rust-lang.org/cargo/reference/config.html#alias
-                    command = Some(match name {
-                        "b" => CargoCommand::Build,
-                        "c" => CargoCommand::Check,
-                        "t" => CargoCommand::Test,
-                        name => CargoCommand::ALL.into_iter().find(|c| c.as_str() == name)?,
-                    });
-                    command_args = &args[token.source_index + 1..];
-                }
-                (TokenKind::Positional, _) => {}
-                (TokenKind::DashDash, _) => {
-                    // libtest/nextest own the tail; other Cargo commands do not.
-                    // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
-                    // https://nexte.st/docs/running/
-                    if !matches!(command?, CargoCommand::Test | CargoCommand::Nextest) {
-                        break;
-                    }
-                    forwarded = true;
-                }
-                // Global options use the same rules before and after the command.
-                // --config values retain their original order; -C requires nightly
-                // and -Z unstable-options. Native Cargo enforces those constraints.
+                // Rustup recognizes +toolchain only immediately after cargo.
+                // https://rust-lang.github.io/rustup/overrides.html#toolchain-override-shorthand
+                (TokenKind::Positional, name)
+                    if token.source_index == 0 && name.starts_with('+') => {}
+                (TokenKind::Positional, _) => break token,
+                // Only prefix options need recognition: unknown arities could
+                // make an option value look like the command.
                 // https://doc.rust-lang.org/cargo/commands/cargo.html#common-options
                 (
                     TokenKind::Long,
@@ -149,15 +114,49 @@ impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
                 (TokenKind::Short, "Z") => {
                     // Script mode changes command interpretation; leave it native.
                     // https://doc.rust-lang.org/cargo/reference/unstable.html#script
-                    if command.is_none()
-                        && value.is_some_and(|v| {
-                            v.trim_start_matches('=').split('=').next() == Some("script")
-                        })
-                    {
+                    if token.value(&tokens).is_some_and(|v| {
+                        v.trim_start_matches('=').split('=').next() == Some("script")
+                    }) {
                         return None;
                     }
                 }
-                (TokenKind::Long, "message-format") if command.is_some() => {
+                _ => return None,
+            }
+        };
+        // Canonical names have one source; aliases are separate.
+        // https://doc.rust-lang.org/cargo/reference/config.html#alias
+        let command = match command_token.text {
+            "b" => CargoCommand::Build,
+            "c" => CargoCommand::Check,
+            "t" => CargoCommand::Test,
+            name => CargoCommand::ALL.into_iter().find(|c| c.as_str() == name)?,
+        };
+        let command_args = &args[command_token.source_index + 1..];
+        let mut message_format = MessageFormat::Human;
+        let mut requests_help = false;
+        let mut forwarded = false;
+        // The command is fixed. Ignore ordinary options and positionals; only
+        // collect RTK's format/help metadata. Cargo validates everything else.
+        for token in remaining {
+            if forwarded {
+                if token.text == "--" {
+                    break;
+                }
+                requests_help |= is_help_argument(token.text);
+                continue;
+            }
+            let value = token.value(&tokens);
+            match (token.kind, token.text) {
+                (TokenKind::DashDash, _) => {
+                    // Only libtest/nextest interpret the tail as test arguments.
+                    // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
+                    // https://nexte.st/docs/running/
+                    if !matches!(command, CargoCommand::Test | CargoCommand::Nextest) {
+                        break;
+                    }
+                    forwarded = true;
+                }
+                (TokenKind::Long, "message-format") => {
                     if let Some(value) = value {
                         message_format = if value.contains("json") {
                             MessageFormat::Json
@@ -169,18 +168,15 @@ impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
                 // install --version takes a crate version, not a help request.
                 // https://doc.rust-lang.org/cargo/commands/cargo-install.html#install-options
                 (TokenKind::Long, "version")
-                    if command == Some(CargoCommand::Install) && value.is_some() => {}
-                _ if command.is_some() && is_help_argument(words[token.source_index].as_ref()) => {
-                    requests_help = true;
-                }
-                _ if command.is_none() => return None, // Unknown prefix arity: do not guess.
-                _ => {} // Command-specific arguments are Cargo's responsibility.
+                    if command == CargoCommand::Install && value.is_some() => {}
+                _ if is_help_argument(words[token.source_index].as_ref()) => requests_help = true,
+                _ => {}
             }
         }
         Some(Self {
             args,
             command_args,
-            command: command?,
+            command,
             message_format,
             requests_help,
         })
@@ -1679,6 +1675,35 @@ mod tests {
             .chain(args.iter().map(OsString::from))
             .collect();
         CargoInvocation::parse(&argv).unwrap().message_format() == MessageFormat::Json
+    }
+
+    #[test]
+    fn only_the_prefix_needs_option_recognition() {
+        assert!(CargoInvocation::parse(&["--future-option", "check"]).is_none());
+        let args = [
+            "check",
+            "--future-option",
+            "test",
+            "--color",
+            "never",
+            "--config",
+            "install",
+            "--locked",
+            "--offline",
+            "--frozen",
+            "--quiet",
+            "--verbose",
+            "-Z=script",
+            "--message-format=json",
+        ];
+        let invocation = CargoInvocation::parse(&args).unwrap();
+        assert_eq!(invocation.command(), CargoCommand::Check);
+        assert_eq!(invocation.message_format(), MessageFormat::Json);
+        assert!(!invocation.requests_help());
+        assert_eq!(
+            invocation.to_command().get_args().collect::<Vec<_>>(),
+            args.iter().map(OsStr::new).collect::<Vec<_>>()
+        );
     }
 
     #[test]
