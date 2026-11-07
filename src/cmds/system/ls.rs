@@ -353,9 +353,9 @@ fn render(raw: &str, native: Option<&str>, show_all: bool, show_long: bool, verb
 
     // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
     // This is safer than returning "(empty)" for a non-empty directory.
-    let has_real_content = raw
-        .lines()
-        .any(|l| !l.starts_with("total ") && !l.is_empty() && !is_dotdir(l));
+    let has_real_content = raw.lines().any(|l| {
+        !l.starts_with("total ") && !l.is_empty() && !is_dotdir(l) && !is_listing_header(l)
+    });
     if parsed_count == 0 && has_real_content {
         return native
             .map_or(raw, |native| never_worse(native, raw))
@@ -519,6 +519,22 @@ fn perms_to_octal(perms: &str) -> Option<String> {
     }
 }
 
+/// Long-listing mode and link-count fields remain recognizable even when the
+/// date parser cannot understand the locale or an explicit time format.
+static LS_ROW_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[bcdlps?-][rwxstST-]{9}[.+@]?\s+\d+\s").unwrap());
+
+fn is_listing_header(line: &str) -> bool {
+    line.ends_with(':') && !LS_ROW_RE.is_match(line)
+}
+
+fn attributed_line(header: Option<&str>, line: &str) -> String {
+    match header {
+        Some(header) => format!("{header}\n{line}"),
+        None => line.to_string(),
+    }
+}
+
 /// Parse ls -la output into compact format.
 ///
 /// Without `show_long`:
@@ -532,7 +548,8 @@ fn perms_to_octal(perms: &str) -> Option<String> {
 /// Returns (entries, parsed_count, truncated, filtered) so caller can emit
 /// a recovery hint when anything was dropped.
 /// parsed_count tracks how many non-header lines were successfully parsed.
-/// truncated holds compact lines beyond the CAP_INVENTORY display cap.
+/// truncated holds compact entries beyond the CAP_INVENTORY display cap,
+/// each prefixed with its directory header when present.
 /// filtered holds the display name of each entry RTK removed from view
 /// (noise dirs without -a/-A as `name/`, plus raw unparsable non-dotdir
 /// lines).
@@ -542,24 +559,38 @@ fn compact_ls(
     show_all: bool,
     show_long: bool,
 ) -> (String, usize, Vec<String>, Vec<String>) {
-    let mut dirs: Vec<(String, Option<String>)> = Vec::new(); // (name, octal_perms)
-    let mut files: Vec<(String, String, Option<String>)> = Vec::new(); // (name, size, octal_perms)
+    #[derive(Default)]
+    struct ListingGroup {
+        header: Option<String>,
+        dirs: Vec<(String, Option<String>)>,
+        files: Vec<(String, String, Option<String>)>,
+    }
+    let mut groups = vec![ListingGroup::default()];
     let mut lines_seen: usize = 0;
     let mut parsed_count: usize = 0;
     let mut dotdirs: usize = 0;
     let mut filtered: Vec<String> = Vec::new();
 
     for line in raw.lines() {
+        if is_listing_header(line) {
+            groups.push(ListingGroup {
+                header: Some(line.to_string()),
+                ..ListingGroup::default()
+            });
+            continue;
+        }
         if line.starts_with("total ") || line.is_empty() {
             continue;
         }
         lines_seen += 1;
+        let index = groups.len() - 1;
+        let group = &mut groups[index];
 
         let Some((file_type, perms, size, name)) = parse_ls_line(line) else {
             if is_dotdir(line) {
                 dotdirs += 1;
             } else {
-                filtered.push(line.trim().to_string());
+                filtered.push(attributed_line(group.header.as_deref(), line.trim()));
             }
             continue;
         };
@@ -568,7 +599,10 @@ fn compact_ls(
         // Filter noise dirs unless dotfiles were requested; every entry the
         // child printed and RTK drops is recorded so the hint can recover it.
         if !show_all && NOISE_DIRS.iter().any(|noise| name == *noise) {
-            filtered.push(format!("{}/", name));
+            filtered.push(attributed_line(
+                group.header.as_deref(),
+                &format!("{}/", name),
+            ));
             continue;
         }
 
@@ -581,54 +615,63 @@ fn compact_ls(
         };
 
         if file_type == 'd' {
-            dirs.push((name, octal));
+            group.dirs.push((name, octal));
         } else {
             // Regular files, symlinks, character/block devices, pipes, sockets
-            files.push((name, human_size(size), octal));
+            group.files.push((name, human_size(size), octal));
         }
     }
 
-    if dirs.is_empty() && files.is_empty() {
-        if lines_seen > 0 && parsed_count == 0 {
-            if dotdirs == lines_seen {
-                // Only . and .. entries (empty directory)
-                return ("(empty)\n".to_string(), 0, Vec::new(), Vec::new());
-            }
-            // Real content that couldn't be parsed (e.g., non-English locale)
-            return (String::new(), 0, Vec::new(), Vec::new());
-        }
-        // Everything parsed was filtered out (e.g., only noise dirs) —
-        // keep filtered so the caller can still emit a recovery hint.
-        return ("(empty)\n".to_string(), parsed_count, Vec::new(), filtered);
+    if parsed_count == 0 && lines_seen > dotdirs {
+        // Preserve the caller's lossless fallback for unrecognized listings.
+        return (String::new(), 0, Vec::new(), Vec::new());
     }
-
-    // Dirs first, then files — one compact line each
-    let mut all_lines: Vec<String> = Vec::with_capacity(dirs.len() + files.len());
-    for (name, octal) in &dirs {
-        all_lines.push(match octal {
-            Some(octal) => format!("{}  {}/", octal, name),
-            None => format!("{}/", name),
-        });
-    }
-    for (name, size, octal) in &files {
-        all_lines.push(match (show_long, octal) {
-            (false, _) => name.clone(),
-            (true, Some(octal)) => format!("{}  {}  {}", octal, name, size),
-            (true, None) => format!("{}  {}", name, size),
-        });
-    }
-
-    // Cap the displayed listing; the rest is recoverable via the tee hint.
-    let truncated = if all_lines.len() > CAP_INVENTORY {
-        all_lines.split_off(CAP_INVENTORY)
-    } else {
-        Vec::new()
-    };
 
     let mut entries = String::new();
-    for line in &all_lines {
-        entries.push_str(line);
-        entries.push('\n');
+    let mut truncated = Vec::new();
+    let mut displayed = 0;
+    for group in &groups {
+        // Dirs first, then files — one compact line each
+        let mut all_lines: Vec<String> = Vec::with_capacity(group.dirs.len() + group.files.len());
+        for (name, octal) in &group.dirs {
+            all_lines.push(match octal {
+                Some(octal) => format!("{}  {}/", octal, name),
+                None => format!("{}/", name),
+            });
+        }
+        for (name, size, octal) in &group.files {
+            all_lines.push(match (show_long, octal) {
+                (false, _) => name.clone(),
+                (true, Some(octal)) => format!("{}  {}  {}", octal, name, size),
+                (true, None) => format!("{}  {}", name, size),
+            });
+        }
+
+        if all_lines.is_empty() && group.header.is_none() && groups.len() > 1 {
+            continue;
+        }
+        if all_lines.is_empty() || displayed < CAP_INVENTORY {
+            if !entries.is_empty() {
+                entries.push('\n');
+            }
+            if let Some(header) = &group.header {
+                entries.push_str(header);
+                entries.push('\n');
+            }
+            if all_lines.is_empty() {
+                entries.push_str("(empty)\n");
+            }
+        }
+        for line in all_lines {
+            if displayed < CAP_INVENTORY {
+                entries.push_str(&line);
+                entries.push('\n');
+                displayed += 1;
+            } else {
+                // Recovery can begin mid-section: attribute each hidden entry.
+                truncated.push(attributed_line(group.header.as_deref(), &line));
+            }
+        }
     }
 
     (entries, parsed_count, truncated, filtered)
@@ -637,6 +680,142 @@ fn compact_ls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_grouped_captured_gnu_listing() {
+        // Captured with LC_ALL=C ls -l 'first dir' second (duplicate colon names).
+        let raw = "first dir:\ntotal 4\n-rw------- 1 hermesworker hermesworker 7 Oct 31 21:56 same:\n\nsecond:\ntotal 4\n-rw------- 1 hermesworker hermesworker 7 Oct 31 21:56 same:\n";
+        let native = "first dir:\nsame:\n\nsecond:\nsame:\n";
+        assert_eq!(render(raw, Some(native), false, false, 0), native);
+        assert_eq!(render(raw, None, false, false, 0), native);
+        assert_eq!(
+            render(raw, Some(raw), false, true, 0),
+            "first dir:\n600  same:  7B\n\nsecond:\n600  same:  7B\n"
+        );
+    }
+
+    #[test]
+    fn regression_grouped_populated_and_mixed_modes() {
+        let raw = format!(
+            "{}\nfirst dir:\ntotal 4\n{}\nsecond:\ntotal 4\n{}",
+            long_line('-', "loose:"),
+            long_line('-', "same:"),
+            long_line('-', "same:")
+        );
+        let native = "loose:\n\nfirst dir:\nsame:\n\nsecond:\nsame:\n";
+        for long in [false, true] {
+            let expected = if long {
+                "644  loose:  1.2K\n\nfirst dir:\n644  same:  1.2K\n\nsecond:\n644  same:  1.2K\n"
+            } else {
+                native
+            };
+            let (entries, parsed, truncated, filtered) = compact_ls(&raw, false, long);
+            assert_eq!(entries, expected);
+            assert_eq!(parsed, 3);
+            assert!(truncated.is_empty());
+            assert!(filtered.is_empty());
+            assert_eq!(render(&raw, None, false, long, 0), expected);
+            let budget = if long { raw.as_str() } else { native };
+            assert_eq!(render(&raw, Some(budget), false, long, 0), expected);
+            assert!(estimate_tokens(expected) * 100 < estimate_tokens(&raw) * 80);
+        }
+    }
+
+    #[test]
+    fn regression_grouped_empty_and_recursive_labels() {
+        let raw = "total samples:\ntotal 0\n\nparent/child:\ntotal 0\n";
+        let expected = "total samples:\n(empty)\n\nparent/child:\n(empty)\n";
+        let native = "total samples:\n\nparent/child:\n";
+        for long in [false, true] {
+            let (entries, parsed, truncated, filtered) = compact_ls(raw, false, long);
+            assert_eq!(entries, expected);
+            assert_eq!(parsed, 0);
+            assert!(truncated.is_empty());
+            assert!(filtered.is_empty());
+            assert_eq!(render(raw, None, false, long, 0), expected);
+            assert_eq!(render(raw, Some(native), false, long, 0), native);
+        }
+    }
+
+    #[test]
+    fn regression_date_shaped_empty_directory_header() {
+        // Captured from LC_ALL=C /bin/ls -l -- 'a b c d Jan 1 12:00 folder' other.
+        let raw = "a b c d Jan 1 12:00 folder:\ntotal 0\n\nother:\ntotal 0\n";
+        let native = "a b c d Jan 1 12:00 folder:\n\nother:\n";
+        let expected = "a b c d Jan 1 12:00 folder:\n(empty)\n\nother:\n(empty)\n";
+        for long in [false, true] {
+            assert!(is_listing_header("a b c d Jan 1 12:00 folder:"));
+            let (entries, parsed, truncated, filtered) = compact_ls(raw, false, long);
+            assert_eq!(entries, expected);
+            assert_eq!(parsed, 0);
+            assert!(truncated.is_empty());
+            assert!(filtered.is_empty());
+            assert_eq!(render(raw, None, false, long, 0), expected);
+            let budget = if long { raw } else { native };
+            assert_eq!(
+                render(raw, Some(budget), false, long, 0),
+                if long { expected } else { native }
+            );
+        }
+    }
+
+    #[test]
+    fn regression_grouped_hidden_and_global_cap() {
+        let mut raw = String::from("first dir:\ntotal 4\n");
+        for i in 0..=CAP_INVENTORY {
+            raw.push_str(&long_line('-', &format!("file{i:03}")));
+        }
+        raw.push_str(&format!(
+            "{}\nsecond:\ntotal 4\n{}{}foreign row\n\nempty:\ntotal 0\n",
+            long_line('d', "target"),
+            long_line('-', "same"),
+            long_line('d', "target")
+        ));
+        for long in [false, true] {
+            let (entries, parsed, truncated, filtered) = compact_ls(&raw, false, long);
+            assert_eq!(parsed, CAP_INVENTORY + 4);
+            assert_eq!(
+                entries
+                    .lines()
+                    .filter(|l| l.starts_with("file") || l.starts_with("644  file"))
+                    .count(),
+                CAP_INVENTORY
+            );
+            assert!(entries.starts_with("first dir:\n"));
+            assert!(entries.ends_with("empty:\n(empty)\n"));
+            assert_eq!(truncated.len(), 2);
+            assert!(truncated[0].starts_with("first dir:\n"));
+            assert!(truncated[1].starts_with("second:\n"));
+            assert_eq!(
+                filtered,
+                [
+                    "first dir:\ntarget/",
+                    "second:\ntarget/",
+                    "second:\nforeign row"
+                ]
+            );
+            assert!(render(&raw, None, false, long, 0).contains("... (2 more, 3 filtered)"));
+        }
+    }
+
+    #[test]
+    fn regression_foreign_date_colon_row_retains_fallback() {
+        for row in [
+            "-rw-r--r-- 1 user staff 7 1月 1 12:00 file:",
+            "-rw-r--r-- 1 user staff 7 Oct 28 16:25:03 2026 file:",
+        ] {
+            let raw = format!("dir with spaces:\ntotal 4\n{row}\n");
+            for long in [false, true] {
+                assert_eq!(render(&raw, None, false, long, 0), raw);
+                let (_, parsed, _, _) = compact_ls(&raw, false, long);
+                assert_eq!(parsed, 0);
+                let mixed = format!("{raw}{}", long_line('-', "known"));
+                let (_, parsed, _, filtered) = compact_ls(&mixed, false, long);
+                assert_eq!(parsed, 1);
+                assert_eq!(filtered, [format!("dir with spaces:\n{row}")]);
+            }
+        }
+    }
 
     #[test]
     fn test_compact_basic() {
@@ -1396,7 +1575,10 @@ mod tests {
         let raw = "Desktop:\ntotal 0\n\ngo:\ntotal 0\n";
         let native = "Desktop:\n\ngo:\n";
         assert_eq!(render(raw, Some(native), false, false, 0), native);
-        assert_eq!(render(raw, None, false, false, 0), raw);
+        assert_eq!(
+            render(raw, None, false, false, 0),
+            "Desktop:\n(empty)\n\ngo:\n(empty)\n"
+        );
     }
 
     #[test]
