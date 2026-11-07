@@ -157,11 +157,10 @@ of it. Before matching, RTK peels those off the command and matches what is left
 alike; `"pytest"` also covers `python3 -m pytest tests/`, and `"phpunit"` covers
 `vendor/bin/phpunit` and `php vendor/bin/phpunit`.
 
-Three spellings are not peeled, and still rewrite despite a matching entry:
+Two spellings are not peeled, and still rewrite despite a matching entry:
 
 | Entry | Command | Why |
 |---|---|---|
-| `"head"`, `"tail"` | `head -20 f`, `tail -n 5 f` | The line-range form takes a fast path that returns before the exclusion is consulted. Without a line range, `head f` is excluded normally. |
 | `"gradlew"`, `"mvn"` | `gradlew.bat build`, `mvnw.cmd test` | Path stripping splits on `/`, so a `.bat`/`.cmd` spelling never reduces to the tool name. `./gradlew` and `gradlew` are both excluded. |
 | `"golangci-lint"` | `golangci run ./...` | `golangci run` is one of the rule's own aliases and is kept whole, so it does not match the `golangci-lint` entry. Exclude `"golangci"` as well to cover it. |
 
