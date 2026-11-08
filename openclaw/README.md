@@ -92,17 +92,7 @@ No minimum. `RTK_REWRITE_HOST` travels in the environment rather than in argv pr
 
 ## What gets rewritten
 
-Everything that `rtk rewrite` supports. See [what RTK covers](https://www.rtk-ai.app/guide/resources/what-rtk-covers).
-
-## What's NOT rewritten
-
-Handled by `rtk rewrite` guards:
-- Commands already using `rtk`
-- Heredocs (`<<`)
-- Commands without an RTK filter
-- Intermediate pipeline stages and `|&` pipelines
-
-Compound commands are not skipped: `rtk rewrite` splits on `&&`, `||`, `;` and `|` and rewrites each segment on its own (`git status && cargo test` becomes `rtk git status && rtk cargo test`). See [Compound splitting](https://github.com/rtk-ai/rtk/blob/develop/src/discover/README.md) for which pipeline stages are rewritten.
+Whatever `rtk rewrite` rewrites; the plugin has no guards of its own. See [what RTK covers](https://www.rtk-ai.app/docs/resources/what-rtk-covers/) for the commands, and [How command rewriting works](https://github.com/rtk-ai/rtk/blob/develop/src/discover/README.md#how-command-rewriting-works) for what stays raw (pipeline stages, heredocs, commands already using `rtk`, commands without a filter).
 
 ## License
 
