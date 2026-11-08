@@ -481,8 +481,8 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
     if stem == "cargo"
         && let Some(invocation) = CargoInvocation::parse(args)
     {
-        return invocation.command().common().help
-            || invocation.command().common().unstable_help
+        return invocation.common().help
+            || invocation.common().unstable_help
             || match invocation.command() {
                 CargoCommand::NoCommand(options) => options.version,
                 CargoCommand::Clippy(options) => options.version,
