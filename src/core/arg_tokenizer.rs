@@ -8,6 +8,8 @@
 //! tokenizing an owned `Vec<String>` built *inside* this module would tie every `Token` to a
 //! value dropped when the function returns.
 
+use std::ops::ControlFlow;
+
 /// What kind of unit a [`Token`] represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
@@ -473,82 +475,111 @@ pub enum TokenAction {
     Continue(Option<ValueSpec>),
     /// Include the current argument, finish its cluster and any separate option value,
     /// then return the batch. The next call starts at the following argument.
+    #[allow(dead_code)] // Available to callers that collect resumable batches.
     StopAfter(Option<ValueSpec>),
+}
+
+/// Syntax and caller-defined meaning are independent. A known option may need its
+/// value consumed even when the caller does not need to record any semantic fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OptionDefinition<K> {
+    /// How to consume a value, independently of whether it has semantic interest.
+    pub value: Option<ValueSpec>,
+    /// Caller-defined meaning; None recognizes the option without recording a fact.
+    pub meaning: Option<K>,
+}
+
+/// A completed option, free positional, or separator. Separate values are delivered
+/// with their owner, never as independent events. Tokens have no collection links yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenEvent<'a, K> {
+    pub token: Token<'a>,
+    /// The exact definition returned by the lookup, including its semantic tag.
+    /// None means an unknown option, or a positional/separator with no option definition.
+    pub definition: Option<OptionDefinition<K>>,
+    pub separate_value: Option<Token<'a>>,
+}
+
+impl<'a, K> TokenEvent<'a, K> {
+    /// The resolved attached or separate value; no token collection is needed.
+    pub fn value(&self) -> Option<&'a str> {
+        self.token
+            .attached
+            .or_else(|| self.separate_value.map(|token| token.text))
+    }
+}
+
+/// Two stages of one scan: define an option before consuming its value, then visit
+/// the completed item. The tokenizer carries the definition through without another lookup.
+pub trait TokenHandler<'a> {
+    type Meaning;
+
+    /// Called once per option head, never for positionals, separators or consumed values.
+    /// Short attached and separate values are not resolved until after this lookup.
+    /// None leaves an unknown option without a value-consumption rule.
+    fn lookup(&mut self, token: &Token<'a>) -> Option<OptionDefinition<Self::Meaning>>;
+
+    /// May record semantic facts directly or collect items for later processing.
+    /// Break stops after the current argument, including its whole cluster and owned value.
+    /// Remaining cluster members still use this handler before the scan returns.
+    fn visit(&mut self, event: TokenEvent<'a, Self::Meaning>) -> ControlFlow<()>;
 }
 
 /// Resumable batch tokenizer. Callers can change the grammar between batches.
 /// Source indices address the original invocation; links address the returned batch.
 pub struct Tokenizer<'a, T> {
-    tokens: Vec<Token<'a>>,
     args: &'a [T],
     i: usize,
     dialect: Dialect,
     emitted_dash_dash: bool,
-    stop_requested: bool,
 }
 
 impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
-    fn push_token(
-        &mut self,
-        token: Token<'a>,
-        handler: &mut dyn FnMut(&Token<'a>) -> TokenAction,
-    ) -> Option<ValueSpec> {
-        let action = handler(&token);
-        self.tokens.push(token);
-        match action {
-            TokenAction::Continue(value) => value,
-            TokenAction::StopAfter(value) => {
-                self.stop_requested = true;
-                value
-            }
-        }
-    }
-
-    /// Pushes one atomic (non-clustering) flag token — used for `--flag` in every dialect, and
+    /// Scans one atomic (non-clustering) flag token — used for `--flag` in every dialect, and
     /// for `-flag`/`/flag` where the dialect says so. `rest` is the flag text with its prefix
     /// already stripped; `prefix` records which one it was. Only the `/flag` spelling is barred
     /// from consuming a separate value: an MSBuild switch attaches its value with `:`
     /// (`/bl:x.binlog`), so `/r` (MSBuild's `restore`) must not swallow the token after it the
     /// way dotnet's own `-r <rid>` does.
-    fn push_atomic_flag(
+    fn scan_atomic_flag<H: TokenHandler<'a>>(
         &mut self,
         rest: &'a str,
         prefix: FlagPrefix,
-        handler: &mut dyn FnMut(&Token<'a>) -> TokenAction,
-    ) {
+        handler: &mut H,
+    ) -> ControlFlow<()> {
         let (name, attached) = split_attached(rest, self.dialect);
-        let flag_index = self.tokens.len();
-        let source_index = self.i;
-        let value_spec = self.push_token(
-            Token {
-                attached,
-                ..token(TokenKind::Long, name, source_index, prefix)
-            },
-            handler,
-        );
+        let token = Token {
+            attached,
+            ..token(TokenKind::Long, name, self.i, prefix)
+        };
+        let definition = handler.lookup(&token);
         self.i += 1;
 
+        let mut separate_value = None;
         if attached.is_none() && prefix != FlagPrefix::Slash {
             // `solo_only` cannot apply here: a Long flag is always the whole argument.
-            if let Some(spec) = value_spec
+            if let Some(spec) = definition.as_ref().and_then(|definition| definition.value)
                 && spec.attachment != Attachment::AttachedOnly
-                && self.link_next_value(flag_index, self.i, spec)
             {
-                self.i += 1;
+                separate_value = self.next_value(self.i, spec);
+                if separate_value.is_some() {
+                    self.i += 1;
+                }
             }
         }
+        handler.visit(TokenEvent {
+            token,
+            definition,
+            separate_value,
+        })
     }
 
-    /// If `self.args[value_index]` exists and isn't the still-unseen boundary `--`, pushes it as
-    /// a `Positional` token linked to `flag_index` (and links `flag_index` back to it). Returns
-    /// whether a value was consumed; does *not* itself advance `self.i`. The still-unseen `--`
-    /// is swallowed as a value only when the flag's [`ValueSpec::claims_dash_dash`] says so.
-    fn link_next_value(&mut self, flag_index: usize, value_index: usize, spec: ValueSpec) -> bool {
-        let Some(next) = self.args.get(value_index) else {
-            return false;
-        };
+    /// Resolve a separate value under the dialect and option rules without advancing the
+    /// cursor. The collector, when used, supplies links between this value and its owner.
+    fn next_value(&self, value_index: usize, spec: ValueSpec) -> Option<Token<'a>> {
+        let next = self.args.get(value_index)?;
         if next.as_ref() == "--" && !self.emitted_dash_dash && !spec.claims_dash_dash {
-            return false;
+            return None;
         }
         if next.as_ref() != "--"
             && next.as_ref() != "-"
@@ -556,27 +587,19 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
             && !self.dialect.allow_hyphen_values
             && !spec.allow_hyphen_values
         {
-            return false;
+            return None;
         }
-        let token_index = self.tokens.len();
-        self.tokens.push(Token {
-            linked: Some(flag_index),
-            ..positional(next.as_ref(), value_index)
-        });
-        self.tokens[flag_index].linked = Some(token_index);
-        true
+        Some(positional(next.as_ref(), value_index))
     }
 }
 
 impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
     pub fn new(args: &'a [T], dialect: Dialect) -> Self {
         Self {
-            tokens: Vec::with_capacity(args.len()),
             args,
             i: 0,
             dialect,
             emitted_dash_dash: false,
-            stop_requested: false,
         }
     }
 
@@ -598,44 +621,50 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
         &mut self,
         handler: &mut dyn FnMut(&Token<'a>) -> TokenAction,
     ) -> Vec<Token<'a>> {
-        self.stop_requested = false;
+        let mut collector = TokenCollector {
+            tokens: Vec::new(),
+            handler,
+            stop_requested: false,
+        };
+        self.visit_until(&mut collector);
+        collector.tokens
+    }
+
+    /// Scan completed items directly, without allocating a token collection. Option lookup
+    /// precedes value consumption; the visitor receives the resolved value and the same
+    /// definition. Cursor, region boundaries and stopping guarantees match `tokenize_until`.
+    pub fn visit_until<H: TokenHandler<'a>>(&mut self, handler: &mut H) {
         while self.i < self.args.len() {
-            self.scan_argument(handler);
-            if self.stop_requested {
+            if self.scan_argument(handler).is_break() {
                 break;
             }
         }
-        std::mem::take(&mut self.tokens)
     }
 
-    fn scan_argument(&mut self, handler: &mut dyn FnMut(&Token<'a>) -> TokenAction) {
+    fn scan_argument<H: TokenHandler<'a>>(&mut self, handler: &mut H) -> ControlFlow<()> {
         let arg = self.args[self.i].as_ref();
 
         if self.emitted_dash_dash && !self.dialect.classifies_past_dash_dash() {
-            self.push_token(positional(arg, self.i), handler);
+            let token = positional(arg, self.i);
             self.i += 1;
-            return;
+            return visit_non_option(handler, token);
         }
 
         if arg == "--" {
-            if self.emitted_dash_dash {
+            let token = if self.emitted_dash_dash {
                 // A second (or later) literal "--" is never itself the boundary — it's just
                 // ordinary text at this point, under every dialect.
-                self.push_token(positional(arg, self.i), handler);
+                positional(arg, self.i)
             } else {
-                self.push_token(
-                    token(TokenKind::DashDash, "", self.i, FlagPrefix::Dash),
-                    handler,
-                );
                 self.emitted_dash_dash = true;
-            }
+                token(TokenKind::DashDash, "", self.i, FlagPrefix::Dash)
+            };
             self.i += 1;
-            return;
+            return visit_non_option(handler, token);
         }
 
         if let Some(rest) = arg.strip_prefix("--") {
-            self.push_atomic_flag(rest, FlagPrefix::DashDash, handler);
-            return;
+            return self.scan_atomic_flag(rest, FlagPrefix::DashDash, handler);
         }
 
         if self.dialect.slash_flags
@@ -649,8 +678,7 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
             // only the loose flag lookup ([`has_flag`]) is affected.
             let (name_part, _) = split_attached(rest, self.dialect);
             if !rest.is_empty() && !name_part.contains('/') {
-                self.push_atomic_flag(rest, FlagPrefix::Slash, handler);
-                return;
+                return self.scan_atomic_flag(rest, FlagPrefix::Slash, handler);
             }
         }
 
@@ -662,32 +690,33 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
                     SingleDash::AtomicAliasingLong => FlagPrefix::DashDash,
                     SingleDash::Cluster | SingleDash::Atomic => FlagPrefix::Dash,
                 };
-                self.push_atomic_flag(&arg[1..], prefix, handler);
-                return;
+                return self.scan_atomic_flag(&arg[1..], prefix, handler);
             }
 
             let cluster = &arg[1..];
 
             if self.dialect.numeric_shortcut && is_digit_run(cluster) {
-                self.push_token(
-                    token(TokenKind::Short, cluster, self.i, FlagPrefix::Dash),
-                    handler,
-                );
+                let token = token(TokenKind::Short, cluster, self.i, FlagPrefix::Dash);
+                let definition = handler.lookup(&token);
                 self.i += 1;
-                return;
+                return handler.visit(TokenEvent {
+                    token,
+                    definition,
+                    separate_value: None,
+                });
             }
 
             let mut consumed_next = false;
+            let mut control = ControlFlow::Continue(());
             let source_index = self.i;
 
             for (offset, ch) in cluster.char_indices() {
                 let char_len = ch.len_utf8();
                 let char_text = &cluster[offset..offset + char_len];
-                let flag_index = self.tokens.len();
-                let value_spec = self.push_token(
-                    token(TokenKind::Short, char_text, source_index, FlagPrefix::Dash),
-                    handler,
-                );
+                let mut token = token(TokenKind::Short, char_text, source_index, FlagPrefix::Dash);
+                let definition = handler.lookup(&token);
+                let value_spec = definition.as_ref().and_then(|definition| definition.value);
+                let mut separate_value = None;
 
                 if let Some(spec) = value_spec {
                     let remainder = &cluster[offset + char_len..];
@@ -695,12 +724,11 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
                         // Clap's parse_short_arg strips exactly one '=' for a value-taking
                         // option; a boolean flag does not claim the rest of its cluster.
                         // https://github.com/clap-rs/clap/blob/v4.6.7/clap_builder/src/parser/parser.rs#L969-L987
-                        self.tokens[flag_index].attached =
-                            Some(if self.dialect.short_value_equals {
-                                remainder.strip_prefix('=').unwrap_or(remainder)
-                            } else {
-                                remainder
-                            });
+                        token.attached = Some(if self.dialect.short_value_equals {
+                            remainder.strip_prefix('=').unwrap_or(remainder)
+                        } else {
+                            remainder
+                        });
                     } else {
                         // is_solo: offset == 0 with an empty remainder means this char is the
                         // *entire* cluster (the arg was e.g. just "-n"); a later offset, or any
@@ -711,20 +739,93 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
                             Attachment::AttachedOrSeparate { solo_only } => !solo_only || is_solo,
                         };
                         if takes_separate {
-                            consumed_next =
-                                self.link_next_value(flag_index, source_index + 1, spec);
+                            separate_value = self.next_value(source_index + 1, spec);
+                            consumed_next = separate_value.is_some();
                         }
                     }
+                }
+                if handler
+                    .visit(TokenEvent {
+                        token,
+                        definition,
+                        separate_value,
+                    })
+                    .is_break()
+                {
+                    control = ControlFlow::Break(());
+                }
+                if value_spec.is_some() {
                     break;
                 }
             }
 
             self.i += if consumed_next { 2 } else { 1 };
-            return;
+            return control;
         }
 
-        self.push_token(positional(arg, self.i), handler);
+        let token = positional(arg, self.i);
         self.i += 1;
+        visit_non_option(handler, token)
+    }
+}
+
+fn visit_non_option<'a, H: TokenHandler<'a>>(handler: &mut H, token: Token<'a>) -> ControlFlow<()> {
+    handler.visit(TokenEvent {
+        token,
+        definition: None,
+        separate_value: None,
+    })
+}
+
+/// Adapter for callers that want token collections and the original early callback.
+/// Collection links are assigned here; the scanning engine itself needs no vector.
+struct TokenCollector<'a, 'h> {
+    tokens: Vec<Token<'a>>,
+    handler: &'h mut dyn FnMut(&Token<'a>) -> TokenAction,
+    stop_requested: bool,
+}
+
+impl<'a> TokenCollector<'a, '_> {
+    fn action(&mut self, token: &Token<'a>) -> Option<ValueSpec> {
+        match (self.handler)(token) {
+            TokenAction::Continue(value) => value,
+            TokenAction::StopAfter(value) => {
+                self.stop_requested = true;
+                value
+            }
+        }
+    }
+}
+
+impl<'a> TokenHandler<'a> for TokenCollector<'a, '_> {
+    type Meaning = ();
+
+    fn lookup(&mut self, token: &Token<'a>) -> Option<OptionDefinition<()>> {
+        Some(OptionDefinition {
+            value: self.action(token),
+            meaning: None,
+        })
+    }
+
+    fn visit(&mut self, event: TokenEvent<'a, ()>) -> ControlFlow<()> {
+        if !matches!(event.token.kind, TokenKind::Long | TokenKind::Short) {
+            self.action(&event.token);
+        }
+        let index = self.tokens.len();
+        let mut token = event.token;
+        if event.separate_value.is_some() {
+            token.linked = Some(index + 1);
+        }
+        self.tokens.push(token);
+        if let Some(mut value) = event.separate_value {
+            value.linked = Some(index);
+            self.tokens.push(value);
+        }
+        if self.stop_requested {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
     }
 }
 
