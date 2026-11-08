@@ -481,9 +481,10 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
     if stem == "cargo"
         && let Some(invocation) = CargoInvocation::parse(args)
     {
-        return invocation.help()
-            || invocation.unstable_help()
+        return invocation.command().common().help
+            || invocation.command().common().unstable_help
             || match invocation.command() {
+                CargoCommand::NoCommand(options) => options.version,
                 CargoCommand::Clippy(options) => options.version,
                 CargoCommand::Test(options) => options.harness.help,
                 CargoCommand::Nextest(options) => options.version || options.harness.help,
@@ -494,7 +495,7 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
     let spelling = help_spelling(stem, first);
     let takes_value = |kind: TokenKind, name: &str| {
         // Supported commands use their prepared semantics above. For unknown
-        // invocations we only know Cargo's global arities, not a command schema.
+        // invocations we only know Cargo's root option arities, not a command schema.
         if stem == "cargo" {
             return cargo_cmd::option_value(kind, name);
         }
@@ -1922,7 +1923,7 @@ mod requests_help_tests {
                 let _ = requests_help_args(tool, &owned);
             }
         }
-        assert!(!requests_help_args("cargo", &["-hh".to_string()]));
+        assert!(requests_help_args("cargo", &["-hh".to_string()]));
         // Case matters; tools spell it lowercase.
         assert!(!requests_help_args("cargo", &["--HELP".to_string()]));
     }
@@ -1977,8 +1978,8 @@ mod requests_help_tests {
     fn a_cluster_is_not_the_flag() {
         assert!(!asks("ls", &["-lh"]), "but -h is ls's own");
         assert!(
-            !asks("cargo", &["-qh"]),
-            "inside a cluster the h is not the flag"
+            asks("cargo", &["-qh"]),
+            "Cargo recognizes help inside a short-option cluster"
         );
         assert!(asks("git", &["log", "--help"]));
         assert!(!asks("git", &["log", "-5"]));

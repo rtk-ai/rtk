@@ -24,7 +24,16 @@ fn toolchain_rewrites_preserve_selector_and_arguments() {
             );
         }
     }
-    for command in ["cargo +stable metadata", "cargo +stable checker"] {
+    for command in [
+        "cargo +stable metadata",
+        "cargo +stable checker",
+        "cargo",
+        "cargo +stable",
+        "cargo --help",
+        "cargo --version",
+        "cargo --list",
+        "cargo --explain E0425",
+    ] {
         let output = common::rtk_command()
             .args(["rewrite", command])
             .output()
@@ -240,6 +249,14 @@ fn parsed_information_modes_are_interpreted_by_command_runners() {
     .unwrap();
     let argv_file = dir.path().join("argv");
     for args in [
+        vec![],
+        vec!["+stable"],
+        vec!["--locked", "--color", "never"],
+        vec!["--help"],
+        vec!["--version"],
+        vec!["--list"],
+        vec!["--explain", "E0425"],
+        vec!["-Zhelp"],
         vec!["check", "--unit-graph"],
         vec!["build", "-Zhelp"],
         vec!["clippy", "--version"],
