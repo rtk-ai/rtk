@@ -484,9 +484,13 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
         return invocation.help()
             || invocation.unstable_help()
             || match invocation.command() {
-                CargoCommand::Clippy(options) => options.version(),
-                CargoCommand::Test(options) => options.harness().help(),
-                CargoCommand::Nextest(options) => options.version() || options.harness().help(),
+                CargoCommand::Clippy { version, .. } => *version,
+                CargoCommand::Test { harness_help, .. } => *harness_help,
+                CargoCommand::Nextest {
+                    version,
+                    harness_help,
+                    ..
+                } => *version || *harness_help,
                 _ => false,
             };
     }
