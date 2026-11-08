@@ -3,7 +3,7 @@
 use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
 use crate::core::runner;
 use crate::core::shell::display_args;
-use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
+use crate::core::stream::{BlockHandler, BlockStreamFilter};
 use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{join_with_overflow, resolved_command, truncate};
 use anyhow::Result;
@@ -179,7 +179,6 @@ pub struct NextestOptions {
 #[derive(Debug)]
 pub struct CargoInvocation<'a, T = OsString> {
     args: &'a [T],
-    command_args: &'a [T],
     command: CargoCommand,
     common: CommonOptions,
 }
@@ -302,11 +301,10 @@ impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
             .collect();
         let mut tokenizer = arg_tokenizer::Tokenizer::new(&words, Dialect::Clap);
         let mut common = CommonOptions::default();
-        let (mut command, start) = find_command(&mut tokenizer, &mut common)?;
+        let mut command = find_command(&mut tokenizer, &mut common)?;
         read_command_options(&mut tokenizer, &mut command, &mut common);
         Some(Self {
             args,
-            command_args: &args[start..],
             command,
             common,
         })
@@ -327,7 +325,7 @@ impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
     fn display_args(&self) -> String {
         display_args(
             &self
-                .command_args
+                .args
                 .iter()
                 .map(|s| s.as_ref().to_string_lossy().into_owned())
                 .collect::<Vec<_>>(),
@@ -338,7 +336,7 @@ impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
 fn find_command<T: AsRef<str>>(
     tokenizer: &mut arg_tokenizer::Tokenizer<'_, T>,
     common: &mut CommonOptions,
-) -> Option<(CargoCommand, usize)> {
+) -> Option<CargoCommand> {
     let mut options = NoCommandOptions::default();
     while let Some(range) = tokenizer.next_argument(&option_value) {
         for token in &tokenizer.tokens()[range] {
@@ -357,7 +355,7 @@ fn find_command<T: AsRef<str>>(
                     if options.version || options.list || options.explain {
                         return None;
                     }
-                    return Some((CargoCommand::named(name)?, token.source_index + 1));
+                    return CargoCommand::named(name);
                 }
                 _ => match CargoOption::lookup(None, token.kind, token.text)? {
                     CargoOption::Help => common.help = true,
@@ -380,11 +378,7 @@ fn find_command<T: AsRef<str>>(
             }
         }
     }
-    let end = tokenizer
-        .tokens()
-        .last()
-        .map_or(0, |token| token.source_index + 1);
-    Some((CargoCommand::NoCommand(options), end))
+    Some(CargoCommand::NoCommand(options))
 }
 
 fn read_command_options<T: AsRef<str>>(
@@ -549,12 +543,14 @@ fn read_test_arguments<T: AsRef<str>>(
 
 pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
     let Some(invocation) = CargoInvocation::parse(args) else {
-        return run_passthrough(args, verbose);
+        return runner::run_passthrough("cargo", args, verbose);
     };
     // Policy belongs to execution. The parser only records which information was requested.
     if invocation.common().help || invocation.common().unstable_help {
-        return run_passthrough(args, verbose);
+        return runner::run_passthrough("cargo", args, verbose);
     }
+    // Dedicated runners use unguarded_help(): these facts were already inspected,
+    // so the generic runner does not need to parse the arguments again.
     match invocation.command() {
         CargoCommand::Build(options) => run_build(&invocation, options, verbose),
         CargoCommand::Check(options) => run_check(&invocation, options, verbose),
@@ -562,7 +558,9 @@ pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
         CargoCommand::Test(options) => run_test(&invocation, options, verbose),
         CargoCommand::Install(options) => run_install(&invocation, options, verbose),
         CargoCommand::Nextest(options) => run_nextest(&invocation, options, verbose),
-        CargoCommand::NoCommand(_) | CargoCommand::Fmt => run_passthrough(args, verbose),
+        CargoCommand::NoCommand(_) | CargoCommand::Fmt => {
+            runner::run_passthrough("cargo", args, verbose)
+        }
     }
 }
 
@@ -793,106 +791,35 @@ impl BlockHandler for CargoTestHandler {
     }
 }
 
-/// Generic cargo command runner with filtering.
-/// The raw Cargo argument tail already contains its original `--` separators.
-fn run_cargo_filtered<F>(invocation: &CargoInvocation<'_>, verbose: u8, filter_fn: F) -> Result<i32>
-where
-    F: Fn(&str) -> String,
-{
-    let cmd = invocation.to_command();
-    let subcommand = invocation
-        .command()
-        .as_str()
-        .expect("filtered Cargo commands have a subcommand");
-
-    if verbose > 0 {
-        eprintln!("Running: {:?}", cmd);
-    }
-
-    runner::run_filtered(
-        cmd,
-        &format!("cargo {}", subcommand),
-        &invocation.display_args(),
-        filter_fn,
-        // The Cargo execution layer has already interpreted the parsed request.
-        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)).unguarded_help(),
-    )
-}
-
-/// Same as `run_cargo_filtered` but the filter also receives the child exit code,
-/// so it can tell a genuine failure from a clean run when no diagnostics parse.
-fn run_cargo_filtered_with_exit<F>(
-    invocation: &CargoInvocation<'_>,
-    verbose: u8,
-    filter_fn: F,
-) -> Result<i32>
-where
-    F: Fn(&str, i32) -> String,
-{
-    let cmd = invocation.to_command();
-    let subcommand = invocation
-        .command()
-        .as_str()
-        .expect("filtered Cargo commands have a subcommand");
-
-    if verbose > 0 {
-        eprintln!("Running: {:?}", cmd);
-    }
-
-    runner::run_filtered_with_exit(
-        cmd,
-        &format!("cargo {}", subcommand),
-        &invocation.display_args(),
-        filter_fn,
-        // The Cargo execution layer has already interpreted the parsed request.
-        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)).unguarded_help(),
-    )
-}
-
-fn run_cargo_streamed(
-    invocation: &CargoInvocation<'_>,
-    verbose: u8,
-    filter: Box<dyn StreamFilter>,
-) -> Result<i32> {
-    let cmd = invocation.to_command();
-    let subcommand = invocation
-        .command()
-        .as_str()
-        .expect("filtered Cargo commands have a subcommand");
-
-    if verbose > 0 {
-        eprintln!("Running: {:?}", cmd);
-    }
-
-    runner::run_streamed(
-        cmd,
-        &format!("cargo {}", subcommand),
-        &invocation.display_args(),
-        filter,
-        // The Cargo execution layer has already interpreted the parsed request.
-        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)).unguarded_help(),
-    )
-}
-
 fn run_build(
     invocation: &CargoInvocation<'_>,
     options: &CompilationOptions,
     verbose: u8,
 ) -> Result<i32> {
     if options.unit_graph || options.message_format == MessageFormat::Unknown {
-        return run_passthrough(invocation.args, verbose);
+        return runner::run_passthrough("cargo", invocation.args, verbose);
+    }
+    let args_display = invocation.display_args();
+    if verbose > 0 {
+        eprintln!("Running: cargo {}", args_display);
     }
     if options.message_format == MessageFormat::Json {
-        return run_cargo_filtered_with_exit(invocation, verbose, |o, exit| {
-            filter_cargo_build_labeled(o, "build", exit)
-        });
+        return runner::run_filtered_with_exit(
+            invocation.to_command(),
+            "cargo",
+            &args_display,
+            |o, exit| filter_cargo_build_labeled(o, "build", exit),
+            runner::RunOptions::with_tee("cargo_build").unguarded_help(),
+        );
     }
-    run_cargo_streamed(
-        invocation,
-        verbose,
+    runner::run_streamed(
+        invocation.to_command(),
+        "cargo",
+        &args_display,
         Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
             "build",
         ))),
+        runner::RunOptions::with_tee("cargo_build").unguarded_help(),
     )
 }
 
@@ -905,16 +832,22 @@ fn run_test(invocation: &CargoInvocation<'_>, options: &TestOptions, verbose: u8
             TestFormat::Json | TestFormat::Unknown
         )
     {
-        return run_passthrough(invocation.args, verbose);
+        return runner::run_passthrough("cargo", invocation.args, verbose);
     }
     // No json branch here on purpose: --message-format=json only reformats the
     // build phase, the test harness output stays human-readable. CargoTestHandler
     // reads both — it aggregates the `test result:` lines and, on a compile error,
     // parses the json diagnostics in format_summary.
-    run_cargo_streamed(
-        invocation,
-        verbose,
+    let args_display = invocation.display_args();
+    if verbose > 0 {
+        eprintln!("Running: cargo {}", args_display);
+    }
+    runner::run_streamed(
+        invocation.to_command(),
+        "cargo",
+        &args_display,
         Box::new(BlockStreamFilter::new(CargoTestHandler::new())),
+        runner::RunOptions::with_tee("cargo_test").unguarded_help(),
     )
 }
 
@@ -928,12 +861,28 @@ fn run_clippy(
         || options.compilation.unit_graph
         || options.compilation.message_format == MessageFormat::Unknown
     {
-        return run_passthrough(invocation.args, verbose);
+        return runner::run_passthrough("cargo", invocation.args, verbose);
+    }
+    let args_display = invocation.display_args();
+    if verbose > 0 {
+        eprintln!("Running: cargo {}", args_display);
     }
     if options.compilation.message_format == MessageFormat::Json {
-        return run_cargo_filtered_with_exit(invocation, verbose, filter_cargo_clippy_json);
+        return runner::run_filtered_with_exit(
+            invocation.to_command(),
+            "cargo",
+            &args_display,
+            filter_cargo_clippy_json,
+            runner::RunOptions::with_tee("cargo_clippy").unguarded_help(),
+        );
     }
-    run_cargo_filtered(invocation, verbose, filter_cargo_clippy)
+    runner::run_filtered(
+        invocation.to_command(),
+        "cargo",
+        &args_display,
+        filter_cargo_clippy,
+        runner::RunOptions::with_tee("cargo_clippy").unguarded_help(),
+    )
 }
 
 fn run_check(
@@ -942,19 +891,29 @@ fn run_check(
     verbose: u8,
 ) -> Result<i32> {
     if options.unit_graph || options.message_format == MessageFormat::Unknown {
-        return run_passthrough(invocation.args, verbose);
+        return runner::run_passthrough("cargo", invocation.args, verbose);
+    }
+    let args_display = invocation.display_args();
+    if verbose > 0 {
+        eprintln!("Running: cargo {}", args_display);
     }
     if options.message_format == MessageFormat::Json {
-        return run_cargo_filtered_with_exit(invocation, verbose, |o, exit| {
-            filter_cargo_build_labeled(o, "check", exit)
-        });
+        return runner::run_filtered_with_exit(
+            invocation.to_command(),
+            "cargo",
+            &args_display,
+            |o, exit| filter_cargo_build_labeled(o, "check", exit),
+            runner::RunOptions::with_tee("cargo_check").unguarded_help(),
+        );
     }
-    run_cargo_streamed(
-        invocation,
-        verbose,
+    runner::run_streamed(
+        invocation.to_command(),
+        "cargo",
+        &args_display,
         Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
             "check",
         ))),
+        runner::RunOptions::with_tee("cargo_check").unguarded_help(),
     )
 }
 
@@ -970,9 +929,19 @@ fn run_install(
             MessageFormat::Json | MessageFormat::Unknown
         )
     {
-        return run_passthrough(invocation.args, verbose);
+        return runner::run_passthrough("cargo", invocation.args, verbose);
     }
-    run_cargo_filtered(invocation, verbose, filter_cargo_install)
+    let args_display = invocation.display_args();
+    if verbose > 0 {
+        eprintln!("Running: cargo {}", args_display);
+    }
+    runner::run_filtered(
+        invocation.to_command(),
+        "cargo",
+        &args_display,
+        filter_cargo_install,
+        runner::RunOptions::with_tee("cargo_install").unguarded_help(),
+    )
 }
 
 fn run_nextest(
@@ -995,9 +964,19 @@ fn run_nextest(
             TestFormat::Json | TestFormat::Unknown
         )
     {
-        return run_passthrough(invocation.args, verbose);
+        return runner::run_passthrough("cargo", invocation.args, verbose);
     }
-    run_cargo_filtered(invocation, verbose, filter_cargo_nextest)
+    let args_display = invocation.display_args();
+    if verbose > 0 {
+        eprintln!("Running: cargo {}", args_display);
+    }
+    runner::run_filtered(
+        invocation.to_command(),
+        "cargo",
+        &args_display,
+        filter_cargo_nextest,
+        runner::RunOptions::with_tee("cargo_nextest").unguarded_help(),
+    )
 }
 
 /// Format crate name + version into a display string
@@ -2062,10 +2041,6 @@ fn filter_cargo_clippy_json(output: &str, exit_code: i32) -> String {
     filter_cargo_build_labeled(output, "clippy", exit_code)
 }
 
-pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
-    crate::core::runner::run_passthrough("cargo", args, verbose)
-}
-
 #[cfg(test)]
 mod tests {
     const TINY_BUILD_SUCCESS_OUTPUT: &str =
@@ -2492,30 +2467,25 @@ mod tests {
 
     #[test]
     fn consumes_option_values_and_resolves_aliases() {
-        for (args, index, command) in [
+        for (args, command) in [
             (
                 vec!["--config", "check", "t"],
-                2,
                 CargoCommand::Test(TestOptions::default()),
             ),
             (
                 vec!["+nightly", "-vvZunstable-options", "-Cvery/quiet", "b"],
-                3,
                 CargoCommand::Build(CompilationOptions::default()),
             ),
             (
                 vec!["+nightly", "-vC", "some path", "-Z=unstable-options", "c"],
-                4,
                 CargoCommand::Check(CompilationOptions::default()),
             ),
             (
                 vec!["+nightly", "-vZ", "unstable-options", "check"],
-                3,
                 CargoCommand::Check(CompilationOptions::default()),
             ),
             (
                 vec!["+nightly", "-Z", "unstable-options", "-C", "some path", "c"],
-                5,
                 CargoCommand::Check(CompilationOptions::default()),
             ),
             (
@@ -2530,12 +2500,10 @@ mod tests {
                     "-vv",
                     "b",
                 ],
-                8,
                 CargoCommand::Build(CompilationOptions::default()),
             ),
             (
                 vec!["-Zunstable-options", "-Csome path", "-q", "clippy"],
-                3,
                 CargoCommand::Clippy(ClippyOptions::default()),
             ),
         ] {
@@ -2545,15 +2513,7 @@ mod tests {
                 invocation.to_command().get_args().collect::<Vec<_>>(),
                 args.iter().map(OsStr::new).collect::<Vec<_>>()
             );
-            assert_eq!(
-                invocation.display_args(),
-                display_args(
-                    &args[index + 1..]
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect::<Vec<_>>()
-                )
-            );
+            assert_eq!(invocation.display_args(), display_args(&args));
         }
     }
 

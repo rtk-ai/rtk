@@ -237,6 +237,122 @@ exit 101
 }
 
 #[test]
+fn tracking_and_verbose_output_preserve_the_full_argument_list() {
+    let dir = common::tempdir();
+    let cargo = dir.path().join("cargo");
+    fs::write(
+        &cargo,
+        r#"#!/bin/sh
+printf '%s\n' "$@" > "$CARGO_ARGV_FILE"
+printf '    Checking demo v0.1.0\n' >&2
+printf 'error[E0308]: mismatched types\n --> src/lib.rs:1:1\n\n' >&2
+printf 'error: could not compile demo due to 1 previous error\n' >&2
+exit 101
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(std::iter::once(dir.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    let argv_file = dir.path().join("argv");
+    let cases: &[(&str, &[&str], bool)] = &[
+        ("b", &[], false),
+        ("check", &[], false),
+        ("t", &[], false),
+        ("clippy", &[], false),
+        ("install", &[], false),
+        ("nextest", &["run"], false),
+        ("b", &["--message-format=json"], false),
+        ("c", &["--message-format=json"], false),
+        ("clippy", &["--message-format=json"], false),
+        ("fmt", &[], true),
+        ("check", &["--unit-graph"], true),
+    ];
+    for (case, &(subcommand, extra, passthrough)) in cases.iter().enumerate() {
+        let args: Vec<_> = [
+            "+nightly",
+            "-Zunstable-options",
+            "-C",
+            "some path",
+            "--config",
+            "build.jobs=2",
+            "--color",
+            "never",
+            subcommand,
+        ]
+        .into_iter()
+        .chain(extra.iter().copied())
+        .chain([
+            "--manifest-path",
+            "some workspace/Cargo.toml",
+            "--",
+            "",
+            "--nocapture",
+        ])
+        .collect();
+        let extra_display = if extra.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", extra.join(" "))
+        };
+        let expected = format!(
+            "cargo +nightly -Zunstable-options -C 'some path' --config build.jobs=2 --color never {subcommand}{extra_display} --manifest-path 'some workspace/Cargo.toml' -- '' --nocapture"
+        );
+        for verbose in [false, true] {
+            let db = dir.path().join(format!("{case}-{verbose}.db"));
+            let mut cmd = common::rtk_command();
+            if verbose {
+                cmd.arg("-v");
+            }
+            let output = cmd
+                .arg("cargo")
+                .args(&args)
+                .env("PATH", &path)
+                .env("CARGO_ARGV_FILE", &argv_file)
+                .env("RTK_DB_PATH", &db)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(101), "{args:?}: {output:?}");
+            assert_eq!(
+                fs::read_to_string(&argv_file).unwrap(),
+                format!("{}\n", args.join("\n"))
+            );
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            let (original, rtk): (String, String) = conn
+                .query_row("SELECT original_cmd, rtk_cmd FROM commands", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .unwrap();
+            assert_eq!(original, expected, "{args:?}");
+            assert_eq!(
+                rtk,
+                format!(
+                    "{} {expected}",
+                    if passthrough {
+                        "rtk:passthrough"
+                    } else {
+                        "rtk"
+                    }
+                )
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let log = if passthrough {
+                format!("cargo passthrough: {args:?}")
+            } else {
+                format!("Running: {expected}")
+            };
+            assert_eq!(
+                stderr.lines().filter(|line| *line == log).count(),
+                usize::from(verbose),
+                "{args:?}: {stderr}"
+            );
+        }
+    }
+}
+
+#[test]
 fn parsed_information_modes_are_interpreted_by_command_runners() {
     let dir = common::tempdir();
     let cargo = dir.path().join("cargo");
