@@ -236,39 +236,19 @@ enum HarnessOption {
     TerseOutput,
 }
 
-impl CargoOption {
-    fn flag(self) -> OptionDefinition<Self> {
-        OptionDefinition {
-            value: None,
-            meaning: Some(self),
-        }
-    }
-
-    fn value(self) -> OptionDefinition<Self> {
-        OptionDefinition {
-            value: Some(ValueSpec::value()),
-            meaning: Some(self),
-        }
-    }
-}
-
 impl CommonOptions {
     fn lookup(kind: TokenKind, name: &str) -> Option<OptionDefinition<CargoOption>> {
         // Shared globals retain their definitions on either side of a built-in command.
         // https://github.com/rust-lang/cargo/blob/master/src/bin/cargo/cli.rs
         Some(match (kind, name) {
             (TokenKind::Long, "locked" | "offline" | "frozen" | "quiet" | "verbose")
-            | (TokenKind::Short, "q" | "v") => OptionDefinition {
-                value: None,
-                meaning: None,
-            },
-            (TokenKind::Long, "config" | "color") => OptionDefinition {
-                value: Some(ValueSpec::value()),
-                meaning: None,
-            },
-            (TokenKind::Short, "Z") => CargoOption::Common(CommonOption::Unstable).value(),
+            | (TokenKind::Short, "q" | "v") => OptionDefinition::flag(None),
+            (TokenKind::Long, "config" | "color") => OptionDefinition::value(None),
+            (TokenKind::Short, "Z") => {
+                OptionDefinition::value(Some(CargoOption::Common(CommonOption::Unstable)))
+            }
             (TokenKind::Long, "help") | (TokenKind::Short, "h") => {
-                CargoOption::Common(CommonOption::Help).flag()
+                OptionDefinition::flag(Some(CargoOption::Common(CommonOption::Help)))
             }
             _ => return None,
         })
@@ -287,16 +267,15 @@ impl NoCommandOptions {
         Some(match (kind, name) {
             // -C changes Cargo's working directory and is only accepted before the command.
             // https://doc.rust-lang.org/cargo/commands/cargo.html#option-cargo--C
-            (TokenKind::Short, "C") => OptionDefinition {
-                value: Some(ValueSpec::value()),
-                meaning: None,
-            },
+            (TokenKind::Short, "C") => OptionDefinition::value(None),
             (TokenKind::Long, "version") | (TokenKind::Short, "V") => {
-                CargoOption::Root(RootOption::ShowVersion).flag()
+                OptionDefinition::flag(Some(CargoOption::Root(RootOption::ShowVersion)))
             }
-            (TokenKind::Long, "list") => CargoOption::Root(RootOption::ListCommands).flag(),
+            (TokenKind::Long, "list") => {
+                OptionDefinition::flag(Some(CargoOption::Root(RootOption::ListCommands)))
+            }
             (TokenKind::Long, "explain") => {
-                CargoOption::Root(RootOption::ExplainDiagnostic).value()
+                OptionDefinition::value(Some(CargoOption::Root(RootOption::ExplainDiagnostic)))
             }
             _ => return CommonOptions::lookup(kind, name),
         })
@@ -314,11 +293,11 @@ impl NoCommandOptions {
 impl CompilationOptions {
     fn lookup(kind: TokenKind, name: &str) -> Option<OptionDefinition<CargoOption>> {
         Some(match (kind, name) {
-            (TokenKind::Long, "message-format") => {
-                CargoOption::Compilation(CompilationOption::DiagnosticFormat).value()
-            }
+            (TokenKind::Long, "message-format") => OptionDefinition::value(Some(
+                CargoOption::Compilation(CompilationOption::DiagnosticFormat),
+            )),
             (TokenKind::Long, "unit-graph") => {
-                CargoOption::Compilation(CompilationOption::UnitGraph).flag()
+                OptionDefinition::flag(Some(CargoOption::Compilation(CompilationOption::UnitGraph)))
             }
             _ => return None,
         })
@@ -340,9 +319,11 @@ impl ClippyOptions {
     fn lookup(kind: TokenKind, name: &str) -> Option<OptionDefinition<CargoOption>> {
         Some(match (kind, name) {
             (TokenKind::Long, "version") | (TokenKind::Short, "V") => {
-                CargoOption::Clippy(ClippyOption::ShowVersion).flag()
+                OptionDefinition::flag(Some(CargoOption::Clippy(ClippyOption::ShowVersion)))
             }
-            (TokenKind::Long, "explain") => CargoOption::Clippy(ClippyOption::ExplainLint).value(),
+            (TokenKind::Long, "explain") => {
+                OptionDefinition::value(Some(CargoOption::Clippy(ClippyOption::ExplainLint)))
+            }
             _ => return CompilationOptions::lookup(kind, name),
         })
     }
@@ -350,8 +331,9 @@ impl ClippyOptions {
 
 impl TestOptions {
     fn lookup(kind: TokenKind, name: &str) -> Option<OptionDefinition<CargoOption>> {
-        (kind == TokenKind::Long && name == "unit-graph")
-            .then(|| CargoOption::Compilation(CompilationOption::UnitGraph).flag())
+        (kind == TokenKind::Long && name == "unit-graph").then(|| {
+            OptionDefinition::flag(Some(CargoOption::Compilation(CompilationOption::UnitGraph)))
+        })
     }
 }
 
@@ -360,11 +342,10 @@ impl InstallOptions {
         Some(match (kind, name) {
             // Consume the crate version without recording a version-display request.
             // https://doc.rust-lang.org/cargo/commands/cargo-install.html#install-options
-            (TokenKind::Long, "version" | "vers") => OptionDefinition {
-                value: Some(ValueSpec::value()),
-                meaning: None,
-            },
-            (TokenKind::Long, "list") => CargoOption::Install(InstallOption::ListPackages).flag(),
+            (TokenKind::Long, "version" | "vers") => OptionDefinition::value(None),
+            (TokenKind::Long, "list") => {
+                OptionDefinition::flag(Some(CargoOption::Install(InstallOption::ListPackages)))
+            }
             _ => return CompilationOptions::lookup(kind, name),
         })
     }
@@ -376,26 +357,23 @@ impl NextestOptions {
             (TokenKind::Long, "version") | (TokenKind::Short, "V")
                 if self.operation == NextestOperation::Unspecified =>
             {
-                CargoOption::Nextest(NextestOption::ShowVersion).flag()
+                OptionDefinition::flag(Some(CargoOption::Nextest(NextestOption::ShowVersion)))
             }
             (TokenKind::Long, "message-format") if self.operation == NextestOperation::Run => {
-                CargoOption::Nextest(NextestOption::OutputFormat).value()
+                OptionDefinition::value(Some(CargoOption::Nextest(NextestOption::OutputFormat)))
             }
             // Both spellings describe compiler diagnostics, unlike Nextest's result format.
             // https://nexte.st/docs/running/#cargo-build-options
-            (TokenKind::Long, "cargo-message-format") => {
-                CargoOption::Compilation(CompilationOption::DiagnosticFormat).value()
-            }
+            (TokenKind::Long, "cargo-message-format") => OptionDefinition::value(Some(
+                CargoOption::Compilation(CompilationOption::DiagnosticFormat),
+            )),
             (TokenKind::Long, "unit-graph") => {
-                CargoOption::Compilation(CompilationOption::UnitGraph).flag()
+                OptionDefinition::flag(Some(CargoOption::Compilation(CompilationOption::UnitGraph)))
             }
             (
                 TokenKind::Long,
                 "config-file" | "user-config-file" | "tool-config-file" | "manifest-path",
-            ) => OptionDefinition {
-                value: Some(ValueSpec::value()),
-                meaning: None,
-            },
+            ) => OptionDefinition::value(None),
             _ => return None,
         })
     }
@@ -472,20 +450,19 @@ impl TestHarnessOptions {
     fn lookup(kind: TokenKind, name: &str) -> Option<OptionDefinition<CargoOption>> {
         Some(match (kind, name) {
             (TokenKind::Long, "help") | (TokenKind::Short, "h") => {
-                CargoOption::Harness(HarnessOption::Help).flag()
+                OptionDefinition::flag(Some(CargoOption::Harness(HarnessOption::Help)))
             }
-            (TokenKind::Long, "list") => CargoOption::Harness(HarnessOption::ListTests).flag(),
+            (TokenKind::Long, "list") => {
+                OptionDefinition::flag(Some(CargoOption::Harness(HarnessOption::ListTests)))
+            }
             (TokenKind::Long, "quiet") | (TokenKind::Short, "q") => {
-                CargoOption::Harness(HarnessOption::TerseOutput).flag()
+                OptionDefinition::flag(Some(CargoOption::Harness(HarnessOption::TerseOutput)))
             }
             (TokenKind::Long, "format") => {
-                CargoOption::Harness(HarnessOption::OutputFormat).value()
+                OptionDefinition::value(Some(CargoOption::Harness(HarnessOption::OutputFormat)))
             }
             (TokenKind::Long, "skip" | "test-threads" | "color" | "logfile")
-            | (TokenKind::Short, "Z") => OptionDefinition {
-                value: Some(ValueSpec::value()),
-                meaning: None,
-            },
+            | (TokenKind::Short, "Z") => OptionDefinition::value(None),
             _ => return None,
         })
     }

@@ -489,6 +489,23 @@ pub struct OptionDefinition<K> {
     pub meaning: Option<K>,
 }
 
+impl<K> OptionDefinition<K> {
+    /// Define an option with an explicit consumption rule and optional semantic tag.
+    pub const fn new(value: Option<ValueSpec>, meaning: Option<K>) -> Self {
+        Self { value, meaning }
+    }
+
+    /// An option that takes no value, with or without a semantic tag.
+    pub const fn flag(meaning: Option<K>) -> Self {
+        Self::new(None, meaning)
+    }
+
+    /// An option accepting an attached or separate value under the default rules.
+    pub const fn value(meaning: Option<K>) -> Self {
+        Self::new(Some(ValueSpec::value()), meaning)
+    }
+}
+
 /// A completed option, free positional, or separator. Separate values are delivered
 /// with their owner, never as independent events. Tokens have no collection links yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -801,10 +818,7 @@ impl<'a> TokenHandler<'a> for TokenCollector<'a, '_> {
     type Meaning = ();
 
     fn lookup(&mut self, token: &Token<'a>) -> Option<OptionDefinition<()>> {
-        Some(OptionDefinition {
-            value: self.action(token),
-            meaning: None,
-        })
+        Some(OptionDefinition::new(self.action(token), None))
     }
 
     fn visit(&mut self, event: TokenEvent<'a, ()>) -> ControlFlow<()> {

@@ -220,22 +220,12 @@ struct RecordingHandler<'a> {
 impl RecordingHandler<'_> {
     fn definition(name: &str) -> Option<OptionDefinition<&'static str>> {
         Some(match name {
-            "value" | "n" => OptionDefinition {
-                value: Some(ValueSpec::value()),
-                meaning: Some("value"),
-            },
-            "optional" | "o" => OptionDefinition {
-                value: Some(ValueSpec::attached_only()),
-                meaning: Some("value"),
-            },
-            "flag" | "v" => OptionDefinition {
-                value: None,
-                meaning: Some("flag"),
-            },
-            "ignored" => OptionDefinition {
-                value: Some(ValueSpec::value()),
-                meaning: None,
-            },
+            "value" | "n" => OptionDefinition::value(Some("value")),
+            "optional" | "o" => {
+                OptionDefinition::new(Some(ValueSpec::attached_only()), Some("value"))
+            }
+            "flag" | "v" => OptionDefinition::flag(Some("flag")),
+            "ignored" => OptionDefinition::value(None),
             _ => return None,
         })
     }
