@@ -310,9 +310,10 @@ fn report_data_dir_privacy() {}
 ///
 /// Behavior:
 /// - No resolvable Claude directory: silent, continue (no hook to locate)
-/// - `Verified` / `NotInstalled` / `NoBaseline`: silent, continue
+/// - No hook script, with or without a leftover baseline: silent, continue
+/// - `Verified` / `NoBaseline`: silent, continue
 /// - `Tampered`: print warning to stderr, exit 1
-/// - `OrphanedHash`: warn to stderr, continue
+/// - Damaged baseline or unreadable hook: return the error with the restore command
 ///
 /// When RTK uses native binary commands (no script file), integrity
 /// checking is a no-op — there is no script to tamper with.
@@ -337,8 +338,12 @@ fn runtime_check_in(hook_path: Result<PathBuf>) -> Result<()> {
         return Ok(());
     }
 
-    match verify_hook_at(&hook_path)? {
-        IntegrityStatus::Verified | IntegrityStatus::NotInstalled => {
+    // Flattened rather than `.context()`, which would print the hint before the cause.
+    let status = verify_hook_at(&hook_path)
+        .map_err(|err| anyhow::anyhow!("{err:#}\n  To restore:  rtk init -g --auto-patch"))?;
+
+    match status {
+        IntegrityStatus::Verified => {
             // All good, proceed
         }
         IntegrityStatus::NoBaseline => {
@@ -356,16 +361,15 @@ fn runtime_check_in(hook_path: Result<PathBuf>) -> Result<()> {
                 actual.get(..16).unwrap_or(&actual)
             );
             eprintln!();
-            eprintln!("  The hook at ~/.claude/hooks/rtk-rewrite.sh has been modified.");
+            eprintln!("  The hook at {} has been modified.", hook_path.display());
             eprintln!("  This may indicate tampering. RTK will not execute.");
             eprintln!();
             eprintln!("  To restore:  rtk init -g --auto-patch");
             eprintln!("  To inspect:  rtk verify");
             std::process::exit(1);
         }
-        IntegrityStatus::OrphanedHash => {
-            eprintln!("rtk: warning: hash file exists but hook is missing");
-            eprintln!("  Run `rtk init -g` to reinstall.");
+        IntegrityStatus::NotInstalled | IntegrityStatus::OrphanedHash => {
+            // Only if the hook vanished after the check above.
             // Don't block — hook is gone, nothing to exploit
         }
     }
@@ -413,6 +417,53 @@ mod tests {
         let hook_path = explicit.map(|dir| dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE));
         let err = runtime_check_in(hook_path).unwrap_err();
         assert!(err.to_string().contains("Invalid hash format"));
+    }
+
+    /// The gate's error as the user reads it (`rtk: {:#}`): the cause, then the way out.
+    fn assert_offers_restore_command(hook: PathBuf, cause: &str) {
+        let message = format!("{:#}", runtime_check_in(Ok(hook)).unwrap_err());
+        assert!(message.contains(cause), "{message}");
+        assert!(
+            message.ends_with("\n  To restore:  rtk init -g --auto-patch"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn runtime_check_damaged_baseline_offers_restore_command() {
+        for (baseline, cause) in [
+            (&b""[..], "Empty hash file"),
+            (b"not a hash", "Invalid hash format"),
+            (b"xyz  rtk-rewrite.sh\n", "Invalid SHA-256 hash"),
+            (b"\xff\xfe  rtk-rewrite.sh\n", "Failed to read hash file"),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let hook = temp.path().join(REWRITE_HOOK_FILE);
+            fs::write(&hook, "#!/bin/sh\n").unwrap();
+            fs::write(temp.path().join(HASH_FILENAME), baseline).unwrap();
+            assert_offers_restore_command(hook, cause);
+        }
+    }
+
+    #[test]
+    fn runtime_check_unreadable_path_offers_restore_command() {
+        // A directory is unreadable as a file for every user on every platform,
+        // where chmod 000 means nothing to root and nothing on Windows.
+        let temp = TempDir::new().unwrap();
+        let hook = temp.path().join(REWRITE_HOOK_FILE);
+        fs::create_dir(&hook).unwrap();
+        fs::write(
+            temp.path().join(HASH_FILENAME),
+            format!("{}  {REWRITE_HOOK_FILE}\n", "0".repeat(64)),
+        )
+        .unwrap();
+        assert_offers_restore_command(hook, "Failed to read file");
+
+        let temp = TempDir::new().unwrap();
+        let hook = temp.path().join(REWRITE_HOOK_FILE);
+        fs::write(&hook, "#!/bin/sh\n").unwrap();
+        fs::create_dir(temp.path().join(HASH_FILENAME)).unwrap();
+        assert_offers_restore_command(hook, "Failed to read hash file");
     }
 
     #[test]
