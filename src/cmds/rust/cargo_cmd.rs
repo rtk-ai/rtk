@@ -16,114 +16,45 @@ use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CargoCommand {
-    Build {
-        message_format: MessageFormat,
-        unit_graph: bool,
-    },
-    Check {
-        message_format: MessageFormat,
-        unit_graph: bool,
-    },
-    Clippy {
-        message_format: MessageFormat,
-        unit_graph: bool,
-        version: bool,
-        explain: bool,
-    },
-    Test {
-        unit_graph: bool,
-        harness_help: bool,
-        harness_list: bool,
-        harness_format: TestFormat,
-    },
-    Install {
-        message_format: MessageFormat,
-        unit_graph: bool,
-        list: bool,
-    },
-    Nextest {
-        operation: NextestOperation,
-        message_format: NextestFormat,
-        cargo_message_format: MessageFormat,
-        version: bool,
-        unit_graph: bool,
-        harness_help: bool,
-        harness_list: bool,
-        harness_format: TestFormat,
-    },
+    Build(CompilationOptions),
+    Check(CompilationOptions),
+    Clippy(ClippyOptions),
+    Test(TestOptions),
+    Install(InstallOptions),
+    Nextest(NextestOptions),
     Fmt,
 }
 
 impl CargoCommand {
-    const ALL: [Self; 7] = [
-        Self::Build {
-            message_format: MessageFormat::Human,
-            unit_graph: false,
-        },
-        Self::Check {
-            message_format: MessageFormat::Human,
-            unit_graph: false,
-        },
-        Self::Clippy {
-            message_format: MessageFormat::Human,
-            unit_graph: false,
-            version: false,
-            explain: false,
-        },
-        Self::Test {
-            unit_graph: false,
-            harness_help: false,
-            harness_list: false,
-            harness_format: TestFormat::Pretty,
-        },
-        Self::Install {
-            message_format: MessageFormat::Human,
-            unit_graph: false,
-            list: false,
-        },
-        Self::Nextest {
-            operation: NextestOperation::Unspecified,
-            message_format: NextestFormat::Human,
-            cargo_message_format: MessageFormat::Human,
-            version: false,
-            unit_graph: false,
-            harness_help: false,
-            harness_list: false,
-            harness_format: TestFormat::Pretty,
-        },
-        Self::Fmt,
-    ];
     fn named(name: &str) -> Option<Self> {
         // Canonical names have one source; built-in aliases are separate.
         // https://doc.rust-lang.org/cargo/reference/config.html#alias
         match name {
-            "b" => Some(Self::Build {
-                message_format: MessageFormat::Human,
-                unit_graph: false,
-            }),
-            "c" => Some(Self::Check {
-                message_format: MessageFormat::Human,
-                unit_graph: false,
-            }),
-            "t" => Some(Self::Test {
-                unit_graph: false,
-                harness_help: false,
-                harness_list: false,
-                harness_format: TestFormat::Pretty,
-            }),
-            name => Self::ALL
-                .into_iter()
-                .find(|command| command.as_str() == name),
+            "b" => Some(Self::Build(Default::default())),
+            "c" => Some(Self::Check(Default::default())),
+            "t" => Some(Self::Test(Default::default())),
+            name => [
+                Self::Build(Default::default()),
+                Self::Check(Default::default()),
+                Self::Clippy(Default::default()),
+                Self::Test(Default::default()),
+                Self::Install(Default::default()),
+                Self::Nextest(Default::default()),
+                Self::Fmt,
+            ]
+            .into_iter()
+            .find(|command| command.as_str() == name),
         }
     }
+
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Build { .. } => "build",
-            Self::Check { .. } => "check",
-            Self::Clippy { .. } => "clippy",
-            Self::Test { .. } => "test",
-            Self::Install { .. } => "install",
-            Self::Nextest { .. } => "nextest",
+            Self::Build(_) => "build",
+            Self::Check(_) => "check",
+            Self::Clippy(_) => "clippy",
+            Self::Test(_) => "test",
+            Self::Install(_) => "install",
+            Self::Nextest(_) => "nextest",
             Self::Fmt => "fmt",
         }
     }
@@ -163,12 +94,39 @@ impl MessageFormat {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CompilationOptions {
+    pub message_format: MessageFormat,
+    pub unit_graph: bool,
+}
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ClippyOptions {
+    pub compilation: CompilationOptions,
+    pub version: bool,
+    pub explain: bool,
+}
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TestOptions {
+    pub unit_graph: bool,
+    pub harness: TestHarnessOptions,
+}
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct InstallOptions {
+    pub compilation: CompilationOptions,
+    pub list: bool,
+}
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum TestFormat {
     #[default]
     Pretty,
     Terse,
     Json,
     Unknown,
+}
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TestHarnessOptions {
+    pub help: bool,
+    pub list: bool,
+    pub format: TestFormat,
 }
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum NextestOperation {
@@ -185,6 +143,15 @@ pub enum NextestFormat {
     LibtestJson,
     LibtestJsonPlus,
     Unknown,
+}
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct NextestOptions {
+    pub operation: NextestOperation,
+    pub message_format: NextestFormat,
+    pub cargo_message_format: MessageFormat,
+    pub version: bool,
+    pub unit_graph: bool,
+    pub harness: TestHarnessOptions,
 }
 
 #[derive(Debug)]
@@ -229,38 +196,38 @@ impl CargoOption {
             _ => {}
         }
         match (command?, kind, name) {
-            (CargoCommand::Install { .. }, TokenKind::Long, "version" | "vers") => {
+            (CargoCommand::Install(_), TokenKind::Long, "version" | "vers") => {
                 Some(Self::InstallVersion)
             }
-            (CargoCommand::Clippy { .. }, TokenKind::Long, "version")
-            | (CargoCommand::Clippy { .. }, TokenKind::Short, "V") => Some(Self::Version),
-            (CargoCommand::Nextest { operation, .. }, TokenKind::Long, "version")
-            | (CargoCommand::Nextest { operation, .. }, TokenKind::Short, "V")
-                if *operation == NextestOperation::Unspecified =>
+            (CargoCommand::Clippy(_), TokenKind::Long, "version")
+            | (CargoCommand::Clippy(_), TokenKind::Short, "V") => Some(Self::Version),
+            (CargoCommand::Nextest(options), TokenKind::Long, "version")
+            | (CargoCommand::Nextest(options), TokenKind::Short, "V")
+                if options.operation == NextestOperation::Unspecified =>
             {
                 Some(Self::Version)
             }
-            (CargoCommand::Nextest { operation, .. }, TokenKind::Long, "message-format")
-                if *operation == NextestOperation::Run =>
+            (CargoCommand::Nextest(options), TokenKind::Long, "message-format")
+                if options.operation == NextestOperation::Run =>
             {
                 Some(Self::NextestFormat)
             }
-            (CargoCommand::Nextest { .. }, TokenKind::Long, "cargo-message-format") => {
+            (CargoCommand::Nextest(_), TokenKind::Long, "cargo-message-format") => {
                 Some(Self::CargoMessageFormat)
             }
             (
-                CargoCommand::Build { .. }
-                | CargoCommand::Check { .. }
-                | CargoCommand::Clippy { .. }
-                | CargoCommand::Install { .. },
+                CargoCommand::Build(_)
+                | CargoCommand::Check(_)
+                | CargoCommand::Clippy(_)
+                | CargoCommand::Install(_),
                 TokenKind::Long,
                 "message-format",
             ) => Some(Self::MessageFormat),
-            (CargoCommand::Clippy { .. }, TokenKind::Long, "explain") => Some(Self::Explain),
-            (CargoCommand::Install { .. }, TokenKind::Long, "list") => Some(Self::List),
+            (CargoCommand::Clippy(_), TokenKind::Long, "explain") => Some(Self::Explain),
+            (CargoCommand::Install(_), TokenKind::Long, "list") => Some(Self::List),
             (_, TokenKind::Long, "unit-graph") => Some(Self::UnitGraph),
             (
-                CargoCommand::Nextest { .. },
+                CargoCommand::Nextest(_),
                 TokenKind::Long,
                 "config-file" | "user-config-file" | "tool-config-file" | "manifest-path",
             ) => Some(Self::GlobalValue),
@@ -393,22 +360,12 @@ fn read_command_options<T: AsRef<str>>(
         for token in &tokenizer.tokens()[range] {
             if token.kind == TokenKind::DashDash {
                 // A distinct program owns the suffix; resume tokenization with its grammar,
-                // retaining source indices. No Cargo rule applies to this region.
+                // retaining all original source indices. No Cargo rule applies to this region.
                 // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
                 match command {
-                    CargoCommand::Test {
-                        harness_help,
-                        harness_list,
-                        harness_format,
-                        ..
-                    }
-                    | CargoCommand::Nextest {
-                        harness_help,
-                        harness_list,
-                        harness_format,
-                        ..
-                    } => {
-                        read_test_arguments(tokenizer, harness_help, harness_list, harness_format);
+                    CargoCommand::Test(options) => options.harness = read_test_arguments(tokenizer),
+                    CargoCommand::Nextest(options) => {
+                        options.harness = read_test_arguments(tokenizer)
                     }
                     _ => {}
                 }
@@ -416,10 +373,10 @@ fn read_command_options<T: AsRef<str>>(
             }
             if token.kind == TokenKind::Positional {
                 if token.is_free_positional()
-                    && let CargoCommand::Nextest { operation, .. } = command
-                    && *operation == NextestOperation::Unspecified
+                    && let CargoCommand::Nextest(options) = command
+                    && options.operation == NextestOperation::Unspecified
                 {
-                    *operation = match token.text {
+                    options.operation = match token.text {
                         "run" => NextestOperation::Run,
                         "list" => NextestOperation::List,
                         _ => NextestOperation::Other,
@@ -429,10 +386,10 @@ fn read_command_options<T: AsRef<str>>(
             }
             let Some(option) = CargoOption::lookup(Some(command), token.kind, token.text) else {
                 // Unknown arity before a nested operation cannot identify that operation safely.
-                if let CargoCommand::Nextest { operation, .. } = command
-                    && *operation == NextestOperation::Unspecified
+                if let CargoCommand::Nextest(options) = command
+                    && options.operation == NextestOperation::Unspecified
                 {
-                    *operation = NextestOperation::Other;
+                    options.operation = NextestOperation::Other;
                 }
                 continue;
             };
@@ -441,53 +398,56 @@ fn read_command_options<T: AsRef<str>>(
                 CargoOption::Help => help = true,
                 CargoOption::Unstable => *unstable_help |= value == Some("help"),
                 CargoOption::MessageFormat => {
-                    if let Some(value) = value
-                        && let CargoCommand::Build { message_format, .. }
-                        | CargoCommand::Check { message_format, .. }
-                        | CargoCommand::Clippy { message_format, .. }
-                        | CargoCommand::Install { message_format, .. } = command
-                    {
-                        *message_format = MessageFormat::read(value);
+                    if let Some(value) = value {
+                        match command {
+                            CargoCommand::Build(options) | CargoCommand::Check(options) => {
+                                options.message_format = MessageFormat::read(value);
+                            }
+                            CargoCommand::Clippy(options) => {
+                                options.compilation.message_format = MessageFormat::read(value);
+                            }
+                            CargoCommand::Install(options) => {
+                                options.compilation.message_format = MessageFormat::read(value);
+                            }
+                            _ => {}
+                        }
                     }
                 }
-                CargoOption::UnitGraph => {
-                    if let CargoCommand::Build { unit_graph, .. }
-                    | CargoCommand::Check { unit_graph, .. }
-                    | CargoCommand::Clippy { unit_graph, .. }
-                    | CargoCommand::Test { unit_graph, .. }
-                    | CargoCommand::Install { unit_graph, .. }
-                    | CargoCommand::Nextest { unit_graph, .. } = command
-                    {
-                        *unit_graph = true;
+                CargoOption::UnitGraph => match command {
+                    CargoCommand::Build(options) | CargoCommand::Check(options) => {
+                        options.unit_graph = true
                     }
-                }
-                CargoOption::Version => {
-                    if let CargoCommand::Clippy { version, .. }
-                    | CargoCommand::Nextest { version, .. } = command
-                    {
-                        *version = true;
-                    }
-                }
+                    CargoCommand::Clippy(options) => options.compilation.unit_graph = true,
+                    CargoCommand::Install(options) => options.compilation.unit_graph = true,
+                    CargoCommand::Test(options) => options.unit_graph = true,
+                    CargoCommand::Nextest(options) => options.unit_graph = true,
+                    _ => {}
+                },
+                CargoOption::Version => match command {
+                    CargoCommand::Clippy(options) => options.version = true,
+                    CargoCommand::Nextest(options) => options.version = true,
+                    _ => {}
+                },
                 // install's --version/--vers is consumed by its grammar and yields no fact
                 // needed by RTK. https://doc.rust-lang.org/cargo/commands/cargo-install.html#install-options
                 CargoOption::InstallVersion => {}
                 CargoOption::Explain => {
-                    if let CargoCommand::Clippy { explain, .. } = command {
-                        *explain = true;
+                    if let CargoCommand::Clippy(options) = command {
+                        options.explain = true;
                     }
                 }
                 CargoOption::List => {
-                    if let CargoCommand::Install { list, .. } = command {
-                        *list = true;
+                    if let CargoCommand::Install(options) = command {
+                        options.list = true;
                     }
                 }
                 // Nextest's test-result format differs from Cargo's diagnostic format.
                 // https://nexte.st/docs/running/#controlling-nextests-output
                 CargoOption::NextestFormat => {
                     if let Some(value) = value
-                        && let CargoCommand::Nextest { message_format, .. } = command
+                        && let CargoCommand::Nextest(options) = command
                     {
-                        *message_format = match value {
+                        options.message_format = match value {
                             "human" => NextestFormat::Human,
                             "libtest-json" => NextestFormat::LibtestJson,
                             "libtest-json-plus" => NextestFormat::LibtestJsonPlus,
@@ -497,12 +457,9 @@ fn read_command_options<T: AsRef<str>>(
                 }
                 CargoOption::CargoMessageFormat => {
                     if let Some(value) = value
-                        && let CargoCommand::Nextest {
-                            cargo_message_format,
-                            ..
-                        } = command
+                        && let CargoCommand::Nextest(options) = command
                     {
-                        *cargo_message_format = MessageFormat::read(value);
+                        options.cargo_message_format = MessageFormat::read(value);
                     }
                 }
                 _ => {}
@@ -514,13 +471,11 @@ fn read_command_options<T: AsRef<str>>(
 
 fn read_test_arguments<T: AsRef<str>>(
     tokenizer: &mut arg_tokenizer::Tokenizer<'_, T>,
-    help: &mut bool,
-    list: &mut bool,
-    format: &mut TestFormat,
-) {
+) -> TestHarnessOptions {
     // libtest has its own -- boundary and --format, not Cargo's --message-format.
     // https://doc.rust-lang.org/rustc/tests/index.html#output-options
     tokenizer.begin_region(Dialect::Clap);
+    let mut options = TestHarnessOptions::default();
     while let Some(range) = tokenizer.next_argument(&|kind, name| {
         (kind == TokenKind::Long
             && matches!(
@@ -532,13 +487,15 @@ fn read_test_arguments<T: AsRef<str>>(
     }) {
         for token in &tokenizer.tokens()[range] {
             match (token.kind, token.text) {
-                (TokenKind::DashDash, _) => return,
-                (TokenKind::Long, "help") | (TokenKind::Short, "h") => *help = true,
-                (TokenKind::Long, "list") => *list = true,
-                (TokenKind::Long, "quiet") | (TokenKind::Short, "q") => *format = TestFormat::Terse,
+                (TokenKind::DashDash, _) => return options,
+                (TokenKind::Long, "help") | (TokenKind::Short, "h") => options.help = true,
+                (TokenKind::Long, "list") => options.list = true,
+                (TokenKind::Long, "quiet") | (TokenKind::Short, "q") => {
+                    options.format = TestFormat::Terse
+                }
                 (TokenKind::Long, "format") => {
                     if let Some(value) = token.value(tokenizer.tokens()) {
-                        *format = match value {
+                        options.format = match value {
                             "pretty" => TestFormat::Pretty,
                             "terse" => TestFormat::Terse,
                             "json" => TestFormat::Json,
@@ -550,6 +507,7 @@ fn read_test_arguments<T: AsRef<str>>(
             }
         }
     }
+    options
 }
 
 pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
@@ -561,12 +519,12 @@ pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
         return run_passthrough(args, verbose);
     }
     match invocation.command() {
-        CargoCommand::Build { .. } => run_build(&invocation, verbose),
-        CargoCommand::Check { .. } => run_check(&invocation, verbose),
-        CargoCommand::Clippy { .. } => run_clippy(&invocation, verbose),
-        CargoCommand::Test { .. } => run_test(&invocation, verbose),
-        CargoCommand::Install { .. } => run_install(&invocation, verbose),
-        CargoCommand::Nextest { .. } => run_nextest(&invocation, verbose),
+        CargoCommand::Build(options) => run_build(&invocation, options, verbose),
+        CargoCommand::Check(options) => run_check(&invocation, options, verbose),
+        CargoCommand::Clippy(options) => run_clippy(&invocation, options, verbose),
+        CargoCommand::Test(options) => run_test(&invocation, options, verbose),
+        CargoCommand::Install(options) => run_install(&invocation, options, verbose),
+        CargoCommand::Nextest(options) => run_nextest(&invocation, options, verbose),
         CargoCommand::Fmt => run_passthrough(args, verbose),
     }
 }
@@ -870,18 +828,15 @@ fn run_cargo_streamed(
     )
 }
 
-fn run_build(invocation: &CargoInvocation<'_>, verbose: u8) -> Result<i32> {
-    let CargoCommand::Build {
-        message_format,
-        unit_graph,
-    } = *invocation.command()
-    else {
-        unreachable!("run_build requires the build command");
-    };
-    if unit_graph || message_format == MessageFormat::Unknown {
+fn run_build(
+    invocation: &CargoInvocation<'_>,
+    options: &CompilationOptions,
+    verbose: u8,
+) -> Result<i32> {
+    if options.unit_graph || options.message_format == MessageFormat::Unknown {
         return run_passthrough(invocation.args, verbose);
     }
-    if message_format == MessageFormat::Json {
+    if options.message_format == MessageFormat::Json {
         return run_cargo_filtered_with_exit(invocation, verbose, |o, exit| {
             filter_cargo_build_labeled(o, "build", exit)
         });
@@ -895,20 +850,14 @@ fn run_build(invocation: &CargoInvocation<'_>, verbose: u8) -> Result<i32> {
     )
 }
 
-fn run_test(invocation: &CargoInvocation<'_>, verbose: u8) -> Result<i32> {
-    let CargoCommand::Test {
-        unit_graph,
-        harness_help,
-        harness_list,
-        harness_format,
-    } = *invocation.command()
-    else {
-        unreachable!("run_test requires the test command");
-    };
-    if unit_graph
-        || harness_help
-        || harness_list
-        || matches!(harness_format, TestFormat::Json | TestFormat::Unknown)
+fn run_test(invocation: &CargoInvocation<'_>, options: &TestOptions, verbose: u8) -> Result<i32> {
+    if options.unit_graph
+        || options.harness.help
+        || options.harness.list
+        || matches!(
+            options.harness.format,
+            TestFormat::Json | TestFormat::Unknown
+        )
     {
         return run_passthrough(invocation.args, verbose);
     }
@@ -923,37 +872,33 @@ fn run_test(invocation: &CargoInvocation<'_>, verbose: u8) -> Result<i32> {
     )
 }
 
-fn run_clippy(invocation: &CargoInvocation<'_>, verbose: u8) -> Result<i32> {
-    let CargoCommand::Clippy {
-        message_format,
-        unit_graph,
-        version,
-        explain,
-    } = *invocation.command()
-    else {
-        unreachable!("run_clippy requires the clippy command");
-    };
-    if version || explain || unit_graph || message_format == MessageFormat::Unknown {
+fn run_clippy(
+    invocation: &CargoInvocation<'_>,
+    options: &ClippyOptions,
+    verbose: u8,
+) -> Result<i32> {
+    if options.version
+        || options.explain
+        || options.compilation.unit_graph
+        || options.compilation.message_format == MessageFormat::Unknown
+    {
         return run_passthrough(invocation.args, verbose);
     }
-    if message_format == MessageFormat::Json {
+    if options.compilation.message_format == MessageFormat::Json {
         return run_cargo_filtered_with_exit(invocation, verbose, filter_cargo_clippy_json);
     }
     run_cargo_filtered(invocation, verbose, filter_cargo_clippy)
 }
 
-fn run_check(invocation: &CargoInvocation<'_>, verbose: u8) -> Result<i32> {
-    let CargoCommand::Check {
-        message_format,
-        unit_graph,
-    } = *invocation.command()
-    else {
-        unreachable!("run_check requires the check command");
-    };
-    if unit_graph || message_format == MessageFormat::Unknown {
+fn run_check(
+    invocation: &CargoInvocation<'_>,
+    options: &CompilationOptions,
+    verbose: u8,
+) -> Result<i32> {
+    if options.unit_graph || options.message_format == MessageFormat::Unknown {
         return run_passthrough(invocation.args, verbose);
     }
-    if message_format == MessageFormat::Json {
+    if options.message_format == MessageFormat::Json {
         return run_cargo_filtered_with_exit(invocation, verbose, |o, exit| {
             filter_cargo_build_labeled(o, "check", exit)
         });
@@ -967,47 +912,42 @@ fn run_check(invocation: &CargoInvocation<'_>, verbose: u8) -> Result<i32> {
     )
 }
 
-fn run_install(invocation: &CargoInvocation<'_>, verbose: u8) -> Result<i32> {
-    let CargoCommand::Install {
-        message_format,
-        unit_graph,
-        list,
-    } = *invocation.command()
-    else {
-        unreachable!("run_install requires the install command");
-    };
-    if list || unit_graph || matches!(message_format, MessageFormat::Json | MessageFormat::Unknown)
+fn run_install(
+    invocation: &CargoInvocation<'_>,
+    options: &InstallOptions,
+    verbose: u8,
+) -> Result<i32> {
+    if options.list
+        || options.compilation.unit_graph
+        || matches!(
+            options.compilation.message_format,
+            MessageFormat::Json | MessageFormat::Unknown
+        )
     {
         return run_passthrough(invocation.args, verbose);
     }
     run_cargo_filtered(invocation, verbose, filter_cargo_install)
 }
 
-fn run_nextest(invocation: &CargoInvocation<'_>, verbose: u8) -> Result<i32> {
-    let CargoCommand::Nextest {
-        operation,
-        message_format,
-        cargo_message_format,
-        version,
-        unit_graph,
-        harness_help,
-        harness_list,
-        harness_format,
-    } = *invocation.command()
-    else {
-        unreachable!("run_nextest requires the nextest command");
-    };
-    if version
-        || operation != NextestOperation::Run
-        || unit_graph
-        || message_format != NextestFormat::Human
+fn run_nextest(
+    invocation: &CargoInvocation<'_>,
+    options: &NextestOptions,
+    verbose: u8,
+) -> Result<i32> {
+    if options.version
+        || options.operation != NextestOperation::Run
+        || options.unit_graph
+        || options.message_format != NextestFormat::Human
         || matches!(
-            cargo_message_format,
+            options.cargo_message_format,
             MessageFormat::Json | MessageFormat::Unknown
         )
-        || harness_help
-        || harness_list
-        || matches!(harness_format, TestFormat::Json | TestFormat::Unknown)
+        || options.harness.help
+        || options.harness.list
+        || matches!(
+            options.harness.format,
+            TestFormat::Json | TestFormat::Unknown
+        )
     {
         return run_passthrough(invocation.args, verbose);
     }
@@ -2090,10 +2030,9 @@ mod tests {
 
     fn diagnostic_format(command: &CargoCommand) -> MessageFormat {
         match command {
-            CargoCommand::Build { message_format, .. }
-            | CargoCommand::Check { message_format, .. }
-            | CargoCommand::Clippy { message_format, .. }
-            | CargoCommand::Install { message_format, .. } => *message_format,
+            CargoCommand::Build(o) | CargoCommand::Check(o) => o.message_format,
+            CargoCommand::Clippy(o) => o.compilation.message_format,
+            CargoCommand::Install(o) => o.compilation.message_format,
             _ => MessageFormat::Human,
         }
     }
@@ -2101,13 +2040,9 @@ mod tests {
         invocation.help()
             || invocation.unstable_help()
             || match invocation.command() {
-                CargoCommand::Clippy { version, .. } => *version,
-                CargoCommand::Test { harness_help, .. } => *harness_help,
-                CargoCommand::Nextest {
-                    version,
-                    harness_help,
-                    ..
-                } => *version || *harness_help,
+                CargoCommand::Clippy(o) => o.version,
+                CargoCommand::Nextest(o) => o.version || o.harness.help,
+                CargoCommand::Test(o) => o.harness.help,
                 _ => false,
             }
     }
@@ -2132,18 +2067,12 @@ mod tests {
             "--message-format=json",
         ];
         let invocation = CargoInvocation::parse(&args).unwrap();
-        let CargoCommand::Clippy {
-            version,
-            explain,
-            message_format,
-            ..
-        } = invocation.command()
-        else {
+        let CargoCommand::Clippy(options) = invocation.command() else {
             panic!("expected clippy")
         };
-        assert!(*version);
-        assert!(*explain);
-        assert_eq!(*message_format, MessageFormat::Json);
+        assert!(options.version);
+        assert!(options.explain);
+        assert_eq!(options.compilation.message_format, MessageFormat::Json);
         assert!(!invocation.help());
 
         for version in [
@@ -2158,10 +2087,10 @@ mod tests {
                 .chain(["--list"])
                 .collect();
             let invocation = CargoInvocation::parse(&args).unwrap();
-            let CargoCommand::Install { list, .. } = invocation.command() else {
+            let CargoCommand::Install(options) = invocation.command() else {
                 panic!("expected install")
             };
-            assert!(*list);
+            assert!(options.list);
             assert!(!invocation.help());
         }
         let invocation = CargoInvocation::parse(&[
@@ -2171,16 +2100,11 @@ mod tests {
             "--unit-graph",
         ])
         .unwrap();
-        let CargoCommand::Check {
-            message_format,
-            unit_graph,
-            ..
-        } = invocation.command()
-        else {
+        let CargoCommand::Check(options) = invocation.command() else {
             panic!("expected check")
         };
-        assert_eq!(*message_format, MessageFormat::Short);
-        assert!(*unit_graph);
+        assert_eq!(options.message_format, MessageFormat::Short);
+        assert!(options.unit_graph);
         assert!(!usage_request(&invocation));
     }
 
@@ -2196,20 +2120,13 @@ mod tests {
             "--cargo-message-format=json",
         ];
         let invocation = CargoInvocation::parse(&args).unwrap();
-        let CargoCommand::Nextest {
-            operation: parsed_operation,
-            message_format,
-            cargo_message_format,
-            version,
-            ..
-        } = invocation.command()
-        else {
+        let CargoCommand::Nextest(options) = invocation.command() else {
             panic!("expected nextest")
         };
-        assert_eq!(*parsed_operation, NextestOperation::Run);
-        assert_eq!(*message_format, NextestFormat::LibtestJsonPlus);
-        assert_eq!(*cargo_message_format, MessageFormat::Json);
-        assert!(*version);
+        assert_eq!(options.operation, NextestOperation::Run);
+        assert_eq!(options.message_format, NextestFormat::LibtestJsonPlus);
+        assert_eq!(options.cargo_message_format, MessageFormat::Json);
+        assert!(options.version);
         for (args, operation) in [
             (vec!["nextest", "list"], NextestOperation::List),
             (vec!["nextest", "show-config"], NextestOperation::Other),
@@ -2219,14 +2136,10 @@ mod tests {
             ),
         ] {
             let invocation = CargoInvocation::parse(&args).unwrap();
-            let CargoCommand::Nextest {
-                operation: parsed_operation,
-                ..
-            } = invocation.command()
-            else {
+            let CargoCommand::Nextest(options) = invocation.command() else {
                 panic!("expected nextest")
             };
-            assert_eq!(*parsed_operation, operation);
+            assert_eq!(options.operation, operation);
         }
     }
 
@@ -2241,34 +2154,19 @@ mod tests {
             "--help",
         ];
         let invocation = CargoInvocation::parse(&args).unwrap();
-        let CargoCommand::Test {
-            harness_help,
-            harness_list,
-            harness_format,
-            ..
-        } = invocation.command()
-        else {
+        let CargoCommand::Test(options) = invocation.command() else {
             panic!("expected test")
         };
-        assert_eq!(*harness_format, TestFormat::Json);
-        assert!(*harness_help);
-        assert!(*harness_list);
+        assert_eq!(options.harness.format, TestFormat::Json);
+        assert!(options.harness.help);
+        assert!(options.harness.list);
         assert!(!invocation.help());
         let args = ["test", "--", "--", "--help", "--list", "--format=json"];
         let invocation = CargoInvocation::parse(&args).unwrap();
-        let CargoCommand::Test {
-            harness_help,
-            harness_list,
-            harness_format,
-            ..
-        } = invocation.command()
-        else {
+        let CargoCommand::Test(options) = invocation.command() else {
             panic!("expected test")
         };
-        assert_eq!(
-            (*harness_help, *harness_list, *harness_format),
-            (false, false, TestFormat::Pretty)
-        );
+        assert_eq!(options.harness, TestHarnessOptions::default());
     }
 
     #[test]
@@ -2456,44 +2354,27 @@ mod tests {
             (
                 vec!["--config", "check", "t"],
                 2,
-                CargoCommand::Test {
-                    unit_graph: false,
-                    harness_help: false,
-                    harness_list: false,
-                    harness_format: TestFormat::Pretty,
-                },
+                CargoCommand::Test(TestOptions::default()),
             ),
             (
                 vec!["+nightly", "-vvZunstable-options", "-Cvery/quiet", "b"],
                 3,
-                CargoCommand::Build {
-                    message_format: MessageFormat::Human,
-                    unit_graph: false,
-                },
+                CargoCommand::Build(CompilationOptions::default()),
             ),
             (
                 vec!["+nightly", "-vC", "some path", "-Z=unstable-options", "c"],
                 4,
-                CargoCommand::Check {
-                    message_format: MessageFormat::Human,
-                    unit_graph: false,
-                },
+                CargoCommand::Check(CompilationOptions::default()),
             ),
             (
                 vec!["+nightly", "-vZ", "unstable-options", "check"],
                 3,
-                CargoCommand::Check {
-                    message_format: MessageFormat::Human,
-                    unit_graph: false,
-                },
+                CargoCommand::Check(CompilationOptions::default()),
             ),
             (
                 vec!["+nightly", "-Z", "unstable-options", "-C", "some path", "c"],
                 5,
-                CargoCommand::Check {
-                    message_format: MessageFormat::Human,
-                    unit_graph: false,
-                },
+                CargoCommand::Check(CompilationOptions::default()),
             ),
             (
                 vec![
@@ -2508,20 +2389,12 @@ mod tests {
                     "b",
                 ],
                 8,
-                CargoCommand::Build {
-                    message_format: MessageFormat::Human,
-                    unit_graph: false,
-                },
+                CargoCommand::Build(CompilationOptions::default()),
             ),
             (
                 vec!["-Zunstable-options", "-Csome path", "-q", "clippy"],
                 3,
-                CargoCommand::Clippy {
-                    message_format: MessageFormat::Human,
-                    unit_graph: false,
-                    version: false,
-                    explain: false,
-                },
+                CargoCommand::Clippy(ClippyOptions::default()),
             ),
         ] {
             let invocation = CargoInvocation::parse(&args).expect("known command");
