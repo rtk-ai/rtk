@@ -1,0 +1,23 @@
+{
+  "name": "rtk",
+  "version": "0.0.0-dev",
+  "description": "RTK for Claude Desktop: compresses command output before it reaches Claude and runs RTK pipelines (delegation to cheaper models) in Cowork tasks, on macOS, Windows and Linux. Bundles the rtk it was released with.",
+  "mcpServers": "./desktop/rtk-desktop.mcpb",
+  "icon": "./icon.png",
+  "author": {
+    "name": "rtk-ai",
+    "url": "https://www.rtk-ai.app"
+  },
+  "homepage": "https://www.rtk-ai.app",
+  "repository": "https://github.com/rtk-ai/rtk",
+  "keywords": [
+    "rtk",
+    "tokens",
+    "cost",
+    "compression",
+    "delegation",
+    "cowork",
+    "claude-desktop"
+  ],
+  "license": "Apache-2.0 (plugin) + BUSL-1.1 (bundled rtk engine, see LICENSE-ENGINE)"
+}

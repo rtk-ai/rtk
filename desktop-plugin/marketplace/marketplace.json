@@ -1,0 +1,23 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "rtk-ai",
+  "description": "RTK for Claude Desktop: shorter command results for Claude and routine work on cheaper models, in every Cowork task.",
+  "owner": {
+    "name": "rtk-ai",
+    "url": "https://www.rtk-ai.app"
+  },
+  "plugins": [
+    {
+      "name": "rtk",
+      "version": "__VERSION__",
+      "source": {
+        "source": "archive",
+        "url": "https://github.com/rtk-ai/rtk/releases/download/__TAG__/rtk-desktop-plugin-__VERSION__.zip",
+        "sha256": "__SHA256__"
+      },
+      "description": "RTK for Claude Desktop: Claude reads shorter command results and routine work goes to cheaper models, in every Cowork task. /rtk-setup to start, /rtk-gain for the savings.",
+      "category": "developer-tools",
+      "tags": ["tokens", "cost", "cowork", "claude-desktop"]
+    }
+  ]
+}

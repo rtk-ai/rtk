@@ -293,6 +293,179 @@ jobs:
           prerelease: ${{ inputs.prerelease }}
           token: ${{ steps.app-token.outputs.token }}
 
+  desktop-plugin:
+    name: Claude Desktop plugin
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Get version
+        id: version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          TAG="$INPUT_TAG"
+          if [ -z "$TAG" ]; then
+            TAG="$RELEASE_TAG"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=${TAG#v}" >> $GITHUB_OUTPUT
+
+      - name: Download the Linux musl rtk of this release
+        uses: actions/download-artifact@v4
+        with:
+          name: rtk-x86_64-unknown-linux-musl
+          path: musl
+
+      - name: Unpack rtk
+        run: |
+          mkdir -p musl/bin
+          tar -xzf musl/rtk-x86_64-unknown-linux-musl.tar.gz -C musl/bin rtk
+          musl/bin/rtk --version
+
+      - name: Test the service
+        run: cd desktop-plugin/desktop-src && node --test 'test/*.test.mjs'
+
+      - name: Test the hooks against this rtk
+        run: RTK_BIN="$PWD/musl/bin/rtk" python3 desktop-plugin/test_hooks.py
+
+      - name: Build the plugin zip
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: sh desktop-plugin/build.sh --version "$VERSION" --rtk musl/bin/rtk --out desktop-plugin/dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: rtk-desktop-plugin
+          path: desktop-plugin/dist/rtk-desktop-plugin-*.zip
+
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app-token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Add the plugin to the release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          ZIP=$(ls desktop-plugin/dist/rtk-desktop-plugin-*.zip)
+          NAME=$(basename "$ZIP")
+          cp "$ZIP" desktop-plugin/dist/rtk-desktop-plugin.zip
+          gh release upload "$TAG" "$ZIP" desktop-plugin/dist/rtk-desktop-plugin.zip --repo "$REPO" --clobber
+          gh release download "$TAG" --repo "$REPO" --pattern checksums.txt --output checksums.txt --clobber
+          grep -v "[[:space:]]rtk-desktop-plugin" checksums.txt > checksums.new || true
+          (cd desktop-plugin/dist && sha256sum "$NAME" rtk-desktop-plugin.zip) >> checksums.new
+          mv checksums.new checksums.txt
+          gh release upload "$TAG" checksums.txt --repo "$REPO" --clobber
+
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        if: ${{ !inputs.prerelease }}
+        id: marketplace-token
+        continue-on-error: true
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: rtk-ai
+          repositories: claude-plugins
+          permission-contents: write
+
+      - name: Publish to the plugin marketplace
+        if: ${{ !inputs.prerelease }}
+        env:
+          TOKEN: ${{ steps.marketplace-token.outputs.token }}
+          APP_SLUG: ${{ steps.marketplace-token.outputs.app-slug }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          REPO: ${{ github.repository }}
+          MARKETPLACE_REPO: rtk-ai/claude-plugins
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::no token for $MARKETPLACE_REPO (is the GitHub App installed on it?): the marketplace was not updated"
+            exit 0
+          fi
+          ZIP="desktop-plugin/dist/rtk-desktop-plugin-$VERSION.zip"
+          SHA=$(sha256sum "$ZIP" | cut -d' ' -f1)
+          URL="https://github.com/$REPO/releases/download/$TAG/rtk-desktop-plugin-$VERSION.zip"
+          for i in 1 2 3 4 5 6; do
+            curl -sSfL --max-time 120 -o downloaded.zip "$URL" && break
+            sleep 10
+          done
+          [ "$(sha256sum downloaded.zip | cut -d' ' -f1)" = "$SHA" ] || { echo "::error::$URL does not serve the zip that was built, the marketplace was not updated"; exit 1; }
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          git clone --quiet --depth 1 "https://github.com/${MARKETPLACE_REPO}.git" marketplace
+          mkdir -p marketplace/.claude-plugin
+          sed -e "s|__VERSION__|$VERSION|g" -e "s|__TAG__|$TAG|g" -e "s|__SHA256__|$SHA|g" desktop-plugin/marketplace/marketplace.json > marketplace/.claude-plugin/marketplace.json
+          python3 -c 'import json, sys; json.load(open(sys.argv[1]))' marketplace/.claude-plugin/marketplace.json
+          cp desktop-plugin/marketplace/README.md marketplace/README.md
+          cd marketplace
+          git rm -r --quiet --ignore-unmatch plugins
+
+          bot="${APP_SLUG:-rtk-release-bot}[bot]"
+          bot_id=$(GH_TOKEN="$TOKEN" gh api "/users/${bot}" --jq .id 2>/dev/null || true)
+          git config user.name "$bot"
+          git config user.email "${bot_id:+${bot_id}+}${bot}@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "marketplace already at $VERSION"
+          else
+            git commit --quiet -m "rtk $VERSION"
+            git push --quiet origin HEAD
+          fi
+
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        if: failure()
+        id: issue-token
+        continue-on-error: true
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-issues: write
+
+      - name: Alert on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ steps.issue-token.outputs.token }}
+          DISCORD_WEBHOOK: ${{ secrets.RTK_DISCORD_RELEASE }}
+          TAG: ${{ steps.version.outputs.tag }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          echo "::error title=Claude Desktop plugin::The plugin was not built or published for $TAG. The release itself is unaffected; fix desktop-plugin/ before the next release. $RUN_URL"
+          TITLE="Claude Desktop plugin build failed"
+          BODY="The \`desktop-plugin\` job failed for release \`$TAG\`: $RUN_URL
+
+          The release itself is published without \`rtk-desktop-plugin-*.zip\`. Users of the Desktop plugin stay on their previous version until this is fixed and a release ships it again."
+          if [ -n "$GH_TOKEN" ]; then
+            EXISTING=$(gh issue list --repo "$REPO" --state open --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty' || true)
+            if [ -n "$EXISTING" ]; then
+              gh issue comment "$EXISTING" --repo "$REPO" --body "$BODY" || echo "::warning::could not comment issue #$EXISTING"
+            else
+              gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" || echo "::warning::could not open the issue"
+            fi
+          else
+            echo "::warning::no token with issues permission; the issue was not opened"
+          fi
+          if [ -n "$DISCORD_WEBHOOK" ]; then
+            jq -n --arg title "Claude Desktop plugin build FAILED for $TAG" --arg url "$RUN_URL" \
+              --arg desc "The rtk release is published, but without the Desktop plugin zip. Fix desktop-plugin/ before the next release." \
+              '{embeds: [{title: $title, url: $url, description: $desc, color: 15158332, footer: {text: "Rust Token Killer"}}]}' \
+            | curl -sf -H "Content-Type: application/json" -d @- "$DISCORD_WEBHOOK" || echo "::warning::Discord notification failed"
+          fi
+
   notify-discord:
     name: Notify Discord
     needs: [release]

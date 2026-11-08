@@ -1,0 +1,43 @@
+# default-bash-compress — RTK's original behaviour (pre-1.0): rewrite shell commands to their rtk
+# equivalent before they run, so the agent reads the filtered output. Nothing else.
+#
+# What it does
+# - PreToolUse hook: `git status` -> `rtk git status`, `cargo test` -> `rtk cargo test`, and so on
+#   for every command RTK has a filter for; commands without a filter run untouched.
+# - The filters drop noise the agent never reads (progress bars, ANSI codes, repeated lines,
+#   boilerplate) and keep every line that carries signal: errors, test names, paths, diffs.
+# - No PostToolUse compression, no delegation, no routing. The output you get is what
+#   `rtk <cmd>` prints in your own terminal.
+#
+# Install needs nothing but rtk itself (`rtk init -g` sets up the hook).
+#
+# Benchmark — SkillsBench, Claude Code on claude-opus-4-8, 12 tasks, 4 trials per arm,
+# 2026-08-10, OFF (stock Claude Code) in the same batch, RTK v0.45.0 hook. Mean cost per
+# trial, runtime-error trials excluded (see RESULTS.md):
+#
+#   task                                OFF     RTK  change
+#   parallel-tfidf-search             $1.37   $0.92   -32%
+#   react-performance-debugging       $1.22   $0.97   -21%
+#   python-scala-translation          $1.22   $1.01   -17%
+#   dialogue-parser                   $0.37   $0.32   -12%
+#   fix-build-google-auto             $2.11   $1.91   -10%
+#   jax-computing-basics              $0.28   $0.27    -5%
+#   spring-boot-jakarta-migration     $0.91   $0.86    -5%
+#   debug-trl-grpo                    $0.60   $0.63    +6%
+#   simpo-code-reproduction           $0.98   $1.04    +7%
+#   llm-prefix-cache-replay           $0.63   $0.68    +7%
+#   azure-bgp-oscillation-route-leak  $0.49   $0.54   +11%
+#   fix-visual-stability              $1.92   $2.19   +14%
+#   total                            $12.10  $11.35  -6.2%
+#
+# Pooled over all trials: -4.8% (permutation p = 0.305), 7 tasks cheaper / 5 costlier:
+# cost-neutral to slightly cheaper. Pass rate 0.49 -> 0.46 over the 11 scored tasks. RTK removed
+# about 99 KB (~25K tokens) from 154 rewritten commands in the run. Per-trial rows: results.tsv.
+schema_version = 1
+
+[pipeline]
+name    = "default-bash-compress"
+extends = "rtk:default"
+
+[override.normalize]
+enabled = false

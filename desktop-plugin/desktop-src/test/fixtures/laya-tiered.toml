@@ -1,0 +1,147 @@
+# laya-tiered — Laya-routed three-tier delegation: Haiku explores, Sonnet implements, Opus decides.
+#
+# Best gains (Claude Opus 5.5, SkillsBench, 4 trials per arm, OFF = stock Claude Code in the
+# same batch): -51% cost on parallel-tfidf-search, -31% on fix-visual-stability and -28% on
+# python-scala-translation, -24% on fix-build-google-auto; -20% on an 11-task suite (reward 0.66 -> 0.64)
+# and -27% on a 6-task suite (reward 0.72 -> 0.85) where laya-delegate, in the same batch, is -13%.
+# Costs 1.5-1.8x the wall-clock of stock Claude Code; saves nothing on tasks under ~$0.25.
+#
+# PREREQUISITE: Laya running locally. The routing decisions come from Laya
+# (@receptron/laya, a small local classifier; Node 20+, ~1.7 GB model download
+# on first start), served at http://127.0.0.1:41733/v1/systemone (rtk's
+# classifier wire format), with RTK_LAYA_TOKEN exported. Without it, every
+# Laya-gated rule stays silent and only RTK's output filtering applies.
+# Sub-agents run on Haiku and Sonnet through Claude Code's Agent tool, so the
+# session must be allowed to use those models.
+#
+# What it does
+# - Laya labels the task: bug / setup / write / data.
+# - On write and data tasks, RTK refuses the agent's first looking command or
+#   file read and asks it to (1) hand the investigation to the Explore sub-agent
+#   on Haiku, with a compact report (paths, line numbers, exact lines), then
+#   (2) hand the implementation to a general-purpose sub-agent on Sonnet with a
+#   short brief, and to run the tests before reporting. The main agent keeps the
+#   brief, the review of the result and whatever the tests missed.
+# - Bug and setup tasks are left alone.
+# - Ranged reads (sed -n a,bp / grep -n) are never capped by RTK.
+# - Whole-file reads over 350 lines that need little exact text are answered by
+#   a Haiku summary (needs an Anthropic API key; skipped on subscription logins).
+# - Everything else is standard RTK output filtering.
+#
+# Benchmark B — SkillsBench, Claude Opus 5.5, 11 tasks, 4 trials per arm, 2026-10-22/23,
+# OFF (stock Claude Code) in the same batch. Mean cost per trial, trials that errored or
+# ran past the task time limit excluded (see RESULTS.md; the last two tasks score 0 for
+# every model and count for cost only):
+#
+#   task                                 OFF   tiered  change   pass rate
+#   parallel-tfidf-search             $0.885   $0.432   -51%   1.00 -> 0.75
+#   python-scala-translation          $0.891   $0.641   -28%   1.00 -> 1.00
+#   fix-visual-stability              $0.620   $0.427   -31%   0.00 -> 0.50
+#   fix-build-google-auto             $0.298   $0.227   -24%   0.75 -> 1.00
+#   react-performance-debugging       $0.476   $0.431    -9%   1.00 -> 0.25
+#   debug-trl-grpo                    $0.274   $0.253    -8%   0.60 -> 0.60
+#   fix-erlang-ssh-cve                $0.233   $0.250    +7%   1.00 -> 1.00
+#   dialogue-parser                   $0.234   $0.260   +11%   0.92 -> 0.92
+#   jax-computing-basics              $0.125   $0.167   +34%   1.00 -> 1.00
+#   azure-bgp-oscillation-route-leak  $0.134   $0.120   -11%   0.00 -> 0.00
+#   llm-prefix-cache-replay           $0.141   $0.232   +65%   0.00 -> 0.00
+#   total                            $4.312   $3.440  -20.2%   0.66 -> 0.64
+#
+# Benchmark A — same suite, 6 tasks (tfidf, python-scala, visual, google-auto, erlang, trl),
+# 2026-10-21/22, three arms in one
+# batch: OFF $3.423, laya-delegate $2.979 (-13.0%), laya-tiered $2.509 (-26.7%);
+# reward 0.72 -> 0.81 -> 0.85.
+#
+# Sub-agent hand-offs in the tiered arm of benchmark B: 26 to Haiku (investigation),
+# 27 to Sonnet (implementation) over 42 trials. Where it loses: short tasks
+# (+3 to +9 cents each) and react-performance-debugging, where the Sonnet implementer
+# missed a fetch reordering stock Opus found (pass rate 1.00 -> 0.25). Per-trial rows:
+# results.tsv.
+
+schema_version = 1
+
+[pipeline]
+name    = "laya-tiered"
+extends = ["rtk:posthook", "rtk:delegate-reads"]
+
+[upstream.judge]
+provider     = "laya"
+model        = "laya"
+base_url     = "http://127.0.0.1:41733/v1/systemone"
+api_key_env  = "RTK_LAYA_TOKEN"
+timeout_secs = 60
+
+[upstream.haiku]
+provider     = "anthropic"
+model        = "claude-haiku-5-5"
+timeout_secs = 90
+
+[classifier.need]
+upstream     = "judge"
+question     = "score"
+instructions = "How much of this file's exact text does the agent need for its next step?"
+rubric       = ["none: a short summary is enough", "a few exact lines", "most of the file verbatim"]
+input_chars  = 2000
+
+[classifier.kind]
+upstream     = "judge"
+question     = "choice"
+instructions = "What kind of work is this coding task?"
+input_chars  = 2000
+min_confidence = 0.0
+
+[classifier.kind.labels]
+bug   = "find and fix a bug by reading source code closely"
+setup = "understand or repair a build, configuration, dependency or environment"
+write = "write new code, a script or a port"
+data  = "analyse data or files and report results"
+
+[task.investigate]
+kind         = "digest"
+upstream     = "haiku"
+temperature  = 0
+context      = true
+
+[task.bulk-read]
+kind         = "summarize"
+upstream     = "haiku"
+temperature  = 0
+context      = true
+instructions = "You read a file for a coding agent that will NOT see it, only your reply. First answer what the agent needs for its current step, in a few terse lines, with exact identifiers. Then map the file: one line on what it is; every class, function and method with its exact signature, in file order. Then quote verbatim, grouped under the name of the function that contains them, the lines whose exact text the agent would most need for its step (non-obvious arithmetic, constants, conditions, error handling, config values). Never give line numbers. Never paraphrase code you quote. No advice, no headings. End with exactly: (Exact text: grep -n a quoted line, then Read that file with offset and limit, at most 350 lines.)"
+
+[override.shunt-large-read]
+enabled = false
+
+[[hook.before_tool.read]]
+name   = "answer-big-reads"
+when   = { file_lines_gt = 350, whole_file = true, "score.need_lte" = 0.65 }
+action = "route"
+task   = "bulk-read"
+mode   = "answer"
+
+[[directive]]
+name = "tiered-delegation"
+text = """
+When RTK asks you to hand an investigation to the Explore sub-agent, call it on the haiku model (Agent tool: subagent_type "Explore", model "haiku") with one precise question built from the task, and ask for a compact report: findings first, then only the file paths, line numbers and exact lines you will need, never whole files. Then do not write the code yourself: hand the implementation to a general-purpose sub-agent on the sonnet model (Agent tool: subagent_type "general-purpose", model "sonnet") with the task, the Explore report and the exact files to create or change — a short brief of what and where, never the code itself — and ask it to run the tests before it reports. Keep for yourself only what needs your judgment: the spec you give it, checking its result against the task, and fixing what its tests missed.
+"""
+
+[[hook.before_tool.shell]]
+name    = "delegate-investigation"
+when    = { command_matches = "^(cd [^;&]+(;|&&) *)?(ls|cat|head|tail|grep|rg|find|tree|pwd|echo|which|wc|file|stat|du|for|while|awk|nl|xxd|git|sed -n)\\b", recent_calls_matches = "^(Bash|Read|Grep|Glob) [^|]*((\\|\\||\\| ?[^A-Z |])[^|]*)*( \\| (Bash|Read|Grep|Glob) [^|]*((\\|\\||\\| ?[^A-Z |])[^|]*)*)?$", "class.kind_in" = ["write", "data"] }
+action  = "route"
+task    = "investigate"
+mode    = "suggest"
+message = "Do not run this search or open these files yourself: hand the investigation to the Explore sub-agent (Agent tool: subagent_type \"Explore\", model \"haiku\") with one precise question, and ask for a compact report: file paths, line numbers and the exact lines you will need, never whole files. Then hand the implementation to a general-purpose sub-agent on the sonnet model (Agent tool: subagent_type \"general-purpose\", model \"sonnet\") with the task, that report and the files to create or change (a short brief: what and where, never the code itself), and ask it to run the tests before it reports. Check its result yourself."
+
+[[hook.before_tool.read]]
+name    = "delegate-investigation-read"
+when    = { recent_calls_matches = "^(Bash|Read|Grep|Glob) [^|]*((\\|\\||\\| ?[^A-Z |])[^|]*)*( \\| (Bash|Read|Grep|Glob) [^|]*((\\|\\||\\| ?[^A-Z |])[^|]*)*)?$", "class.kind_in" = ["write", "data"] }
+action  = "route"
+task    = "bulk-read"
+mode    = "suggest"
+message = "Do not run this search or open these files yourself: hand the investigation to the Explore sub-agent (Agent tool: subagent_type \"Explore\", model \"haiku\") with one precise question, and ask for a compact report: file paths, line numbers and the exact lines you will need, never whole files. Then hand the implementation to a general-purpose sub-agent on the sonnet model (Agent tool: subagent_type \"general-purpose\", model \"sonnet\") with the task, that report and the files to create or change (a short brief: what and where, never the code itself), and ask it to run the tests before it reports. Check its result yourself."
+
+[[hook.after_tool.shell]]
+name = "keep-ranged-reads"
+when = { command_matches = "\\bsed -n *'?[0-9]+,[0-9]+p|\\b(grep|egrep|rg)\\b[^|;&]* -[A-Za-z]*n", is_rtk_command = false }
+use  = ["ansi"]
