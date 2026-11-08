@@ -1739,7 +1739,7 @@ dependencies = [
 
 [[package]]
 name = "rtk-engine"
-version = "0.49.0"
+version = "1.2.0"
 dependencies = [
  "htmd",
  "regex",
@@ -1752,7 +1752,7 @@ dependencies = [
 
 [[package]]
 name = "rtk-proxy"
-version = "0.49.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1795,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "rtk-text"
-version = "0.49.0"
+version = "1.2.0"
 dependencies = [
  "regex",
 ]
