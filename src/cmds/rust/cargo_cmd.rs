@@ -2,8 +2,8 @@
 
 use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
 use crate::core::runner;
-use crate::core::shell::display_args;
 use crate::core::stream::{BlockHandler, BlockStreamFilter};
+use crate::core::tracking;
 use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{join_with_overflow, resolved_command, truncate};
 use anyhow::Result;
@@ -11,7 +11,6 @@ use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
-use std::process::Command;
 use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,8 +176,7 @@ pub struct NextestOptions {
 }
 
 #[derive(Debug)]
-pub struct CargoInvocation<'a, T = OsString> {
-    args: &'a [T],
+pub struct CargoInvocation {
     command: CargoCommand,
     common: CommonOptions,
 }
@@ -290,11 +288,11 @@ pub(crate) fn option_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
     CargoOption::lookup(None, kind, name).and_then(CargoOption::value_spec)
 }
 
-impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
+impl CargoInvocation {
     /// Extract command semantics once. The two stages consume disjoint arguments:
     /// global rules locate the command, then its grammar supplies the relevant arities.
     /// Cargo remains responsible for validation and unknown command options.
-    pub fn parse(args: &'a [T]) -> Option<Self> {
+    pub fn parse<T: AsRef<OsStr>>(args: &[T]) -> Option<Self> {
         let words: Vec<_> = args
             .iter()
             .map(|arg| arg.as_ref().to_string_lossy())
@@ -303,33 +301,13 @@ impl<'a, T: AsRef<OsStr>> CargoInvocation<'a, T> {
         let mut common = CommonOptions::default();
         let mut command = find_command(&mut tokenizer, &mut common)?;
         read_command_options(&mut tokenizer, &mut command, &mut common);
-        Some(Self {
-            args,
-            command,
-            common,
-        })
+        Some(Self { command, common })
     }
     pub fn command(&self) -> &CargoCommand {
         &self.command
     }
     pub fn common(&self) -> &CommonOptions {
         &self.common
-    }
-    /// Execute the original OS arguments, preserving aliases, ordering, boundaries and
-    /// non-UTF-8 paths. The recognition-only text view is never used to rebuild argv.
-    pub fn to_command(&self) -> Command {
-        let mut cmd = resolved_command("cargo");
-        cmd.args(self.args.iter().map(AsRef::as_ref));
-        cmd
-    }
-    fn display_args(&self) -> String {
-        display_args(
-            &self
-                .args
-                .iter()
-                .map(|s| s.as_ref().to_string_lossy().into_owned())
-                .collect::<Vec<_>>(),
-        )
     }
 }
 
@@ -552,12 +530,12 @@ pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
     // Dedicated runners use unguarded_help(): these facts were already inspected,
     // so the generic runner does not need to parse the arguments again.
     match invocation.command() {
-        CargoCommand::Build(options) => run_build(&invocation, options, verbose),
-        CargoCommand::Check(options) => run_check(&invocation, options, verbose),
-        CargoCommand::Clippy(options) => run_clippy(&invocation, options, verbose),
-        CargoCommand::Test(options) => run_test(&invocation, options, verbose),
-        CargoCommand::Install(options) => run_install(&invocation, options, verbose),
-        CargoCommand::Nextest(options) => run_nextest(&invocation, options, verbose),
+        CargoCommand::Build(options) => run_build(args, options, verbose),
+        CargoCommand::Check(options) => run_check(args, options, verbose),
+        CargoCommand::Clippy(options) => run_clippy(args, options, verbose),
+        CargoCommand::Test(options) => run_test(args, options, verbose),
+        CargoCommand::Install(options) => run_install(args, options, verbose),
+        CargoCommand::Nextest(options) => run_nextest(args, options, verbose),
         CargoCommand::NoCommand(_) | CargoCommand::Fmt => {
             runner::run_passthrough("cargo", args, verbose)
         }
@@ -791,21 +769,19 @@ impl BlockHandler for CargoTestHandler {
     }
 }
 
-fn run_build(
-    invocation: &CargoInvocation<'_>,
-    options: &CompilationOptions,
-    verbose: u8,
-) -> Result<i32> {
+fn run_build(args: &[OsString], options: &CompilationOptions, verbose: u8) -> Result<i32> {
     if options.unit_graph || options.message_format == MessageFormat::Unknown {
-        return runner::run_passthrough("cargo", invocation.args, verbose);
+        return runner::run_passthrough("cargo", args, verbose);
     }
-    let args_display = invocation.display_args();
+    let mut cmd = resolved_command("cargo");
+    cmd.args(args);
+    let args_display = tracking::args_display(args);
     if verbose > 0 {
         eprintln!("Running: cargo {}", args_display);
     }
     if options.message_format == MessageFormat::Json {
         return runner::run_filtered_with_exit(
-            invocation.to_command(),
+            cmd,
             "cargo",
             &args_display,
             |o, exit| filter_cargo_build_labeled(o, "build", exit),
@@ -813,7 +789,7 @@ fn run_build(
         );
     }
     runner::run_streamed(
-        invocation.to_command(),
+        cmd,
         "cargo",
         &args_display,
         Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
@@ -823,7 +799,7 @@ fn run_build(
     )
 }
 
-fn run_test(invocation: &CargoInvocation<'_>, options: &TestOptions, verbose: u8) -> Result<i32> {
+fn run_test(args: &[OsString], options: &TestOptions, verbose: u8) -> Result<i32> {
     if options.unit_graph
         || options.harness.help
         || options.harness.list
@@ -832,18 +808,20 @@ fn run_test(invocation: &CargoInvocation<'_>, options: &TestOptions, verbose: u8
             TestFormat::Json | TestFormat::Unknown
         )
     {
-        return runner::run_passthrough("cargo", invocation.args, verbose);
+        return runner::run_passthrough("cargo", args, verbose);
     }
     // No json branch here on purpose: --message-format=json only reformats the
     // build phase, the test harness output stays human-readable. CargoTestHandler
     // reads both — it aggregates the `test result:` lines and, on a compile error,
     // parses the json diagnostics in format_summary.
-    let args_display = invocation.display_args();
+    let mut cmd = resolved_command("cargo");
+    cmd.args(args);
+    let args_display = tracking::args_display(args);
     if verbose > 0 {
         eprintln!("Running: cargo {}", args_display);
     }
     runner::run_streamed(
-        invocation.to_command(),
+        cmd,
         "cargo",
         &args_display,
         Box::new(BlockStreamFilter::new(CargoTestHandler::new())),
@@ -851,25 +829,23 @@ fn run_test(invocation: &CargoInvocation<'_>, options: &TestOptions, verbose: u8
     )
 }
 
-fn run_clippy(
-    invocation: &CargoInvocation<'_>,
-    options: &ClippyOptions,
-    verbose: u8,
-) -> Result<i32> {
+fn run_clippy(args: &[OsString], options: &ClippyOptions, verbose: u8) -> Result<i32> {
     if options.version
         || options.explain
         || options.compilation.unit_graph
         || options.compilation.message_format == MessageFormat::Unknown
     {
-        return runner::run_passthrough("cargo", invocation.args, verbose);
+        return runner::run_passthrough("cargo", args, verbose);
     }
-    let args_display = invocation.display_args();
+    let mut cmd = resolved_command("cargo");
+    cmd.args(args);
+    let args_display = tracking::args_display(args);
     if verbose > 0 {
         eprintln!("Running: cargo {}", args_display);
     }
     if options.compilation.message_format == MessageFormat::Json {
         return runner::run_filtered_with_exit(
-            invocation.to_command(),
+            cmd,
             "cargo",
             &args_display,
             filter_cargo_clippy_json,
@@ -877,7 +853,7 @@ fn run_clippy(
         );
     }
     runner::run_filtered(
-        invocation.to_command(),
+        cmd,
         "cargo",
         &args_display,
         filter_cargo_clippy,
@@ -885,21 +861,19 @@ fn run_clippy(
     )
 }
 
-fn run_check(
-    invocation: &CargoInvocation<'_>,
-    options: &CompilationOptions,
-    verbose: u8,
-) -> Result<i32> {
+fn run_check(args: &[OsString], options: &CompilationOptions, verbose: u8) -> Result<i32> {
     if options.unit_graph || options.message_format == MessageFormat::Unknown {
-        return runner::run_passthrough("cargo", invocation.args, verbose);
+        return runner::run_passthrough("cargo", args, verbose);
     }
-    let args_display = invocation.display_args();
+    let mut cmd = resolved_command("cargo");
+    cmd.args(args);
+    let args_display = tracking::args_display(args);
     if verbose > 0 {
         eprintln!("Running: cargo {}", args_display);
     }
     if options.message_format == MessageFormat::Json {
         return runner::run_filtered_with_exit(
-            invocation.to_command(),
+            cmd,
             "cargo",
             &args_display,
             |o, exit| filter_cargo_build_labeled(o, "check", exit),
@@ -907,7 +881,7 @@ fn run_check(
         );
     }
     runner::run_streamed(
-        invocation.to_command(),
+        cmd,
         "cargo",
         &args_display,
         Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
@@ -917,11 +891,7 @@ fn run_check(
     )
 }
 
-fn run_install(
-    invocation: &CargoInvocation<'_>,
-    options: &InstallOptions,
-    verbose: u8,
-) -> Result<i32> {
+fn run_install(args: &[OsString], options: &InstallOptions, verbose: u8) -> Result<i32> {
     if options.list
         || options.compilation.unit_graph
         || matches!(
@@ -929,14 +899,16 @@ fn run_install(
             MessageFormat::Json | MessageFormat::Unknown
         )
     {
-        return runner::run_passthrough("cargo", invocation.args, verbose);
+        return runner::run_passthrough("cargo", args, verbose);
     }
-    let args_display = invocation.display_args();
+    let mut cmd = resolved_command("cargo");
+    cmd.args(args);
+    let args_display = tracking::args_display(args);
     if verbose > 0 {
         eprintln!("Running: cargo {}", args_display);
     }
     runner::run_filtered(
-        invocation.to_command(),
+        cmd,
         "cargo",
         &args_display,
         filter_cargo_install,
@@ -944,11 +916,7 @@ fn run_install(
     )
 }
 
-fn run_nextest(
-    invocation: &CargoInvocation<'_>,
-    options: &NextestOptions,
-    verbose: u8,
-) -> Result<i32> {
+fn run_nextest(args: &[OsString], options: &NextestOptions, verbose: u8) -> Result<i32> {
     if options.version
         || options.operation != NextestOperation::Run
         || options.unit_graph
@@ -964,14 +932,16 @@ fn run_nextest(
             TestFormat::Json | TestFormat::Unknown
         )
     {
-        return runner::run_passthrough("cargo", invocation.args, verbose);
+        return runner::run_passthrough("cargo", args, verbose);
     }
-    let args_display = invocation.display_args();
+    let mut cmd = resolved_command("cargo");
+    cmd.args(args);
+    let args_display = tracking::args_display(args);
     if verbose > 0 {
         eprintln!("Running: cargo {}", args_display);
     }
     runner::run_filtered(
-        invocation.to_command(),
+        cmd,
         "cargo",
         &args_display,
         filter_cargo_nextest,
@@ -2057,7 +2027,7 @@ mod tests {
             _ => MessageFormat::Human,
         }
     }
-    fn usage_request<T: AsRef<OsStr>>(invocation: &CargoInvocation<'_, T>) -> bool {
+    fn usage_request(invocation: &CargoInvocation) -> bool {
         invocation.common().help
             || invocation.common().unstable_help
             || match invocation.command() {
@@ -2095,10 +2065,6 @@ mod tests {
                 "{args:?}"
             );
             assert_eq!(invocation.command().as_str(), None);
-            assert_eq!(
-                invocation.to_command().get_args().collect::<Vec<_>>(),
-                args.iter().map(OsStr::new).collect::<Vec<_>>()
-            );
         }
         for args in [vec!["--version"], vec!["-V"], vec!["+stable", "--version"]] {
             let invocation = CargoInvocation::parse(&args).unwrap();
@@ -2331,10 +2297,6 @@ mod tests {
             let invocation =
                 CargoInvocation::parse(&args).expect("attached values do not end options");
             assert_eq!(invocation.command().as_str(), Some("check"));
-            assert_eq!(
-                invocation.to_command().get_args().collect::<Vec<_>>(),
-                args.iter().map(OsStr::new).collect::<Vec<_>>()
-            );
         }
     }
 
@@ -2366,10 +2328,6 @@ mod tests {
         assert_eq!(invocation.command().as_str(), Some("check"));
         assert_eq!(diagnostic_format(invocation.command()), MessageFormat::Json);
         assert!(!usage_request(&invocation));
-        assert_eq!(
-            invocation.to_command().get_args().collect::<Vec<_>>(),
-            args.iter().map(OsStr::new).collect::<Vec<_>>()
-        );
     }
 
     #[test]
@@ -2418,10 +2376,6 @@ mod tests {
         ] {
             let invocation = CargoInvocation::parse(&args).expect("command can be located");
             assert_eq!(invocation.command().as_str(), Some("check"));
-            assert_eq!(
-                invocation.to_command().get_args().collect::<Vec<_>>(),
-                args.iter().map(OsStr::new).collect::<Vec<_>>()
-            );
         }
     }
 
@@ -2451,17 +2405,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn invocation_preserves_non_utf8_arguments() {
+    fn invocation_accepts_non_utf8_option_values() {
         use std::os::unix::ffi::OsStringExt;
         let args = vec![
+            OsString::from("--config"),
+            OsString::from_vec(vec![0xff]),
             OsString::from("check"),
             OsString::from("--manifest-path"),
             OsString::from_vec(vec![0xff]),
+            OsString::from("--message-format=json"),
         ];
         let invocation = CargoInvocation::parse(&args).unwrap();
         assert_eq!(
-            invocation.to_command().get_args().collect::<Vec<_>>(),
-            args.iter().map(OsString::as_os_str).collect::<Vec<_>>()
+            *invocation.command(),
+            CargoCommand::Check(CompilationOptions {
+                message_format: MessageFormat::Json,
+                unit_graph: false,
+            })
         );
     }
 
@@ -2509,11 +2469,6 @@ mod tests {
         ] {
             let invocation = CargoInvocation::parse(&args).expect("known command");
             assert_eq!(*invocation.command(), command, "{args:?}");
-            assert_eq!(
-                invocation.to_command().get_args().collect::<Vec<_>>(),
-                args.iter().map(OsStr::new).collect::<Vec<_>>()
-            );
-            assert_eq!(invocation.display_args(), display_args(&args));
         }
     }
 

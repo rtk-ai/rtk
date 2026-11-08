@@ -2,7 +2,9 @@
 
 mod common;
 
+use std::ffi::OsString;
 use std::fs;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
@@ -234,6 +236,29 @@ exit 101
         );
         assert!(text.contains("Checking demo"), "{args:?}: {text}");
     }
+
+    let args = [
+        OsString::from("+stable"),
+        OsString::from("--config"),
+        OsString::from_vec(vec![0xff]),
+        OsString::from("check"),
+        OsString::from("--message-format=json"),
+        OsString::from("--manifest-path"),
+        OsString::from_vec(vec![0xfe]),
+    ];
+    let output = common::rtk_command()
+        .arg("cargo")
+        .args(&args)
+        .env("PATH", &path)
+        .env("CARGO_ARGV_FILE", &argv_file)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(101), "{output:?}");
+    let expected: Vec<u8> = args
+        .iter()
+        .flat_map(|arg| arg.as_bytes().iter().copied().chain(std::iter::once(b'\n')))
+        .collect();
+    assert_eq!(fs::read(&argv_file).unwrap(), expected);
 }
 
 #[test]
