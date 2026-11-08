@@ -6,7 +6,7 @@
 
 [package]
 name = "rtk-proxy"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 rust-version = "1.91"
 authors = ["RTK AI Labs"]
@@ -73,6 +73,9 @@ dirs = "5"
 # postgres/multi-pod need here. Apache-2.0.
 icm-core = { git = "https://github.com/rtk-ai/icm", rev = "831e915b", default-features = false }
 icm-store = { git = "https://github.com/rtk-ai/icm", rev = "831e915b", default-features = false, features = ["backend-sqlite"] }
+
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", features = ["no_thp"] }
 
 [dev-dependencies]
 wiremock = "0.6"

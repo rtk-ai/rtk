@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: &rust_toolchain dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: *rust_toolchain
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: *rust_toolchain
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --no-deps
 
@@ -76,7 +76,7 @@ jobs:
     needs: clippy
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: *rust_toolchain
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -94,7 +94,7 @@ jobs:
     needs: clippy
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: *rust_toolchain
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -136,7 +136,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: *rust_toolchain
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -163,7 +163,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: *rust_toolchain
 
       - uses: Swatinem/rust-cache@v2
 
@@ -298,7 +298,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: *rust_toolchain
 
       - uses: Swatinem/rust-cache@v2
 
@@ -336,7 +336,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: *rust_toolchain
 
       - uses: Swatinem/rust-cache@v2
 
