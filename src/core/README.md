@@ -144,6 +144,8 @@ Key functions available to all command modules:
 
 Shared classifier for an already-`--`-restored args slice (see `args_utils::restore_double_dash`) into flags, their values, and positionals. `tokenize_grammar` takes a `takes_value(kind, name)` predicate the caller supplies — the list of which flags take a value is per-tool, but the token-walking around it isn't. `tokenize(args)` is the structural-only entry point, for a caller asking which arguments are flags and where `--` is; it assumes **no flag takes a value**, so anything reading a value or counting free positionals needs `tokenize_grammar`.
 
+`Tokenizer::tokenize_until` returns resumable batches. Its callback sees options, free positionals and separators, and returns `TokenAction::Continue(value_spec)` or `StopAfter(value_spec)`. Stop requests finish the current cluster and any owned value; consumed values do not invoke the callback. Links address the returned batch, while source indices address the original argv. Calls preserve the cursor and `--` state; `begin_region` starts a forwarded program's grammar at the same cursor.
+
 **Use it for anything that decides what an argument is.** A new command filter, a new flag on an existing one, or a fix to how one is detected goes through `tokenize_grammar` — not `starts_with('-')`, not `args.iter().any(|a| a == "--flag")`. Those miss exactly what this module exists for: a flag's own value (`git log --grep -p` searches for the string "-p"), an attached value (`--flag=v`, `/bl:x`), a short cluster (`-rn`), and everything past `--`. Every bug the migration fixed was one of those four.
 
 Four rules, each of which cost a real bug before it was written down:

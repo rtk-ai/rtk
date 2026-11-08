@@ -3,55 +3,6 @@
 use super::{Dialect, TokenKind, ValueSpec, tokenize_grammar};
 use clap::{Arg, ArgAction, Command};
 
-#[test]
-fn incremental_grammars_keep_links_and_source_indices_without_restarting() {
-    use super::Tokenizer;
-    let args = [
-        "--config",
-        "check",
-        "install",
-        "--version",
-        "1.2.3",
-        "--",
-        "--format=json",
-    ];
-    let mut tokenizer = Tokenizer::new(&args, Dialect::Clap);
-    let prefix = tokenizer
-        .next_argument(&|_, name| (name == "config").then(ValueSpec::value))
-        .unwrap();
-    assert_eq!(prefix, 0..2);
-    assert_eq!(
-        tokenizer.tokens()[0].value(tokenizer.tokens()),
-        Some("check")
-    );
-    let command = tokenizer.next_argument(&|_, _| None).unwrap();
-    assert_eq!(tokenizer.tokens()[command.start].text, "install");
-    let option = tokenizer
-        .next_argument(&|_, name| (name == "version").then(ValueSpec::value))
-        .unwrap();
-    assert_eq!(
-        tokenizer.tokens()[option.start].value(tokenizer.tokens()),
-        Some("1.2.3")
-    );
-    assert_eq!(tokenizer.tokens()[option.start].source_index, 3);
-    let boundary = tokenizer.next_argument(&|_, _| None).unwrap();
-    assert_eq!(tokenizer.tokens()[boundary.start].kind, TokenKind::DashDash);
-    tokenizer.begin_region(Dialect::Clap);
-    let inner = tokenizer
-        .next_argument(&|_, name| (name == "format").then(ValueSpec::value))
-        .unwrap();
-    assert_eq!(tokenizer.tokens()[inner.start].source_index, 6);
-    assert_eq!(
-        tokenizer.tokens()[inner.start].value(tokenizer.tokens()),
-        Some("json")
-    );
-    assert!(
-        tokenizer
-            .next_argument(&|_, _| panic!("must not rescan any argument"))
-            .is_none()
-    );
-}
-
 fn assert_like_clap(args: &[&str], spec: ValueSpec, optional: bool) {
     let tokens = tokenize_grammar(
         args,

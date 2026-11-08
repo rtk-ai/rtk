@@ -1,6 +1,6 @@
 //! Filters cargo output — build errors, test results, clippy warnings.
 
-use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
+use crate::core::arg_tokenizer::{self, Dialect, Token, TokenAction, TokenKind, ValueSpec};
 use crate::core::runner;
 use crate::core::stream::{BlockHandler, BlockStreamFilter};
 use crate::core::tracking;
@@ -288,9 +288,34 @@ pub(crate) fn option_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
     CargoOption::lookup(None, kind, name).and_then(CargoOption::value_spec)
 }
 
+fn is_toolchain_selector(token: &Token<'_>) -> bool {
+    // Rustup recognizes a selector only in the first argument.
+    // https://rust-lang.github.io/rustup/overrides.html#toolchain-override-shorthand
+    token.is_free_positional() && token.source_index == 0 && token.text.starts_with('+')
+}
+
+fn command_token_action(command: Option<&CargoCommand>, token: &Token<'_>) -> TokenAction {
+    let option = CargoOption::lookup(command, token.kind, token.text);
+    let value = option.and_then(CargoOption::value_spec);
+    let finding_name = command.is_none()
+        || matches!(command, Some(CargoCommand::Nextest(options))
+            if options.operation == NextestOperation::Unspecified);
+    // Return at grammar boundaries. Unknown arity during discovery also needs a decision
+    // from the parser before tokenization can safely continue with command-specific rules.
+    let stop = token.kind == TokenKind::DashDash
+        || finding_name
+            && (token.is_free_positional() && !is_toolchain_selector(token)
+                || matches!(token.kind, TokenKind::Long | TokenKind::Short) && option.is_none());
+    if stop {
+        TokenAction::StopAfter(value)
+    } else {
+        TokenAction::Continue(value)
+    }
+}
+
 impl CargoInvocation {
-    /// Extract command semantics once. The two stages consume disjoint arguments:
-    /// global rules locate the command, then its grammar supplies the relevant arities.
+    /// Extract command semantics once. Batches consume disjoint arguments, stopping at
+    /// command names and `--` so the next batch uses the appropriate option grammar.
     /// Cargo remains responsible for validation and unknown command options.
     pub fn parse<T: AsRef<OsStr>>(args: &[T]) -> Option<Self> {
         let words: Vec<_> = args
@@ -316,44 +341,39 @@ fn find_command<T: AsRef<str>>(
     common: &mut CommonOptions,
 ) -> Option<CargoCommand> {
     let mut options = NoCommandOptions::default();
-    while let Some(range) = tokenizer.next_argument(&option_value) {
-        for token in &tokenizer.tokens()[range] {
-            if token.kind == TokenKind::Positional && token.linked.is_some() {
-                continue;
-            }
-            match (token.kind, token.text) {
-                // Rustup's selector is recognized only in the first argument.
-                // https://rust-lang.github.io/rustup/overrides.html#toolchain-override-shorthand
-                (TokenKind::Positional, name)
-                    if token.source_index == 0 && name.starts_with('+') => {}
-                (TokenKind::Positional, name) => {
-                    // Combined top-level actions and explicit subcommands are outside this
-                    // partial model. Do not discard a root action by interpreting it as a
-                    // command-local option (notably install's --version).
-                    if options.version || options.list || options.explain {
-                        return None;
-                    }
-                    return CargoCommand::named(name);
+    let tokens = tokenizer.tokenize_until(&mut |token| command_token_action(None, token));
+    for token in &tokens {
+        if token.kind == TokenKind::Positional && token.linked.is_some() {
+            continue;
+        }
+        match (token.kind, token.text) {
+            (TokenKind::Positional, _) if is_toolchain_selector(token) => {}
+            (TokenKind::Positional, name) => {
+                // Combined top-level actions and explicit subcommands are outside this
+                // partial model. Do not discard a root action by interpreting it as a
+                // command-local option (notably install's --version).
+                if options.version || options.list || options.explain {
+                    return None;
                 }
-                _ => match CargoOption::lookup(None, token.kind, token.text)? {
-                    CargoOption::Help => common.help = true,
-                    CargoOption::Version => options.version = true,
-                    CargoOption::List => options.list = true,
-                    CargoOption::Explain => options.explain = true,
-                    CargoOption::Unstable => match token
-                        .value(tokenizer.tokens())
-                        .and_then(|v| v.split('=').next())
-                    {
+                return CargoCommand::named(name);
+            }
+            _ => match CargoOption::lookup(None, token.kind, token.text)? {
+                CargoOption::Help => common.help = true,
+                CargoOption::Version => options.version = true,
+                CargoOption::List => options.list = true,
+                CargoOption::Explain => options.explain = true,
+                CargoOption::Unstable => {
+                    match token.value(&tokens).and_then(|v| v.split('=').next()) {
                         // Script mode has a script operand instead of our command grammar.
                         // https://doc.rust-lang.org/cargo/reference/unstable.html#script
                         Some("script") => return None,
                         Some("help") => common.unstable_help = true,
                         _ => {}
-                    },
-                    option if option.prefix() => {}
-                    _ => return None,
-                },
-            }
+                    }
+                }
+                option if option.prefix() => {}
+                _ => return None,
+            },
         }
     }
     Some(CargoCommand::NoCommand(options))
@@ -364,13 +384,16 @@ fn read_command_options<T: AsRef<str>>(
     command: &mut CargoCommand,
     common: &mut CommonOptions,
 ) {
-    while let Some(range) = tokenizer.next_argument(&|kind, name| {
-        CargoOption::lookup(Some(command), kind, name).and_then(CargoOption::value_spec)
-    }) {
-        for token in &tokenizer.tokens()[range] {
+    loop {
+        let tokens =
+            tokenizer.tokenize_until(&mut |token| command_token_action(Some(command), token));
+        if tokens.is_empty() {
+            return;
+        }
+        for token in &tokens {
             if token.kind == TokenKind::DashDash {
                 // A distinct program owns the suffix; resume tokenization with its grammar,
-                // retaining all original source indices. No Cargo rule applies to this region.
+                // retaining original source indices. No Cargo rule applies to this region.
                 // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
                 match command {
                     CargoCommand::Test(options) => options.harness = read_test_arguments(tokenizer),
@@ -403,7 +426,7 @@ fn read_command_options<T: AsRef<str>>(
                 }
                 continue;
             };
-            let value = token.value(tokenizer.tokens());
+            let value = token.value(&tokens);
             match option {
                 CargoOption::Help => common.help = true,
                 CargoOption::Unstable => common.unstable_help |= value == Some("help"),
@@ -485,35 +508,40 @@ fn read_test_arguments<T: AsRef<str>>(
     // https://doc.rust-lang.org/rustc/tests/index.html#output-options
     tokenizer.begin_region(Dialect::Clap);
     let mut options = TestHarnessOptions::default();
-    while let Some(range) = tokenizer.next_argument(&|kind, name| {
-        (kind == TokenKind::Long
+    let tokens = tokenizer.tokenize_until(&mut |token| {
+        let (kind, name) = (token.kind, token.text);
+        let value = (kind == TokenKind::Long
             && matches!(
                 name,
                 "format" | "skip" | "test-threads" | "color" | "logfile"
             )
             || kind == TokenKind::Short && name == "Z")
-            .then(ValueSpec::value)
-    }) {
-        for token in &tokenizer.tokens()[range] {
-            match (token.kind, token.text) {
-                (TokenKind::DashDash, _) => return options,
-                (TokenKind::Long, "help") | (TokenKind::Short, "h") => options.help = true,
-                (TokenKind::Long, "list") => options.list = true,
-                (TokenKind::Long, "quiet") | (TokenKind::Short, "q") => {
-                    options.format = TestFormat::Terse
-                }
-                (TokenKind::Long, "format") => {
-                    if let Some(value) = token.value(tokenizer.tokens()) {
-                        options.format = match value {
-                            "pretty" => TestFormat::Pretty,
-                            "terse" => TestFormat::Terse,
-                            "json" => TestFormat::Json,
-                            _ => TestFormat::Unknown,
-                        };
-                    }
-                }
-                _ => {}
+            .then(ValueSpec::value);
+        if kind == TokenKind::DashDash {
+            TokenAction::StopAfter(value)
+        } else {
+            TokenAction::Continue(value)
+        }
+    });
+    for token in &tokens {
+        match (token.kind, token.text) {
+            (TokenKind::DashDash, _) => return options,
+            (TokenKind::Long, "help") | (TokenKind::Short, "h") => options.help = true,
+            (TokenKind::Long, "list") => options.list = true,
+            (TokenKind::Long, "quiet") | (TokenKind::Short, "q") => {
+                options.format = TestFormat::Terse
             }
+            (TokenKind::Long, "format") => {
+                if let Some(value) = token.value(&tokens) {
+                    options.format = match value {
+                        "pretty" => TestFormat::Pretty,
+                        "terse" => TestFormat::Terse,
+                        "json" => TestFormat::Json,
+                        _ => TestFormat::Unknown,
+                    };
+                }
+            }
+            _ => {}
         }
     }
     options
@@ -2144,6 +2172,23 @@ mod tests {
     }
 
     #[test]
+    fn batches_keep_top_level_and_install_version_arities_separate() {
+        let args = ["--version", "install", "--version", "1.2.3", "--list"];
+        let mut tokenizer = arg_tokenizer::Tokenizer::new(&args, Dialect::Clap);
+        let prefix = tokenizer.tokenize_until(&mut |token| command_token_action(None, token));
+        assert_eq!(prefix.len(), 2);
+        assert_eq!(prefix[0].value(&prefix), None);
+        assert_eq!(prefix[1].text, "install");
+        let command = CargoCommand::Install(InstallOptions::default());
+        let options =
+            tokenizer.tokenize_until(&mut |token| command_token_action(Some(&command), token));
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0].source_index, 2);
+        assert_eq!(options[0].value(&options), Some("1.2.3"));
+        assert_eq!(options[2].text, "list");
+    }
+
+    #[test]
     fn command_specific_semantics_are_typed_and_scoped() {
         let args = [
             "+nightly",
@@ -2205,8 +2250,10 @@ mod tests {
             "--config-file",
             "list",
             "run",
-            "--message-format=libtest-json-plus",
-            "--cargo-message-format=json",
+            "--message-format",
+            "libtest-json-plus",
+            "--cargo-message-format",
+            "json",
         ];
         let invocation = CargoInvocation::parse(&args).unwrap();
         let CargoCommand::Nextest(options) = invocation.command() else {
