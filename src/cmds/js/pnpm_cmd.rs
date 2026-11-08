@@ -519,7 +519,7 @@ fn run_install(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 /// Filter pnpm install output - remove progress bars, keep summary
-fn filter_pnpm_install(output: &str) -> String {
+pub(crate) fn filter_pnpm_install(output: &str) -> String {
     let mut result = Vec::new();
     let mut saw_progress = false;
 
