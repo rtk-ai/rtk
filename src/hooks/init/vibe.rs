@@ -131,7 +131,7 @@ fn patch_vibe_hooks_toml(
     if patch_mode == PatchMode::Skip {
         println!(
             "\nManual setup needed: add RTK hook to {}\n\
-             See: https://www.rtk-ai.app/guide/getting-started/supported-agents#mistral-vibe",
+             See: https://www.rtk-ai.app/docs/getting-started/supported-agents/#mistral-vibe",
             hooks_path.display()
         );
         return Ok(VibeHookPatchOutcome::Skipped);
