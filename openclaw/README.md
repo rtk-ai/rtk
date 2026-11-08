@@ -49,13 +49,20 @@ In `openclaw.json`:
         enabled: true,
         config: {
           enabled: true,    // Toggle rewriting on/off
-          verbose: false     // Log rewrites to console
+          verbose: false,   // Log rewrites to console
+          // Optional: pin a trusted installation instead of discovering it
+          // once from PATH. The path must be absolute.
+          rtkPath: "/opt/homebrew/bin/rtk"
         }
       }
     }
   }
 }
 ```
+
+At startup, the plugin resolves RTK to a canonical absolute path and uses that
+same executable for every rewrite. Setting `rtkPath` is recommended when the
+gateway's `PATH` can be influenced by less-trusted configuration.
 
 ## Permissions
 
