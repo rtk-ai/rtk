@@ -527,8 +527,9 @@ pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
     if invocation.common().help || invocation.common().unstable_help {
         return runner::run_passthrough("cargo", args, verbose);
     }
-    // Dedicated runners use unguarded_help(): these facts were already inspected,
-    // so the generic runner does not need to parse the arguments again.
+    // Dedicated Cargo runners choose whether and how to filter using the parsed options.
+    // When filtering, they pass .unguarded_help() to core::runner, disabling its
+    // automatic help/version detection to avoid parsing argv again.
     match invocation.command() {
         CargoCommand::Build(options) => run_build(args, options, verbose),
         CargoCommand::Check(options) => run_check(args, options, verbose),
