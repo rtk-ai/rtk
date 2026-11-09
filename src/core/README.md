@@ -144,6 +144,9 @@ Key functions available to all command modules:
 
 Shared classifier for an already-`--`-restored args slice (see `args_utils::restore_double_dash`) into flags, their values, and positionals. `tokenize_grammar` takes a `takes_value(kind, name)` predicate the caller supplies — the list of which flags take a value is per-tool, but the token-walking around it isn't. `tokenize(args)` is the structural-only entry point, for a caller asking which arguments are flags and where `--` is; it assumes **no flag takes a value**, so anything reading a value or counting free positionals needs `tokenize_grammar`.
 
+Wrappers retaining native `OsString` arguments use `args_utils::restore_double_dash_os`.
+It shares the same restoration logic and reads `args_os`, preserving non-UTF-8 paths.
+
 **Use it for anything that decides what an argument is.** A new command filter, a new flag on an existing one, or a fix to how one is detected goes through `tokenize_grammar` — not `starts_with('-')`, not `args.iter().any(|a| a == "--flag")`. Those miss exactly what this module exists for: a flag's own value (`git log --grep -p` searches for the string "-p"), an attached value (`--flag=v`, `/bl:x`), a short cluster (`-rn`), and everything past `--`. Every bug the migration fixed was one of those four.
 
 Four rules, each of which cost a real bug before it was written down:

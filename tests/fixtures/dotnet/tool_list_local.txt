@@ -1,0 +1,4 @@
+Package Id                Version      Commands             Manifest
+---------------------------------------------------------------------------------------------------------------------------------------------
+csharp-ls                 0.28.0       csharp-ls            /workspace/sample tools/.config/dotnet-tools.json
+dotnet-outdated-tool      4.8.1        dotnet-outdated      /workspace/sample tools/.config/dotnet-tools.json

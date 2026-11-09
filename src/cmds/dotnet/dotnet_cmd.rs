@@ -1,15 +1,18 @@
-//! Filters dotnet CLI output — build, test, and format results.
+//! Filters dotnet CLI output — build, test, restore, format, and tool lists.
+
+use super::dotnet_tool_list;
 
 use crate::binlog;
 use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec};
 use crate::core::args_utils;
 use crate::core::guard::never_worse;
+use crate::core::runner::{self, RunOptions};
 use crate::core::shell::{display_args, quote_word, with_args};
-use crate::core::stream::exec_capture;
+use crate::core::stream::{self, exec_capture};
 use crate::core::tracking;
 use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
 use crate::core::user_dirs;
-use crate::core::utils::{resolved_command, truncate};
+use crate::core::utils::{ChildArgExt, resolved_command, truncate};
 use crate::dotnet_format_report;
 use crate::dotnet_trx;
 use anyhow::{Context, Result};
@@ -17,6 +20,7 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 use serde_json::Value;
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -88,6 +92,84 @@ fn forwarded_dotnet_args(subcommand: &str, args: &[String]) -> Vec<OsString> {
     let mut out = vec![OsString::from(subcommand)];
     out.extend(args.iter().map(OsString::from));
     out
+}
+
+pub fn run_tool(args: &[OsString], verbose: u8) -> Result<i32> {
+    let args = args_utils::restore_double_dash_os(args);
+    let parsed_args: Vec<String> = args
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let tokens = arg_tokenizer::tokenize_grammar(
+        &parsed_args,
+        &dotnet_tool_list_takes_value,
+        Dialect::Msbuild,
+    );
+    let is_list = tokens
+        .first()
+        .is_some_and(|token| token.is_free_positional() && token.text == "list");
+    let explicit_json = arg_tokenizer::double_dash_flag_values(
+        arg_tokenizer::before_dashdash(&tokens),
+        Dialect::Msbuild,
+        "format",
+    )
+    .any(|value| value.eq_ignore_ascii_case("json"));
+    let mut forwarded = vec![OsString::from("tool")];
+    forwarded.extend(args);
+    if !is_list {
+        return run_passthrough(&forwarded, verbose);
+    }
+
+    let mut cmd = resolved_command("dotnet");
+    cmd.env(DOTNET_CLI_UI_LANGUAGE, DOTNET_CLI_UI_LANGUAGE_VALUE);
+    cmd.child_args(&forwarded);
+    let display = tracking::args_display(&forwarded);
+    if verbose > 0 {
+        eprintln!("Running: dotnet {display}");
+    }
+    if explicit_json || runner::requests_help(&cmd) {
+        return runner::run(
+            cmd,
+            "dotnet",
+            &display,
+            runner::RunMode::Passthrough,
+            RunOptions::default(),
+        );
+    }
+
+    // The line-oriented runner changes CRLF/EOF and caps output before a raw
+    // fallback can see it. Preserve both streams, as the other .NET filters do.
+    let timer = tracking::TimedExecution::start();
+    let captured =
+        stream::exec_capture_stdin_with_relay(&mut cmd).context("Failed to run dotnet tool list");
+    let result = captured.map(|output| {
+        let raw = output.combined();
+        let filtered = if output.success() {
+            dotnet_tool_list::filter_output(&output.stdout)
+        } else {
+            output.stdout.clone()
+        };
+        let shown = never_worse(&output.stdout, &filtered);
+        print!("{shown}");
+        eprint!("{}", output.stderr);
+        timer.track(
+            &with_args("dotnet", &display),
+            &with_args("rtk dotnet", &display),
+            &raw,
+            &format!("{shown}{}", output.stderr),
+        );
+        output.exit_code
+    });
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    stream::die_by_relayed_signal();
+    result
+}
+
+fn dotnet_tool_list_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    (kind == TokenKind::Long
+        && matches!(name.to_ascii_lowercase().as_str(), "tool-path" | "format"))
+    .then(ValueSpec::value)
 }
 
 pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
