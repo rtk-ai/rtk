@@ -62,7 +62,7 @@ src/
 ├── discover/                  ← Claude Code history analysis
 ├── learn/                     ← CLI correction detection
 ├── parser/                    ← Parser infrastructure
-└── filters/                   ← 62 TOML filter configs
+└── filters/                   ← 63 TOML filter configs
 ```
 
 ## Common Search Patterns
