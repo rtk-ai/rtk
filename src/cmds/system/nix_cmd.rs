@@ -1,101 +1,135 @@
-use crate::core::tracking;
-use crate::core::utils::{resolved_command, strip_ansi};
-use anyhow::{Context, Result};
+//! Compact `nix search` output. Every other nix command is passed through.
+//!
+//! `nix search` outside a terminal prints one `evaluating …` line per package
+//! (hundreds of thousands of lines on nixpkgs). The filter keeps the package
+//! list and diagnostics, including the location lines that follow an error.
+
+use crate::core::runner::{self, RunOptions};
+use crate::core::shell::display_args;
+use crate::core::utils::{ChildArgExt, resolved_command, strip_ansi};
+use anyhow::Result;
+use std::ffi::OsString;
 
 const MAX_SEARCH_RESULTS: usize = 20;
 const MAX_FALLBACK_LINES: usize = 40;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
+    if nix_operation(args) != Some("search") {
+        let os_args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        return runner::run_passthrough("nix", &os_args, verbose);
+    }
 
     let mut cmd = resolved_command("nix");
-    for arg in args {
-        cmd.arg(arg);
-    }
+    cmd.child_args(args);
 
     if verbose > 0 {
-        eprintln!("Running: nix {}", args.join(" "));
+        eprintln!("Running: nix {}", display_args(args));
     }
 
-    let output = cmd.output().context("Failed to run nix")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-    let filtered = filter_nix_output(&raw);
-
-    println!("{}", filtered);
-
-    timer.track(
-        &format!("nix {}", args.join(" ")),
-        &format!("rtk nix {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    let code = output.status.code().unwrap_or(1);
-    if !output.status.success() {
-        return Ok(code);
-    }
-
-    Ok(0)
+    runner::run_filtered(
+        cmd,
+        "nix",
+        &display_args(args),
+        filter_nix_search,
+        RunOptions::with_tee("nix"),
+    )
 }
 
-fn filter_nix_output(raw: &str) -> String {
-    let clean = strip_ansi(raw);
-    let mut entries: Vec<String> = Vec::new();
-    let mut summaries: Vec<String> = Vec::new();
-    let mut diagnostics: Vec<String> = Vec::new();
-    let mut fallback: Vec<String> = Vec::new();
-
-    let mut pending_entry: Option<String> = None;
-
-    for line in clean.lines() {
-        if line.trim().is_empty() {
-            if let Some(entry) = pending_entry.take() {
-                entries.push(entry);
+/// The nix subcommand, skipping global flags that take values.
+///
+/// Unknown flags are not assumed to take a value. Misreading one falls through
+/// to the real command instead of filtering a build log.
+fn nix_operation(args: &[String]) -> Option<&str> {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "--" {
+            return args.get(index + 1).map(String::as_str);
+        }
+        if let Some(name) = arg.strip_prefix("--") {
+            let name = name.split('=').next().unwrap_or(name);
+            index += 1;
+            if !arg.contains('=') {
+                index += flag_values(name).min(args.len().saturating_sub(index));
             }
             continue;
         }
+        if arg.starts_with('-') && arg != "-" {
+            index += 1;
+            continue;
+        }
+        return Some(arg);
+    }
+    None
+}
 
-        if let Some(entry) = pending_entry.clone() {
-            if line.starts_with("  ") && !line.trim().starts_with('*') {
-                entries.push(format!("{entry} - {}", line.trim()));
-                pending_entry = None;
+fn flag_values(name: &str) -> usize {
+    match name {
+        "option" => 2,
+        "log-format" | "store" | "file" | "expr" | "include" => 1,
+        _ => 0,
+    }
+}
+
+fn filter_nix_search(raw: &str) -> String {
+    let clean = strip_ansi(raw);
+    let mut entries: Vec<String> = Vec::new();
+    let mut diagnostics: Vec<String> = Vec::new();
+    let mut fallback: Vec<String> = Vec::new();
+    let mut pending_entry: Option<String> = None;
+    let mut in_diagnostic = false;
+    let mut diagnostic_blanks = 0;
+
+    for line in clean.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if let Some(entry) = pending_entry.take() {
+                entries.push(entry);
+            }
+            if in_diagnostic {
+                diagnostic_blanks += 1;
+                if diagnostic_blanks >= 2 {
+                    in_diagnostic = false;
+                }
+            }
+            continue;
+        }
+        diagnostic_blanks = 0;
+
+        if let Some(entry) = pending_entry.take() {
+            if line.starts_with("  ") && !trimmed.starts_with('*') {
+                entries.push(format!("{entry} - {}", trimmed));
+                in_diagnostic = false;
                 continue;
             }
-
             entries.push(entry);
-            pending_entry = None;
         }
 
-        let trimmed = line.trim();
         if trimmed.starts_with("* ") {
-            let after_star = trimmed.trim_start_matches("* ");
-            let normalized = normalize_entry_name(after_star);
+            let normalized = normalize_entry_name(trimmed.trim_start_matches("* "));
             if is_low_signal_entry(&normalized) {
-                pending_entry = None;
+                in_diagnostic = false;
                 continue;
             }
             pending_entry = Some(normalized);
+            in_diagnostic = false;
             continue;
         }
 
         let lower = trimmed.to_lowercase();
         if lower.starts_with("error:") || lower.starts_with("warning:") {
             diagnostics.push(trimmed.to_string());
+            in_diagnostic = true;
             continue;
         }
+
+        if in_diagnostic && (line.starts_with(' ') || is_location_line(trimmed)) {
+            diagnostics.push(trimmed.to_string());
+            continue;
+        }
+        in_diagnostic = false;
 
         if is_noise_line(trimmed) {
-            continue;
-        }
-
-        if trimmed.starts_with("these ")
-            && (trimmed.contains("will be built")
-                || trimmed.contains("will be fetched")
-                || trimmed.contains("will be downloaded"))
-        {
-            summaries.push(trimmed.to_string());
             continue;
         }
 
@@ -121,19 +155,15 @@ fn filter_nix_output(raw: &str) -> String {
         return out.join("\n");
     }
 
-    let mut out: Vec<String> = Vec::new();
-    out.extend(summaries);
-    out.extend(diagnostics);
-
-    if out.is_empty() {
-        out.extend(fallback.into_iter().take(MAX_FALLBACK_LINES));
+    if !diagnostics.is_empty() {
+        return diagnostics.join("\n");
     }
 
-    if out.is_empty() {
-        "ok nix".to_string()
-    } else {
-        out.join("\n")
-    }
+    fallback
+        .into_iter()
+        .take(MAX_FALLBACK_LINES)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn is_noise_line(line: &str) -> bool {
@@ -147,12 +177,15 @@ fn is_noise_line(line: &str) -> bool {
         || line.starts_with("warning: ignoring the client-specified setting")
 }
 
+fn is_location_line(line: &str) -> bool {
+    line.starts_with("at ") || line.contains(".nix:")
+}
+
 fn normalize_entry_name(entry: &str) -> String {
-    // nix search entries are often prefixed with: legacyPackages.<arch>.
-    if let Some(rest) = entry.strip_prefix("legacyPackages.") {
-        if let Some(dot_idx) = rest.find('.') {
-            return rest[dot_idx + 1..].to_string();
-        }
+    if let Some(rest) = entry.strip_prefix("legacyPackages.")
+        && let Some(dot_idx) = rest.find('.')
+    {
+        return rest[dot_idx + 1..].to_string();
     }
     entry.to_string()
 }
@@ -175,7 +208,7 @@ evaluating 'legacyPackages.x86_64-linux.hello-wayland'...
 * legacyPackages.x86_64-linux.hello-wayland (0-unstable)
   Hello world Wayland client
 "#;
-        let filtered = filter_nix_output(raw);
+        let filtered = filter_nix_search(raw);
         assert!(filtered.contains("Nix: 2 results"));
         assert!(filtered.contains("hello (2.12.2) - Program"));
         assert!(!filtered.contains("evaluating"));
@@ -187,8 +220,21 @@ evaluating 'legacyPackages.x86_64-linux.hello-wayland'...
 evaluating 'legacyPackages.x86_64-linux.foo'...
 error: attribute 'foo' missing
 "#;
-        let filtered = filter_nix_output(raw);
+        let filtered = filter_nix_search(raw);
         assert!(filtered.contains("error: attribute 'foo' missing"));
+        assert!(!filtered.contains("evaluating"));
+    }
+
+    #[test]
+    fn test_filter_nix_keeps_error_location() {
+        let raw = "\
+error: undefined variable 'foo'
+
+       at /tmp/bad-eval.nix:5:30:
+";
+        let filtered = filter_nix_search(raw);
+        assert!(filtered.contains("error: undefined variable 'foo'"));
+        assert!(filtered.contains("at /tmp/bad-eval.nix:5:30:"));
     }
 
     #[test]
@@ -199,9 +245,61 @@ error: attribute 'foo' missing
 * legacyPackages.x86_64-linux.hello (2.12.2)
   Program that produces a familiar, friendly greeting
 "#;
-        let filtered = filter_nix_output(raw);
+        let filtered = filter_nix_search(raw);
         assert!(!filtered.contains("tests.foo"));
         assert!(filtered.contains("hello (2.12.2)"));
         assert!(!filtered.contains("legacyPackages.x86_64-linux"));
+    }
+
+    #[test]
+    fn search_is_the_only_filtered_operation() {
+        assert_eq!(
+            nix_operation(&["search".into(), "nixpkgs".into(), "hello".into()]),
+            Some("search")
+        );
+        assert_eq!(
+            nix_operation(&[
+                "--offline".into(),
+                "search".into(),
+                "nixpkgs".into(),
+                "ripgrep".into()
+            ]),
+            Some("search")
+        );
+        assert_eq!(
+            nix_operation(&[
+                "--log-format".into(),
+                "bar".into(),
+                "search".into(),
+                "nixpkgs".into(),
+                "hello".into()
+            ]),
+            Some("search")
+        );
+        assert_eq!(
+            nix_operation(&["build".into(), "nixpkgs#hello".into()]),
+            Some("build")
+        );
+        assert_eq!(
+            nix_operation(&[
+                "shell".into(),
+                "nixpkgs#cargo".into(),
+                "-c".into(),
+                "cargo".into(),
+                "build".into()
+            ]),
+            Some("shell")
+        );
+        assert_eq!(
+            nix_operation(&[
+                "--option".into(),
+                "sandbox".into(),
+                "false".into(),
+                "eval".into(),
+                "--expr".into(),
+                "foo".into()
+            ]),
+            Some("eval")
+        );
     }
 }

@@ -28,10 +28,27 @@ rtk gain --graph          # ASCII graph, last 30 days
 rtk gain --history        # last 10 commands
 rtk gain --quota          # monthly quota savings estimate (default tier: 20x)
 rtk gain --quota -t pro   # use pro tier token budget for estimate
+rtk gain --recalls        # recall efficiency per filter (calibration)
+
+# Live dashboard
+rtk gain                  # auto-launches the dashboard when the RTK Proxy runs
+rtk gain --watch          # force the dashboard
+rtk gain --text           # force the static view
+
+# Attribution (where the savings came from)
+rtk gain --by-method      # per compression method
+rtk gain --by-rule        # per pipeline rule
+rtk gain --by-layer       # per token layer (read, tool_result, history, ...)
+rtk gain --by-pipeline    # per pipeline
+rtk gain --pipeline NAME  # one pipeline, sliced by where its savings land
+rtk gain --shadow         # what shadow rules would have saved
 
 # Export
 rtk gain --all --format json > savings.json
 rtk gain --all --format csv  > savings.csv
+
+# Reset
+rtk gain --reset          # zero the savings and recall stats (asks first)
 ```
 
 ## Daily breakdown
@@ -40,18 +57,18 @@ rtk gain --all --format csv  > savings.csv
 rtk gain --daily
 ```
 
-**Example output** (illustrative numbers from one machine, not typical results — yours depend entirely on which commands you run):
+**Example output** (illustrative values — yours depend entirely on which commands you run):
 
 ```
 📅 Daily Breakdown (3 days)
 ════════════════════════════════════════════════════════════════
 Date            Cmds      Input     Output      Saved   Save%
 ────────────────────────────────────────────────────────────────
-2026-01-28        89     380.9K      26.7K     355.8K   93.4%
-2026-01-29       102     894.5K      32.4K     863.7K   96.6%
-2026-01-30         5        749         55        694   92.7%
+2026-01-01       100     500.0K     100.0K     400.0K   80.0%
+2026-01-02       100     500.0K     100.0K     400.0K   80.0%
+2026-01-03       100     500.0K     100.0K     400.0K   80.0%
 ────────────────────────────────────────────────────────────────
-TOTAL            196       1.3M      59.2K       1.2M   95.6%
+TOTAL            300       1.5M     300.0K       1.2M   80.0%
 ```
 
 - **Cmds**: RTK commands executed
@@ -81,11 +98,11 @@ Same columns as daily, aggregated by Sunday-Saturday week or calendar month.
 ```json
 {
   "summary": {
-    "total_commands": 196,
-    "total_input": 1276098,
-    "total_output": 59244,
-    "total_saved": 1220217,
-    "avg_savings_pct": 95.62
+    "total_commands": 300,
+    "total_input": 1500000,
+    "total_output": 300000,
+    "total_saved": 1200000,
+    "avg_savings_pct": 80.0
   },
   "daily": [...],
   "weekly": [...],
@@ -93,23 +110,9 @@ Same columns as daily, aggregated by Sunday-Saturday week or calendar month.
 }
 ```
 
-## Typical savings by command
-
-| Command | Bash output reduction | Mechanism |
-|---------|----------------------|-----------|
-| `git status` | 77-93% | Compact stat format |
-| `eslint` | 84% | Group by rule |
-| `jest` | 94-99% | Show failures only |
-| `vitest` | 94-99% | Show failures only |
-| `find` | 75% | Tree format |
-| `pnpm list` | 70-90% | Compact dependencies |
-| `grep` | 70% | Truncate + group |
-
-These percentages measure bash output bytes removed, not cost reduction.
-
 ## How token estimation works
 
-`rtk gain` estimates tokens as `bytes / 4` (`src/core/tracking.rs:1284`). RTK ships no real tokenizer by design: embedding one would cost startup time and would require a tokenizer per model, or a per-session model lookup, which RTK does not implement. The same estimator is applied to raw and filtered output, so the percentage is reliable; the absolute token counts are approximate and will not match your provider's billing.
+`rtk gain` estimates tokens as `bytes / 4`; RTK ships no tokenizer. The same estimator is applied to raw and filtered output, so the percentage is reliable; the absolute token counts are approximate and will not match your provider's billing.
 
 ```
 Input Tokens  = estimate_tokens(raw_command_output)
@@ -122,7 +125,7 @@ Savings %     = (Saved / Input) × 100
 
 Savings data is stored locally in SQLite:
 
-- **Location**: `~/.local/share/rtk/history.db` (Linux / macOS)
+- **Location**: `~/.local/share/rtk/history.db` on Linux, `~/Library/Application Support/rtk/history.db` on macOS (override with `RTK_DB_PATH`) — paths below use the Linux location
 - **Retention**: 90 days (automatic cleanup)
 - **Scope**: Global across all projects and Claude sessions
 
@@ -137,6 +140,14 @@ cp ~/.local/share/rtk/history.db ~/backups/rtk-history-$(date +%Y%m%d).db
 
 # Reset
 rm ~/.local/share/rtk/history.db    # recreated on next command
+```
+
+Prefer `--reset` over deleting the file: it zeroes both the token savings and the
+[recall stats](#recall-efficiency), which live separately, and leaves the database intact.
+
+```bash
+rtk gain --reset          # asks for confirmation
+rtk gain --reset --yes    # skip the prompt (scripts)
 ```
 
 ## Analysis workflows
@@ -199,6 +210,104 @@ The tiers (`pro`, `5x`, `20x`) correspond to Anthropic Claude API subscription l
 :::tip[Find missed savings]
 `rtk gain` shows what RTK saved. To find commands that ran *without* RTK and calculate what you lost, see [rtk discover](./discover.md).
 :::
+
+## Live dashboard
+
+`--watch` replaces the static report with a full-screen live dashboard covering **both** savings layers at once: the agent hooks trimming command output, and the [RTK Proxy](../proxy/overview.md) compressing billed input tokens.
+
+```bash
+rtk gain --watch
+```
+
+### Auto-launch
+
+A bare `rtk gain` launches the dashboard **automatically** once the RTK Proxy is running. All four conditions must hold:
+
+1. You passed no flag asking for a specific static view — no `--daily`, `--weekly`, `--monthly`, `--all`, `--history`, `--graph`, `--quota`, and `--format` left at `text`.
+2. You did not pass `--text`.
+3. Standard output is an interactive terminal — piping or redirecting opts out, so scripts and cron jobs are unaffected.
+4. The RTK Proxy is running and reachable.
+
+Without the proxy running, `rtk gain` behaves exactly as it always has.
+
+`--text` is the escape hatch — it forces the static view with the proxy up:
+
+```bash
+rtk gain --text
+```
+
+`--watch` and `--text` are mutually exclusive. Asking for `--watch` without a terminal falls back to the text view with a warning rather than failing.
+
+## Attribution
+
+The default report tells you *how much* was saved. The attribution flags tell you *where it came from*, which helps you tune a pipeline. Each covers both the hook and proxy sites; proxy figures appear only if you run the [RTK Proxy](../proxy/overview.md).
+
+```bash
+rtk gain --by-method      # which compression method did the work
+rtk gain --by-rule        # which pipeline rule fired
+rtk gain --by-layer       # which token layer (read, tool_result, history, ...)
+rtk gain --by-pipeline    # which pipeline
+```
+
+These combine — passing several renders several sections in one report.
+
+### One pipeline in detail
+
+`--pipeline <NAME>` slices a single pipeline by where its savings actually land: which tool outputs the hooks trimmed, and which methods compressed billed input.
+
+```bash
+rtk gain --pipeline my-pipeline
+```
+
+### Shadow rules
+
+Shadow rules are recorded but never emitted — they let you measure a rule's effect before trusting it with real output. `--shadow` reports what they *would* have saved:
+
+```bash
+rtk gain --shadow
+```
+
+A shadow rule showing strong savings is a candidate to promote; one showing nothing is a rule you can delete.
+
+:::note[Full edition only]
+Rule, pipeline and shadow attribution describe the compression engine, which the Apache-2.0 edition does not include. See [Editions and Licensing](../resources/editions.md).
+:::
+
+## Recall efficiency
+
+`--recalls` measures how often your AI assistant goes back for output a filter elided — the signal that a filter's cap is too aggressive for your workflow. Every time a filter stores elided output (an *elision*) and every time the assistant retrieves it (a *recall*), RTK counts it per filter:
+
+```bash
+rtk gain --recalls
+```
+
+Illustrative output:
+
+```
+Recall efficiency  (current mode: sqlite)
+
+SQLITE (exact — reads go through rtk recall)
+FILTER                   ELISIONS RECALLED   RATE
+vitest                         50       20    40%
+docker-images                 100        2     2%
+
+TEE (approximate — bash-observed reads only)
+FILTER                   ELISIONS RECALLED   RATE
+cargo_test                     40        4   ≥10%
+```
+
+How to read it:
+
+- **RATE** is the share of elided outputs the assistant went back for. Re-reading the same entry counts once — the rate measures *entries consulted*, not read commands.
+- A **high rate** means that filter regularly hides output the assistant needs: every recall is an extra API round-trip you paid for. Consider raising that filter's cap.
+- A **low rate** means the filter's cap is well calibrated — the elided output was noise.
+
+The two sections are never merged because the data quality differs:
+
+- **SQLITE (exact)**: reads go through `rtk recall <hash>`, the only access path, so the count is exact.
+- **TEE (approximate)**: in legacy [tee mode](../getting-started/configuration.md#recall-system), reads are shell commands (`tail`, `cat`, `grep`, …) observed by the rewrite hook before execution. Editor or assistant file-tool reads are invisible, denied commands are not counted, and the per-file dedup window is finite — so the `≥` rate is approximate, not exact. A high rate is still a reliable signal that the cap is too aggressive.
+
+Stats survive entry eviction and retention cleanup: calibration data is kept even after the underlying outputs are purged.
 
 ## Troubleshooting
 

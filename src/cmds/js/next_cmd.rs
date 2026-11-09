@@ -1,6 +1,7 @@
 //! Filters Next.js build output down to route metrics and bundle sizes.
 
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
@@ -33,7 +34,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "next build",
-        &args.join(" "),
+        &display_args(args),
         filter_next_build,
         runner::RunOptions::default(),
     )
@@ -95,10 +96,10 @@ fn filter_next_build(output: &str) -> String {
         }
 
         // Extract build time
-        if line.contains("Compiled") || line.contains("in") {
-            if let Some(time_match) = extract_time(line) {
-                build_time = time_match;
-            }
+        if (line.contains("Compiled") || line.contains("in"))
+            && let Some(time_match) = extract_time(line)
+        {
+            build_time = time_match;
         }
     }
 

@@ -1,0 +1,10 @@
+[0m[1mbun install [0m[2mv1.2.20 (6ad208bc)[0m
+Resolving dependencies
+Resolved, downloaded and extracted [4]
+Saved lockfile
+
+[0m[32m+[0m [1mchalk[0m[2m@5.6.2[0m [2m([34mv6.0.0 available[0m[2m)[0m
+[0m[32m+[0m [1mis-odd[0m[2m@3.0.1[0m
+[0m[32m+[0m [1mlodash[0m[2m@4.18.1[0m
+
+[32m4[0m packages[0m installed [0m[2m[[1m278.00ms[0m[2m][0m[0m

@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
   <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk" alt="Release"></a>
-  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
+  <a href="#许可证"><img src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20BUSL--1.1-blue.svg" alt="License: Apache-2.0 and BUSL-1.1"></a>
   <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1478373640461488159?label=Discord&logo=discord" alt="Discord"></a>
   <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk" alt="Homebrew"></a>
 </p>
@@ -72,6 +72,14 @@ RTK 报告的 token 数量按 `字节数 / 4` 估算：RTK 不内置分词器，
 brew install rtk
 ```
 
+### winget（Windows）
+
+Windows 上最简单的安装方式 — 一条命令，无需配置 PATH：
+
+```powershell
+winget install rtk-ai.rtk
+```
+
 ### 快速安装（Linux/macOS）
 
 ```bash
@@ -81,7 +89,17 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 ### Cargo
 
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk
+cargo install --git https://github.com/rtk-ai/rtk rtk
+```
+
+### Apache-2.0 版本（仅开源，允许商业使用）
+
+同一个 `rtk` 二进制文件，构建时不包含 BUSL-1.1 压缩引擎：钩子重写系统和所有命令过滤器，仅遵循 Apache-2.0。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | RTK_EDITION=oss sh
+brew install rtk-ai/tap/rtk-oss
+cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
 ```
 
 ### 验证
@@ -94,10 +112,12 @@ rtk gain        # 应显示 token 节省统计
 ## 快速开始
 
 ```bash
-# 1. 为 Claude Code 安装 hook（推荐）
-rtk init --global
+# 1. 为对应的 AI 工具安装 hook
+rtk init --global               # Claude Code（默认）
+rtk init --agent trae           # Trae（项目级）
+rtk init --global --agent trae  # Trae（全局）
 
-# 2. 重启 Claude Code，然后测试
+# 2. 重启相应的 AI 工具，然后测试
 git status  # 自动重写为 rtk git status
 ```
 
@@ -145,7 +165,7 @@ rtk jest                        # Jest 紧凑输出
 rtk vitest                      # Vitest 紧凑输出
 rtk pytest                      # Python 测试（-90%）
 rtk go test                     # Go 测试（-90%）
-rtk test <cmd>                  # 仅显示失败（-90%）
+rtk test <cmd> [args...]        # 仅显示失败（-90%），直接执行 argv
 ```
 
 ### 构建 & 检查
@@ -172,7 +192,7 @@ rtk discover                    # 发现遗漏的节省机会
 
 ## 文档
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - 解决常见问题
+- **[TROUBLESHOOTING.md](docs/guide/resources/troubleshooting.md)** - 解决常见问题
 - **[INSTALL.md](INSTALL.md)** - 详细安装指南
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - 技术架构
 
@@ -185,6 +205,8 @@ rtk discover                    # 发现遗漏的节省机会
 ## 许可证
 
 Apache 2.0 许可证 - 详见 [LICENSE](LICENSE)。
+
+> `engine/` and `proxy/` are licensed BUSL-1.1 — see their LICENSE files.
 
 ## 免责声明
 
