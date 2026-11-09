@@ -712,9 +712,10 @@ fn scan_mtp_kind_in_file(path: &Path) -> MtpProjectKind {
     };
 
     let mut reader = Reader::from_str(&content);
-    reader.config_mut().trim_text(true);
+    reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
     let mut inside_mtp_element = false;
+    let mut mtp_element_text = String::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -723,20 +724,39 @@ fn scan_mtp_kind_in_file(path: &Path) -> MtpProjectKind {
                 // All project-file MTP properties run in VSTest bridge mode and require
                 // MTP-specific args to come after `--`. Only global.json MTP mode is native.
                 inside_mtp_element = matches!(
-                    name_lower.as_slice(),
-                    b"usemicrosofttestingplatformrunner"
-                        | b"usetestingplatformrunner"
-                        | b"testingplatformdotnettestsupport"
+                    name_lower.as_str(),
+                    "usemicrosofttestingplatformrunner"
+                        | "usetestingplatformrunner"
+                        | "testingplatformdotnettestsupport"
                 );
-            }
-            Ok(Event::Text(e)) if inside_mtp_element => {
-                if let Ok(text) = e.unescape()
-                    && text.trim().eq_ignore_ascii_case("true")
-                {
-                    return MtpProjectKind::VsTestBridge;
+                if inside_mtp_element {
+                    mtp_element_text.clear();
                 }
             }
-            Ok(Event::End(_)) => inside_mtp_element = false,
+            Ok(Event::Text(e)) if inside_mtp_element => {
+                if let Ok(text) = quick_xml::escape::unescape(e.as_ref()) {
+                    mtp_element_text.push_str(&text);
+                }
+            }
+            Ok(Event::GeneralRef(e)) if inside_mtp_element => {
+                let text = e
+                    .resolve_char_ref()
+                    .ok()
+                    .flatten()
+                    .map(|ch| ch.to_string())
+                    .or_else(|| {
+                        quick_xml::escape::resolve_predefined_entity(e.as_ref()).map(str::to_owned)
+                    });
+                if let Some(text) = text {
+                    mtp_element_text.push_str(&text);
+                }
+            }
+            Ok(Event::End(_)) => {
+                if inside_mtp_element && mtp_element_text.trim().eq_ignore_ascii_case("true") {
+                    return MtpProjectKind::VsTestBridge;
+                }
+                inside_mtp_element = false;
+            }
             Ok(Event::Eof) => break,
             Err(_) => break,
             _ => {}
@@ -2712,6 +2732,19 @@ mod tests {
         .expect("write csproj");
 
         // All project-file properties → VsTestBridge; only global.json gives MtpNative
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
+    }
+
+    #[test]
+    fn test_scan_mtp_kind_resolves_character_references() {
+        let temp_dir = test_isolation::tempdir();
+        let csproj = temp_dir.path().join("MTP.Tests.csproj");
+        fs::write(
+            &csproj,
+            "<Project><PropertyGroup><UseMicrosoftTestingPlatformRunner>tru&#101;</UseMicrosoftTestingPlatformRunner></PropertyGroup></Project>",
+        )
+        .expect("write csproj");
+
         assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
     }
 

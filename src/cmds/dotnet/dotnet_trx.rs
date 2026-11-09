@@ -3,25 +3,32 @@
 use crate::binlog::{FailedTest, TestSummary};
 use chrono::{DateTime, FixedOffset};
 use quick_xml::Reader;
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::events::{BytesRef, BytesStart, Event};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-fn local_name(name: &[u8]) -> &[u8] {
-    name.rsplit(|b| *b == b':').next().unwrap_or(name)
+fn local_name(name: &str) -> &str {
+    name.rsplit(':').next().unwrap_or(name)
 }
 
-fn extract_attr_value(
-    reader: &Reader<&[u8]>,
-    start: &BytesStart<'_>,
-    key: &[u8],
-) -> Option<String> {
+fn resolve_reference(reference: &BytesRef<'_>) -> Option<String> {
+    reference
+        .resolve_char_ref()
+        .ok()
+        .flatten()
+        .map(|ch| ch.to_string())
+        .or_else(|| {
+            quick_xml::escape::resolve_predefined_entity(reference.as_ref()).map(str::to_owned)
+        })
+}
+
+fn extract_attr_value(start: &BytesStart<'_>, key: &str) -> Option<String> {
     for attr in start.attributes().flatten() {
         if local_name(attr.key.as_ref()) != key {
             continue;
         }
 
-        if let Ok(value) = attr.decode_and_unescape_value(reader.decoder()) {
+        if let Ok(value) = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0) {
             return Some(value.into_owned());
         }
     }
@@ -29,8 +36,8 @@ fn extract_attr_value(
     None
 }
 
-fn parse_usize_attr(reader: &Reader<&[u8]>, start: &BytesStart<'_>, key: &[u8]) -> usize {
-    extract_attr_value(reader, start, key)
+fn parse_usize_attr(start: &BytesStart<'_>, key: &str) -> usize {
+    extract_attr_value(start, key)
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0)
 }
@@ -67,13 +74,13 @@ fn parse_trx_time_bounds(content: &str) -> Option<(DateTime<FixedOffset>, DateTi
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                if local_name(e.name().as_ref()) != b"Times" {
+                if local_name(e.name().as_ref()) != "Times" {
                     buf.clear();
                     continue;
                 }
 
-                let start = extract_attr_value(&reader, &e, b"start")?;
-                let finish = extract_attr_value(&reader, &e, b"finish")?;
+                let start = extract_attr_value(&e, "start")?;
+                let finish = extract_attr_value(&e, "finish")?;
                 let start_dt = DateTime::parse_from_rfc3339(&start).ok()?;
                 let finish_dt = DateTime::parse_from_rfc3339(&finish).ok()?;
                 return Some((start_dt, finish_dt));
@@ -212,7 +219,7 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
     }
 
     let mut reader = Reader::from_str(content);
-    reader.config_mut().trim_text(true);
+    reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
     let mut summary = TestSummary::default();
     let mut saw_test_run = false;
@@ -226,22 +233,22 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
-                b"TestRun" => saw_test_run = true,
-                b"Times" => {
-                    let start = extract_attr_value(&reader, &e, b"start");
-                    let finish = extract_attr_value(&reader, &e, b"finish");
+                "TestRun" => saw_test_run = true,
+                "Times" => {
+                    let start = extract_attr_value(&e, "start");
+                    let finish = extract_attr_value(&e, "finish");
                     if let (Some(start), Some(finish)) = (start, finish) {
                         summary.duration_text = parse_trx_duration(&start, &finish);
                     }
                 }
-                b"Counters" => {
-                    summary.total = parse_usize_attr(&reader, &e, b"total");
-                    summary.passed = parse_usize_attr(&reader, &e, b"passed");
-                    summary.failed = parse_usize_attr(&reader, &e, b"failed");
+                "Counters" => {
+                    summary.total = parse_usize_attr(&e, "total");
+                    summary.passed = parse_usize_attr(&e, "passed");
+                    summary.failed = parse_usize_attr(&e, "failed");
                 }
-                b"UnitTestResult" => {
-                    let outcome = extract_attr_value(&reader, &e, b"outcome")
-                        .unwrap_or_else(|| "Unknown".to_string());
+                "UnitTestResult" => {
+                    let outcome =
+                        extract_attr_value(&e, "outcome").unwrap_or_else(|| "Unknown".to_string());
 
                     if outcome == "Failed" {
                         in_failed_result = true;
@@ -249,41 +256,41 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
                         capture_field = None;
                         message_buf.clear();
                         stack_buf.clear();
-                        failed_test_name = extract_attr_value(&reader, &e, b"testName")
+                        failed_test_name = extract_attr_value(&e, "testName")
                             .unwrap_or_else(|| "unknown".to_string());
                     }
                 }
-                b"ErrorInfo" if in_failed_result => {
+                "ErrorInfo" if in_failed_result => {
                     in_error_info = true;
                 }
-                b"Message" if in_failed_result && in_error_info => {
+                "Message" if in_failed_result && in_error_info => {
                     capture_field = Some(CaptureField::Message);
                     message_buf.clear();
                 }
-                b"StackTrace" if in_failed_result && in_error_info => {
+                "StackTrace" if in_failed_result && in_error_info => {
                     capture_field = Some(CaptureField::StackTrace);
                     stack_buf.clear();
                 }
                 _ => {}
             },
             Ok(Event::Empty(e)) => match local_name(e.name().as_ref()) {
-                b"Times" => {
-                    let start = extract_attr_value(&reader, &e, b"start");
-                    let finish = extract_attr_value(&reader, &e, b"finish");
+                "Times" => {
+                    let start = extract_attr_value(&e, "start");
+                    let finish = extract_attr_value(&e, "finish");
                     if let (Some(start), Some(finish)) = (start, finish) {
                         summary.duration_text = parse_trx_duration(&start, &finish);
                     }
                 }
-                b"Counters" => {
-                    summary.total = parse_usize_attr(&reader, &e, b"total");
-                    summary.passed = parse_usize_attr(&reader, &e, b"passed");
-                    summary.failed = parse_usize_attr(&reader, &e, b"failed");
+                "Counters" => {
+                    summary.total = parse_usize_attr(&e, "total");
+                    summary.passed = parse_usize_attr(&e, "passed");
+                    summary.failed = parse_usize_attr(&e, "failed");
                 }
-                b"UnitTestResult" => {
-                    let outcome = extract_attr_value(&reader, &e, b"outcome")
-                        .unwrap_or_else(|| "Unknown".to_string());
+                "UnitTestResult" => {
+                    let outcome =
+                        extract_attr_value(&e, "outcome").unwrap_or_else(|| "Unknown".to_string());
                     if outcome == "Failed" {
-                        let name = extract_attr_value(&reader, &e, b"testName")
+                        let name = extract_attr_value(&e, "testName")
                             .unwrap_or_else(|| "unknown".to_string());
                         summary.failed_tests.push(FailedTest {
                             name,
@@ -299,7 +306,8 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
                     continue;
                 }
 
-                let text = String::from_utf8_lossy(e.as_ref());
+                let text =
+                    quick_xml::escape::unescape(e.as_ref()).unwrap_or_else(|_| e.as_ref().into());
                 match capture_field {
                     Some(CaptureField::Message) => message_buf.push_str(&text),
                     Some(CaptureField::StackTrace) => stack_buf.push_str(&text),
@@ -312,21 +320,30 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
                     continue;
                 }
 
-                let text = String::from_utf8_lossy(e.as_ref());
+                let text = e.as_ref();
                 match capture_field {
-                    Some(CaptureField::Message) => message_buf.push_str(&text),
-                    Some(CaptureField::StackTrace) => stack_buf.push_str(&text),
+                    Some(CaptureField::Message) => message_buf.push_str(text),
+                    Some(CaptureField::StackTrace) => stack_buf.push_str(text),
                     None => {}
                 }
             }
+            Ok(Event::GeneralRef(e)) if in_failed_result => {
+                if let Some(text) = resolve_reference(&e) {
+                    match capture_field {
+                        Some(CaptureField::Message) => message_buf.push_str(&text),
+                        Some(CaptureField::StackTrace) => stack_buf.push_str(&text),
+                        None => {}
+                    }
+                }
+            }
             Ok(Event::End(e)) => match local_name(e.name().as_ref()) {
-                b"Message" | b"StackTrace" => {
+                "Message" | "StackTrace" => {
                     capture_field = None;
                 }
-                b"ErrorInfo" => {
+                "ErrorInfo" => {
                     in_error_info = false;
                 }
-                b"UnitTestResult" if in_failed_result => {
+                "UnitTestResult" if in_failed_result => {
                     let mut details = Vec::new();
 
                     let message = message_buf.trim();
@@ -422,10 +439,10 @@ mod tests {
         let trx = r#"<?xml version="1.0" encoding="utf-8"?>
 <TestRun>
   <Results>
-    <UnitTestResult testName="MyTests.Calculator.Add_ShouldFail" outcome="Failed">
+    <UnitTestResult testName="MyTests.Calculator.Add&amp;Subtract_ShouldFail" outcome="Failed">
       <Output>
         <ErrorInfo>
-          <Message>Expected: 5, Actual: 4</Message>
+          <Message>Expected: &lt;5&gt; &amp; got 4</Message>
           <StackTrace>at MyTests.Calculator.Add_ShouldFail()\nat line 42</StackTrace>
         </ErrorInfo>
       </Output>
@@ -438,9 +455,9 @@ mod tests {
         assert_eq!(summary.failed_tests.len(), 1);
         assert_eq!(
             summary.failed_tests[0].name,
-            "MyTests.Calculator.Add_ShouldFail"
+            "MyTests.Calculator.Add&Subtract_ShouldFail"
         );
-        assert!(summary.failed_tests[0].details[0].contains("Expected: 5, Actual: 4"));
+        assert_eq!(summary.failed_tests[0].details[0], "Expected: <5> & got 4");
     }
 
     #[test]
