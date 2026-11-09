@@ -569,8 +569,12 @@ impl CargoInvocation {
             }
             CargoCommand::Test(options) => {
                 if tokenizer.parse_while(options) == ParseBoundary::DashDash {
-                    // Cargo consumed --; the harness starts with its own option boundary.
+                    // Cargo forwards the arguments after -- to the test harness.
                     // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
+                    // Our Clap tokenizer treats arguments after -- as positional, including
+                    // --help. Reset that separator state at the current cursor so the harness
+                    // can recognize its own options and its own -- separator.
+                    // https://docs.rs/clap/latest/clap/_concepts/index.html#argument-parsing
                     tokenizer.begin_region(Dialect::Clap);
                     tokenizer.parse_while(&mut options.harness);
                 }
@@ -580,7 +584,10 @@ impl CargoInvocation {
             }
             CargoCommand::Nextest(options) => {
                 if tokenizer.parse_while(options) == ParseBoundary::DashDash {
-                    // The forwarded arguments have their own option boundary.
+                    // Our Clap tokenizer treats arguments after -- as positional. Reset that
+                    // separator state at the current cursor so forwarded --help/--format are
+                    // recognized as harness options, with a fresh -- separator of their own.
+                    // https://docs.rs/clap/latest/clap/_concepts/index.html#argument-parsing
                     tokenizer.begin_region(Dialect::Clap);
                     tokenizer.parse_while(&mut options.harness);
                 }
