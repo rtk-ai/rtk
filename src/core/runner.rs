@@ -512,7 +512,7 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
             };
         (TokenAction::Continue, git_message.then(ValueSpec::value))
     });
-    let tokens = arg_tokenizer::Tokenizer::new(args, spelling.dialect).tokenize_until(&mut parser);
+    let tokens = arg_tokenizer::Tokenizer::new(args, spelling.dialect).tokenize_while(&mut parser);
     if names_usage(
         arg_tokenizer::before_dashdash(&tokens),
         args,
@@ -534,7 +534,7 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
     let forwarded = &args[boundary + 1..];
     let mut no_values = ();
     let inner =
-        arg_tokenizer::Tokenizer::new(forwarded, Dialect::Posix).tokenize_until(&mut no_values);
+        arg_tokenizer::Tokenizer::new(forwarded, Dialect::Posix).tokenize_while(&mut no_values);
     names_usage(
         arg_tokenizer::before_dashdash(&inner),
         forwarded,

@@ -21,7 +21,7 @@ fn batches_change_grammar_without_restarting_or_mistaking_values_for_commands() 
     ];
     let mut tokenizer = Tokenizer::new(&args, Dialect::Clap);
     let mut visited = Vec::new();
-    let prefix = tokenizer.tokenize_until(&mut syntax_callback(|token| {
+    let prefix = tokenizer.tokenize_while(&mut syntax_callback(|token| {
         visited.push(token.source_index);
         if token.is_free_positional() {
             (TokenAction::Stop, None)
@@ -37,7 +37,7 @@ fn batches_change_grammar_without_restarting_or_mistaking_values_for_commands() 
     assert_eq!(prefix[2].text, "install");
     assert_eq!(prefix[2].source_index, 2);
 
-    let command = tokenizer.tokenize_until(&mut syntax_callback(|token| {
+    let command = tokenizer.tokenize_while(&mut syntax_callback(|token| {
         visited.push(token.source_index);
         if token.kind == TokenKind::DashDash {
             (TokenAction::Stop, None)
@@ -56,7 +56,7 @@ fn batches_change_grammar_without_restarting_or_mistaking_values_for_commands() 
     assert_eq!(command[2].kind, TokenKind::DashDash);
 
     tokenizer.begin_region(Dialect::Clap);
-    let harness = tokenizer.tokenize_until(&mut syntax_callback(|token| {
+    let harness = tokenizer.tokenize_while(&mut syntax_callback(|token| {
         visited.push(token.source_index);
         if token.kind == TokenKind::DashDash {
             (TokenAction::Stop, None)
@@ -73,7 +73,7 @@ fn batches_change_grammar_without_restarting_or_mistaking_values_for_commands() 
     // An earlier batch's links remain valid after subsequent calls.
     assert_eq!(prefix[0].value(&prefix), Some("check"));
 
-    let tail = tokenizer.tokenize_until(&mut syntax_callback(|token| {
+    let tail = tokenizer.tokenize_while(&mut syntax_callback(|token| {
         visited.push(token.source_index);
         (TokenAction::Continue, None)
     }));
@@ -83,7 +83,7 @@ fn batches_change_grammar_without_restarting_or_mistaking_values_for_commands() 
     assert_eq!(visited, [0, 2, 3, 5, 6, 8, 9]);
     assert!(
         tokenizer
-            .tokenize_until(&mut syntax_callback(|_| panic!("must not rescan")))
+            .tokenize_while(&mut syntax_callback(|_| panic!("must not rescan")))
             .is_empty()
     );
 }
@@ -93,7 +93,7 @@ fn stop_finishes_the_cluster_and_its_separate_value() {
     let args = ["-vn", "value", "tail"];
     let mut tokenizer = Tokenizer::new(&args, Dialect::Clap);
     let mut visited = Vec::new();
-    let batch = tokenizer.tokenize_until(&mut syntax_callback(|token| {
+    let batch = tokenizer.tokenize_while(&mut syntax_callback(|token| {
         visited.push(token.text);
         match token.text {
             "v" => (TokenAction::Stop, None),
@@ -105,7 +105,7 @@ fn stop_finishes_the_cluster_and_its_separate_value() {
     assert_eq!(batch.len(), 3);
     assert_eq!(batch[1].value(&batch), Some("value"));
     assert_eq!(batch[2].source_index, 1);
-    let tail = tokenizer.tokenize_until(&mut syntax_callback(|_| (TokenAction::Continue, None)));
+    let tail = tokenizer.tokenize_while(&mut syntax_callback(|_| (TokenAction::Continue, None)));
     assert_eq!(tail[0].text, "tail");
     assert_eq!(tail[0].source_index, 2);
 }
@@ -119,12 +119,12 @@ fn stop_on_an_option_consumes_its_attached_or_separate_value() {
         vec!["-n=data", "tail"],
     ] {
         let mut tokenizer = Tokenizer::new(&args, Dialect::Clap);
-        let batch = tokenizer.tokenize_until(&mut syntax_callback(|_| {
+        let batch = tokenizer.tokenize_while(&mut syntax_callback(|_| {
             (TokenAction::Stop, Some(ValueSpec::value()))
         }));
         assert_eq!(batch[0].value(&batch), Some("data"), "{args:?}");
         let tail =
-            tokenizer.tokenize_until(&mut syntax_callback(|_| (TokenAction::Continue, None)));
+            tokenizer.tokenize_while(&mut syntax_callback(|_| (TokenAction::Continue, None)));
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].text, "tail");
         assert_eq!(tail[0].source_index, args.len() - 1);
@@ -136,7 +136,7 @@ fn a_consumed_double_dash_is_not_a_stop_event() {
     let args = ["--value", "--", "--", "-v"];
     let mut tokenizer = Tokenizer::new(&args, Dialect::Clap);
     let mut visited = Vec::new();
-    let batch = tokenizer.tokenize_until(&mut syntax_callback(|token| {
+    let batch = tokenizer.tokenize_while(&mut syntax_callback(|token| {
         visited.push(token.source_index);
         if token.kind == TokenKind::DashDash {
             (TokenAction::Stop, None)
@@ -150,7 +150,7 @@ fn a_consumed_double_dash_is_not_a_stop_event() {
     assert_eq!(visited, [0, 2]);
     assert_eq!(batch[0].value(&batch), Some("--"));
     assert_eq!(batch[2].kind, TokenKind::DashDash);
-    let tail = tokenizer.tokenize_until(&mut syntax_callback(|_| (TokenAction::Continue, None)));
+    let tail = tokenizer.tokenize_while(&mut syntax_callback(|_| (TokenAction::Continue, None)));
     assert_eq!(tail[0].kind, TokenKind::Positional);
     assert_eq!(tail[0].text, "-v");
 }
@@ -165,11 +165,11 @@ fn attached_atomic_flags_numeric_shortcuts_and_empty_operands_can_stop() {
     ] {
         let args = [first, "tail"];
         let mut tokenizer = Tokenizer::new(&args, dialect);
-        let batch = tokenizer.tokenize_until(&mut syntax_callback(|_| (TokenAction::Stop, None)));
+        let batch = tokenizer.tokenize_while(&mut syntax_callback(|_| (TokenAction::Stop, None)));
         assert_eq!(batch.len(), 1, "{first}");
         assert_eq!(batch[0].source_index, 0);
         let tail =
-            tokenizer.tokenize_until(&mut syntax_callback(|_| (TokenAction::Continue, None)));
+            tokenizer.tokenize_while(&mut syntax_callback(|_| (TokenAction::Continue, None)));
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].text, "tail");
         assert_eq!(tail[0].source_index, 1);
@@ -206,7 +206,7 @@ fn pauses_preserve_tokenization_under_every_dialect() {
                 let mut tokenizer = Tokenizer::new(args, dialect);
                 let mut actual = Vec::new();
                 loop {
-                    let mut batch = tokenizer.tokenize_until(&mut syntax_callback(|token| {
+                    let mut batch = tokenizer.tokenize_while(&mut syntax_callback(|token| {
                         (TokenAction::Stop, takes_value(token.kind, token.text))
                     }));
                     if batch.is_empty() {
@@ -268,7 +268,7 @@ fn parser_objects_read_resolved_values_in_the_token_loop() {
     let mut tokenizer = Tokenizer::new(&args, Dialect::Clap);
     let mut destination = Parameters::default();
     let mut scratch = destination.clone();
-    let tokens = tokenizer.tokenize_until(&mut scratch);
+    let tokens = tokenizer.tokenize_while(&mut scratch);
     assert_eq!(scratch.flags, 1);
     assert!(
         scratch.values.is_empty(),
@@ -292,7 +292,7 @@ fn parser_objects_read_resolved_values_in_the_token_loop() {
 
     // A trait object can also resume the same tokenizer with its -- state intact.
     let parser: &mut dyn ParameterParser<'_> = &mut ();
-    let tail = tokenizer.tokenize_until(parser);
+    let tail = tokenizer.tokenize_while(parser);
     assert_eq!(tail.len(), 1);
     assert!(tail[0].is_free_positional());
     assert_eq!(tail[0].text, "--flag");
@@ -344,47 +344,47 @@ impl<'a> ParameterParser<'a> for ParsedArguments<'a> {
 }
 
 #[test]
-fn parse_until_resolves_values_once_and_preserves_boundaries() {
+fn parse_while_resolves_values_once_and_preserves_boundaries() {
     let args = ["--value", "operand", "command", "--flag", "--", "--flag"];
     let mut tokenizer = Tokenizer::new(&args, Dialect::Clap);
     let mut parsed = ParsedArguments::default();
     assert_eq!(
-        tokenizer.parse_until(&mut parsed),
+        tokenizer.parse_while(&mut parsed),
         ParseBoundary::Positional("command")
     );
     assert_eq!(parsed.values, ["operand"]);
     assert_eq!(parsed.positionals, ["command"]);
     assert!(parsed.flags.is_empty());
-    assert_eq!(tokenizer.parse_until(&mut parsed), ParseBoundary::Stopped);
+    assert_eq!(tokenizer.parse_while(&mut parsed), ParseBoundary::Stopped);
     assert_eq!(parsed.flags, ["flag"]);
     assert_eq!(
-        tokenizer.parse_until(&mut parsed),
+        tokenizer.parse_while(&mut parsed),
         ParseBoundary::Positional("--flag")
     );
     assert_eq!(parsed.positionals, ["command", "--flag"]);
     assert_eq!(parsed.flags, ["flag"]);
     assert_eq!(
-        tokenizer.parse_until(&mut parsed),
+        tokenizer.parse_while(&mut parsed),
         ParseBoundary::EndOfInput
     );
 }
 
 #[test]
-fn parse_until_finishes_semantic_updates_for_the_cluster_and_its_value() {
+fn parse_while_finishes_semantic_updates_for_the_cluster_and_its_value() {
     let args = ["-vn", "data", "tail"];
     let mut tokenizer = Tokenizer::new(&args, Dialect::Clap);
     let mut parsed = ParsedArguments::default();
-    assert_eq!(tokenizer.parse_until(&mut parsed), ParseBoundary::Stopped);
+    assert_eq!(tokenizer.parse_while(&mut parsed), ParseBoundary::Stopped);
     assert_eq!(parsed.flags, ["v"]);
     assert_eq!(parsed.values, ["data"]);
     assert_eq!(
-        tokenizer.parse_until(&mut parsed),
+        tokenizer.parse_while(&mut parsed),
         ParseBoundary::Positional("tail")
     );
 }
 
 #[test]
-fn parse_until_value_dependent_stops_leave_the_next_separator_unread() {
+fn parse_while_value_dependent_stops_leave_the_next_separator_unread() {
     for args in [
         vec!["--value", "stop", "--", "--flag"],
         vec!["--value=stop", "--", "--flag"],
@@ -394,18 +394,18 @@ fn parse_until_value_dependent_stops_leave_the_next_separator_unread() {
         let mut tokenizer = Tokenizer::new(&args, Dialect::Clap);
         let mut parsed = ParsedArguments::default();
         assert_eq!(
-            tokenizer.parse_until(&mut parsed),
+            tokenizer.parse_while(&mut parsed),
             ParseBoundary::Stopped,
             "{args:?}"
         );
         assert_eq!(parsed.values, ["stop"]);
         assert_eq!(
-            tokenizer.parse_until(&mut parsed),
+            tokenizer.parse_while(&mut parsed),
             ParseBoundary::Stopped,
             "{args:?}"
         );
         assert_eq!(
-            tokenizer.parse_until(&mut parsed),
+            tokenizer.parse_while(&mut parsed),
             ParseBoundary::Positional("--flag"),
             "{args:?}"
         );
@@ -414,7 +414,7 @@ fn parse_until_value_dependent_stops_leave_the_next_separator_unread() {
 }
 
 #[test]
-fn parse_until_uses_resolved_state_to_tokenize_subsequent_arguments() {
+fn parse_while_uses_resolved_state_to_tokenize_subsequent_arguments() {
     #[derive(Clone, Default)]
     struct ValueMode<'a> {
         takes_value: bool,
@@ -447,7 +447,7 @@ fn parse_until_uses_resolved_state_to_tokenize_subsequent_arguments() {
     let mut tokenizer = Tokenizer::new(&args, Dialect::Clap);
     let mut parsed = ValueMode::default();
     assert_eq!(
-        tokenizer.parse_until(&mut parsed),
+        tokenizer.parse_while(&mut parsed),
         ParseBoundary::Positional("command")
     );
     assert_eq!(parsed.captured, Some("operand"));

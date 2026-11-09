@@ -28,21 +28,42 @@ pub enum CargoCommand {
 }
 
 impl CargoCommand {
-    fn named(name: &str) -> Option<Self> {
+    fn named(name: &str, common: CommonOptions) -> Option<Self> {
+        let build = Self::Build(BuildOptions {
+            common,
+            ..Default::default()
+        });
+        let check = Self::Check(CheckOptions {
+            common,
+            ..Default::default()
+        });
+        let test = Self::Test(TestOptions {
+            common,
+            ..Default::default()
+        });
         // Canonical names have one source; built-in aliases are separate.
         // https://doc.rust-lang.org/cargo/reference/config.html#alias
         match name {
-            "b" => Some(Self::Build(Default::default())),
-            "c" => Some(Self::Check(Default::default())),
-            "t" => Some(Self::Test(Default::default())),
+            "b" => Some(build),
+            "c" => Some(check),
+            "t" => Some(test),
             name => [
-                Self::Build(Default::default()),
-                Self::Check(Default::default()),
-                Self::Clippy(Default::default()),
-                Self::Test(Default::default()),
-                Self::Install(Default::default()),
-                Self::Nextest(Default::default()),
-                Self::Fmt(Default::default()),
+                build,
+                check,
+                Self::Clippy(ClippyOptions {
+                    common,
+                    ..Default::default()
+                }),
+                test,
+                Self::Install(InstallOptions {
+                    common,
+                    ..Default::default()
+                }),
+                Self::Nextest(NextestOptions {
+                    common,
+                    ..Default::default()
+                }),
+                Self::Fmt(FmtOptions { common }),
             ]
             .into_iter()
             .find(|command| command.as_str() == Some(name)),
@@ -537,46 +558,39 @@ impl CargoInvocation {
         let mut common = CommonOptions::default();
         // Prefix options own their values. The first free argument ends the prefix;
         // an unknown option also stops discovery because its arity is unknown.
-        let mut command = match tokenizer.parse_until(&mut common) {
+        let mut command = match tokenizer.parse_while(&mut common) {
             ParseBoundary::EndOfInput => CargoCommand::NoCommand(common),
             ParseBoundary::Positional(name) => {
                 // Combined root actions and explicit commands remain outside this partial model.
                 if common.version || common.list || common.explain {
                     return None;
                 }
-                CargoCommand::named(name)?
+                CargoCommand::named(name, common)?
             }
             ParseBoundary::Stopped => return None,
         };
         match &mut command {
             CargoCommand::NoCommand(_) => {}
             CargoCommand::Build(options) => {
-                options.common = common;
-                tokenizer.parse_until(options);
+                tokenizer.parse_while(options);
             }
             CargoCommand::Check(options) => {
-                options.common = common;
-                tokenizer.parse_until(options);
+                tokenizer.parse_while(options);
             }
             CargoCommand::Clippy(options) => {
-                options.common = common;
-                tokenizer.parse_until(options);
+                tokenizer.parse_while(options);
             }
             CargoCommand::Test(options) => {
-                options.common = common;
-                tokenizer.parse_until(options);
+                tokenizer.parse_while(options);
             }
             CargoCommand::Install(options) => {
-                options.common = common;
-                tokenizer.parse_until(options);
+                tokenizer.parse_while(options);
             }
             CargoCommand::Nextest(options) => {
-                options.common = common;
-                tokenizer.parse_until(options);
+                tokenizer.parse_while(options);
             }
             CargoCommand::Fmt(options) => {
-                options.common = common;
-                tokenizer.parse_until(options);
+                tokenizer.parse_while(options);
             }
         }
         let harness = match &mut command {
@@ -588,7 +602,7 @@ impl CargoInvocation {
             // Cargo's -- hands the suffix to a distinct parser with its own boundary.
             // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
             tokenizer.begin_region(Dialect::Clap);
-            tokenizer.parse_until(harness);
+            tokenizer.parse_while(harness);
         }
         Some(Self { command })
     }
@@ -2196,14 +2210,14 @@ mod tests {
         let mut tokenizer = arg_tokenizer::Tokenizer::new(&args, Dialect::Clap);
         let mut common = CommonOptions::default();
         assert_eq!(
-            tokenizer.parse_until(&mut common),
+            tokenizer.parse_while(&mut common),
             ParseBoundary::Positional("install")
         );
         assert_eq!(common, CommonOptions::default());
 
         let mut options = InstallOptions::default();
         assert_eq!(
-            tokenizer.parse_until(&mut options),
+            tokenizer.parse_while(&mut options),
             ParseBoundary::EndOfInput
         );
         assert_eq!(options.version.as_deref(), Some("^1.2"));
@@ -2218,7 +2232,7 @@ mod tests {
             let mut tokenizer = arg_tokenizer::Tokenizer::new(&args, Dialect::Clap);
             let mut common = CommonOptions::default();
             assert_eq!(
-                tokenizer.parse_until(&mut common),
+                tokenizer.parse_while(&mut common),
                 ParseBoundary::Stopped,
                 "{unknown}"
             );
@@ -2265,7 +2279,7 @@ mod tests {
     #[test]
     fn common_requests_are_embedded_in_command_options() {
         for command in [
-            "build", "check", "clippy", "test", "install", "nextest", "fmt",
+            "build", "check", "clippy", "test", "install", "nextest", "fmt", "b", "c", "t",
         ] {
             for args in [
                 vec!["-Zhelp", command, "--help"],
@@ -2420,7 +2434,7 @@ mod tests {
             operation: NextestOperation::Run,
             ..Default::default()
         };
-        tokenizer.parse_until(&mut options);
+        tokenizer.parse_while(&mut options);
         assert_eq!(options.operation, NextestOperation::Run);
         assert_eq!(options.message_format, NextestFormat::LibtestJson);
         assert_eq!(options.cargo_message_format, MessageFormat::Json);
@@ -2616,9 +2630,9 @@ mod tests {
             let args = [option, "--", "check"];
             let mut tokenizer = arg_tokenizer::Tokenizer::new(&args, Dialect::Clap);
             let tokens = if option == "--message-format" {
-                tokenizer.tokenize_until(&mut CheckOptions::default())
+                tokenizer.tokenize_while(&mut CheckOptions::default())
             } else {
-                tokenizer.tokenize_until(&mut CommonOptions::default())
+                tokenizer.tokenize_while(&mut CommonOptions::default())
             };
             assert_eq!(tokens[0].value(&tokens), None, "{option}");
             assert_eq!(tokens[1].kind, TokenKind::DashDash, "{option}");

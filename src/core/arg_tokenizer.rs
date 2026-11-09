@@ -476,7 +476,7 @@ pub enum TokenAction {
     Stop,
 }
 
-/// Where [`Tokenizer::parse_until`] finished after applying the parser's semantic updates.
+/// Where [`Tokenizer::parse_while`] finished after applying the parser's semantic updates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseBoundary<'a> {
     EndOfInput,
@@ -513,7 +513,7 @@ impl<'a> ParameterParser<'a> for () {
 }
 
 /// Adapt a syntax-only callback to the parser interface. Its callback sees token heads
-/// before their values are resolved, following the original [`Tokenizer::tokenize_until`] contract.
+/// before their values are resolved, following the original [`Tokenizer::tokenize_while`] contract.
 pub fn syntax_callback<'a, F>(callback: F) -> impl ParameterParser<'a>
 where
     F: FnMut(&Token<'a>) -> (TokenAction, Option<ValueSpec>),
@@ -646,14 +646,14 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
         self.emitted_dash_dash = false;
     }
 
-    /// Tokenize through the argument whose parser requests [`TokenAction::Stop`],
-    /// or through the end of input. An empty batch means input is exhausted.
+    /// Tokenize while the parser permits continuation, finishing the argument that requests
+    /// [`TokenAction::Stop`], or reaching the end of input. An empty batch means input is exhausted.
     ///
     /// The parser sees each option, free positional and separator with `value: None`.
     /// It supplies the rule before short attached and separate values are resolved. Option/value
     /// pairs and short clusters are never split. Supply this batch to [`Token::value`].
     /// The cursor and `--` state survive calls; only [`Self::begin_region`] resets that state.
-    pub fn tokenize_until<P: ParameterParser<'a> + ?Sized>(
+    pub fn tokenize_while<P: ParameterParser<'a> + ?Sized>(
         &mut self,
         parser: &mut P,
     ) -> Vec<Token<'a>> {
@@ -667,12 +667,13 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
         std::mem::take(&mut self.tokens)
     }
 
-    /// Parse through the first stop request or end of input, using resolved option values.
+    /// Fill the destination while the parser permits continuation, using resolved option values.
+    /// Return after the first stop request's argument or at the end of input.
     /// Each complete argument is tokenized with a scratch clone of the current destination,
     /// then replayed on the real destination. Consumed value tokens are read through their
     /// owners. Stops finish the current cluster and its values before returning, so the cursor
     /// and `--` state also remain correct when the stop depends on a resolved value.
-    pub fn parse_until<P: ParameterParser<'a> + Clone>(
+    pub fn parse_while<P: ParameterParser<'a> + Clone>(
         &mut self,
         destination: &mut P,
     ) -> ParseBoundary<'a> {
@@ -831,7 +832,7 @@ fn tokenize_scan<'a, T: AsRef<str>>(
     takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
 ) -> Vec<Token<'a>> {
     let mut tokenizer = Tokenizer::new(args, dialect);
-    tokenizer.tokenize_until(&mut syntax_callback(|token| {
+    tokenizer.tokenize_while(&mut syntax_callback(|token| {
         // Preserve the batch callback contract: it is an arity lookup, so it is not
         // called for positionals, separators, atomic attached values or slash switches.
         let value = match token.kind {
