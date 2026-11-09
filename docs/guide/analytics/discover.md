@@ -9,13 +9,18 @@ sidebar:
 
 ## rtk discover — find missed savings
 
-`rtk discover` analyzes your Claude Code command history to identify commands that ran without RTK filtering, and estimates how much bash output RTK would have removed from them.
+`rtk discover` analyzes your Claude Code and OpenCode command history to identify commands that ran without RTK filtering, and estimates how much bash output RTK would have removed from them.
 
 ```bash
 rtk discover                    # analyze current project history
 rtk discover --all              # all projects
 rtk discover --all --since 7    # last 7 days, all projects
+rtk discover --agent claude     # Claude Code history only
+rtk discover --agent opencode   # OpenCode history only
+rtk discover --agent all        # both stores, merged into one report
 ```
+
+By default `discover` scans every supported agent whose storage exists on your machine (Claude Code and OpenCode). OpenCode history is read from OpenCode's own SQLite database, strictly read-only — RTK never writes to it. Because OpenCode calls never pass through RTK's hook, coverage is not measured for OpenCode sessions; the report says so explicitly instead of attributing a coverage figure to them.
 
 **Example output** (illustrative values):
 

@@ -2,11 +2,13 @@
 
 use crate::core::utils::format_tokens;
 use crate::discover::is_already_rtk;
-use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
+use crate::discover::provider::{
+    ClaudeProvider, ExtractedCommand, ProjectFilter, SessionProvider, SessionRef,
+};
 use crate::discover::registry::{Classification, classify_command, split_command_chain};
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 
 /// A summarized session for display.
 struct SessionSummary {
@@ -59,10 +61,25 @@ fn progress_bar(pct: f64, width: usize) -> String {
     format!("{}{}", "@".repeat(filled), ".".repeat(empty))
 }
 
+/// The JSONL path behind a session ref (`None` for providers that do not
+/// store sessions as files; this command only summarizes Claude Code).
+fn claude_file(session: &SessionRef) -> Option<&Path> {
+    match session {
+        SessionRef::File(p) => Some(p),
+        SessionRef::OpenCode { .. } => None,
+    }
+}
+
+fn session_mtime(session: &SessionRef) -> std::time::SystemTime {
+    claude_file(session)
+        .and_then(|p| fs::metadata(p).and_then(|m| m.modified()).ok())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+}
+
 pub fn run(_verbose: u8) -> Result<()> {
     let provider = ClaudeProvider;
     let sessions = provider
-        .discover_sessions(None, Some(30))
+        .discover_sessions(ProjectFilter::All, Some(30))
         .context("Failed to discover Claude Code sessions")?;
 
     if sessions.is_empty() {
@@ -72,32 +89,27 @@ pub fn run(_verbose: u8) -> Result<()> {
     }
 
     // Group JSONL files by parent session (ignore subagent files)
-    let mut session_files: Vec<PathBuf> = sessions
-        .into_iter()
-        .filter(|p| {
+    let mut session_files: Vec<&SessionRef> = sessions
+        .iter()
+        .filter(|s| {
             // Skip subagent files — only top-level session JSONL
-            !p.to_string_lossy().contains("subagents")
+            !s.display().contains("subagents")
         })
         .collect();
 
     // Sort by mtime desc
-    session_files.sort_by(|a, b| {
-        let ma = fs::metadata(a)
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        let mb = fs::metadata(b)
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        mb.cmp(&ma)
-    });
+    session_files.sort_by_key(|s| std::cmp::Reverse(session_mtime(s)));
 
     // Take top 10
     session_files.truncate(10);
 
     let mut summaries: Vec<SessionSummary> = Vec::new();
 
-    for path in &session_files {
-        let cmds = match provider.extract_commands(path) {
+    for session in &session_files {
+        let Some(path) = claude_file(session) else {
+            continue;
+        };
+        let cmds = match provider.extract_commands(session) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -383,7 +395,9 @@ mod tests {
         }
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(tmp.path()).expect("parse JSONL");
+        let cmds = provider
+            .extract_commands(&SessionRef::File(tmp.path().to_path_buf()))
+            .expect("parse JSONL");
 
         let (total, rtk, _output) = count_rtk_commands(&cmds);
         assert_eq!(total, 3, "should find 3 Bash commands");
@@ -407,7 +421,9 @@ mod tests {
         }
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(tmp.path()).expect("parse JSONL");
+        let cmds = provider
+            .extract_commands(&SessionRef::File(tmp.path().to_path_buf()))
+            .expect("parse JSONL");
 
         let (total, rtk, _) = count_rtk_commands(&cmds);
         assert_eq!(total, 1, "only Bash tool should be counted");
@@ -428,7 +444,9 @@ mod tests {
         }
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(tmp.path()).expect("parse JSONL");
+        let cmds = provider
+            .extract_commands(&SessionRef::File(tmp.path().to_path_buf()))
+            .expect("parse JSONL");
 
         assert!(cmds.is_empty(), "no Bash commands = empty");
     }
@@ -448,7 +466,9 @@ mod tests {
         }
 
         let provider = ClaudeProvider;
-        let cmds = provider.extract_commands(tmp.path()).expect("parse JSONL");
+        let cmds = provider
+            .extract_commands(&SessionRef::File(tmp.path().to_path_buf()))
+            .expect("parse JSONL");
 
         assert_eq!(cmds.len(), 1, "one Bash tool call");
         let (total, rtk, _) = count_rtk_commands(&cmds);
