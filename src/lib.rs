@@ -10,7 +10,7 @@ mod llm_proxy;
 mod parser;
 
 // Re-export command modules for routing
-use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::cloud::{ansible_lint_cmd, aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git_cmd, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -970,6 +970,13 @@ enum Commands {
         /// Rake arguments (e.g., test, test TEST=path/to/test.rb)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+
+    /// Ansible-lint violations grouped by rule with sample paths
+    AnsibleLint {
+        /// Arguments forwarded to ansible-lint
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
     },
 
     /// RuboCop linter with compact output (Ruby)
@@ -3603,6 +3610,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Rake { args } => rake_cmd::run(&args, cli.verbose)?,
 
+        Commands::AnsibleLint { args } => ansible_lint_cmd::run(&args, cli.verbose)?,
+
         Commands::Rubocop { args } => rubocop_cmd::run(&args, cli.verbose)?,
 
         Commands::Rspec { args } => rspec_cmd::run(&args, cli.verbose)?,
@@ -4090,6 +4099,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Pint { .. }
             | Commands::Phpt { .. }
             | Commands::Rake { .. }
+            | Commands::AnsibleLint { .. }
             | Commands::Rubocop { .. }
             | Commands::Rspec { .. }
             | Commands::Pip { .. }
@@ -4687,6 +4697,7 @@ mod tests {
             "mypy",
             "rake",
             "rubocop",
+            "ansible-lint",
             "rspec",
             "pip",
             "go",

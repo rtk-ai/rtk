@@ -1,0 +1,37 @@
+roles/example/tasks/main.yml:2: command-instead-of-shell: Use shell only when shell functionality is required.
+roles/example/tasks/main.yml:2:3: fqcn[action-core]: Use FQCN for builtin module actions (shell).
+roles/example/tasks/main.yml:2: name[missing][/]: All tasks should be named.
+roles/example/tasks/main.yml:2: no-changed-when: Commands should not change things if nothing needs doing.
+roles/example/tasks/main.yml:3: command-instead-of-shell: Use shell only when shell functionality is required.
+roles/example/tasks/main.yml:3:3: fqcn[action-core]: Use FQCN for builtin module actions (shell).
+roles/example/tasks/main.yml:3: name[missing][/]: All tasks should be named.
+roles/example/tasks/main.yml:3: no-changed-when: Commands should not change things if nothing needs doing.
+roles/example/tasks/main.yml:4: command-instead-of-shell: Use shell only when shell functionality is required.
+roles/example/tasks/main.yml:4:3: fqcn[action-core]: Use FQCN for builtin module actions (shell).
+roles/example/tasks/main.yml:4: name[missing][/]: All tasks should be named.
+roles/example/tasks/main.yml:4: no-changed-when: Commands should not change things if nothing needs doing.
+roles/example/tasks/main.yml:5: command-instead-of-shell: Use shell only when shell functionality is required.
+roles/example/tasks/main.yml:5:3: fqcn[action-core]: Use FQCN for builtin module actions (shell).
+roles/example/tasks/main.yml:5: name[missing][/]: All tasks should be named.
+roles/example/tasks/main.yml:5: no-changed-when: Commands should not change things if nothing needs doing.
+roles/example/tasks/main.yml:6: command-instead-of-shell: Use shell only when shell functionality is required.
+roles/example/tasks/main.yml:6:3: fqcn[action-core]: Use FQCN for builtin module actions (shell).
+roles/example/tasks/main.yml:6: name[missing][/]: All tasks should be named.
+roles/example/tasks/main.yml:6: no-changed-when: Commands should not change things if nothing needs doing.
+roles/example/tasks/main.yml:7: command-instead-of-shell: Use shell only when shell functionality is required.
+roles/example/tasks/main.yml:7:3: fqcn[action-core]: Use FQCN for builtin module actions (shell).
+roles/example/tasks/main.yml:7: name[missing][/]: All tasks should be named.
+roles/example/tasks/main.yml:7: no-changed-when: Commands should not change things if nothing needs doing.
+Deprecated `-p` cli option replaced with current `--format=pep8` option. This alias will be removed in a future release.
+WARNING  Directory expansion discovered 1 file(s). If this is more than expected, use 'exclude_paths' in your ansible-lint configuration to narrow the scope. See: https://docs.ansible.com/projects/lint/configuring/
+WARNING  Listing 24 violation(s) that are fatal
+Read documentation for instructions on how to ignore specific rule violations.
+
+# Rule Violation Summary
+
+  6 command-instead-of-shell profile:basic tags:command-shell,idiom
+  6 name profile:basic tags:idiom
+  6 no-changed-when profile:basic tags:command-shell,idempotency
+  6 fqcn profile:basic tags:formatting
+
+Failed: 24 failure(s), 0 warning(s) in 2 files processed of 3 encountered. Last profile that met the validation criteria was 'min'.

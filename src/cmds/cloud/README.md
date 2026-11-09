@@ -9,3 +9,4 @@
 - `curl_cmd.rs` truncates long responses, saves full output to file for recovery
 - `wget_cmd.rs` wraps wget with output filtering
 - `psql_cmd.rs` filters PostgreSQL query output
+- `ansible_lint_cmd.rs` groups default and legacy `-p` reports by rule, with three sample locations per rule, omitted counts and full-output recovery. It retains the final Passed/Failed summary and returns the native exit code. For example, `rtk ansible-lint --offline roles/ playbooks/`. Help, version, rule/tag/profile lists and explicit `-f`/`--format` output pass through unchanged. Multiline or unfamiliar reports stay complete. If recovery storage is unavailable, samples stay uncapped.
