@@ -250,6 +250,15 @@ impl<'a> ParameterParser<'a> for CommonOptions {
             // -C is only accepted before the command name.
             // https://doc.rust-lang.org/cargo/commands/cargo.html#option-cargo--C
             (TokenKind::Short, "C") => Some(ValueSpec::value()),
+            (TokenKind::Short, "Z") => {
+                let value = value.and_then(|value| value.split('=').next());
+                // Script mode uses a script operand rather than our command grammar.
+                // https://doc.rust-lang.org/cargo/reference/unstable.html#script
+                if value == Some("script") {
+                    return Some(TokenAction::StopAfter(Some(ValueSpec::value())));
+                }
+                return self.parse_shared_parameter(token, value);
+            }
             // Cargo's root version flag is not global. Command parsers define their
             // own --version, if any; install's spelling takes a crate version instead.
             // https://doc.rust-lang.org/cargo/commands/cargo.html#special-options
@@ -510,12 +519,19 @@ impl<'a> ParameterParser<'a> for FmtOptions {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ParameterBoundary<'a> {
+    EndOfInput,
+    Positional(&'a str),
+    Stopped,
+}
+
 /// Scratch destinations guide tokenization; the token loop supplies the real destinations
-/// and resolved values to the same parser method, ignoring its tokenizer decisions.
+/// and resolved values to the same parser method, returning its first stopping point.
 fn parse_parameters_until<'a, T: AsRef<str>, O: ParameterParser<'a> + Clone>(
     tokenizer: &mut arg_tokenizer::Tokenizer<'a, T>,
     options: &mut O,
-) {
+) -> ParameterBoundary<'a> {
     // Both passes start with the same state, including any nested-command context.
     let mut scratch_options = options.clone();
     let tokens = tokenizer.tokenize_until(&mut scratch_options);
@@ -524,8 +540,17 @@ fn parse_parameters_until<'a, T: AsRef<str>, O: ParameterParser<'a> + Clone>(
         if token.kind == TokenKind::Positional && !token.is_free_positional() {
             continue;
         }
-        let _ = options.parse_parameter(token, token.value(&tokens));
+        if let Some(TokenAction::StopAfter(_)) =
+            options.parse_parameter(token, token.value(&tokens))
+        {
+            return if token.is_free_positional() {
+                ParameterBoundary::Positional(token.text)
+            } else {
+                ParameterBoundary::Stopped
+            };
+        }
     }
+    ParameterBoundary::EndOfInput
 }
 
 impl CargoInvocation {
@@ -546,42 +571,19 @@ impl CargoInvocation {
         };
         let mut tokenizer = arg_tokenizer::Tokenizer::new(words, Dialect::Clap);
         let mut common = CommonOptions::default();
-        let mut scratch_common = common;
         // Prefix options own their values. The first free argument ends the prefix;
         // an unknown option also stops discovery because its arity is unknown.
-        let prefix = tokenizer.tokenize_until(&mut scratch_common);
-        let mut command = None;
-        for token in &prefix {
-            if token.kind == TokenKind::Positional && !token.is_free_positional() {
-                continue;
-            }
-            if token.is_free_positional() {
+        let mut command = match parse_parameters_until(&mut tokenizer, &mut common) {
+            ParameterBoundary::EndOfInput => CargoCommand::NoCommand(common),
+            ParameterBoundary::Positional(name) => {
                 // Combined root actions and explicit commands remain outside this partial model.
                 if common.version || common.list || common.explain {
                     return None;
                 }
-                command = Some(CargoCommand::named(token.text)?);
-                break;
+                CargoCommand::named(name)?
             }
-            let value = if token.kind == TokenKind::Short && token.text == "Z" {
-                let value = token
-                    .value(&prefix)
-                    .and_then(|value| value.split('=').next());
-                // Script mode uses a script operand rather than our command grammar.
-                // https://doc.rust-lang.org/cargo/reference/unstable.html#script
-                if value == Some("script") {
-                    return None;
-                }
-                value
-            } else {
-                token.value(&prefix)
-            };
-            // The root parser also stops on unsupported prefix syntax and --.
-            let TokenAction::Continue(_) = common.parse_parameter(token, value)? else {
-                return None;
-            };
-        }
-        let mut command = command.unwrap_or(CargoCommand::NoCommand(common));
+            ParameterBoundary::Stopped => return None,
+        };
         match &mut command {
             CargoCommand::NoCommand(_) => {}
             CargoCommand::Build(options) => {
@@ -2228,14 +2230,18 @@ mod tests {
             "--list",
         ];
         let mut tokenizer = arg_tokenizer::Tokenizer::new(&args, Dialect::Clap);
-        let mut scratch_common = CommonOptions::default();
-        let prefix = tokenizer.tokenize_until(&mut scratch_common);
-        assert_eq!(prefix.last().unwrap().text, "install");
-        assert_eq!(prefix[0].value(&prefix), Some("clippy"));
-        assert_eq!(scratch_common, CommonOptions::default());
+        let mut common = CommonOptions::default();
+        assert_eq!(
+            parse_parameters_until(&mut tokenizer, &mut common),
+            ParameterBoundary::Positional("install")
+        );
+        assert_eq!(common, CommonOptions::default());
 
         let mut options = InstallOptions::default();
-        parse_parameters_until(&mut tokenizer, &mut options);
+        assert_eq!(
+            parse_parameters_until(&mut tokenizer, &mut options),
+            ParameterBoundary::EndOfInput
+        );
         assert_eq!(options.version.as_deref(), Some("^1.2"));
         assert!(options.list);
         assert_eq!(options.common, CommonOptions::default());
@@ -2246,11 +2252,43 @@ mod tests {
         for unknown in ["--future-option", "-X"] {
             let args = [unknown, "--version", "check"];
             let mut tokenizer = arg_tokenizer::Tokenizer::new(&args, Dialect::Clap);
-            let mut scratch_common = CommonOptions::default();
-            let prefix = tokenizer.tokenize_until(&mut scratch_common);
-            assert_eq!(prefix.len(), 1, "{unknown}");
-            assert_eq!(scratch_common, CommonOptions::default());
+            let mut common = CommonOptions::default();
+            assert_eq!(
+                parse_parameters_until(&mut tokenizer, &mut common),
+                ParameterBoundary::Stopped,
+                "{unknown}"
+            );
+            assert_eq!(common, CommonOptions::default());
             assert!(CargoInvocation::parse(&args).is_none());
+        }
+    }
+
+    #[test]
+    fn common_parser_handles_resolved_unstable_flag_names() {
+        for args in [
+            vec!["-Zscript"],
+            vec!["-Zscript", "check"],
+            vec!["-Z", "script", "check"],
+            vec!["-Z=script", "check"],
+            vec!["-Zscript=value", "check"],
+        ] {
+            let mut tokenizer = arg_tokenizer::Tokenizer::new(&args, Dialect::Clap);
+            let mut common = CommonOptions::default();
+            assert_eq!(
+                parse_parameters_until(&mut tokenizer, &mut common),
+                ParameterBoundary::Stopped,
+                "{args:?}"
+            );
+            assert!(CargoInvocation::parse(&args).is_none(), "{args:?}");
+        }
+        for args in [
+            vec!["-Zhelp", "check"],
+            vec!["-Z", "help", "check"],
+            vec!["-Zhelp=value", "check"],
+        ] {
+            let invocation = CargoInvocation::parse(&args).unwrap();
+            assert!(invocation.common().unstable_help, "{args:?}");
+            assert_eq!(invocation.command().as_str(), Some("check"));
         }
     }
 
