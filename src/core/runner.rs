@@ -483,15 +483,19 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
     if stem == "cargo"
         && let Some(invocation) = CargoInvocation::parse(args)
     {
-        return invocation.common().help
-            || invocation.common().unstable_help
-            || match invocation.command() {
-                CargoCommand::NoCommand(options) => options.version,
-                CargoCommand::Clippy(options) => options.version,
-                CargoCommand::Test(options) => options.harness.help,
-                CargoCommand::Nextest(options) => options.version || options.harness.help,
-                _ => false,
-            };
+        let (common, command_usage) = match invocation.command() {
+            CargoCommand::NoCommand(options) => (options, options.version),
+            CargoCommand::Build(options) => (&options.common, false),
+            CargoCommand::Check(options) => (&options.common, false),
+            CargoCommand::Clippy(options) => (&options.common, options.version),
+            CargoCommand::Test(options) => (&options.common, options.harness.help),
+            CargoCommand::Install(options) => (&options.common, false),
+            CargoCommand::Nextest(options) => {
+                (&options.common, options.version || options.harness.help)
+            }
+            CargoCommand::Fmt(options) => (&options.common, false),
+        };
+        return common.help || common.unstable_help || command_usage;
     }
     let first = args.first().map(String::as_str);
     let spelling = help_spelling(stem, first);

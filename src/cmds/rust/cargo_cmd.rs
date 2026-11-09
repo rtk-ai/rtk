@@ -83,19 +83,6 @@ impl CargoCommand {
             Self::Fmt(_) => Some("fmt"),
         }
     }
-
-    fn common(&self) -> &CommonOptions {
-        match self {
-            Self::NoCommand(options) => options,
-            Self::Build(options) => &options.common,
-            Self::Check(options) => &options.common,
-            Self::Clippy(options) => &options.common,
-            Self::Test(options) => &options.common,
-            Self::Install(options) => &options.common,
-            Self::Nextest(options) => &options.common,
-            Self::Fmt(options) => &options.common,
-        }
-    }
 }
 
 /// Cargo's prefix requests and shared option facts. Root-only actions such as --version
@@ -567,7 +554,7 @@ impl CargoInvocation {
                 }
                 CargoCommand::named(name, common)?
             }
-            ParseBoundary::Stopped => return None,
+            ParseBoundary::DashDash | ParseBoundary::Stopped => return None,
         };
         match &mut command {
             CargoCommand::NoCommand(_) => {}
@@ -581,36 +568,31 @@ impl CargoInvocation {
                 tokenizer.parse_while(options);
             }
             CargoCommand::Test(options) => {
-                tokenizer.parse_while(options);
+                if tokenizer.parse_while(options) == ParseBoundary::DashDash {
+                    // Cargo consumed --; the harness starts with its own option boundary.
+                    // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
+                    tokenizer.begin_region(Dialect::Clap);
+                    tokenizer.parse_while(&mut options.harness);
+                }
             }
             CargoCommand::Install(options) => {
                 tokenizer.parse_while(options);
             }
             CargoCommand::Nextest(options) => {
-                tokenizer.parse_while(options);
+                if tokenizer.parse_while(options) == ParseBoundary::DashDash {
+                    // The forwarded arguments have their own option boundary.
+                    tokenizer.begin_region(Dialect::Clap);
+                    tokenizer.parse_while(&mut options.harness);
+                }
             }
             CargoCommand::Fmt(options) => {
                 tokenizer.parse_while(options);
             }
         }
-        let harness = match &mut command {
-            CargoCommand::Test(options) => Some(&mut options.harness),
-            CargoCommand::Nextest(options) => Some(&mut options.harness),
-            _ => None,
-        };
-        if let Some(harness) = harness {
-            // Cargo's -- hands the suffix to a distinct parser with its own boundary.
-            // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
-            tokenizer.begin_region(Dialect::Clap);
-            tokenizer.parse_while(harness);
-        }
         Some(Self { command })
     }
     pub fn command(&self) -> &CargoCommand {
         &self.command
-    }
-    pub fn common(&self) -> &CommonOptions {
-        self.command.common()
     }
 }
 
@@ -619,9 +601,6 @@ pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
         return runner::run_passthrough("cargo", args, verbose);
     };
     // Policy belongs to execution. The parser only records which information was requested.
-    if invocation.common().help || invocation.common().unstable_help {
-        return runner::run_passthrough("cargo", args, verbose);
-    }
     // Dedicated Cargo runners choose whether and how to filter using the parsed options.
     // When filtering, they pass .unguarded_help() to core::runner, disabling its
     // automatic help/version detection to avoid parsing argv again.
@@ -866,7 +845,9 @@ impl BlockHandler for CargoTestHandler {
 }
 
 fn run_build(args: &[OsString], options: &BuildOptions, verbose: u8) -> Result<i32> {
-    if options.compilation.unit_graph
+    if options.common.help
+        || options.common.unstable_help
+        || options.compilation.unit_graph
         || options.compilation.message_format == MessageFormat::Unknown
     {
         return runner::run_passthrough("cargo", args, verbose);
@@ -898,7 +879,9 @@ fn run_build(args: &[OsString], options: &BuildOptions, verbose: u8) -> Result<i
 }
 
 fn run_test(args: &[OsString], options: &TestOptions, verbose: u8) -> Result<i32> {
-    if options.unit_graph
+    if options.common.help
+        || options.common.unstable_help
+        || options.unit_graph
         || options.harness.help
         || options.harness.list
         || matches!(
@@ -928,7 +911,9 @@ fn run_test(args: &[OsString], options: &TestOptions, verbose: u8) -> Result<i32
 }
 
 fn run_clippy(args: &[OsString], options: &ClippyOptions, verbose: u8) -> Result<i32> {
-    if options.version
+    if options.common.help
+        || options.common.unstable_help
+        || options.version
         || options.explain
         || options.compilation.unit_graph
         || options.compilation.message_format == MessageFormat::Unknown
@@ -960,7 +945,9 @@ fn run_clippy(args: &[OsString], options: &ClippyOptions, verbose: u8) -> Result
 }
 
 fn run_check(args: &[OsString], options: &CheckOptions, verbose: u8) -> Result<i32> {
-    if options.compilation.unit_graph
+    if options.common.help
+        || options.common.unstable_help
+        || options.compilation.unit_graph
         || options.compilation.message_format == MessageFormat::Unknown
     {
         return runner::run_passthrough("cargo", args, verbose);
@@ -992,7 +979,9 @@ fn run_check(args: &[OsString], options: &CheckOptions, verbose: u8) -> Result<i
 }
 
 fn run_install(args: &[OsString], options: &InstallOptions, verbose: u8) -> Result<i32> {
-    if options.list
+    if options.common.help
+        || options.common.unstable_help
+        || options.list
         || options.compilation.unit_graph
         || matches!(
             options.compilation.message_format,
@@ -1017,7 +1006,9 @@ fn run_install(args: &[OsString], options: &InstallOptions, verbose: u8) -> Resu
 }
 
 fn run_nextest(args: &[OsString], options: &NextestOptions, verbose: u8) -> Result<i32> {
-    if options.version
+    if options.common.help
+        || options.common.unstable_help
+        || options.version
         || options.operation != NextestOperation::Run
         || options.unit_graph
         || options.message_format != NextestFormat::Human
@@ -2129,15 +2120,17 @@ mod tests {
         }
     }
     fn usage_request(invocation: &CargoInvocation) -> bool {
-        invocation.common().help
-            || invocation.common().unstable_help
-            || match invocation.command() {
-                CargoCommand::NoCommand(o) => o.version,
-                CargoCommand::Clippy(o) => o.version,
-                CargoCommand::Nextest(o) => o.version || o.harness.help,
-                CargoCommand::Test(o) => o.harness.help,
-                _ => false,
-            }
+        let (common, command_usage) = match invocation.command() {
+            CargoCommand::NoCommand(o) => (o, o.version),
+            CargoCommand::Build(o) => (&o.common, false),
+            CargoCommand::Check(o) => (&o.common, false),
+            CargoCommand::Clippy(o) => (&o.common, o.version),
+            CargoCommand::Test(o) => (&o.common, o.harness.help),
+            CargoCommand::Install(o) => (&o.common, false),
+            CargoCommand::Nextest(o) => (&o.common, o.version || o.harness.help),
+            CargoCommand::Fmt(o) => (&o.common, false),
+        };
+        common.help || common.unstable_help || command_usage
     }
 
     fn has_json_message_format(args: &[String]) -> bool {
@@ -2187,8 +2180,10 @@ mod tests {
         assert!(options.explain);
         for args in [vec!["--help"], vec!["+stable", "--help"], vec!["-qh"]] {
             let invocation = CargoInvocation::parse(&args).unwrap();
-            assert!(matches!(invocation.command(), CargoCommand::NoCommand(_)));
-            assert!(invocation.common().help);
+            let CargoCommand::NoCommand(options) = invocation.command() else {
+                panic!("expected top-level options")
+            };
+            assert!(options.help);
         }
         assert!(
             CargoInvocation::parse(&["--version", "install"]).is_none(),
@@ -2251,8 +2246,10 @@ mod tests {
             vec!["-Zscript=value", "check"],
         ] {
             let invocation = CargoInvocation::parse(&args).unwrap();
-            assert_eq!(invocation.command().as_str(), Some("check"), "{args:?}");
-            assert_eq!(*invocation.common(), CommonOptions::default());
+            let CargoCommand::Check(options) = invocation.command() else {
+                panic!("expected check: {args:?}")
+            };
+            assert_eq!(options.common, CommonOptions::default());
         }
         for args in [
             vec!["-Zhelp", "check"],
@@ -2260,8 +2257,10 @@ mod tests {
             vec!["-Zhelp=value", "check"],
         ] {
             let invocation = CargoInvocation::parse(&args).unwrap();
-            assert!(invocation.common().unstable_help, "{args:?}");
-            assert_eq!(invocation.command().as_str(), Some("check"));
+            let CargoCommand::Check(options) = invocation.command() else {
+                panic!("expected check: {args:?}")
+            };
+            assert!(options.common.unstable_help, "{args:?}");
         }
         let invocation = CargoInvocation::parse(&["-Zscript"]).unwrap();
         assert_eq!(
@@ -2286,8 +2285,18 @@ mod tests {
                 vec!["--help", command, "-Zhelp"],
             ] {
                 let invocation = CargoInvocation::parse(&args).unwrap();
+                let common = match invocation.command() {
+                    CargoCommand::Build(o) => &o.common,
+                    CargoCommand::Check(o) => &o.common,
+                    CargoCommand::Clippy(o) => &o.common,
+                    CargoCommand::Test(o) => &o.common,
+                    CargoCommand::Install(o) => &o.common,
+                    CargoCommand::Nextest(o) => &o.common,
+                    CargoCommand::Fmt(o) => &o.common,
+                    CargoCommand::NoCommand(_) => panic!("expected named command: {args:?}"),
+                };
                 assert_eq!(
-                    *invocation.command().common(),
+                    *common,
                     CommonOptions {
                         help: true,
                         unstable_help: true,
@@ -2304,7 +2313,7 @@ mod tests {
             vec!["fmt", "-Zhelp"],
         ] {
             let invocation = CargoInvocation::parse(&args).unwrap();
-            assert!(invocation.common().unstable_help, "{args:?}");
+            assert!(usage_request(&invocation), "{args:?}");
         }
         for args in [
             vec!["--help", "check"],
@@ -2312,19 +2321,11 @@ mod tests {
             vec!["fmt", "--help"],
         ] {
             let invocation = CargoInvocation::parse(&args).unwrap();
-            assert!(invocation.common().help, "{args:?}");
+            assert!(usage_request(&invocation), "{args:?}");
         }
         let invocation =
             CargoInvocation::parse(&["--help", "check", "--message-format=json", "-Zhelp"])
                 .unwrap();
-        assert_eq!(
-            *invocation.common(),
-            CommonOptions {
-                help: true,
-                unstable_help: true,
-                ..Default::default()
-            }
-        );
         assert_eq!(
             *invocation.command(),
             CargoCommand::Check(CheckOptions {
@@ -2340,7 +2341,6 @@ mod tests {
             })
         );
         let invocation = CargoInvocation::parse(&["-Zhelp", "--list"]).unwrap();
-        assert!(invocation.common().unstable_help);
         assert_eq!(
             *invocation.command(),
             CargoCommand::NoCommand(CommonOptions {
@@ -2363,7 +2363,6 @@ mod tests {
             "json",
         ])
         .unwrap();
-        assert!(invocation.common().help);
         assert_eq!(
             *invocation.command(),
             CargoCommand::Install(InstallOptions {
@@ -2399,7 +2398,6 @@ mod tests {
             "json",
         ])
         .unwrap();
-        assert!(invocation.common().help);
         assert_eq!(
             *invocation.command(),
             CargoCommand::Install(InstallOptions {
@@ -2462,7 +2460,7 @@ mod tests {
         assert!(!options.common.version);
         assert!(!options.common.explain);
         assert_eq!(options.compilation.message_format, MessageFormat::Json);
-        assert!(!invocation.common().help);
+        assert!(!options.common.help);
 
         for (version, expected) in [
             (vec!["--version", "1.2.3"], Some("1.2.3")),
@@ -2485,7 +2483,7 @@ mod tests {
             assert_eq!(options.version.as_deref(), expected);
             assert!(!options.common.version);
             assert!(!options.common.list);
-            assert!(!invocation.common().help);
+            assert!(!options.common.help);
         }
         let invocation = CargoInvocation::parse(&[
             "check",
@@ -2602,13 +2600,51 @@ mod tests {
         assert_eq!(options.harness.format, TestFormat::Json);
         assert!(options.harness.help);
         assert!(options.harness.list);
-        assert!(!invocation.common().help);
+        assert!(!options.common.help);
         let args = ["test", "--", "--", "--help", "--list", "--format=json"];
         let invocation = CargoInvocation::parse(&args).unwrap();
         let CargoCommand::Test(options) = invocation.command() else {
             panic!("expected test")
         };
         assert_eq!(options.harness, TestHarnessOptions::default());
+    }
+
+    #[test]
+    fn harness_options_require_a_cargo_separator_for_test_and_nextest() {
+        for prefix in [vec!["test"], vec!["nextest", "run"]] {
+            for (suffix, common_help, harness) in [
+                (vec!["--help"], true, TestHarnessOptions::default()),
+                (
+                    vec!["--config=--", "--help"],
+                    true,
+                    TestHarnessOptions::default(),
+                ),
+                (
+                    vec!["--", "--help", "--list", "--format=json"],
+                    false,
+                    TestHarnessOptions {
+                        help: true,
+                        list: true,
+                        format: TestFormat::Json,
+                    },
+                ),
+                (
+                    vec!["--", "--", "--help"],
+                    false,
+                    TestHarnessOptions::default(),
+                ),
+            ] {
+                let args: Vec<_> = prefix.iter().copied().chain(suffix).collect();
+                let invocation = CargoInvocation::parse(&args).unwrap();
+                let (common, actual_harness) = match invocation.command() {
+                    CargoCommand::Test(options) => (&options.common, &options.harness),
+                    CargoCommand::Nextest(options) => (&options.common, &options.harness),
+                    _ => panic!("expected test or nextest: {args:?}"),
+                };
+                assert_eq!(common.help, common_help, "{args:?}");
+                assert_eq!(*actual_harness, harness, "{args:?}");
+            }
+        }
     }
 
     #[test]

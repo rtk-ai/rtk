@@ -482,7 +482,9 @@ pub enum ParseBoundary<'a> {
     EndOfInput,
     /// The parser requested a stop on this free positional, which is included in the parse.
     Positional(&'a str),
-    /// The parser requested a stop on an option or separator.
+    /// The parser requested a stop on the `--` separator, which has been consumed.
+    DashDash,
+    /// The parser requested a stop on an option.
     Stopped,
 }
 
@@ -692,6 +694,8 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
                 {
                     boundary = Some(if token.is_free_positional() {
                         ParseBoundary::Positional(token.text)
+                    } else if token.kind == TokenKind::DashDash {
+                        ParseBoundary::DashDash
                     } else {
                         ParseBoundary::Stopped
                     });

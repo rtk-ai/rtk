@@ -355,7 +355,7 @@ fn parse_while_resolves_values_once_and_preserves_boundaries() {
     assert_eq!(parsed.values, ["operand"]);
     assert_eq!(parsed.positionals, ["command"]);
     assert!(parsed.flags.is_empty());
-    assert_eq!(tokenizer.parse_while(&mut parsed), ParseBoundary::Stopped);
+    assert_eq!(tokenizer.parse_while(&mut parsed), ParseBoundary::DashDash);
     assert_eq!(parsed.flags, ["flag"]);
     assert_eq!(
         tokenizer.parse_while(&mut parsed),
@@ -401,7 +401,7 @@ fn parse_while_value_dependent_stops_leave_the_next_separator_unread() {
         assert_eq!(parsed.values, ["stop"]);
         assert_eq!(
             tokenizer.parse_while(&mut parsed),
-            ParseBoundary::Stopped,
+            ParseBoundary::DashDash,
             "{args:?}"
         );
         assert_eq!(
