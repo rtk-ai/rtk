@@ -476,6 +476,52 @@ pub enum TokenAction {
     StopAfter(Option<ValueSpec>),
 }
 
+/// A destination that interprets option heads, free positionals and separators.
+/// `None` means this parser did not recognize the token; it can be offered to another parser.
+/// An unrecognized token at the tokenizer boundary continues without consuming a separate value.
+pub trait ParameterParser<'a> {
+    /// Tokenization calls this with `None`; short attached and separate values are not resolved yet.
+    /// Callers use scratch state for that pass, then call the same method on their real
+    /// destination with [`Token::value`] from the returned batch. Consumed values are read
+    /// through their owners rather than passed to the parser as independent positionals.
+    fn parse_parameter(&mut self, token: &Token<'a>, value: Option<&'a str>)
+    -> Option<TokenAction>;
+}
+
+impl<'a> ParameterParser<'a> for () {
+    fn parse_parameter(
+        &mut self,
+        _token: &Token<'a>,
+        _value: Option<&'a str>,
+    ) -> Option<TokenAction> {
+        None
+    }
+}
+
+/// Adapt a syntax-only callback to the parser interface. Its callback sees token heads
+/// before their values are resolved, following the original [`Tokenizer::tokenize_until`] contract.
+pub fn syntax_callback<'a, F>(callback: F) -> impl ParameterParser<'a>
+where
+    F: FnMut(&Token<'a>) -> TokenAction,
+{
+    SyntaxCallback(callback)
+}
+
+struct SyntaxCallback<F>(F);
+
+impl<'a, F> ParameterParser<'a> for SyntaxCallback<F>
+where
+    F: FnMut(&Token<'a>) -> TokenAction,
+{
+    fn parse_parameter(
+        &mut self,
+        token: &Token<'a>,
+        _value: Option<&'a str>,
+    ) -> Option<TokenAction> {
+        Some((self.0)(token))
+    }
+}
+
 /// Resumable batch tokenizer. Callers can change the grammar between batches.
 /// Source indices address the original invocation; links address the returned batch.
 pub struct Tokenizer<'a, T> {
@@ -488,12 +534,14 @@ pub struct Tokenizer<'a, T> {
 }
 
 impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
-    fn push_token(
+    fn push_token<P: ParameterParser<'a> + ?Sized>(
         &mut self,
         token: Token<'a>,
-        handler: &mut dyn FnMut(&Token<'a>) -> TokenAction,
+        parser: &mut P,
     ) -> Option<ValueSpec> {
-        let action = handler(&token);
+        let action = parser
+            .parse_parameter(&token, None)
+            .unwrap_or(TokenAction::Continue(None));
         self.tokens.push(token);
         match action {
             TokenAction::Continue(value) => value,
@@ -510,11 +558,11 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
     /// from consuming a separate value: an MSBuild switch attaches its value with `:`
     /// (`/bl:x.binlog`), so `/r` (MSBuild's `restore`) must not swallow the token after it the
     /// way dotnet's own `-r <rid>` does.
-    fn push_atomic_flag(
+    fn push_atomic_flag<P: ParameterParser<'a> + ?Sized>(
         &mut self,
         rest: &'a str,
         prefix: FlagPrefix,
-        handler: &mut dyn FnMut(&Token<'a>) -> TokenAction,
+        parser: &mut P,
     ) {
         let (name, attached) = split_attached(rest, self.dialect);
         let flag_index = self.tokens.len();
@@ -524,7 +572,7 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
                 attached,
                 ..token(TokenKind::Long, name, source_index, prefix)
             },
-            handler,
+            parser,
         );
         self.i += 1;
 
@@ -587,20 +635,20 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
         self.emitted_dash_dash = false;
     }
 
-    /// Tokenize through the argument whose callback requests [`TokenAction::StopAfter`],
+    /// Tokenize through the argument whose parser requests [`TokenAction::StopAfter`],
     /// or through the end of input. An empty batch means input is exhausted.
     ///
-    /// The callback sees each option, free positional and separator. For short options it
-    /// supplies the value rule before their attached/separate value is resolved. Option/value
+    /// The parser sees each option, free positional and separator with `value: None`.
+    /// It supplies the rule before short attached and separate values are resolved. Option/value
     /// pairs and short clusters are never split. Supply this batch to [`Token::value`].
     /// The cursor and `--` state survive calls; only [`Self::begin_region`] resets that state.
-    pub fn tokenize_until(
+    pub fn tokenize_until<P: ParameterParser<'a> + ?Sized>(
         &mut self,
-        handler: &mut dyn FnMut(&Token<'a>) -> TokenAction,
+        parser: &mut P,
     ) -> Vec<Token<'a>> {
         self.stop_requested = false;
         while self.i < self.args.len() {
-            self.scan_argument(handler);
+            self.scan_argument(parser);
             if self.stop_requested {
                 break;
             }
@@ -608,11 +656,11 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
         std::mem::take(&mut self.tokens)
     }
 
-    fn scan_argument(&mut self, handler: &mut dyn FnMut(&Token<'a>) -> TokenAction) {
+    fn scan_argument<P: ParameterParser<'a> + ?Sized>(&mut self, parser: &mut P) {
         let arg = self.args[self.i].as_ref();
 
         if self.emitted_dash_dash && !self.dialect.classifies_past_dash_dash() {
-            self.push_token(positional(arg, self.i), handler);
+            self.push_token(positional(arg, self.i), parser);
             self.i += 1;
             return;
         }
@@ -621,11 +669,11 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
             if self.emitted_dash_dash {
                 // A second (or later) literal "--" is never itself the boundary — it's just
                 // ordinary text at this point, under every dialect.
-                self.push_token(positional(arg, self.i), handler);
+                self.push_token(positional(arg, self.i), parser);
             } else {
                 self.push_token(
                     token(TokenKind::DashDash, "", self.i, FlagPrefix::Dash),
-                    handler,
+                    parser,
                 );
                 self.emitted_dash_dash = true;
             }
@@ -634,7 +682,7 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
         }
 
         if let Some(rest) = arg.strip_prefix("--") {
-            self.push_atomic_flag(rest, FlagPrefix::DashDash, handler);
+            self.push_atomic_flag(rest, FlagPrefix::DashDash, parser);
             return;
         }
 
@@ -649,7 +697,7 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
             // only the loose flag lookup ([`has_flag`]) is affected.
             let (name_part, _) = split_attached(rest, self.dialect);
             if !rest.is_empty() && !name_part.contains('/') {
-                self.push_atomic_flag(rest, FlagPrefix::Slash, handler);
+                self.push_atomic_flag(rest, FlagPrefix::Slash, parser);
                 return;
             }
         }
@@ -662,7 +710,7 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
                     SingleDash::AtomicAliasingLong => FlagPrefix::DashDash,
                     SingleDash::Cluster | SingleDash::Atomic => FlagPrefix::Dash,
                 };
-                self.push_atomic_flag(&arg[1..], prefix, handler);
+                self.push_atomic_flag(&arg[1..], prefix, parser);
                 return;
             }
 
@@ -671,7 +719,7 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
             if self.dialect.numeric_shortcut && is_digit_run(cluster) {
                 self.push_token(
                     token(TokenKind::Short, cluster, self.i, FlagPrefix::Dash),
-                    handler,
+                    parser,
                 );
                 self.i += 1;
                 return;
@@ -686,7 +734,7 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
                 let flag_index = self.tokens.len();
                 let value_spec = self.push_token(
                     token(TokenKind::Short, char_text, source_index, FlagPrefix::Dash),
-                    handler,
+                    parser,
                 );
 
                 if let Some(spec) = value_spec {
@@ -723,7 +771,7 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
             return;
         }
 
-        self.push_token(positional(arg, self.i), handler);
+        self.push_token(positional(arg, self.i), parser);
         self.i += 1;
     }
 }
@@ -735,7 +783,7 @@ fn tokenize_scan<'a, T: AsRef<str>>(
     takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
 ) -> Vec<Token<'a>> {
     let mut tokenizer = Tokenizer::new(args, dialect);
-    tokenizer.tokenize_until(&mut |token| {
+    tokenizer.tokenize_until(&mut syntax_callback(|token| {
         // Preserve the batch callback contract: it is an arity lookup, so it is not
         // called for positionals, separators, atomic attached values or slash switches.
         let value = match token.kind {
@@ -748,7 +796,7 @@ fn tokenize_scan<'a, T: AsRef<str>>(
             _ => None,
         };
         TokenAction::Continue(value)
-    })
+    }))
 }
 
 /// Splits `s` into `(name, attached_value)` on the first separator allowed by the dialect's
