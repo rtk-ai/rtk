@@ -1,0 +1,24 @@
+Microsoft (R) Build Engine version 17.8.5+b5c6332e2 for .NET Framework
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+Build started 1/15/2026 9:10:00 AM.
+Project "C:\src\MyProject.sln" on node 1 (Build target(s)).
+ClCompile:
+  main.cpp
+  util.cpp
+Link:
+  C:\BuildTools\bin\link.exe /OUT:"Debug\MyProject.dll" /NOLOGO main.obj util.obj
+MyProject.lib(util.obj) : error LNK2001: unresolved external symbol "void __cdecl bar(int)" (?bar@@YAXH@Z)
+MyProject.lib(main.obj) : error LNK2001: unresolved external symbol "class Logger * __cdecl get_logger(void)" (?get_logger@@YAPAVLogger@@XZ)
+MyOtherDLL.dll : fatal error LNK1120: 2 unresolved externals
+Done Building Project "C:\src\MyProject\MyProject.vcxproj" (default targets) -- FAILED.
+
+Build FAILED.
+
+MyProject.lib(util.obj) : error LNK2001: unresolved external symbol "void __cdecl bar(int)" (?bar@@YAXH@Z)
+MyProject.lib(main.obj) : error LNK2001: unresolved external symbol "class Logger * __cdecl get_logger(void)" (?get_logger@@YAPAVLogger@@XZ)
+MyOtherDLL.dll : fatal error LNK1120: 2 unresolved externals
+    0 Warning(s)
+    3 Error(s)
+
+Time Elapsed 00:00:08.45
