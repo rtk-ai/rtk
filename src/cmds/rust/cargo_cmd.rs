@@ -601,6 +601,23 @@ impl CargoInvocation {
     pub fn command(&self) -> &CargoCommand {
         &self.command
     }
+
+    /// Whether the recorded options request help or a tool's version, including harness help.
+    pub fn requests_usage(&self) -> bool {
+        let (common, command_usage) = match &self.command {
+            CargoCommand::NoCommand(options) => (options, options.version),
+            CargoCommand::Build(options) => (&options.common, false),
+            CargoCommand::Check(options) => (&options.common, false),
+            CargoCommand::Clippy(options) => (&options.common, options.version),
+            CargoCommand::Test(options) => (&options.common, options.harness.help),
+            CargoCommand::Install(options) => (&options.common, false),
+            CargoCommand::Nextest(options) => {
+                (&options.common, options.version || options.harness.help)
+            }
+            CargoCommand::Fmt(options) => (&options.common, false),
+        };
+        common.help || common.unstable_help || command_usage
+    }
 }
 
 pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
@@ -2126,19 +2143,6 @@ mod tests {
             _ => MessageFormat::Human,
         }
     }
-    fn usage_request(invocation: &CargoInvocation) -> bool {
-        let (common, command_usage) = match invocation.command() {
-            CargoCommand::NoCommand(o) => (o, o.version),
-            CargoCommand::Build(o) => (&o.common, false),
-            CargoCommand::Check(o) => (&o.common, false),
-            CargoCommand::Clippy(o) => (&o.common, o.version),
-            CargoCommand::Test(o) => (&o.common, o.harness.help),
-            CargoCommand::Install(o) => (&o.common, false),
-            CargoCommand::Nextest(o) => (&o.common, o.version || o.harness.help),
-            CargoCommand::Fmt(o) => (&o.common, false),
-        };
-        common.help || common.unstable_help || command_usage
-    }
 
     fn has_json_message_format(args: &[String]) -> bool {
         let argv: Vec<OsString> = std::iter::once(OsString::from("check"))
@@ -2320,7 +2324,7 @@ mod tests {
             vec!["fmt", "-Zhelp"],
         ] {
             let invocation = CargoInvocation::parse(&args).unwrap();
-            assert!(usage_request(&invocation), "{args:?}");
+            assert!(invocation.requests_usage(), "{args:?}");
         }
         for args in [
             vec!["--help", "check"],
@@ -2328,7 +2332,7 @@ mod tests {
             vec!["fmt", "--help"],
         ] {
             let invocation = CargoInvocation::parse(&args).unwrap();
-            assert!(usage_request(&invocation), "{args:?}");
+            assert!(invocation.requests_usage(), "{args:?}");
         }
         let invocation =
             CargoInvocation::parse(&["--help", "check", "--message-format=json", "-Zhelp"])
@@ -2504,7 +2508,7 @@ mod tests {
         };
         assert_eq!(options.compilation.message_format, MessageFormat::Short);
         assert!(options.compilation.unit_graph);
-        assert!(!usage_request(&invocation));
+        assert!(!invocation.requests_usage());
     }
 
     #[test]
@@ -2729,7 +2733,7 @@ mod tests {
         let invocation = CargoInvocation::parse(&args).unwrap();
         assert_eq!(invocation.command().as_str(), Some("check"));
         assert_eq!(diagnostic_format(invocation.command()), MessageFormat::Json);
-        assert!(!usage_request(&invocation));
+        assert!(!invocation.requests_usage());
     }
 
     #[test]
@@ -2760,7 +2764,7 @@ mod tests {
             (vec!["test", "--", "--", "--help"], false),
         ] {
             assert_eq!(
-                usage_request(&CargoInvocation::parse(&args).unwrap()),
+                CargoInvocation::parse(&args).unwrap().requests_usage(),
                 expected,
                 "{args:?}"
             );

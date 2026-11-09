@@ -476,26 +476,14 @@ fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
 }
 
 fn asks_for_usage(stem: &str, args: &[String]) -> bool {
-    use crate::cmds::rust::cargo_cmd::{CargoCommand, CargoInvocation, CommonOptions};
+    use crate::cmds::rust::cargo_cmd::{CargoInvocation, CommonOptions};
 
     // Standalone callers use Cargo's prepared metadata too. The Cargo execution
     // path handles help before entering this runner, so it does not parse twice.
     if stem == "cargo"
         && let Some(invocation) = CargoInvocation::parse(args)
     {
-        let (common, command_usage) = match invocation.command() {
-            CargoCommand::NoCommand(options) => (options, options.version),
-            CargoCommand::Build(options) => (&options.common, false),
-            CargoCommand::Check(options) => (&options.common, false),
-            CargoCommand::Clippy(options) => (&options.common, options.version),
-            CargoCommand::Test(options) => (&options.common, options.harness.help),
-            CargoCommand::Install(options) => (&options.common, false),
-            CargoCommand::Nextest(options) => {
-                (&options.common, options.version || options.harness.help)
-            }
-            CargoCommand::Fmt(options) => (&options.common, false),
-        };
-        return common.help || common.unstable_help || command_usage;
+        return invocation.requests_usage();
     }
     let first = args.first().map(String::as_str);
     let spelling = help_spelling(stem, first);
