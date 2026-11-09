@@ -222,7 +222,7 @@ pub struct CargoInvocation {
 impl CommonOptions {
     /// Rules available after the command. Root-only actions and prefix-only -C
     /// are handled by ParameterParser, so command parsers keep their own meanings.
-    pub(crate) fn parse_shared_parameter<'a>(
+    fn parse_shared_parameter<'a>(
         &mut self,
         token: &Token<'a>,
         value: Option<&'a str>,

@@ -1,8 +1,6 @@
 //! Shared command execution skeleton for filter modules.
 
-use crate::core::arg_tokenizer::{
-    self, Dialect, ParameterParser, TokenAction, TokenKind, ValueSpec,
-};
+use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::borrow::Cow;
@@ -460,14 +458,12 @@ fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
         short_h: !matches!(stem, "psql" | "ls" | "tree" | "grep"),
         dialect: match stem {
             "dotnet" => Dialect::Msbuild,
-            "cargo" => Dialect::Clap,
             _ => Dialect::Posix,
         },
         past_boundary: stem == "npx"
             || matches!(
                 (stem, first.unwrap_or_default()),
-                ("cargo", "test" | "bench" | "run" | "nextest")
-                    | ("go", "test" | "run")
+                ("go", "test" | "run")
                     | ("uv", "run")
                     | ("npm" | "pnpm" | "yarn" | "bun", "run" | "exec" | "test")
             ),
@@ -476,41 +472,29 @@ fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
 }
 
 fn asks_for_usage(stem: &str, args: &[String]) -> bool {
-    use crate::cmds::rust::cargo_cmd::{CargoInvocation, CommonOptions};
+    use crate::cmds::rust::cargo_cmd::CargoInvocation;
 
-    // Standalone callers use Cargo's prepared metadata too. The Cargo execution
-    // path handles help before entering this runner, so it does not parse twice.
-    if stem == "cargo"
-        && let Some(invocation) = CargoInvocation::parse(args)
-    {
-        return invocation.requests_usage();
+    // Cargo's parser owns its help/version semantics; unclassified arguments stay
+    // unclassified here. The Cargo runner forwards unsupported invocations unchanged.
+    if stem == "cargo" {
+        return CargoInvocation::parse(args).is_some_and(|invocation| invocation.requests_usage());
     }
     let first = args.first().map(String::as_str);
     let spelling = help_spelling(stem, first);
-    let mut cargo_common = CommonOptions::default();
-    let mut parser = arg_tokenizer::syntax_callback(|token| {
-        // Unsupported Cargo invocations use shared syntax rules without applying the
-        // root parser, which stops at the command and defines root-only actions.
-        if stem == "cargo" {
-            return cargo_common
-                .parse_shared_parameter(token, None)
-                .unwrap_or((TokenAction::Continue, None));
-        }
-        let git_message = stem == "git"
-            && match token.kind {
-                TokenKind::Short => matches!(token.text, "m" | "F"),
-                TokenKind::Long => matches!(token.text, "message" | "file"),
-                _ => false,
-            };
-        (TokenAction::Continue, git_message.then(ValueSpec::value))
-    });
-    let tokens = arg_tokenizer::Tokenizer::new(args, spelling.dialect).tokenize_while(&mut parser);
-    if names_usage(
-        arg_tokenizer::before_dashdash(&tokens),
+    let tokens = arg_tokenizer::tokenize_grammar(
         args,
-        &spelling,
-        &mut parser,
-    ) {
+        &|kind, name| {
+            let git_message = stem == "git"
+                && match kind {
+                    TokenKind::Short => matches!(name, "m" | "F"),
+                    TokenKind::Long => matches!(name, "message" | "file"),
+                    _ => false,
+                };
+            git_message.then(ValueSpec::value)
+        },
+        spelling.dialect,
+    );
+    if names_usage(arg_tokenizer::before_dashdash(&tokens), args, &spelling) {
         return true;
     }
     if !spelling.past_boundary {
@@ -524,9 +508,7 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
         return false;
     };
     let forwarded = &args[boundary + 1..];
-    let mut no_values = ();
-    let inner =
-        arg_tokenizer::Tokenizer::new(forwarded, Dialect::Posix).tokenize_while(&mut no_values);
+    let inner = arg_tokenizer::tokenize(forwarded);
     names_usage(
         arg_tokenizer::before_dashdash(&inner),
         forwarded,
@@ -536,15 +518,13 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
             past_boundary: false,
             whole_arg: &[],
         },
-        &mut no_values,
     )
 }
 
-fn names_usage<'a, P: ParameterParser<'a> + ?Sized>(
-    tokens: &[arg_tokenizer::Token<'a>],
+fn names_usage(
+    tokens: &[arg_tokenizer::Token<'_>],
     args: &[String],
     spelling: &HelpSpelling,
-    parser: &mut P,
 ) -> bool {
     tokens.iter().any(|t| {
         let arg = args.get(t.source_index).map(String::as_str);
@@ -555,12 +535,6 @@ fn names_usage<'a, P: ParameterParser<'a> + ?Sized>(
             TokenKind::Long => {
                 (matches!(t.text, "help" | "version" | "?") || (spelling.short_h && t.text == "h"))
                     && t.linked.is_none()
-                    // `--version=1.2.3` on a flag that carries a value names a version too.
-                    && (t.attached.is_none()
-                        || !matches!(
-                            parser.parse_parameter(t, None),
-                            Some((_, Some(_)))
-                        ))
             }
             TokenKind::Short => spelling.short_h && t.text == "h" && arg == Some("-h"),
             _ => false,
@@ -1795,14 +1769,14 @@ mod requests_help_tests {
         assert!(!asks("pnpm", &["exec", "--", "vitest", "run"]));
     }
 
-    /// Every tool RTK wraps, crossed with every position a meta token can take. The
+    /// Tools using generic help detection, crossed with every position a meta token can take. The
     /// property is the boundary, not a table of answers: before `--` the token is a
     /// request, past it the tool is being asked to match on it.
     #[test]
     fn fuzz_the_boundary_decides_and_position_does_not() {
         const TOOLS: &[&str] = &[
-            "cargo", "git", "go", "npm", "pnpm", "docker", "kubectl", "gh", "mvn", "tsc", "pip",
-            "uv", "dotnet", "rg", "psql", "ls", "tree", "grep", "find", "wc",
+            "git", "go", "npm", "pnpm", "docker", "kubectl", "gh", "mvn", "tsc", "pip", "uv",
+            "dotnet", "rg", "psql", "ls", "tree", "grep", "find", "wc",
         ];
         const BASES: &[&[&str]] = &[
             &[],
@@ -1821,14 +1795,6 @@ mod requests_help_tests {
                         let mut argv: Vec<String> = base.iter().map(|s| s.to_string()).collect();
                         argv.insert(at, meta.to_string());
                         checked += 1;
-                        let expected = if *tool == "cargo"
-                            && meta == "--version"
-                            && argv.first().is_some_and(|a| a == "build")
-                        {
-                            false
-                        } else {
-                            expected
-                        };
                         assert_eq!(requests_help_args(tool, &argv), expected, "{tool} {argv:?}");
 
                         // The same tokens past the boundary are operands, never a request.
@@ -1871,20 +1837,20 @@ mod requests_help_tests {
     }
 
     #[test]
-    fn cargo_fallback_uses_parameter_rules_for_unsupported_commands() {
-        for (args, expected) in [
-            (vec!["metadata", "--help"], true),
-            (
-                vec!["+stable", "--config", "check", "metadata", "--help"],
-                true,
-            ),
-            (vec!["metadata", "--config=--help"], false),
-            (vec!["metadata", "--", "--help"], false),
-            (vec!["bench", "--", "--help"], true),
-            (vec!["metadata", "-vh"], false),
-            (vec!["metadata", "--h"], true),
+    fn unsupported_cargo_arguments_are_not_reparsed_by_generic_help_detection() {
+        for args in [
+            vec!["metadata", "--help"],
+            vec!["+stable", "--config", "check", "metadata", "--help"],
+            vec!["metadata", "--config=--help"],
+            vec!["metadata", "--", "--help"],
+            vec!["bench", "--", "--help"],
+            vec!["run", "--", "--help"],
+            vec!["metadata", "-vh"],
+            vec!["metadata", "--h"],
+            vec!["custom", "--version", "1.2.3"],
+            vec!["--unknown", "check", "--help"],
         ] {
-            assert_eq!(asks("cargo", &args), expected, "{args:?}");
+            assert!(!asks("cargo", &args), "{args:?}");
         }
     }
 
