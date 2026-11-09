@@ -502,7 +502,7 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
         if stem == "cargo" {
             return cargo_common
                 .parse_shared_parameter(token, None)
-                .unwrap_or(TokenAction::Continue(None));
+                .unwrap_or((TokenAction::Continue, None));
         }
         let git_message = stem == "git"
             && match token.kind {
@@ -510,7 +510,7 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
                 TokenKind::Long => matches!(token.text, "message" | "file"),
                 _ => false,
             };
-        TokenAction::Continue(git_message.then(ValueSpec::value))
+        (TokenAction::Continue, git_message.then(ValueSpec::value))
     });
     let tokens = arg_tokenizer::Tokenizer::new(args, spelling.dialect).tokenize_until(&mut parser);
     if names_usage(
@@ -567,7 +567,7 @@ fn names_usage<'a, P: ParameterParser<'a> + ?Sized>(
                     && (t.attached.is_none()
                         || !matches!(
                             parser.parse_parameter(t, None),
-                            Some(TokenAction::Continue(Some(_)) | TokenAction::StopAfter(Some(_)))
+                            Some((_, Some(_)))
                         ))
             }
             TokenKind::Short => spelling.short_h && t.text == "h" && arg == Some("-h"),

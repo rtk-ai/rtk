@@ -466,26 +466,30 @@ pub fn tokenize_grammar<'a, T: AsRef<str>>(
     tokenize_scan(args, dialect, takes_value)
 }
 
-/// Value-consumption rule and batch control for an option, free positional, or separator.
-/// Only options use the value rule. Separately consumed values do not invoke the callback.
+/// Batch control for an option, free positional, or separator, independent of its value rule.
+/// Separately consumed values do not invoke the callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenAction {
-    Continue(Option<ValueSpec>),
+    Continue,
     /// Include the current argument, finish its cluster and any separate option value,
     /// then return the batch. The next call starts at the following argument.
-    StopAfter(Option<ValueSpec>),
+    Stop,
 }
 
 /// A destination that interprets option heads, free positionals and separators.
 /// `None` means this parser did not recognize the token; it can be offered to another parser.
 /// An unrecognized token at the tokenizer boundary continues without consuming a separate value.
 pub trait ParameterParser<'a> {
+    /// Return the batch action and, independently, the option's value-consumption rule.
     /// Tokenization calls this with `None`; short attached and separate values are not resolved yet.
     /// Callers use scratch state for that pass, then call the same method on their real
     /// destination with [`Token::value`] from the returned batch. Consumed values are read
     /// through their owners rather than passed to the parser as independent positionals.
-    fn parse_parameter(&mut self, token: &Token<'a>, value: Option<&'a str>)
-    -> Option<TokenAction>;
+    fn parse_parameter(
+        &mut self,
+        token: &Token<'a>,
+        value: Option<&'a str>,
+    ) -> Option<(TokenAction, Option<ValueSpec>)>;
 }
 
 impl<'a> ParameterParser<'a> for () {
@@ -493,7 +497,7 @@ impl<'a> ParameterParser<'a> for () {
         &mut self,
         _token: &Token<'a>,
         _value: Option<&'a str>,
-    ) -> Option<TokenAction> {
+    ) -> Option<(TokenAction, Option<ValueSpec>)> {
         None
     }
 }
@@ -502,7 +506,7 @@ impl<'a> ParameterParser<'a> for () {
 /// before their values are resolved, following the original [`Tokenizer::tokenize_until`] contract.
 pub fn syntax_callback<'a, F>(callback: F) -> impl ParameterParser<'a>
 where
-    F: FnMut(&Token<'a>) -> TokenAction,
+    F: FnMut(&Token<'a>) -> (TokenAction, Option<ValueSpec>),
 {
     SyntaxCallback(callback)
 }
@@ -511,13 +515,13 @@ struct SyntaxCallback<F>(F);
 
 impl<'a, F> ParameterParser<'a> for SyntaxCallback<F>
 where
-    F: FnMut(&Token<'a>) -> TokenAction,
+    F: FnMut(&Token<'a>) -> (TokenAction, Option<ValueSpec>),
 {
     fn parse_parameter(
         &mut self,
         token: &Token<'a>,
         _value: Option<&'a str>,
-    ) -> Option<TokenAction> {
+    ) -> Option<(TokenAction, Option<ValueSpec>)> {
         Some((self.0)(token))
     }
 }
@@ -539,17 +543,14 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
         token: Token<'a>,
         parser: &mut P,
     ) -> Option<ValueSpec> {
-        let action = parser
+        let (action, value_spec) = parser
             .parse_parameter(&token, None)
-            .unwrap_or(TokenAction::Continue(None));
+            .unwrap_or((TokenAction::Continue, None));
         self.tokens.push(token);
-        match action {
-            TokenAction::Continue(value) => value,
-            TokenAction::StopAfter(value) => {
-                self.stop_requested = true;
-                value
-            }
+        if action == TokenAction::Stop {
+            self.stop_requested = true;
         }
+        value_spec
     }
 
     /// Pushes one atomic (non-clustering) flag token — used for `--flag` in every dialect, and
@@ -635,7 +636,7 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
         self.emitted_dash_dash = false;
     }
 
-    /// Tokenize through the argument whose parser requests [`TokenAction::StopAfter`],
+    /// Tokenize through the argument whose parser requests [`TokenAction::Stop`],
     /// or through the end of input. An empty batch means input is exhausted.
     ///
     /// The parser sees each option, free positional and separator with `value: None`.
@@ -795,7 +796,7 @@ fn tokenize_scan<'a, T: AsRef<str>>(
             }
             _ => None,
         };
-        TokenAction::Continue(value)
+        (TokenAction::Continue, value)
     }))
 }
 

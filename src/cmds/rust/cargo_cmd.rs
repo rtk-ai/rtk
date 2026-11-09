@@ -218,7 +218,7 @@ impl CommonOptions {
         &mut self,
         token: &Token<'a>,
         value: Option<&'a str>,
-    ) -> Option<TokenAction> {
+    ) -> Option<(TokenAction, Option<ValueSpec>)> {
         // Shared globals retain their definitions on either side of a built-in command.
         // https://github.com/rust-lang/cargo/blob/master/src/bin/cargo/cli.rs
         let spec = match (token.kind, token.text) {
@@ -233,10 +233,10 @@ impl CommonOptions {
                 self.help = true;
                 None
             }
-            (TokenKind::DashDash, _) => return Some(TokenAction::StopAfter(None)),
+            (TokenKind::DashDash, _) => return Some((TokenAction::Stop, None)),
             _ => return None,
         };
-        Some(TokenAction::Continue(spec))
+        Some((TokenAction::Continue, spec))
     }
 }
 
@@ -245,7 +245,7 @@ impl<'a> ParameterParser<'a> for CommonOptions {
         &mut self,
         token: &Token<'a>,
         value: Option<&'a str>,
-    ) -> Option<TokenAction> {
+    ) -> Option<(TokenAction, Option<ValueSpec>)> {
         let spec = match (token.kind, token.text) {
             // -C is only accepted before the command name.
             // https://doc.rust-lang.org/cargo/commands/cargo.html#option-cargo--C
@@ -255,7 +255,7 @@ impl<'a> ParameterParser<'a> for CommonOptions {
                 // Script mode uses a script operand rather than our command grammar.
                 // https://doc.rust-lang.org/cargo/reference/unstable.html#script
                 if value == Some("script") {
-                    return Some(TokenAction::StopAfter(Some(ValueSpec::value())));
+                    return Some((TokenAction::Stop, Some(ValueSpec::value())));
                 }
                 return self.parse_shared_parameter(token, value);
             }
@@ -278,10 +278,10 @@ impl<'a> ParameterParser<'a> for CommonOptions {
             _ => {
                 return self
                     .parse_shared_parameter(token, value)
-                    .or(Some(TokenAction::StopAfter(None)));
+                    .or(Some((TokenAction::Stop, None)));
             }
         };
-        Some(TokenAction::Continue(spec))
+        Some((TokenAction::Continue, spec))
     }
 }
 
@@ -290,7 +290,7 @@ impl<'a> ParameterParser<'a> for BuildOptions {
         &mut self,
         token: &Token<'a>,
         value: Option<&'a str>,
-    ) -> Option<TokenAction> {
+    ) -> Option<(TokenAction, Option<ValueSpec>)> {
         self.compilation
             .parse_parameter(token, value)
             .or_else(|| self.common.parse_shared_parameter(token, value))
@@ -302,7 +302,7 @@ impl<'a> ParameterParser<'a> for CheckOptions {
         &mut self,
         token: &Token<'a>,
         value: Option<&'a str>,
-    ) -> Option<TokenAction> {
+    ) -> Option<(TokenAction, Option<ValueSpec>)> {
         self.compilation
             .parse_parameter(token, value)
             .or_else(|| self.common.parse_shared_parameter(token, value))
@@ -314,7 +314,7 @@ impl<'a> ParameterParser<'a> for CompilationOptions {
         &mut self,
         token: &Token<'a>,
         value: Option<&'a str>,
-    ) -> Option<TokenAction> {
+    ) -> Option<(TokenAction, Option<ValueSpec>)> {
         let spec = match (token.kind, token.text) {
             (TokenKind::Long, "message-format") => {
                 if let Some(value) = value {
@@ -328,7 +328,7 @@ impl<'a> ParameterParser<'a> for CompilationOptions {
             }
             _ => return None,
         };
-        Some(TokenAction::Continue(spec))
+        Some((TokenAction::Continue, spec))
     }
 }
 
@@ -337,7 +337,7 @@ impl<'a> ParameterParser<'a> for ClippyOptions {
         &mut self,
         token: &Token<'a>,
         value: Option<&'a str>,
-    ) -> Option<TokenAction> {
+    ) -> Option<(TokenAction, Option<ValueSpec>)> {
         let spec = match (token.kind, token.text) {
             (TokenKind::Long, "version") | (TokenKind::Short, "V") => {
                 self.version = true;
@@ -354,7 +354,7 @@ impl<'a> ParameterParser<'a> for ClippyOptions {
                     .or_else(|| self.common.parse_shared_parameter(token, value));
             }
         };
-        Some(TokenAction::Continue(spec))
+        Some((TokenAction::Continue, spec))
     }
 }
 
@@ -363,11 +363,11 @@ impl<'a> ParameterParser<'a> for TestOptions {
         &mut self,
         token: &Token<'a>,
         value: Option<&'a str>,
-    ) -> Option<TokenAction> {
+    ) -> Option<(TokenAction, Option<ValueSpec>)> {
         match (token.kind, token.text) {
             (TokenKind::Long, "unit-graph") => {
                 self.unit_graph = true;
-                Some(TokenAction::Continue(None))
+                Some((TokenAction::Continue, None))
             }
             _ => self.common.parse_shared_parameter(token, value),
         }
@@ -379,7 +379,7 @@ impl<'a> ParameterParser<'a> for InstallOptions {
         &mut self,
         token: &Token<'a>,
         value: Option<&'a str>,
-    ) -> Option<TokenAction> {
+    ) -> Option<(TokenAction, Option<ValueSpec>)> {
         let spec = match (token.kind, token.text) {
             // This crate version requirement is distinct from common.version's root flag.
             // https://doc.rust-lang.org/cargo/commands/cargo-install.html#install-options
@@ -400,7 +400,7 @@ impl<'a> ParameterParser<'a> for InstallOptions {
                     .or_else(|| self.common.parse_shared_parameter(token, value));
             }
         };
-        Some(TokenAction::Continue(spec))
+        Some((TokenAction::Continue, spec))
     }
 }
 
@@ -409,7 +409,7 @@ impl<'a> ParameterParser<'a> for NextestOptions {
         &mut self,
         token: &Token<'a>,
         value: Option<&'a str>,
-    ) -> Option<TokenAction> {
+    ) -> Option<(TokenAction, Option<ValueSpec>)> {
         let spec = match (token.kind, token.text) {
             (TokenKind::Positional, _) if self.operation == NextestOperation::Unspecified => {
                 self.operation = match token.text {
@@ -466,7 +466,7 @@ impl<'a> ParameterParser<'a> for NextestOptions {
                 return None;
             }
         };
-        Some(TokenAction::Continue(spec))
+        Some((TokenAction::Continue, spec))
     }
 }
 
@@ -475,7 +475,7 @@ impl<'a> ParameterParser<'a> for TestHarnessOptions {
         &mut self,
         token: &Token<'a>,
         value: Option<&'a str>,
-    ) -> Option<TokenAction> {
+    ) -> Option<(TokenAction, Option<ValueSpec>)> {
         let spec = match (token.kind, token.text) {
             (TokenKind::Long, "help") | (TokenKind::Short, "h") => {
                 self.help = true;
@@ -502,10 +502,10 @@ impl<'a> ParameterParser<'a> for TestHarnessOptions {
             }
             (TokenKind::Long, "skip" | "test-threads" | "color" | "logfile")
             | (TokenKind::Short, "Z") => Some(ValueSpec::value()),
-            (TokenKind::DashDash, _) => return Some(TokenAction::StopAfter(None)),
+            (TokenKind::DashDash, _) => return Some((TokenAction::Stop, None)),
             _ => return None,
         };
-        Some(TokenAction::Continue(spec))
+        Some((TokenAction::Continue, spec))
     }
 }
 
@@ -514,7 +514,7 @@ impl<'a> ParameterParser<'a> for FmtOptions {
         &mut self,
         token: &Token<'a>,
         value: Option<&'a str>,
-    ) -> Option<TokenAction> {
+    ) -> Option<(TokenAction, Option<ValueSpec>)> {
         self.common.parse_shared_parameter(token, value)
     }
 }
@@ -540,9 +540,7 @@ fn parse_parameters_until<'a, T: AsRef<str>, O: ParameterParser<'a> + Clone>(
         if token.kind == TokenKind::Positional && !token.is_free_positional() {
             continue;
         }
-        if let Some(TokenAction::StopAfter(_)) =
-            options.parse_parameter(token, token.value(&tokens))
-        {
+        if let Some((TokenAction::Stop, _)) = options.parse_parameter(token, token.value(&tokens)) {
             return if token.is_free_positional() {
                 ParameterBoundary::Positional(token.text)
             } else {

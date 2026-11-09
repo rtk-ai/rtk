@@ -24,9 +24,12 @@ fn batches_change_grammar_without_restarting_or_mistaking_values_for_commands() 
     let prefix = tokenizer.tokenize_until(&mut syntax_callback(|token| {
         visited.push(token.source_index);
         if token.is_free_positional() {
-            TokenAction::StopAfter(None)
+            (TokenAction::Stop, None)
         } else {
-            TokenAction::Continue((token.text == "config").then(ValueSpec::value))
+            (
+                TokenAction::Continue,
+                (token.text == "config").then(ValueSpec::value),
+            )
         }
     }));
     assert_eq!(prefix.len(), 3);
@@ -37,9 +40,12 @@ fn batches_change_grammar_without_restarting_or_mistaking_values_for_commands() 
     let command = tokenizer.tokenize_until(&mut syntax_callback(|token| {
         visited.push(token.source_index);
         if token.kind == TokenKind::DashDash {
-            TokenAction::StopAfter(None)
+            (TokenAction::Stop, None)
         } else {
-            TokenAction::Continue((token.text == "version").then(ValueSpec::value))
+            (
+                TokenAction::Continue,
+                (token.text == "version").then(ValueSpec::value),
+            )
         }
     }));
     assert_eq!(command.len(), 3);
@@ -53,9 +59,12 @@ fn batches_change_grammar_without_restarting_or_mistaking_values_for_commands() 
     let harness = tokenizer.tokenize_until(&mut syntax_callback(|token| {
         visited.push(token.source_index);
         if token.kind == TokenKind::DashDash {
-            TokenAction::StopAfter(None)
+            (TokenAction::Stop, None)
         } else {
-            TokenAction::Continue((token.text == "format").then(ValueSpec::value))
+            (
+                TokenAction::Continue,
+                (token.text == "format").then(ValueSpec::value),
+            )
         }
     }));
     assert_eq!(harness.len(), 3);
@@ -66,7 +75,7 @@ fn batches_change_grammar_without_restarting_or_mistaking_values_for_commands() 
 
     let tail = tokenizer.tokenize_until(&mut syntax_callback(|token| {
         visited.push(token.source_index);
-        TokenAction::Continue(None)
+        (TokenAction::Continue, None)
     }));
     assert_eq!(tail.len(), 1);
     assert_eq!(tail[0].kind, TokenKind::Positional);
@@ -87,8 +96,8 @@ fn stop_finishes_the_cluster_and_its_separate_value() {
     let batch = tokenizer.tokenize_until(&mut syntax_callback(|token| {
         visited.push(token.text);
         match token.text {
-            "v" => TokenAction::StopAfter(None),
-            "n" => TokenAction::Continue(Some(ValueSpec::value())),
+            "v" => (TokenAction::Stop, None),
+            "n" => (TokenAction::Continue, Some(ValueSpec::value())),
             _ => panic!("must stop before the tail"),
         }
     }));
@@ -96,7 +105,7 @@ fn stop_finishes_the_cluster_and_its_separate_value() {
     assert_eq!(batch.len(), 3);
     assert_eq!(batch[1].value(&batch), Some("value"));
     assert_eq!(batch[2].source_index, 1);
-    let tail = tokenizer.tokenize_until(&mut syntax_callback(|_| TokenAction::Continue(None)));
+    let tail = tokenizer.tokenize_until(&mut syntax_callback(|_| (TokenAction::Continue, None)));
     assert_eq!(tail[0].text, "tail");
     assert_eq!(tail[0].source_index, 2);
 }
@@ -111,10 +120,11 @@ fn stop_on_an_option_consumes_its_attached_or_separate_value() {
     ] {
         let mut tokenizer = Tokenizer::new(&args, Dialect::Clap);
         let batch = tokenizer.tokenize_until(&mut syntax_callback(|_| {
-            TokenAction::StopAfter(Some(ValueSpec::value()))
+            (TokenAction::Stop, Some(ValueSpec::value()))
         }));
         assert_eq!(batch[0].value(&batch), Some("data"), "{args:?}");
-        let tail = tokenizer.tokenize_until(&mut syntax_callback(|_| TokenAction::Continue(None)));
+        let tail =
+            tokenizer.tokenize_until(&mut syntax_callback(|_| (TokenAction::Continue, None)));
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].text, "tail");
         assert_eq!(tail[0].source_index, args.len() - 1);
@@ -129,15 +139,18 @@ fn a_consumed_double_dash_is_not_a_stop_event() {
     let batch = tokenizer.tokenize_until(&mut syntax_callback(|token| {
         visited.push(token.source_index);
         if token.kind == TokenKind::DashDash {
-            TokenAction::StopAfter(None)
+            (TokenAction::Stop, None)
         } else {
-            TokenAction::Continue(Some(ValueSpec::value().claiming_dash_dash()))
+            (
+                TokenAction::Continue,
+                Some(ValueSpec::value().claiming_dash_dash()),
+            )
         }
     }));
     assert_eq!(visited, [0, 2]);
     assert_eq!(batch[0].value(&batch), Some("--"));
     assert_eq!(batch[2].kind, TokenKind::DashDash);
-    let tail = tokenizer.tokenize_until(&mut syntax_callback(|_| TokenAction::Continue(None)));
+    let tail = tokenizer.tokenize_until(&mut syntax_callback(|_| (TokenAction::Continue, None)));
     assert_eq!(tail[0].kind, TokenKind::Positional);
     assert_eq!(tail[0].text, "-v");
 }
@@ -152,11 +165,11 @@ fn attached_atomic_flags_numeric_shortcuts_and_empty_operands_can_stop() {
     ] {
         let args = [first, "tail"];
         let mut tokenizer = Tokenizer::new(&args, dialect);
-        let batch =
-            tokenizer.tokenize_until(&mut syntax_callback(|_| TokenAction::StopAfter(None)));
+        let batch = tokenizer.tokenize_until(&mut syntax_callback(|_| (TokenAction::Stop, None)));
         assert_eq!(batch.len(), 1, "{first}");
         assert_eq!(batch[0].source_index, 0);
-        let tail = tokenizer.tokenize_until(&mut syntax_callback(|_| TokenAction::Continue(None)));
+        let tail =
+            tokenizer.tokenize_until(&mut syntax_callback(|_| (TokenAction::Continue, None)));
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].text, "tail");
         assert_eq!(tail[0].source_index, 1);
@@ -194,7 +207,7 @@ fn pauses_preserve_tokenization_under_every_dialect() {
                 let mut actual = Vec::new();
                 loop {
                     let mut batch = tokenizer.tokenize_until(&mut syntax_callback(|token| {
-                        TokenAction::StopAfter(takes_value(token.kind, token.text))
+                        (TokenAction::Stop, takes_value(token.kind, token.text))
                     }));
                     if batch.is_empty() {
                         break;
@@ -224,19 +237,19 @@ fn parser_objects_read_resolved_values_in_the_token_loop() {
             &mut self,
             token: &Token<'a>,
             value: Option<&'a str>,
-        ) -> Option<TokenAction> {
+        ) -> Option<(TokenAction, Option<ValueSpec>)> {
             match (token.kind, token.text) {
                 (TokenKind::Long, "value") | (TokenKind::Short, "n") => {
                     if let Some(value) = value {
                         self.values.push(value);
                     }
-                    Some(TokenAction::Continue(Some(ValueSpec::value())))
+                    Some((TokenAction::Continue, Some(ValueSpec::value())))
                 }
                 (TokenKind::Long, "flag") | (TokenKind::Short, "v") => {
                     self.flags += 1;
-                    Some(TokenAction::Continue(None))
+                    Some((TokenAction::Continue, None))
                 }
-                (TokenKind::DashDash, _) => Some(TokenAction::StopAfter(None)),
+                (TokenKind::DashDash, _) => Some((TokenAction::Stop, None)),
                 _ => None,
             }
         }
