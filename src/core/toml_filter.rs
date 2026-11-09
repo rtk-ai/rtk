@@ -311,6 +311,7 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "sqlfluff",
     "go",
     "golangci-lint",
+    "buf",
     "rewrite",
     "bypass",
     "verify",

@@ -1,0 +1,68 @@
+panic: protoc-gen-panic: boom
+
+goroutine 1 [running]:
+main.deep(...)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:5
+main.deep(0x0?)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7 +0x50
+main.deep(...)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7
+main.deep(0x14e2c8288?)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7 +0x30
+main.deep(...)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7
+main.deep(0x2f2f69790548?)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7 +0x30
+main.deep(...)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7
+main.deep(0x2f2f697b0d78?)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7 +0x30
+main.deep(...)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7
+main.deep(0x2f2f697b0d68?)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7 +0x30
+main.deep(...)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7
+main.deep(0x2f2f697b0da8?)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7 +0x30
+main.deep(...)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7
+main.deep(0x14e2c8288?)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7 +0x30
+main.deep(...)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7
+main.deep(0x2f2f697b0dc8?)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7 +0x30
+main.deep(...)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7
+main.deep(0x2f2f697b0e38?)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7 +0x30
+main.deep(...)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7
+main.deep(0x104d2bd20?)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7 +0x30
+main.deep(...)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7
+main.deep(0x1096a36b8?)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7 +0x30
+main.deep(...)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7
+main.deep(0x2f2f697161e0?)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7 +0x30
+main.deep(...)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7
+main.deep(0x2f2f697b0e01?)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7 +0x30
+main.deep(...)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7
+main.deep(0x70?)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7 +0x30
+main.deep(...)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7
+main.deep(0x104d172f0?)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7 +0x30
+main.deep(...)
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:7
+main.main()
+	/var/folders/hm/7vjmmhw17cxby49ckv5lrksh0000gp/T/rtk-buf-fixtures/plugin/main.go:10 +0x20
+Failure: plugin protoc-gen-panic: exit status 2

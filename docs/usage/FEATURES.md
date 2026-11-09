@@ -842,6 +842,20 @@ Compressed JSON output.
 
 ---
 
+### `rtk buf` -- Protobuf (buf)
+
+```bash
+rtk buf lint [args...]
+rtk buf build [args...]
+rtk buf breaking --against <ref> [args...]
+rtk buf format -d [args...]
+rtk buf generate [args...]
+```
+
+JSON diagnostics grouped by rule (cascading compile errors collapsed), `format -d` summarized per file, `generate` failures truncated. Also via `rtk go tool buf`.
+
+---
+
 ## Formatting commands
 
 ### `rtk prettier` -- Prettier
@@ -1347,6 +1361,7 @@ rtk verify
 | `pip list/install` | `rtk pip ...` |
 | `go test/build/vet` | `rtk go ...` |
 | `golangci-lint` | `rtk golangci-lint` |
+| `buf lint/build/breaking/format/generate` | `rtk buf ...` |
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |
@@ -1555,7 +1570,7 @@ No personal data, no command content and no file path is transmitted. Server ret
 | **Git** | status, log, diff, show, add, commit, push, pull |
 | **GitHub** | pr, issue, run, api |
 | **Tests** | cargo test, vitest, playwright, pytest, go test |
-| **Build/Lint** | cargo build, tsc, eslint, prettier, next, ruff, clippy |
+| **Build/Lint** | cargo build, tsc, eslint, prettier, next, ruff, clippy, golangci-lint, buf |
 | **Packages** | pnpm, npm, pip, deps, prisma |
 | **Containers** | docker, kubectl |
 | **Data** | json, env, log, curl, wget |
