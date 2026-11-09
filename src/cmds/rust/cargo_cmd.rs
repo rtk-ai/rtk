@@ -1,8 +1,6 @@
 //! Filters cargo output — build errors, test results, clippy warnings.
 
-use crate::core::arg_tokenizer::{
-    self, Dialect, OptionDefinition, Token, TokenEvent, TokenHandler, TokenKind, ValueSpec,
-};
+use crate::core::arg_tokenizer::{self, Dialect, TokenAction, TokenKind, ValueSpec};
 use crate::core::runner;
 use crate::core::stream::{BlockHandler, BlockStreamFilter};
 use crate::core::tracking;
@@ -13,7 +11,6 @@ use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
-use std::ops::ControlFlow;
 use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,309 +175,324 @@ pub struct NextestOptions {
     pub harness: TestHarnessOptions,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CargoInvocation {
     command: CargoCommand,
     common: CommonOptions,
 }
 
-/// Semantic tags, scoped by meaning rather than spelling or value arity.
-/// Lookups cover facts RTK reads and syntax needed to find commands or keep option
-/// values out of semantic inspection. Consumption-only options have no tag;
-/// Cargo remains responsible for the rest of its grammar and for validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CargoOption {
-    Common(CommonOption),
-    Root(RootOption),
-    Compilation(CompilationOption),
-    Clippy(ClippyOption),
-    Install(InstallOption),
-    Nextest(NextestOption),
-    Harness(HarnessOption),
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CommonOption {
-    Help,
-    Unstable,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RootOption {
-    ShowVersion,
-    ListCommands,
-    ExplainDiagnostic,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CompilationOption {
-    DiagnosticFormat,
-    UnitGraph,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClippyOption {
-    ShowVersion,
-    ExplainLint,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InstallOption {
-    ListPackages,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NextestOption {
-    ShowVersion,
-    OutputFormat,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HarnessOption {
-    Help,
-    ListTests,
-    OutputFormat,
-    TerseOutput,
-}
-
-impl CommonOptions {
-    fn lookup(kind: TokenKind, name: &str) -> Option<OptionDefinition<CargoOption>> {
-        // Shared globals retain their definitions on either side of a built-in command.
-        // https://github.com/rust-lang/cargo/blob/master/src/bin/cargo/cli.rs
-        Some(match (kind, name) {
-            (TokenKind::Long, "locked" | "offline" | "frozen" | "quiet" | "verbose")
-            | (TokenKind::Short, "q" | "v") => OptionDefinition::flag(None),
-            (TokenKind::Long, "config" | "color") => OptionDefinition::value(None),
-            (TokenKind::Short, "Z") => {
-                OptionDefinition::value(Some(CargoOption::Common(CommonOption::Unstable)))
-            }
-            (TokenKind::Long, "help") | (TokenKind::Short, "h") => {
-                OptionDefinition::flag(Some(CargoOption::Common(CommonOption::Help)))
-            }
-            _ => return None,
-        })
-    }
-
-    fn read(&mut self, option: CommonOption, value: Option<&str>) {
-        match option {
-            CommonOption::Help => self.help = true,
-            CommonOption::Unstable => self.unstable_help |= value == Some("help"),
+/// These callbacks cover the facts RTK reads and the syntax needed to discover commands
+/// or keep option values out of semantic inspection. Cargo validates its complete grammar.
+/// None means unrecognized; Some contains the tokenizer's value rule and batch decision.
+fn parse_global_parameter(
+    kind: TokenKind,
+    name: &str,
+    options: &mut CommonOptions,
+    value: Option<&str>,
+) -> Option<TokenAction> {
+    // Shared globals retain their definitions on either side of a built-in command.
+    // https://github.com/rust-lang/cargo/blob/master/src/bin/cargo/cli.rs
+    let spec = match (kind, name) {
+        (TokenKind::Long, "locked" | "offline" | "frozen" | "quiet" | "verbose")
+        | (TokenKind::Short, "q" | "v") => None,
+        (TokenKind::Long, "config" | "color") => Some(ValueSpec::value()),
+        (TokenKind::Short, "Z") => {
+            options.unstable_help |= value == Some("help");
+            Some(ValueSpec::value())
         }
-    }
-}
-
-impl NoCommandOptions {
-    fn lookup(kind: TokenKind, name: &str) -> Option<OptionDefinition<CargoOption>> {
-        Some(match (kind, name) {
-            // -C changes Cargo's working directory and is only accepted before the command.
-            // https://doc.rust-lang.org/cargo/commands/cargo.html#option-cargo--C
-            (TokenKind::Short, "C") => OptionDefinition::value(None),
-            (TokenKind::Long, "version") | (TokenKind::Short, "V") => {
-                OptionDefinition::flag(Some(CargoOption::Root(RootOption::ShowVersion)))
-            }
-            (TokenKind::Long, "list") => {
-                OptionDefinition::flag(Some(CargoOption::Root(RootOption::ListCommands)))
-            }
-            (TokenKind::Long, "explain") => {
-                OptionDefinition::value(Some(CargoOption::Root(RootOption::ExplainDiagnostic)))
-            }
-            _ => return CommonOptions::lookup(kind, name),
-        })
-    }
-
-    fn read(&mut self, option: RootOption) {
-        match option {
-            RootOption::ShowVersion => self.version = true,
-            RootOption::ListCommands => self.list = true,
-            RootOption::ExplainDiagnostic => self.explain = true,
+        (TokenKind::Long, "help") | (TokenKind::Short, "h") => {
+            options.help = true;
+            None
         }
-    }
+        (TokenKind::DashDash, _) => return Some(TokenAction::StopAfter(None)),
+        _ => return None,
+    };
+    Some(TokenAction::Continue(spec))
 }
 
-impl CompilationOptions {
-    fn lookup(kind: TokenKind, name: &str) -> Option<OptionDefinition<CargoOption>> {
-        Some(match (kind, name) {
-            (TokenKind::Long, "message-format") => OptionDefinition::value(Some(
-                CargoOption::Compilation(CompilationOption::DiagnosticFormat),
-            )),
-            (TokenKind::Long, "unit-graph") => {
-                OptionDefinition::flag(Some(CargoOption::Compilation(CompilationOption::UnitGraph)))
-            }
-            _ => return None,
-        })
-    }
-
-    fn read(&mut self, option: CompilationOption, value: Option<&str>) {
-        match option {
-            CompilationOption::DiagnosticFormat => {
-                if let Some(value) = value {
-                    self.message_format = MessageFormat::read(value);
-                }
-            }
-            CompilationOption::UnitGraph => self.unit_graph = true,
+fn parse_no_command_parameter(
+    kind: TokenKind,
+    name: &str,
+    options: &mut NoCommandOptions,
+    _value: Option<&str>,
+) -> Option<TokenAction> {
+    let spec = match (kind, name) {
+        // -C is only accepted before the command name.
+        // https://doc.rust-lang.org/cargo/commands/cargo.html#option-cargo--C
+        (TokenKind::Short, "C") => Some(ValueSpec::value()),
+        (TokenKind::Long, "version") | (TokenKind::Short, "V") => {
+            options.version = true;
+            None
         }
-    }
+        (TokenKind::Long, "list") => {
+            options.list = true;
+            None
+        }
+        (TokenKind::Long, "explain") => {
+            options.explain = true;
+            Some(ValueSpec::value())
+        }
+        _ => return None,
+    };
+    Some(TokenAction::Continue(spec))
 }
 
-impl ClippyOptions {
-    fn lookup(kind: TokenKind, name: &str) -> Option<OptionDefinition<CargoOption>> {
-        Some(match (kind, name) {
-            (TokenKind::Long, "version") | (TokenKind::Short, "V") => {
-                OptionDefinition::flag(Some(CargoOption::Clippy(ClippyOption::ShowVersion)))
+fn parse_compilation_parameter(
+    kind: TokenKind,
+    name: &str,
+    options: &mut CompilationOptions,
+    value: Option<&str>,
+) -> Option<TokenAction> {
+    let spec = match (kind, name) {
+        (TokenKind::Long, "message-format") => {
+            if let Some(value) = value {
+                options.message_format = MessageFormat::read(value);
             }
-            (TokenKind::Long, "explain") => {
-                OptionDefinition::value(Some(CargoOption::Clippy(ClippyOption::ExplainLint)))
+            Some(ValueSpec::value())
+        }
+        (TokenKind::Long, "unit-graph") => {
+            options.unit_graph = true;
+            None
+        }
+        _ => return None,
+    };
+    Some(TokenAction::Continue(spec))
+}
+
+fn parse_build_parameter(
+    kind: TokenKind,
+    name: &str,
+    options: &mut CompilationOptions,
+    value: Option<&str>,
+) -> Option<TokenAction> {
+    parse_compilation_parameter(kind, name, options, value)
+}
+
+fn parse_check_parameter(
+    kind: TokenKind,
+    name: &str,
+    options: &mut CompilationOptions,
+    value: Option<&str>,
+) -> Option<TokenAction> {
+    parse_compilation_parameter(kind, name, options, value)
+}
+
+fn parse_clippy_parameter(
+    kind: TokenKind,
+    name: &str,
+    options: &mut ClippyOptions,
+    value: Option<&str>,
+) -> Option<TokenAction> {
+    let spec = match (kind, name) {
+        (TokenKind::Long, "version") | (TokenKind::Short, "V") => {
+            options.version = true;
+            None
+        }
+        (TokenKind::Long, "explain") => {
+            options.explain = true;
+            Some(ValueSpec::value())
+        }
+        _ => return parse_compilation_parameter(kind, name, &mut options.compilation, value),
+    };
+    Some(TokenAction::Continue(spec))
+}
+
+fn parse_test_parameter(
+    kind: TokenKind,
+    name: &str,
+    options: &mut TestOptions,
+    _value: Option<&str>,
+) -> Option<TokenAction> {
+    match (kind, name) {
+        (TokenKind::Long, "unit-graph") => {
+            options.unit_graph = true;
+            Some(TokenAction::Continue(None))
+        }
+        _ => None,
+    }
+}
+
+fn parse_install_parameter(
+    kind: TokenKind,
+    name: &str,
+    options: &mut InstallOptions,
+    value: Option<&str>,
+) -> Option<TokenAction> {
+    let spec = match (kind, name) {
+        // This is the crate version to install; RTK only needs to consume its value.
+        // https://doc.rust-lang.org/cargo/commands/cargo-install.html#install-options
+        (TokenKind::Long, "version" | "vers") => Some(ValueSpec::value()),
+        (TokenKind::Long, "list") => {
+            options.list = true;
+            None
+        }
+        _ => return parse_compilation_parameter(kind, name, &mut options.compilation, value),
+    };
+    Some(TokenAction::Continue(spec))
+}
+
+fn parse_nextest_parameter(
+    kind: TokenKind,
+    name: &str,
+    options: &mut NextestOptions,
+    value: Option<&str>,
+) -> Option<TokenAction> {
+    let spec = match (kind, name) {
+        (TokenKind::Positional, _) if options.operation == NextestOperation::Unspecified => {
+            options.operation = match name {
+                "run" => NextestOperation::Run,
+                "list" => NextestOperation::List,
+                _ => NextestOperation::Other,
+            };
+            None
+        }
+        (TokenKind::Long, "version") | (TokenKind::Short, "V")
+            if options.operation == NextestOperation::Unspecified =>
+        {
+            options.version = true;
+            None
+        }
+        // Nextest's result format is separate from Cargo's compiler diagnostic format.
+        // https://nexte.st/docs/running/#controlling-nextests-output
+        (TokenKind::Long, "message-format") if options.operation == NextestOperation::Run => {
+            if let Some(value) = value {
+                options.message_format = match value {
+                    "human" => NextestFormat::Human,
+                    "libtest-json" => NextestFormat::LibtestJson,
+                    "libtest-json-plus" => NextestFormat::LibtestJsonPlus,
+                    _ => NextestFormat::Unknown,
+                };
             }
-            _ => return CompilationOptions::lookup(kind, name),
-        })
-    }
-}
-
-impl TestOptions {
-    fn lookup(kind: TokenKind, name: &str) -> Option<OptionDefinition<CargoOption>> {
-        (kind == TokenKind::Long && name == "unit-graph").then(|| {
-            OptionDefinition::flag(Some(CargoOption::Compilation(CompilationOption::UnitGraph)))
-        })
-    }
-}
-
-impl InstallOptions {
-    fn lookup(kind: TokenKind, name: &str) -> Option<OptionDefinition<CargoOption>> {
-        Some(match (kind, name) {
-            // Consume the crate version without recording a version-display request.
-            // https://doc.rust-lang.org/cargo/commands/cargo-install.html#install-options
-            (TokenKind::Long, "version" | "vers") => OptionDefinition::value(None),
-            (TokenKind::Long, "list") => {
-                OptionDefinition::flag(Some(CargoOption::Install(InstallOption::ListPackages)))
+            Some(ValueSpec::value())
+        }
+        // https://nexte.st/docs/running/#cargo-build-options
+        (TokenKind::Long, "cargo-message-format") => {
+            if let Some(value) = value {
+                options.cargo_message_format = MessageFormat::read(value);
             }
-            _ => return CompilationOptions::lookup(kind, name),
-        })
-    }
-}
-
-impl NextestOptions {
-    fn lookup(&self, kind: TokenKind, name: &str) -> Option<OptionDefinition<CargoOption>> {
-        Some(match (kind, name) {
-            (TokenKind::Long, "version") | (TokenKind::Short, "V")
-                if self.operation == NextestOperation::Unspecified =>
+            Some(ValueSpec::value())
+        }
+        (TokenKind::Long, "unit-graph") => {
+            options.unit_graph = true;
+            None
+        }
+        (
+            TokenKind::Long,
+            "config-file" | "user-config-file" | "tool-config-file" | "manifest-path",
+        ) => Some(ValueSpec::value()),
+        _ => {
+            if options.operation == NextestOperation::Unspecified
+                && matches!(kind, TokenKind::Long | TokenKind::Short)
             {
-                OptionDefinition::flag(Some(CargoOption::Nextest(NextestOption::ShowVersion)))
+                // Unknown arity prevents reliable discovery of the nested operation.
+                options.operation = NextestOperation::Other;
             }
-            (TokenKind::Long, "message-format") if self.operation == NextestOperation::Run => {
-                OptionDefinition::value(Some(CargoOption::Nextest(NextestOption::OutputFormat)))
-            }
-            // Both spellings describe compiler diagnostics, unlike Nextest's result format.
-            // https://nexte.st/docs/running/#cargo-build-options
-            (TokenKind::Long, "cargo-message-format") => OptionDefinition::value(Some(
-                CargoOption::Compilation(CompilationOption::DiagnosticFormat),
-            )),
-            (TokenKind::Long, "unit-graph") => {
-                OptionDefinition::flag(Some(CargoOption::Compilation(CompilationOption::UnitGraph)))
-            }
-            (
-                TokenKind::Long,
-                "config-file" | "user-config-file" | "tool-config-file" | "manifest-path",
-            ) => OptionDefinition::value(None),
-            _ => return None,
-        })
-    }
-}
-
-impl CargoCommand {
-    fn lookup(&self, kind: TokenKind, name: &str) -> Option<OptionDefinition<CargoOption>> {
-        CommonOptions::lookup(kind, name).or_else(|| match self {
-            Self::NoCommand(_) => NoCommandOptions::lookup(kind, name),
-            Self::Build(_) | Self::Check(_) => CompilationOptions::lookup(kind, name),
-            Self::Clippy(_) => ClippyOptions::lookup(kind, name),
-            Self::Test(_) => TestOptions::lookup(kind, name),
-            Self::Install(_) => InstallOptions::lookup(kind, name),
-            Self::Nextest(options) => options.lookup(kind, name),
-            Self::Fmt => None,
-        })
-    }
-
-    fn read(&mut self, option: CargoOption, value: Option<&str>) {
-        match (self, option) {
-            (Self::Build(options) | Self::Check(options), CargoOption::Compilation(option)) => {
-                options.read(option, value);
-            }
-            (Self::Clippy(options), CargoOption::Compilation(option)) => {
-                options.compilation.read(option, value);
-            }
-            (Self::Install(options), CargoOption::Compilation(option)) => {
-                options.compilation.read(option, value);
-            }
-            (Self::Test(options), CargoOption::Compilation(CompilationOption::UnitGraph)) => {
-                options.unit_graph = true;
-            }
-            (Self::Clippy(options), CargoOption::Clippy(ClippyOption::ShowVersion)) => {
-                options.version = true;
-            }
-            (Self::Clippy(options), CargoOption::Clippy(ClippyOption::ExplainLint)) => {
-                options.explain = true;
-            }
-            (Self::Install(options), CargoOption::Install(InstallOption::ListPackages)) => {
-                options.list = true;
-            }
-            (Self::Nextest(options), CargoOption::Nextest(NextestOption::ShowVersion)) => {
-                options.version = true;
-            }
-            (Self::Nextest(options), CargoOption::Compilation(CompilationOption::UnitGraph)) => {
-                options.unit_graph = true;
-            }
-            (
-                Self::Nextest(options),
-                CargoOption::Compilation(CompilationOption::DiagnosticFormat),
-            ) => {
-                if let Some(value) = value {
-                    options.cargo_message_format = MessageFormat::read(value);
-                }
-            }
-            // Nextest's test-result format differs from Cargo's diagnostic format.
-            // https://nexte.st/docs/running/#controlling-nextests-output
-            (Self::Nextest(options), CargoOption::Nextest(NextestOption::OutputFormat)) => {
-                if let Some(value) = value {
-                    options.message_format = match value {
-                        "human" => NextestFormat::Human,
-                        "libtest-json" => NextestFormat::LibtestJson,
-                        "libtest-json-plus" => NextestFormat::LibtestJsonPlus,
-                        _ => NextestFormat::Unknown,
-                    };
-                }
-            }
-            _ => {}
+            return None;
         }
-    }
+    };
+    Some(TokenAction::Continue(spec))
 }
 
-impl TestHarnessOptions {
-    fn lookup(kind: TokenKind, name: &str) -> Option<OptionDefinition<CargoOption>> {
-        Some(match (kind, name) {
-            (TokenKind::Long, "help") | (TokenKind::Short, "h") => {
-                OptionDefinition::flag(Some(CargoOption::Harness(HarnessOption::Help)))
-            }
-            (TokenKind::Long, "list") => {
-                OptionDefinition::flag(Some(CargoOption::Harness(HarnessOption::ListTests)))
-            }
-            (TokenKind::Long, "quiet") | (TokenKind::Short, "q") => {
-                OptionDefinition::flag(Some(CargoOption::Harness(HarnessOption::TerseOutput)))
-            }
-            (TokenKind::Long, "format") => {
-                OptionDefinition::value(Some(CargoOption::Harness(HarnessOption::OutputFormat)))
-            }
-            (TokenKind::Long, "skip" | "test-threads" | "color" | "logfile")
-            | (TokenKind::Short, "Z") => OptionDefinition::value(None),
-            _ => return None,
-        })
-    }
+fn parse_fmt_parameter(
+    _kind: TokenKind,
+    _name: &str,
+    _options: &mut (),
+    _value: Option<&str>,
+) -> Option<TokenAction> {
+    None
+}
 
-    fn read(&mut self, option: HarnessOption, value: Option<&str>) {
-        match option {
-            HarnessOption::Help => self.help = true,
-            HarnessOption::ListTests => self.list = true,
-            HarnessOption::TerseOutput => self.format = TestFormat::Terse,
-            HarnessOption::OutputFormat => {
-                if let Some(value) = value {
-                    self.format = match value {
-                        "pretty" => TestFormat::Pretty,
-                        "terse" => TestFormat::Terse,
-                        "json" => TestFormat::Json,
-                        _ => TestFormat::Unknown,
-                    };
+fn parse_harness_parameter(
+    kind: TokenKind,
+    name: &str,
+    options: &mut TestHarnessOptions,
+    value: Option<&str>,
+) -> Option<TokenAction> {
+    let spec = match (kind, name) {
+        (TokenKind::Long, "help") | (TokenKind::Short, "h") => {
+            options.help = true;
+            None
+        }
+        (TokenKind::Long, "list") => {
+            options.list = true;
+            None
+        }
+        (TokenKind::Long, "quiet") | (TokenKind::Short, "q") => {
+            options.format = TestFormat::Terse;
+            None
+        }
+        (TokenKind::Long, "format") => {
+            if let Some(value) = value {
+                options.format = match value {
+                    "pretty" => TestFormat::Pretty,
+                    "terse" => TestFormat::Terse,
+                    "json" => TestFormat::Json,
+                    _ => TestFormat::Unknown,
+                };
+            }
+            Some(ValueSpec::value())
+        }
+        (TokenKind::Long, "skip" | "test-threads" | "color" | "logfile")
+        | (TokenKind::Short, "Z") => Some(ValueSpec::value()),
+        (TokenKind::DashDash, _) => return Some(TokenAction::StopAfter(None)),
+        _ => return None,
+    };
+    Some(TokenAction::Continue(spec))
+}
+
+fn parse_root_parameter(
+    kind: TokenKind,
+    name: &str,
+    destination: &mut Option<CargoInvocation>,
+    value: Option<&str>,
+) -> Option<TokenAction> {
+    let Some(invocation) = destination else {
+        return Some(TokenAction::StopAfter(None));
+    };
+    match kind {
+        TokenKind::Positional => {
+            // Keep combined root actions and explicit commands outside this partial model.
+            match (invocation.command, CargoCommand::named(name)) {
+                (CargoCommand::NoCommand(options), Some(command))
+                    if options == NoCommandOptions::default() =>
+                {
+                    invocation.command = command;
                 }
+                _ => *destination = None,
+            }
+            Some(TokenAction::StopAfter(None))
+        }
+        TokenKind::DashDash => {
+            *destination = None;
+            Some(TokenAction::StopAfter(None))
+        }
+        _ => {
+            let value = if kind == TokenKind::Short && name == "Z" {
+                let value = value.and_then(|value| value.split('=').next());
+                // Script mode has a script operand instead of our subcommand grammar.
+                // https://doc.rust-lang.org/cargo/reference/unstable.html#script
+                if value == Some("script") {
+                    *destination = None;
+                    return Some(TokenAction::StopAfter(Some(ValueSpec::value())));
+                }
+                value
+            } else {
+                value
+            };
+            let action =
+                parse_global_parameter(kind, name, &mut invocation.common, value).or_else(|| {
+                    match &mut invocation.command {
+                        CargoCommand::NoCommand(options) => {
+                            parse_no_command_parameter(kind, name, options, value)
+                        }
+                        _ => None,
+                    }
+                });
+            if action.is_none() {
+                *destination = None;
+                Some(TokenAction::StopAfter(None))
+            } else {
+                action
             }
         }
     }
@@ -488,169 +500,128 @@ impl TestHarnessOptions {
 
 /// Root grammar arities, also used by the generic runner for unrecognized Cargo invocations.
 pub(crate) fn option_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    NoCommandOptions::lookup(kind, name).and_then(|definition| definition.value)
-}
-
-struct CommonOptionsHandler {
-    invocation: Option<CargoInvocation>,
-}
-impl Default for CommonOptionsHandler {
-    fn default() -> Self {
-        Self {
-            invocation: Some(CargoInvocation {
-                command: CargoCommand::NoCommand(Default::default()),
-                common: CommonOptions::default(),
-            }),
-        }
-    }
-}
-impl<'a> TokenHandler<'a> for CommonOptionsHandler {
-    type Meaning = CargoOption;
-
-    fn lookup(&mut self, token: &Token<'a>) -> Option<OptionDefinition<CargoOption>> {
-        NoCommandOptions::lookup(token.kind, token.text)
-    }
-
-    fn visit(&mut self, event: TokenEvent<'a, CargoOption>) -> ControlFlow<()> {
-        let Some(invocation) = &mut self.invocation else {
-            return ControlFlow::Break(());
-        };
-        let value = event.value();
-        match event.token.kind {
-            // Rustup's selector is syntax, not a Cargo subcommand.
-            // https://rust-lang.github.io/rustup/overrides.html#toolchain-override-shorthand
-            TokenKind::Positional
-                if event.token.source_index == 0 && event.token.text.starts_with('+') => {}
-            TokenKind::Positional => {
-                // Keep combined root actions and explicit commands outside this partial model.
-                match (invocation.command, CargoCommand::named(event.token.text)) {
-                    (CargoCommand::NoCommand(options), Some(command))
-                        if options == NoCommandOptions::default() =>
-                    {
-                        invocation.command = command;
-                    }
-                    _ => self.invocation = None,
-                }
-                return ControlFlow::Break(());
-            }
-            _ => match event.definition {
-                None => {
-                    self.invocation = None;
-                    return ControlFlow::Break(());
-                }
-                Some(OptionDefinition {
-                    meaning: Some(CargoOption::Common(option)),
-                    ..
-                }) => {
-                    let value = if option == CommonOption::Unstable {
-                        value.and_then(|value| value.split('=').next())
-                    } else {
-                        value
-                    };
-                    // Script mode has a script operand instead of our subcommand grammar.
-                    // https://doc.rust-lang.org/cargo/reference/unstable.html#script
-                    if option == CommonOption::Unstable && value == Some("script") {
-                        self.invocation = None;
-                        return ControlFlow::Break(());
-                    }
-                    invocation.common.read(option, value);
-                }
-                Some(OptionDefinition {
-                    meaning: Some(CargoOption::Root(option)),
-                    ..
-                }) => {
-                    if let CargoCommand::NoCommand(options) = &mut invocation.command {
-                        options.read(option);
-                    }
-                }
-                _ => {}
-            },
-        }
-        ControlFlow::Continue(())
+    let action = parse_global_parameter(kind, name, &mut CommonOptions::default(), None)
+        .or_else(|| parse_no_command_parameter(kind, name, &mut NoCommandOptions::default(), None));
+    match action {
+        Some(TokenAction::Continue(spec) | TokenAction::StopAfter(spec)) => spec,
+        None => None,
     }
 }
 
-struct CommandOptionsHandler<'a>(&'a mut CargoInvocation);
-impl<'a> TokenHandler<'a> for CommandOptionsHandler<'_> {
-    type Meaning = CargoOption;
-
-    fn lookup(&mut self, token: &Token<'a>) -> Option<OptionDefinition<CargoOption>> {
-        self.0.command.lookup(token.kind, token.text)
-    }
-
-    fn visit(&mut self, event: TokenEvent<'a, CargoOption>) -> ControlFlow<()> {
-        if event.token.kind == TokenKind::DashDash {
-            return ControlFlow::Break(());
+/// Use the same callback twice: scratch destinations guide tokenization; the token loop
+/// supplies the real destinations and resolved values. Its tokenizer decisions are ignored.
+fn parse_parameters_until<T: AsRef<str>, O: Clone>(
+    tokenizer: &mut arg_tokenizer::Tokenizer<'_, T>,
+    options: &mut O,
+    mut common: Option<&mut CommonOptions>,
+    parse: fn(TokenKind, &str, &mut O, Option<&str>) -> Option<TokenAction>,
+) {
+    // Both passes start with the same state, including any nested-command context.
+    let mut scratch_options = options.clone();
+    let mut scratch_common = common.as_deref().copied();
+    let tokens = tokenizer.tokenize_until(&mut |token| {
+        scratch_common
+            .as_mut()
+            .and_then(|options| parse_global_parameter(token.kind, token.text, options, None))
+            .or_else(|| parse(token.kind, token.text, &mut scratch_options, None))
+            .unwrap_or(TokenAction::Continue(None))
+    });
+    for token in &tokens {
+        // Read separate values through their owning option, not as free positionals.
+        if token.kind == TokenKind::Positional && !token.is_free_positional() {
+            continue;
         }
-        if let CargoCommand::Nextest(options) = &mut self.0.command
-            && options.operation == NextestOperation::Unspecified
-        {
-            if event.token.is_free_positional() {
-                options.operation = match event.token.text {
-                    "run" => NextestOperation::Run,
-                    "list" => NextestOperation::List,
-                    _ => NextestOperation::Other,
-                };
-            } else if event.definition.is_none() {
-                // Unknown arity prevents reliable discovery of the nested operation.
-                options.operation = NextestOperation::Other;
-            }
-        }
-        if let Some(option) = event.definition.and_then(|definition| definition.meaning) {
-            match option {
-                CargoOption::Common(option) => self.0.common.read(option, event.value()),
-                option => self.0.command.read(option, event.value()),
-            }
-        }
-        ControlFlow::Continue(())
-    }
-}
-
-struct HarnessOptionsHandler<'a>(&'a mut TestHarnessOptions);
-impl<'a> TokenHandler<'a> for HarnessOptionsHandler<'_> {
-    type Meaning = CargoOption;
-
-    fn lookup(&mut self, token: &Token<'a>) -> Option<OptionDefinition<CargoOption>> {
-        TestHarnessOptions::lookup(token.kind, token.text)
-    }
-
-    fn visit(&mut self, event: TokenEvent<'a, CargoOption>) -> ControlFlow<()> {
-        if event.token.kind == TokenKind::DashDash {
-            return ControlFlow::Break(());
-        }
-        if let Some(CargoOption::Harness(option)) =
-            event.definition.and_then(|definition| definition.meaning)
-        {
-            self.0.read(option, event.value());
-        }
-        ControlFlow::Continue(())
+        let value = token.value(&tokens);
+        let _ = common
+            .as_deref_mut()
+            .and_then(|options| parse_global_parameter(token.kind, token.text, options, value))
+            .or_else(|| parse(token.kind, token.text, options, value));
     }
 }
 
 impl CargoInvocation {
-    /// Classify each option once and record semantic facts when its value is resolved.
+    /// Tokenize each region with its callback, then read its semantic facts from the tokens.
     /// Cargo remains responsible for validation and options outside this subset.
     pub fn parse<T: AsRef<OsStr>>(args: &[T]) -> Option<Self> {
         let words: Vec<_> = args
             .iter()
             .map(|arg| arg.as_ref().to_string_lossy())
             .collect();
-        let mut tokenizer = arg_tokenizer::Tokenizer::new(&words, Dialect::Clap);
-        let mut common = CommonOptionsHandler::default();
-        tokenizer.visit_until(&mut common);
-        let mut invocation = common.invocation?;
-        tokenizer.visit_until(&mut CommandOptionsHandler(&mut invocation));
-
+        // Rustup recognizes a +toolchain selector only as the first argument. It contributes
+        // no semantic fact here; keep it in the original argv forwarded by the runners.
+        // https://rust-lang.github.io/rustup/overrides.html#toolchain-override-shorthand
+        let words = if words.first().is_some_and(|word| word.starts_with('+')) {
+            &words[1..]
+        } else {
+            &words[..]
+        };
+        let mut tokenizer = arg_tokenizer::Tokenizer::new(words, Dialect::Clap);
+        let mut invocation = Some(Self {
+            command: CargoCommand::NoCommand(Default::default()),
+            common: CommonOptions::default(),
+        });
+        parse_parameters_until(&mut tokenizer, &mut invocation, None, parse_root_parameter);
+        let mut invocation = invocation?;
+        let common = &mut invocation.common;
+        match &mut invocation.command {
+            CargoCommand::NoCommand(_) => {}
+            CargoCommand::Build(options) => {
+                parse_parameters_until(
+                    &mut tokenizer,
+                    options,
+                    Some(common),
+                    parse_build_parameter,
+                );
+            }
+            CargoCommand::Check(options) => {
+                parse_parameters_until(
+                    &mut tokenizer,
+                    options,
+                    Some(common),
+                    parse_check_parameter,
+                );
+            }
+            CargoCommand::Clippy(options) => {
+                parse_parameters_until(
+                    &mut tokenizer,
+                    options,
+                    Some(common),
+                    parse_clippy_parameter,
+                );
+            }
+            CargoCommand::Test(options) => {
+                parse_parameters_until(&mut tokenizer, options, Some(common), parse_test_parameter);
+            }
+            CargoCommand::Install(options) => {
+                parse_parameters_until(
+                    &mut tokenizer,
+                    options,
+                    Some(common),
+                    parse_install_parameter,
+                );
+            }
+            CargoCommand::Nextest(options) => {
+                parse_parameters_until(
+                    &mut tokenizer,
+                    options,
+                    Some(common),
+                    parse_nextest_parameter,
+                );
+            }
+            CargoCommand::Fmt => {
+                parse_parameters_until(&mut tokenizer, &mut (), Some(common), parse_fmt_parameter);
+            }
+        }
         let harness = match &mut invocation.command {
             CargoCommand::Test(options) => Some(&mut options.harness),
             CargoCommand::Nextest(options) => Some(&mut options.harness),
             _ => None,
         };
         if let Some(harness) = harness {
-            // Cargo's `--` hands the suffix to a distinct parser with its own boundary.
+            // Cargo's -- hands the suffix to a distinct parser with its own boundary.
             // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
             tokenizer.begin_region(Dialect::Clap);
-            tokenizer.visit_until(&mut HarnessOptionsHandler(harness));
+            parse_parameters_until(&mut tokenizer, harness, None, parse_harness_parameter);
         }
         Some(invocation)
     }
@@ -2287,95 +2258,59 @@ mod tests {
     }
 
     #[test]
-    fn known_options_can_consume_values_without_a_semantic_tag() {
+    fn callbacks_keep_global_and_command_options_separate() {
+        let invocation = CargoInvocation::parse(&[
+            "--help",
+            "install",
+            "--version",
+            "1.2.3",
+            "--list",
+            "--message-format",
+            "json",
+        ])
+        .unwrap();
+        assert!(invocation.common().help);
         assert_eq!(
-            CommonOptions::lookup(TokenKind::Long, "locked"),
-            Some(OptionDefinition {
-                value: None,
-                meaning: None
+            *invocation.command(),
+            CargoCommand::Install(InstallOptions {
+                list: true,
+                compilation: CompilationOptions {
+                    message_format: MessageFormat::Json,
+                    unit_graph: false,
+                },
             })
         );
-        for definition in [
-            CommonOptions::lookup(TokenKind::Long, "color"),
-            NoCommandOptions::lookup(TokenKind::Short, "C"),
-            InstallOptions::lookup(TokenKind::Long, "version"),
-            NextestOptions::default().lookup(TokenKind::Long, "config-file"),
-            TestHarnessOptions::lookup(TokenKind::Long, "skip"),
-        ] {
-            assert_eq!(
-                definition,
-                Some(OptionDefinition {
-                    value: Some(ValueSpec::value()),
-                    meaning: None,
-                })
-            );
-        }
-        assert_eq!(CommonOptions::lookup(TokenKind::Long, "unrecognized"), None);
-
-        // A consumed value that looks like a command must not alter command discovery.
         let invocation = CargoInvocation::parse(&["--config", "install", "check"]).unwrap();
         assert!(matches!(invocation.command(), CargoCommand::Check(_)));
     }
 
     #[test]
-    fn option_meanings_distinguish_scopes_and_share_compilation_facts() {
-        let meaning = |definition: Option<OptionDefinition<CargoOption>>| {
-            definition.and_then(|definition| definition.meaning)
-        };
-        assert_eq!(
-            meaning(NoCommandOptions::lookup(TokenKind::Long, "version")),
-            Some(CargoOption::Root(RootOption::ShowVersion))
-        );
-        assert_eq!(
-            meaning(ClippyOptions::lookup(TokenKind::Long, "version")),
-            Some(CargoOption::Clippy(ClippyOption::ShowVersion))
-        );
-        assert_eq!(
-            meaning(InstallOptions::lookup(TokenKind::Long, "version")),
-            None
-        );
-        for (definition, expected) in [
-            (
-                NoCommandOptions::lookup(TokenKind::Long, "list"),
-                CargoOption::Root(RootOption::ListCommands),
-            ),
-            (
-                InstallOptions::lookup(TokenKind::Long, "list"),
-                CargoOption::Install(InstallOption::ListPackages),
-            ),
-            (
-                TestHarnessOptions::lookup(TokenKind::Long, "list"),
-                CargoOption::Harness(HarnessOption::ListTests),
-            ),
-        ] {
-            assert_eq!(meaning(definition), Some(expected));
-        }
-        assert_eq!(
-            CompilationOptions::lookup(TokenKind::Long, "message-format"),
-            NextestOptions::default().lookup(TokenKind::Long, "cargo-message-format")
-        );
-    }
-
-    #[test]
-    fn handlers_record_semantics_directly_in_their_own_region() {
-        let args = ["--help", "install", "--version", "1.2.3", "--list"];
+    fn scratch_and_real_callbacks_start_with_the_same_nested_context() {
+        let args = [
+            "--message-format",
+            "libtest-json",
+            "--cargo-message-format",
+            "json",
+        ];
         let mut tokenizer = arg_tokenizer::Tokenizer::new(&args, Dialect::Clap);
-        let mut common = CommonOptionsHandler::default();
-        tokenizer.visit_until(&mut common);
-        let mut invocation = common.invocation.expect("the visitor recognized install");
-        assert_eq!(
-            invocation.command,
-            CargoCommand::Install(InstallOptions::default())
+        let mut options = NextestOptions {
+            operation: NextestOperation::Run,
+            ..Default::default()
+        };
+        let mut common = CommonOptions {
+            help: true,
+            unstable_help: false,
+        };
+        parse_parameters_until(
+            &mut tokenizer,
+            &mut options,
+            Some(&mut common),
+            parse_nextest_parameter,
         );
-        assert!(invocation.common.help);
-        tokenizer.visit_until(&mut CommandOptionsHandler(&mut invocation));
-        assert_eq!(
-            invocation.command,
-            CargoCommand::Install(InstallOptions {
-                list: true,
-                ..Default::default()
-            })
-        );
+        assert_eq!(options.operation, NextestOperation::Run);
+        assert_eq!(options.message_format, NextestFormat::LibtestJson);
+        assert_eq!(options.cargo_message_format, MessageFormat::Json);
+        assert!(common.help);
     }
 
     #[test]
