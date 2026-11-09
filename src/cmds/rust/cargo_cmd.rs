@@ -177,7 +177,7 @@ pub struct NextestOptions {
     pub harness: TestHarnessOptions,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CargoInvocation {
     command: CargoCommand,
     common: CommonOptions,
@@ -420,86 +420,6 @@ impl<'a> ParameterParser<'a> for TestHarnessOptions {
     }
 }
 
-impl<'a> ParameterParser<'a> for Option<CargoInvocation> {
-    fn parse_parameter(
-        &mut self,
-        token: &Token<'a>,
-        value: Option<&'a str>,
-    ) -> Option<TokenAction> {
-        let Some(invocation) = self else {
-            return Some(TokenAction::StopAfter(None));
-        };
-        match token.kind {
-            TokenKind::Positional => {
-                // Keep combined root actions and explicit commands outside this partial model.
-                match (invocation.command, CargoCommand::named(token.text)) {
-                    (CargoCommand::NoCommand(options), Some(command))
-                        if options == NoCommandOptions::default() =>
-                    {
-                        invocation.command = command;
-                    }
-                    _ => *self = None,
-                }
-                Some(TokenAction::StopAfter(None))
-            }
-            TokenKind::DashDash => {
-                *self = None;
-                Some(TokenAction::StopAfter(None))
-            }
-            _ => {
-                let value = if token.kind == TokenKind::Short && token.text == "Z" {
-                    let value = value.and_then(|value| value.split('=').next());
-                    // Script mode has a script operand instead of our subcommand grammar.
-                    // https://doc.rust-lang.org/cargo/reference/unstable.html#script
-                    if value == Some("script") {
-                        *self = None;
-                        return Some(TokenAction::StopAfter(Some(ValueSpec::value())));
-                    }
-                    value
-                } else {
-                    value
-                };
-                let action =
-                    invocation.common.parse_parameter(token, value).or_else(
-                        || match &mut invocation.command {
-                            CargoCommand::NoCommand(options) => {
-                                options.parse_parameter(token, value)
-                            }
-                            _ => None,
-                        },
-                    );
-                if action.is_none() {
-                    *self = None;
-                    Some(TokenAction::StopAfter(None))
-                } else {
-                    action
-                }
-            }
-        }
-    }
-}
-
-/// Root grammar arities, also used by the generic runner for unrecognized Cargo invocations.
-pub(crate) fn option_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    // This compatibility predicate has only an option's kind and name, not its argv metadata.
-    let token = Token {
-        kind,
-        text: name,
-        attached: None,
-        linked: None,
-        source_index: 0,
-        double_dash: kind == TokenKind::Long,
-        slash: false,
-    };
-    let action = CommonOptions::default()
-        .parse_parameter(&token, None)
-        .or_else(|| NoCommandOptions::default().parse_parameter(&token, None));
-    match action {
-        Some(TokenAction::Continue(spec) | TokenAction::StopAfter(spec)) => spec,
-        None => None,
-    }
-}
-
 /// Route shared options before command-specific options, in both parsing passes.
 struct CargoParameters<'o, O> {
     common: Option<&'o mut CommonOptions>,
@@ -560,35 +480,74 @@ impl CargoInvocation {
             &words[..]
         };
         let mut tokenizer = arg_tokenizer::Tokenizer::new(words, Dialect::Clap);
-        let mut invocation = Some(Self {
-            command: CargoCommand::NoCommand(Default::default()),
-            common: CommonOptions::default(),
-        });
-        parse_parameters_until(&mut tokenizer, &mut invocation, None);
-        let mut invocation = invocation?;
-        let common = &mut invocation.common;
-        match &mut invocation.command {
+        let mut common = CommonOptions::default();
+        let mut no_command = NoCommandOptions::default();
+        let mut scratch_common = common;
+        let mut scratch_no_command = no_command;
+        // Prefix options own their values. The first free argument ends the prefix;
+        // an unknown option also stops discovery because its arity is unknown.
+        let prefix = tokenizer.tokenize_until(&mut arg_tokenizer::syntax_callback(|token| {
+            scratch_common
+                .parse_parameter(token, None)
+                .or_else(|| scratch_no_command.parse_parameter(token, None))
+                .unwrap_or(TokenAction::StopAfter(None))
+        }));
+        let mut command = None;
+        for token in &prefix {
+            if token.kind == TokenKind::Positional && !token.is_free_positional() {
+                continue;
+            }
+            if token.is_free_positional() {
+                // Combined root actions and explicit commands remain outside this partial model.
+                if no_command != NoCommandOptions::default() {
+                    return None;
+                }
+                command = Some(CargoCommand::named(token.text)?);
+                break;
+            }
+            if token.kind == TokenKind::DashDash {
+                return None;
+            }
+            let value = if token.kind == TokenKind::Short && token.text == "Z" {
+                let value = token
+                    .value(&prefix)
+                    .and_then(|value| value.split('=').next());
+                // Script mode uses a script operand rather than our command grammar.
+                // https://doc.rust-lang.org/cargo/reference/unstable.html#script
+                if value == Some("script") {
+                    return None;
+                }
+                value
+            } else {
+                token.value(&prefix)
+            };
+            let _ = common
+                .parse_parameter(token, value)
+                .or_else(|| no_command.parse_parameter(token, value))?;
+        }
+        let mut command = command.unwrap_or(CargoCommand::NoCommand(no_command));
+        match &mut command {
             CargoCommand::NoCommand(_) => {}
             CargoCommand::Build(options) | CargoCommand::Check(options) => {
-                parse_parameters_until(&mut tokenizer, options, Some(common));
+                parse_parameters_until(&mut tokenizer, options, Some(&mut common));
             }
             CargoCommand::Clippy(options) => {
-                parse_parameters_until(&mut tokenizer, options, Some(common));
+                parse_parameters_until(&mut tokenizer, options, Some(&mut common));
             }
             CargoCommand::Test(options) => {
-                parse_parameters_until(&mut tokenizer, options, Some(common));
+                parse_parameters_until(&mut tokenizer, options, Some(&mut common));
             }
             CargoCommand::Install(options) => {
-                parse_parameters_until(&mut tokenizer, options, Some(common));
+                parse_parameters_until(&mut tokenizer, options, Some(&mut common));
             }
             CargoCommand::Nextest(options) => {
-                parse_parameters_until(&mut tokenizer, options, Some(common));
+                parse_parameters_until(&mut tokenizer, options, Some(&mut common));
             }
             CargoCommand::Fmt => {
-                parse_parameters_until(&mut tokenizer, &mut (), Some(common));
+                parse_parameters_until(&mut tokenizer, &mut (), Some(&mut common));
             }
         }
-        let harness = match &mut invocation.command {
+        let harness = match &mut command {
             CargoCommand::Test(options) => Some(&mut options.harness),
             CargoCommand::Nextest(options) => Some(&mut options.harness),
             _ => None,
@@ -599,7 +558,7 @@ impl CargoInvocation {
             tokenizer.begin_region(Dialect::Clap);
             parse_parameters_until(&mut tokenizer, harness, None);
         }
-        Some(invocation)
+        Some(Self { command, common })
     }
     pub fn command(&self) -> &CargoCommand {
         &self.command
@@ -2261,6 +2220,35 @@ mod tests {
     }
 
     #[test]
+    fn common_options_after_operands_belong_to_the_selected_command() {
+        let invocation = CargoInvocation::parse(&[
+            "+stable",
+            "--config",
+            "check",
+            "install",
+            "demo",
+            "--config",
+            "test",
+            "--help",
+            "--list",
+            "--message-format",
+            "json",
+        ])
+        .unwrap();
+        assert!(invocation.common().help);
+        assert_eq!(
+            *invocation.command(),
+            CargoCommand::Install(InstallOptions {
+                compilation: CompilationOptions {
+                    message_format: MessageFormat::Json,
+                    unit_graph: false,
+                },
+                list: true,
+            })
+        );
+    }
+
+    #[test]
     fn scratch_and_real_parsers_start_with_the_same_nested_context() {
         let args = [
             "--message-format",
@@ -2439,7 +2427,13 @@ mod tests {
             "-Z",
         ] {
             let args = [option, "--", "check"];
-            let tokens = arg_tokenizer::tokenize_grammar(&args, &option_value, Dialect::Clap);
+            let mut tokenizer = arg_tokenizer::Tokenizer::new(&args, Dialect::Clap);
+            let mut common = CommonOptions::default();
+            let mut no_command = NoCommandOptions::default();
+            let tokens = tokenizer.tokenize_until(&mut CargoParameters {
+                common: Some(&mut common),
+                options: &mut no_command,
+            });
             assert_eq!(tokens[0].value(&tokens), None, "{option}");
             assert_eq!(tokens[1].kind, TokenKind::DashDash, "{option}");
         }

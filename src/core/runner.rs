@@ -1,6 +1,8 @@
 //! Shared command execution skeleton for filter modules.
 
-use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
+use crate::core::arg_tokenizer::{
+    self, Dialect, ParameterParser, TokenAction, TokenKind, ValueSpec,
+};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::borrow::Cow;
@@ -474,7 +476,9 @@ fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
 }
 
 fn asks_for_usage(stem: &str, args: &[String]) -> bool {
-    use crate::cmds::rust::cargo_cmd::{self, CargoCommand, CargoInvocation};
+    use crate::cmds::rust::cargo_cmd::{
+        CargoCommand, CargoInvocation, CommonOptions, NoCommandOptions,
+    };
 
     // Standalone callers use Cargo's prepared metadata too. The Cargo execution
     // path handles help before entering this runner, so it does not parse twice.
@@ -493,26 +497,31 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
     }
     let first = args.first().map(String::as_str);
     let spelling = help_spelling(stem, first);
-    let takes_value = |kind: TokenKind, name: &str| {
-        // Supported commands use their prepared semantics above. For unknown
-        // invocations we only know Cargo's root option arities, not a command schema.
+    let mut cargo_common = CommonOptions::default();
+    let mut cargo_root = NoCommandOptions::default();
+    let mut parser = arg_tokenizer::syntax_callback(|token| {
+        // Unsupported Cargo invocations use the same parameter parsers, without assuming
+        // a command-specific grammar. Their scratch destinations only supply syntax rules.
         if stem == "cargo" {
-            return cargo_cmd::option_value(kind, name);
+            return cargo_common
+                .parse_parameter(token, None)
+                .or_else(|| cargo_root.parse_parameter(token, None))
+                .unwrap_or(TokenAction::Continue(None));
         }
         let git_message = stem == "git"
-            && match kind {
-                TokenKind::Short => matches!(name, "m" | "F"),
-                TokenKind::Long => matches!(name, "message" | "file"),
+            && match token.kind {
+                TokenKind::Short => matches!(token.text, "m" | "F"),
+                TokenKind::Long => matches!(token.text, "message" | "file"),
                 _ => false,
             };
-        git_message.then(ValueSpec::value)
-    };
-    let tokens = arg_tokenizer::tokenize_grammar(args, &takes_value, spelling.dialect);
+        TokenAction::Continue(git_message.then(ValueSpec::value))
+    });
+    let tokens = arg_tokenizer::Tokenizer::new(args, spelling.dialect).tokenize_until(&mut parser);
     if names_usage(
         arg_tokenizer::before_dashdash(&tokens),
         args,
         &spelling,
-        &takes_value,
+        &mut parser,
     ) {
         return true;
     }
@@ -527,8 +536,9 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
         return false;
     };
     let forwarded = &args[boundary + 1..];
-    let no_values = |_: TokenKind, _: &str| None::<ValueSpec>;
-    let inner = arg_tokenizer::tokenize_grammar(forwarded, &no_values, Dialect::Posix);
+    let mut no_values = ();
+    let inner =
+        arg_tokenizer::Tokenizer::new(forwarded, Dialect::Posix).tokenize_until(&mut no_values);
     names_usage(
         arg_tokenizer::before_dashdash(&inner),
         forwarded,
@@ -538,15 +548,15 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
             past_boundary: false,
             whole_arg: &[],
         },
-        &no_values,
+        &mut no_values,
     )
 }
 
-fn names_usage(
-    tokens: &[arg_tokenizer::Token<'_>],
+fn names_usage<'a, P: ParameterParser<'a> + ?Sized>(
+    tokens: &[arg_tokenizer::Token<'a>],
     args: &[String],
     spelling: &HelpSpelling,
-    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+    parser: &mut P,
 ) -> bool {
     tokens.iter().any(|t| {
         let arg = args.get(t.source_index).map(String::as_str);
@@ -558,7 +568,11 @@ fn names_usage(
                 (matches!(t.text, "help" | "version" | "?") || (spelling.short_h && t.text == "h"))
                     && t.linked.is_none()
                     // `--version=1.2.3` on a flag that carries a value names a version too.
-                    && (t.attached.is_none() || takes_value(t.kind, t.text).is_none())
+                    && (t.attached.is_none()
+                        || !matches!(
+                            parser.parse_parameter(t, None),
+                            Some(TokenAction::Continue(Some(_)) | TokenAction::StopAfter(Some(_)))
+                        ))
             }
             TokenKind::Short => spelling.short_h && t.text == "h" && arg == Some("-h"),
             _ => false,
@@ -1866,6 +1880,24 @@ mod requests_help_tests {
             "cargo",
             &["+stable", "install", "ripgrep", "--version", "1.2.3"]
         ));
+    }
+
+    #[test]
+    fn cargo_fallback_uses_parameter_rules_for_unsupported_commands() {
+        for (args, expected) in [
+            (vec!["metadata", "--help"], true),
+            (
+                vec!["+stable", "--config", "check", "metadata", "--help"],
+                true,
+            ),
+            (vec!["metadata", "--config=--help"], false),
+            (vec!["metadata", "--", "--help"], false),
+            (vec!["bench", "--", "--help"], true),
+            (vec!["metadata", "-vh"], false),
+            (vec!["metadata", "--h"], true),
+        ] {
+            assert_eq!(asks("cargo", &args), expected, "{args:?}");
+        }
     }
 
     #[test]
