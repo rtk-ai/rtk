@@ -18,13 +18,13 @@ use std::sync::LazyLock;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CargoCommand {
     NoCommand(NoCommandOptions),
-    Build(CompilationOptions),
-    Check(CompilationOptions),
+    Build(BuildOptions),
+    Check(CheckOptions),
     Clippy(ClippyOptions),
     Test(TestOptions),
     Install(InstallOptions),
     Nextest(NextestOptions),
-    Fmt,
+    Fmt(FmtOptions),
 }
 
 impl CargoCommand {
@@ -42,7 +42,7 @@ impl CargoCommand {
                 Self::Test(Default::default()),
                 Self::Install(Default::default()),
                 Self::Nextest(Default::default()),
-                Self::Fmt,
+                Self::Fmt(Default::default()),
             ]
             .into_iter()
             .find(|command| command.as_str() == Some(name)),
@@ -59,12 +59,27 @@ impl CargoCommand {
             Self::Test(_) => Some("test"),
             Self::Install(_) => Some("install"),
             Self::Nextest(_) => Some("nextest"),
-            Self::Fmt => Some("fmt"),
+            Self::Fmt(_) => Some("fmt"),
+        }
+    }
+
+    fn common(&self) -> &CommonOptions {
+        match self {
+            Self::NoCommand(options) => &options.common,
+            Self::Build(options) => &options.common,
+            Self::Check(options) => &options.common,
+            Self::Clippy(options) => &options.common,
+            Self::Test(options) => &options.common,
+            Self::Install(options) => &options.common,
+            Self::Nextest(options) => &options.common,
+            Self::Fmt(options) => &options.common,
         }
     }
 }
 
 /// Shared request facts, recorded without validating each command's support for them.
+/// Each command parser decides when to delegate here; root-only actions such as
+/// --version stay in NoCommandOptions, and local meanings take precedence.
 /// Ordinary globals such as --config/--color/--locked are intentionally not stored:
 /// their arities guide discovery and their original
 /// OS arguments are forwarded unchanged. Add semantic fields only when a consumer needs them.
@@ -78,6 +93,7 @@ pub struct CommonOptions {
 /// https://doc.rust-lang.org/cargo/commands/cargo.html#special-options
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct NoCommandOptions {
+    pub common: CommonOptions,
     pub version: bool,
     pub list: bool,
     pub explain: bool,
@@ -122,18 +138,31 @@ pub struct CompilationOptions {
     pub unit_graph: bool,
 }
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BuildOptions {
+    pub common: CommonOptions,
+    pub compilation: CompilationOptions,
+}
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CheckOptions {
+    pub common: CommonOptions,
+    pub compilation: CompilationOptions,
+}
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ClippyOptions {
+    pub common: CommonOptions,
     pub compilation: CompilationOptions,
     pub version: bool,
     pub explain: bool,
 }
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TestOptions {
+    pub common: CommonOptions,
     pub unit_graph: bool,
     pub harness: TestHarnessOptions,
 }
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct InstallOptions {
+    pub common: CommonOptions,
     pub compilation: CompilationOptions,
     pub list: bool,
 }
@@ -169,6 +198,7 @@ pub enum NextestFormat {
 }
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct NextestOptions {
+    pub common: CommonOptions,
     pub operation: NextestOperation,
     pub message_format: NextestFormat,
     pub cargo_message_format: MessageFormat,
@@ -177,10 +207,14 @@ pub struct NextestOptions {
     pub harness: TestHarnessOptions,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FmtOptions {
+    pub common: CommonOptions,
+}
+
 #[derive(Debug)]
 pub struct CargoInvocation {
     command: CargoCommand,
-    common: CommonOptions,
 }
 
 impl<'a> ParameterParser<'a> for CommonOptions {
@@ -214,12 +248,15 @@ impl<'a> ParameterParser<'a> for NoCommandOptions {
     fn parse_parameter(
         &mut self,
         token: &Token<'a>,
-        _value: Option<&'a str>,
+        value: Option<&'a str>,
     ) -> Option<TokenAction> {
         let spec = match (token.kind, token.text) {
             // -C is only accepted before the command name.
             // https://doc.rust-lang.org/cargo/commands/cargo.html#option-cargo--C
             (TokenKind::Short, "C") => Some(ValueSpec::value()),
+            // Cargo's root version flag is not global. Command parsers define their
+            // own --version, if any; install's spelling takes a crate version instead.
+            // https://doc.rust-lang.org/cargo/commands/cargo.html#special-options
             (TokenKind::Long, "version") | (TokenKind::Short, "V") => {
                 self.version = true;
                 None
@@ -232,9 +269,33 @@ impl<'a> ParameterParser<'a> for NoCommandOptions {
                 self.explain = true;
                 Some(ValueSpec::value())
             }
-            _ => return None,
+            _ => return self.common.parse_parameter(token, value),
         };
         Some(TokenAction::Continue(spec))
+    }
+}
+
+impl<'a> ParameterParser<'a> for BuildOptions {
+    fn parse_parameter(
+        &mut self,
+        token: &Token<'a>,
+        value: Option<&'a str>,
+    ) -> Option<TokenAction> {
+        self.compilation
+            .parse_parameter(token, value)
+            .or_else(|| self.common.parse_parameter(token, value))
+    }
+}
+
+impl<'a> ParameterParser<'a> for CheckOptions {
+    fn parse_parameter(
+        &mut self,
+        token: &Token<'a>,
+        value: Option<&'a str>,
+    ) -> Option<TokenAction> {
+        self.compilation
+            .parse_parameter(token, value)
+            .or_else(|| self.common.parse_parameter(token, value))
     }
 }
 
@@ -276,7 +337,12 @@ impl<'a> ParameterParser<'a> for ClippyOptions {
                 self.explain = true;
                 Some(ValueSpec::value())
             }
-            _ => return self.compilation.parse_parameter(token, value),
+            _ => {
+                return self
+                    .compilation
+                    .parse_parameter(token, value)
+                    .or_else(|| self.common.parse_parameter(token, value));
+            }
         };
         Some(TokenAction::Continue(spec))
     }
@@ -286,14 +352,14 @@ impl<'a> ParameterParser<'a> for TestOptions {
     fn parse_parameter(
         &mut self,
         token: &Token<'a>,
-        _value: Option<&'a str>,
+        value: Option<&'a str>,
     ) -> Option<TokenAction> {
         match (token.kind, token.text) {
             (TokenKind::Long, "unit-graph") => {
                 self.unit_graph = true;
                 Some(TokenAction::Continue(None))
             }
-            _ => None,
+            _ => self.common.parse_parameter(token, value),
         }
     }
 }
@@ -312,7 +378,12 @@ impl<'a> ParameterParser<'a> for InstallOptions {
                 self.list = true;
                 None
             }
-            _ => return self.compilation.parse_parameter(token, value),
+            _ => {
+                return self
+                    .compilation
+                    .parse_parameter(token, value)
+                    .or_else(|| self.common.parse_parameter(token, value));
+            }
         };
         Some(TokenAction::Continue(spec))
     }
@@ -368,6 +439,9 @@ impl<'a> ParameterParser<'a> for NextestOptions {
                 "config-file" | "user-config-file" | "tool-config-file" | "manifest-path",
             ) => Some(ValueSpec::value()),
             _ => {
+                if let Some(action) = self.common.parse_parameter(token, value) {
+                    return Some(action);
+                }
                 if self.operation == NextestOperation::Unspecified
                     && matches!(token.kind, TokenKind::Long | TokenKind::Short)
                 {
@@ -420,22 +494,13 @@ impl<'a> ParameterParser<'a> for TestHarnessOptions {
     }
 }
 
-/// Route shared options before command-specific options, in both parsing passes.
-struct CargoParameters<'o, O> {
-    common: Option<&'o mut CommonOptions>,
-    options: &'o mut O,
-}
-
-impl<'a, O: ParameterParser<'a>> ParameterParser<'a> for CargoParameters<'_, O> {
+impl<'a> ParameterParser<'a> for FmtOptions {
     fn parse_parameter(
         &mut self,
         token: &Token<'a>,
         value: Option<&'a str>,
     ) -> Option<TokenAction> {
-        self.common
-            .as_deref_mut()
-            .and_then(|options| options.parse_parameter(token, value))
-            .or_else(|| self.options.parse_parameter(token, value))
+        self.common.parse_parameter(token, value)
     }
 }
 
@@ -444,22 +509,16 @@ impl<'a, O: ParameterParser<'a>> ParameterParser<'a> for CargoParameters<'_, O> 
 fn parse_parameters_until<'a, T: AsRef<str>, O: ParameterParser<'a> + Clone>(
     tokenizer: &mut arg_tokenizer::Tokenizer<'a, T>,
     options: &mut O,
-    common: Option<&mut CommonOptions>,
 ) {
     // Both passes start with the same state, including any nested-command context.
     let mut scratch_options = options.clone();
-    let mut scratch_common = common.as_deref().copied();
-    let tokens = tokenizer.tokenize_until(&mut CargoParameters {
-        common: scratch_common.as_mut(),
-        options: &mut scratch_options,
-    });
-    let mut destination = CargoParameters { common, options };
+    let tokens = tokenizer.tokenize_until(&mut scratch_options);
     for token in &tokens {
         // Read separate values through their owning option, not as free positionals.
         if token.kind == TokenKind::Positional && !token.is_free_positional() {
             continue;
         }
-        let _ = destination.parse_parameter(token, token.value(&tokens));
+        let _ = options.parse_parameter(token, token.value(&tokens));
     }
 }
 
@@ -480,16 +539,13 @@ impl CargoInvocation {
             &words[..]
         };
         let mut tokenizer = arg_tokenizer::Tokenizer::new(words, Dialect::Clap);
-        let mut common = CommonOptions::default();
         let mut no_command = NoCommandOptions::default();
-        let mut scratch_common = common;
         let mut scratch_no_command = no_command;
         // Prefix options own their values. The first free argument ends the prefix;
         // an unknown option also stops discovery because its arity is unknown.
         let prefix = tokenizer.tokenize_until(&mut arg_tokenizer::syntax_callback(|token| {
-            scratch_common
+            scratch_no_command
                 .parse_parameter(token, None)
-                .or_else(|| scratch_no_command.parse_parameter(token, None))
                 .unwrap_or(TokenAction::StopAfter(None))
         }));
         let mut command = None;
@@ -499,7 +555,7 @@ impl CargoInvocation {
             }
             if token.is_free_positional() {
                 // Combined root actions and explicit commands remain outside this partial model.
-                if no_command != NoCommandOptions::default() {
+                if no_command.version || no_command.list || no_command.explain {
                     return None;
                 }
                 command = Some(CargoCommand::named(token.text)?);
@@ -521,30 +577,38 @@ impl CargoInvocation {
             } else {
                 token.value(&prefix)
             };
-            let _ = common
-                .parse_parameter(token, value)
-                .or_else(|| no_command.parse_parameter(token, value))?;
+            let _ = no_command.parse_parameter(token, value)?;
         }
         let mut command = command.unwrap_or(CargoCommand::NoCommand(no_command));
         match &mut command {
             CargoCommand::NoCommand(_) => {}
-            CargoCommand::Build(options) | CargoCommand::Check(options) => {
-                parse_parameters_until(&mut tokenizer, options, Some(&mut common));
+            CargoCommand::Build(options) => {
+                options.common = no_command.common;
+                parse_parameters_until(&mut tokenizer, options);
+            }
+            CargoCommand::Check(options) => {
+                options.common = no_command.common;
+                parse_parameters_until(&mut tokenizer, options);
             }
             CargoCommand::Clippy(options) => {
-                parse_parameters_until(&mut tokenizer, options, Some(&mut common));
+                options.common = no_command.common;
+                parse_parameters_until(&mut tokenizer, options);
             }
             CargoCommand::Test(options) => {
-                parse_parameters_until(&mut tokenizer, options, Some(&mut common));
+                options.common = no_command.common;
+                parse_parameters_until(&mut tokenizer, options);
             }
             CargoCommand::Install(options) => {
-                parse_parameters_until(&mut tokenizer, options, Some(&mut common));
+                options.common = no_command.common;
+                parse_parameters_until(&mut tokenizer, options);
             }
             CargoCommand::Nextest(options) => {
-                parse_parameters_until(&mut tokenizer, options, Some(&mut common));
+                options.common = no_command.common;
+                parse_parameters_until(&mut tokenizer, options);
             }
-            CargoCommand::Fmt => {
-                parse_parameters_until(&mut tokenizer, &mut (), Some(&mut common));
+            CargoCommand::Fmt(options) => {
+                options.common = no_command.common;
+                parse_parameters_until(&mut tokenizer, options);
             }
         }
         let harness = match &mut command {
@@ -556,15 +620,15 @@ impl CargoInvocation {
             // Cargo's -- hands the suffix to a distinct parser with its own boundary.
             // https://doc.rust-lang.org/cargo/commands/cargo-test.html#description
             tokenizer.begin_region(Dialect::Clap);
-            parse_parameters_until(&mut tokenizer, harness, None);
+            parse_parameters_until(&mut tokenizer, harness);
         }
-        Some(Self { command, common })
+        Some(Self { command })
     }
     pub fn command(&self) -> &CargoCommand {
         &self.command
     }
     pub fn common(&self) -> &CommonOptions {
-        &self.common
+        self.command.common()
     }
 }
 
@@ -586,7 +650,7 @@ pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
         CargoCommand::Test(options) => run_test(args, options, verbose),
         CargoCommand::Install(options) => run_install(args, options, verbose),
         CargoCommand::Nextest(options) => run_nextest(args, options, verbose),
-        CargoCommand::NoCommand(_) | CargoCommand::Fmt => {
+        CargoCommand::NoCommand(_) | CargoCommand::Fmt(_) => {
             runner::run_passthrough("cargo", args, verbose)
         }
     }
@@ -819,8 +883,10 @@ impl BlockHandler for CargoTestHandler {
     }
 }
 
-fn run_build(args: &[OsString], options: &CompilationOptions, verbose: u8) -> Result<i32> {
-    if options.unit_graph || options.message_format == MessageFormat::Unknown {
+fn run_build(args: &[OsString], options: &BuildOptions, verbose: u8) -> Result<i32> {
+    if options.compilation.unit_graph
+        || options.compilation.message_format == MessageFormat::Unknown
+    {
         return runner::run_passthrough("cargo", args, verbose);
     }
     let mut cmd = resolved_command("cargo");
@@ -829,7 +895,7 @@ fn run_build(args: &[OsString], options: &CompilationOptions, verbose: u8) -> Re
     if verbose > 0 {
         eprintln!("Running: cargo {}", args_display);
     }
-    if options.message_format == MessageFormat::Json {
+    if options.compilation.message_format == MessageFormat::Json {
         return runner::run_filtered_with_exit(
             cmd,
             "cargo",
@@ -911,8 +977,10 @@ fn run_clippy(args: &[OsString], options: &ClippyOptions, verbose: u8) -> Result
     )
 }
 
-fn run_check(args: &[OsString], options: &CompilationOptions, verbose: u8) -> Result<i32> {
-    if options.unit_graph || options.message_format == MessageFormat::Unknown {
+fn run_check(args: &[OsString], options: &CheckOptions, verbose: u8) -> Result<i32> {
+    if options.compilation.unit_graph
+        || options.compilation.message_format == MessageFormat::Unknown
+    {
         return runner::run_passthrough("cargo", args, verbose);
     }
     let mut cmd = resolved_command("cargo");
@@ -921,7 +989,7 @@ fn run_check(args: &[OsString], options: &CompilationOptions, verbose: u8) -> Re
     if verbose > 0 {
         eprintln!("Running: cargo {}", args_display);
     }
-    if options.message_format == MessageFormat::Json {
+    if options.compilation.message_format == MessageFormat::Json {
         return runner::run_filtered_with_exit(
             cmd,
             "cargo",
@@ -2071,7 +2139,8 @@ mod tests {
 
     fn diagnostic_format(command: &CargoCommand) -> MessageFormat {
         match command {
-            CargoCommand::Build(o) | CargoCommand::Check(o) => o.message_format,
+            CargoCommand::Build(o) => o.compilation.message_format,
+            CargoCommand::Check(o) => o.compilation.message_format,
             CargoCommand::Clippy(o) => o.compilation.message_format,
             CargoCommand::Install(o) => o.compilation.message_format,
             _ => MessageFormat::Human,
@@ -2146,7 +2215,25 @@ mod tests {
     }
 
     #[test]
-    fn common_requests_are_separate_from_command_specific_options() {
+    fn common_requests_are_embedded_in_command_options() {
+        for command in [
+            "build", "check", "clippy", "test", "install", "nextest", "fmt",
+        ] {
+            for args in [
+                vec!["-Zhelp", command, "--help"],
+                vec!["--help", command, "-Zhelp"],
+            ] {
+                let invocation = CargoInvocation::parse(&args).unwrap();
+                assert_eq!(
+                    *invocation.command().common(),
+                    CommonOptions {
+                        help: true,
+                        unstable_help: true
+                    },
+                    "{args:?}"
+                );
+            }
+        }
         for args in [
             vec!["-Zhelp"],
             vec!["-Zhelp", "check"],
@@ -2176,9 +2263,15 @@ mod tests {
         );
         assert_eq!(
             *invocation.command(),
-            CargoCommand::Check(CompilationOptions {
-                message_format: MessageFormat::Json,
-                unit_graph: false,
+            CargoCommand::Check(CheckOptions {
+                common: CommonOptions {
+                    help: true,
+                    unstable_help: true,
+                },
+                compilation: CompilationOptions {
+                    message_format: MessageFormat::Json,
+                    unit_graph: false,
+                },
             })
         );
         let invocation = CargoInvocation::parse(&["-Zhelp", "--list"]).unwrap();
@@ -2186,6 +2279,10 @@ mod tests {
         assert_eq!(
             *invocation.command(),
             CargoCommand::NoCommand(NoCommandOptions {
+                common: CommonOptions {
+                    unstable_help: true,
+                    ..Default::default()
+                },
                 list: true,
                 ..Default::default()
             })
@@ -2208,6 +2305,10 @@ mod tests {
         assert_eq!(
             *invocation.command(),
             CargoCommand::Install(InstallOptions {
+                common: CommonOptions {
+                    help: true,
+                    ..Default::default()
+                },
                 list: true,
                 compilation: CompilationOptions {
                     message_format: MessageFormat::Json,
@@ -2239,6 +2340,10 @@ mod tests {
         assert_eq!(
             *invocation.command(),
             CargoCommand::Install(InstallOptions {
+                common: CommonOptions {
+                    help: true,
+                    ..Default::default()
+                },
                 compilation: CompilationOptions {
                     message_format: MessageFormat::Json,
                     unit_graph: false,
@@ -2258,18 +2363,18 @@ mod tests {
         ];
         let mut tokenizer = arg_tokenizer::Tokenizer::new(&args, Dialect::Clap);
         let mut options = NextestOptions {
+            common: CommonOptions {
+                help: true,
+                unstable_help: false,
+            },
             operation: NextestOperation::Run,
             ..Default::default()
         };
-        let mut common = CommonOptions {
-            help: true,
-            unstable_help: false,
-        };
-        parse_parameters_until(&mut tokenizer, &mut options, Some(&mut common));
+        parse_parameters_until(&mut tokenizer, &mut options);
         assert_eq!(options.operation, NextestOperation::Run);
         assert_eq!(options.message_format, NextestFormat::LibtestJson);
         assert_eq!(options.cargo_message_format, MessageFormat::Json);
-        assert!(common.help);
+        assert!(options.common.help);
     }
 
     #[test]
@@ -2321,8 +2426,8 @@ mod tests {
         let CargoCommand::Check(options) = invocation.command() else {
             panic!("expected check")
         };
-        assert_eq!(options.message_format, MessageFormat::Short);
-        assert!(options.unit_graph);
+        assert_eq!(options.compilation.message_format, MessageFormat::Short);
+        assert!(options.compilation.unit_graph);
         assert!(!usage_request(&invocation));
     }
 
@@ -2361,6 +2466,31 @@ mod tests {
             };
             assert_eq!(options.operation, operation);
         }
+    }
+
+    #[test]
+    fn nextest_parser_recognizes_shared_options_before_its_operation() {
+        let invocation = CargoInvocation::parse(&[
+            "--config",
+            "check",
+            "nextest",
+            "--config",
+            "list",
+            "--color",
+            "never",
+            "-v",
+            "run",
+            "--message-format",
+            "libtest-json",
+            "--help",
+        ])
+        .unwrap();
+        let CargoCommand::Nextest(options) = invocation.command() else {
+            panic!("expected nextest")
+        };
+        assert_eq!(options.operation, NextestOperation::Run);
+        assert_eq!(options.message_format, NextestFormat::LibtestJson);
+        assert!(options.common.help);
     }
 
     #[test]
@@ -2428,12 +2558,8 @@ mod tests {
         ] {
             let args = [option, "--", "check"];
             let mut tokenizer = arg_tokenizer::Tokenizer::new(&args, Dialect::Clap);
-            let mut common = CommonOptions::default();
             let mut no_command = NoCommandOptions::default();
-            let tokens = tokenizer.tokenize_until(&mut CargoParameters {
-                common: Some(&mut common),
-                options: &mut no_command,
-            });
+            let tokens = tokenizer.tokenize_until(&mut no_command);
             assert_eq!(tokens[0].value(&tokens), None, "{option}");
             assert_eq!(tokens[1].kind, TokenKind::DashDash, "{option}");
         }
@@ -2577,9 +2703,12 @@ mod tests {
         let invocation = CargoInvocation::parse(&args).unwrap();
         assert_eq!(
             *invocation.command(),
-            CargoCommand::Check(CompilationOptions {
-                message_format: MessageFormat::Json,
-                unit_graph: false,
+            CargoCommand::Check(CheckOptions {
+                compilation: CompilationOptions {
+                    message_format: MessageFormat::Json,
+                    unit_graph: false,
+                },
+                ..Default::default()
             })
         );
     }
@@ -2593,19 +2722,19 @@ mod tests {
             ),
             (
                 vec!["+nightly", "-vvZunstable-options", "-Cvery/quiet", "b"],
-                CargoCommand::Build(CompilationOptions::default()),
+                CargoCommand::Build(BuildOptions::default()),
             ),
             (
                 vec!["+nightly", "-vC", "some path", "-Z=unstable-options", "c"],
-                CargoCommand::Check(CompilationOptions::default()),
+                CargoCommand::Check(CheckOptions::default()),
             ),
             (
                 vec!["+nightly", "-vZ", "unstable-options", "check"],
-                CargoCommand::Check(CompilationOptions::default()),
+                CargoCommand::Check(CheckOptions::default()),
             ),
             (
                 vec!["+nightly", "-Z", "unstable-options", "-C", "some path", "c"],
-                CargoCommand::Check(CompilationOptions::default()),
+                CargoCommand::Check(CheckOptions::default()),
             ),
             (
                 vec![
@@ -2619,7 +2748,7 @@ mod tests {
                     "-vv",
                     "b",
                 ],
-                CargoCommand::Build(CompilationOptions::default()),
+                CargoCommand::Build(BuildOptions::default()),
             ),
             (
                 vec!["-Zunstable-options", "-Csome path", "-q", "clippy"],

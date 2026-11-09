@@ -476,9 +476,7 @@ fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
 }
 
 fn asks_for_usage(stem: &str, args: &[String]) -> bool {
-    use crate::cmds::rust::cargo_cmd::{
-        CargoCommand, CargoInvocation, CommonOptions, NoCommandOptions,
-    };
+    use crate::cmds::rust::cargo_cmd::{CargoCommand, CargoInvocation, NoCommandOptions};
 
     // Standalone callers use Cargo's prepared metadata too. The Cargo execution
     // path handles help before entering this runner, so it does not parse twice.
@@ -497,15 +495,13 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
     }
     let first = args.first().map(String::as_str);
     let spelling = help_spelling(stem, first);
-    let mut cargo_common = CommonOptions::default();
     let mut cargo_root = NoCommandOptions::default();
     let mut parser = arg_tokenizer::syntax_callback(|token| {
         // Unsupported Cargo invocations use the same parameter parsers, without assuming
         // a command-specific grammar. Their scratch destinations only supply syntax rules.
         if stem == "cargo" {
-            return cargo_common
+            return cargo_root
                 .parse_parameter(token, None)
-                .or_else(|| cargo_root.parse_parameter(token, None))
                 .unwrap_or(TokenAction::Continue(None));
         }
         let git_message = stem == "git"
