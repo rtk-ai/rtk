@@ -46,6 +46,7 @@ rtk gain --shadow         # what shadow rules would have saved
 # Export
 rtk gain --all --format json > savings.json
 rtk gain --all --format csv  > savings.csv
+rtk gain --history --format jsonl > commands.jsonl   # one line per tracked command
 
 # Reset
 rtk gain --reset          # zero the savings and recall stats (asks first)
@@ -92,6 +93,7 @@ Same columns as daily, aggregated by Sunday-Saturday week or calendar month.
 |--------|------|----------|
 | `text` | default | Terminal display |
 | `json` | `--format json` | Programmatic analysis, dashboards |
+| `jsonl` | `--format jsonl` | Per-command records for scripts and log pipelines |
 | `csv` | `--format csv` | Excel, Python/R, Google Sheets |
 
 **JSON structure:**
@@ -108,6 +110,21 @@ Same columns as daily, aggregated by Sunday-Saturday week or calendar month.
   "weekly": [...],
   "monthly": [...]
 }
+```
+
+**JSONL structure** (`--format jsonl`; `--history` is optional): one object per tracked command, oldest first, covering the whole retention window. `--project` scopes it like the other views; the period flags do not apply.
+
+```json
+{"timestamp":"2026-01-01T10:15:00.123456+00:00","command":"rtk git status","input_tokens":420,"output_tokens":84,"saved_tokens":336,"savings_pct":80.0,"exec_time_ms":12,"oversized":false}
+```
+
+- `command` is the command label without its arguments (`rtk git status`, `rtk read`), so paths, URLs and tokens passed as arguments stay out of the export.
+- `saved_tokens` is `input_tokens - output_tokens`, so a command whose output grew shows a negative value.
+- `oversized` marks a row whose input exceeds the headline cap (7,500 estimated tokens). These rows are left out of the summary and the daily, weekly and monthly totals, and counted in `summary.oversized_excluded`.
+
+```bash
+# Commands that grew their output
+rtk gain --history --format jsonl | jq -c 'select(.saved_tokens < 0)'
 ```
 
 ## How token estimation works
