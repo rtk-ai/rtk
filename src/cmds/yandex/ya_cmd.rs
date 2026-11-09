@@ -86,7 +86,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             "ya",
             &args.join(" "),
             Box::new(test_stream_filter()),
-            runner::RunOptions::with_tee(tee),
+            runner::RunOptions::with_tee(tee).source_hint(crate::cmds::yandex::source_lines::hint),
         ),
         YaPipeline::BuildFiltered { tee } => runner::run_streamed(
             build_ya_command(args),

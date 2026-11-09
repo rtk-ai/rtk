@@ -33,6 +33,7 @@ pub fn print_with_hint(
 #[derive(Default)]
 pub struct RunOptions<'a> {
     pub tee_label: Option<&'a str>,
+    pub source_hint: Option<fn(&str, &crate::core::tee::SavedOutput) -> String>,
     pub filter_stdout_only: bool,
     pub skip_filter_on_failure: bool,
     pub no_trailing_newline: bool,
@@ -55,6 +56,15 @@ impl<'a> RunOptions<'a> {
             filter_stdout_only: true,
             ..Default::default()
         }
+    }
+
+    /// Add recovery locations after a streamed command has finished capture.
+    pub fn source_hint(
+        mut self,
+        formatter: fn(&str, &crate::core::tee::SavedOutput) -> String,
+    ) -> Self {
+        self.source_hint = Some(formatter);
+        self
     }
 
     pub fn tee(mut self, label: &'a str) -> Self {
@@ -184,15 +194,32 @@ pub fn run(
             timer,
         ),
         RunMode::Streamed(filter) => {
-            let result =
+            let mut result =
                 stream::run_streaming(&mut cmd, StdinMode::Null, FilterMode::Streaming(filter))
                     .with_context(|| format!("Failed to run {}", tool_name))?;
 
             if let Some(label) = opts.tee_label {
-                if let Some(hint) =
+                let hint = if let Some(formatter) = opts.source_hint {
+                    crate::core::tee::tee_saved(&result.raw, label, result.exit_code).and_then(
+                        |saved| {
+                            [formatter(&result.raw, &saved), saved.hint()]
+                                .into_iter()
+                                .find(|hint| {
+                                    let combined = format!("{}{}\n", result.filtered, hint);
+                                    tracking::estimate_tokens(&combined)
+                                        <= tracking::estimate_tokens(&result.raw)
+                                })
+                        },
+                    )
+                } else {
                     crate::core::tee::tee_and_hint(&result.raw, label, result.exit_code)
-                {
+                };
+                if let Some(hint) = hint {
                     println!("{}", hint);
+                    if opts.source_hint.is_some() {
+                        result.filtered.push_str(&hint);
+                        result.filtered.push('\n');
+                    }
                 }
             }
 

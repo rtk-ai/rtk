@@ -285,7 +285,16 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
         None => auto_detect_filter(&buf),
     };
 
-    let output = apply_filter(filter_fn, &buf);
+    let mut output = apply_filter(filter_fn, &buf);
+    if matches!(filter_name, Some("ya" | "ya-test"))
+        && crate::cmds::yandex::source_lines::has_failures(&buf)
+    {
+        if let Some(saved) = crate::core::tee::force_tee_saved(&buf, "ya") {
+            output.push('\n');
+            output.push_str(&crate::cmds::yandex::source_lines::hint(&buf, &saved));
+            output.push('\n');
+        }
+    }
     let shown = never_worse(&buf, &output);
     print!("{}", shown);
     Ok(())
