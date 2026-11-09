@@ -476,6 +476,16 @@ pub enum TokenAction {
     Stop,
 }
 
+/// Where [`Tokenizer::parse_until`] finished after applying the parser's semantic updates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseBoundary<'a> {
+    EndOfInput,
+    /// The parser requested a stop on this free positional, which is included in the parse.
+    Positional(&'a str),
+    /// The parser requested a stop on an option or separator.
+    Stopped,
+}
+
 /// A destination that interprets option heads, free positionals and separators.
 /// `None` means this parser did not recognize the token; it can be offered to another parser.
 /// An unrecognized token at the tokenizer boundary continues without consuming a separate value.
@@ -655,6 +665,43 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
             }
         }
         std::mem::take(&mut self.tokens)
+    }
+
+    /// Parse through the first stop request or end of input, using resolved option values.
+    /// Each complete argument is tokenized with a scratch clone of the current destination,
+    /// then replayed on the real destination. Consumed value tokens are read through their
+    /// owners. Stops finish the current cluster and its values before returning, so the cursor
+    /// and `--` state also remain correct when the stop depends on a resolved value.
+    pub fn parse_until<P: ParameterParser<'a> + Clone>(
+        &mut self,
+        destination: &mut P,
+    ) -> ParseBoundary<'a> {
+        while self.i < self.args.len() {
+            let mut scratch = destination.clone();
+            self.stop_requested = false;
+            self.scan_argument(&mut scratch);
+            let mut boundary = None;
+            for token in &self.tokens {
+                if token.kind == TokenKind::Positional && !token.is_free_positional() {
+                    continue;
+                }
+                if let Some((TokenAction::Stop, _)) =
+                    destination.parse_parameter(token, token.value(&self.tokens))
+                    && boundary.is_none()
+                {
+                    boundary = Some(if token.is_free_positional() {
+                        ParseBoundary::Positional(token.text)
+                    } else {
+                        ParseBoundary::Stopped
+                    });
+                }
+            }
+            self.tokens.clear();
+            if let Some(boundary) = boundary {
+                return boundary;
+            }
+        }
+        ParseBoundary::EndOfInput
     }
 
     fn scan_argument<P: ParameterParser<'a> + ?Sized>(&mut self, parser: &mut P) {

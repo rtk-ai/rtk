@@ -68,6 +68,10 @@ fn global_options_and_aliases_rewrite_without_changing_shell_text() {
         r#"cargo +nightly -Z unstable-options -C 'some path' c"#,
         "cargo +nightly -Zunstable-options -Csome-path check",
         "cargo +nightly -Z=unstable-options -C=some-path check",
+        "cargo +nightly -Zscript check",
+        "cargo +nightly -vvZscript check",
+        "cargo +nightly -Z=script check",
+        "cargo +nightly -Z script check",
         "cargo b",
         "cargo c",
         "cargo t -- --nocapture",
@@ -103,10 +107,8 @@ fn global_options_and_aliases_rewrite_without_changing_shell_text() {
         "cargo --version",
         "cargo --list",
         "cargo --explain check",
-        "cargo +nightly -Zscript check",
-        "cargo +nightly -vvZscript check",
-        "cargo +nightly -Z=script check",
-        "cargo +nightly -Z script check",
+        "cargo +nightly -Zscript file.rs check",
+        "cargo +nightly -Z script ./check",
         "cargo --config check metadata",
     ] {
         let output = common::rtk_command()
@@ -154,6 +156,8 @@ exit 101
         vec!["+nightly", "-Z=unstable-options", "-C=some path"],
         vec!["+nightly", "-vvZunstable-options", "-Cvery/quiet"],
         vec!["+nightly", "-vCsome path", "-Z=unstable-options"],
+        vec!["+nightly", "-Zscript"],
+        vec!["+nightly", "-Z", "script"],
     ] {
         for subcommand in [
             "build", "check", "clippy", "test", "b", "c", "t", "metadata", "fmt", "install",
@@ -206,7 +210,7 @@ exit 101
     }
     for args in [
         vec!["--unknown", "check"],
-        vec!["+nightly", "-Zscript", "check"],
+        vec!["+nightly", "-Zscript", "file.rs", "check"],
         vec!["--config"],
         vec!["+stable", "--help"],
         vec!["--version"],
