@@ -15,9 +15,9 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::sync::LazyLock;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CargoCommand {
-    NoCommand(NoCommandOptions),
+    NoCommand(CommonOptions),
     Build(BuildOptions),
     Check(CheckOptions),
     Clippy(ClippyOptions),
@@ -65,7 +65,7 @@ impl CargoCommand {
 
     fn common(&self) -> &CommonOptions {
         match self {
-            Self::NoCommand(options) => &options.common,
+            Self::NoCommand(options) => options,
             Self::Build(options) => &options.common,
             Self::Check(options) => &options.common,
             Self::Clippy(options) => &options.common,
@@ -77,9 +77,8 @@ impl CargoCommand {
     }
 }
 
-/// Shared request facts, recorded without validating each command's support for them.
-/// Each command parser decides when to delegate here; root-only actions such as
-/// --version stay in NoCommandOptions, and local meanings take precedence.
+/// Cargo's prefix requests and shared option facts. Root-only actions such as --version
+/// are read before the command; command parsers delegate only the shared rules.
 /// Ordinary globals such as --config/--color/--locked are intentionally not stored:
 /// their arities guide discovery and their original
 /// OS arguments are forwarded unchanged. Add semantic fields only when a consumer needs them.
@@ -87,13 +86,6 @@ impl CargoCommand {
 pub struct CommonOptions {
     pub help: bool,
     pub unstable_help: bool,
-}
-
-/// Cargo's top-level actions, distinct from similarly spelled command options.
-/// https://doc.rust-lang.org/cargo/commands/cargo.html#special-options
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct NoCommandOptions {
-    pub common: CommonOptions,
     pub version: bool,
     pub list: bool,
     pub explain: bool,
@@ -160,10 +152,12 @@ pub struct TestOptions {
     pub unit_graph: bool,
     pub harness: TestHarnessOptions,
 }
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct InstallOptions {
     pub common: CommonOptions,
     pub compilation: CompilationOptions,
+    /// Crate version requirement as supplied; Cargo validates its syntax.
+    pub version: Option<String>,
     pub list: bool,
 }
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -217,8 +211,10 @@ pub struct CargoInvocation {
     command: CargoCommand,
 }
 
-impl<'a> ParameterParser<'a> for CommonOptions {
-    fn parse_parameter(
+impl CommonOptions {
+    /// Rules available after the command. Root-only actions and prefix-only -C
+    /// are handled by ParameterParser, so command parsers keep their own meanings.
+    pub(crate) fn parse_shared_parameter<'a>(
         &mut self,
         token: &Token<'a>,
         value: Option<&'a str>,
@@ -244,7 +240,7 @@ impl<'a> ParameterParser<'a> for CommonOptions {
     }
 }
 
-impl<'a> ParameterParser<'a> for NoCommandOptions {
+impl<'a> ParameterParser<'a> for CommonOptions {
     fn parse_parameter(
         &mut self,
         token: &Token<'a>,
@@ -269,7 +265,12 @@ impl<'a> ParameterParser<'a> for NoCommandOptions {
                 self.explain = true;
                 Some(ValueSpec::value())
             }
-            _ => return self.common.parse_parameter(token, value),
+            // Include the command (or unknown option) as the final token of the prefix.
+            _ => {
+                return self
+                    .parse_shared_parameter(token, value)
+                    .or(Some(TokenAction::StopAfter(None)));
+            }
         };
         Some(TokenAction::Continue(spec))
     }
@@ -283,7 +284,7 @@ impl<'a> ParameterParser<'a> for BuildOptions {
     ) -> Option<TokenAction> {
         self.compilation
             .parse_parameter(token, value)
-            .or_else(|| self.common.parse_parameter(token, value))
+            .or_else(|| self.common.parse_shared_parameter(token, value))
     }
 }
 
@@ -295,7 +296,7 @@ impl<'a> ParameterParser<'a> for CheckOptions {
     ) -> Option<TokenAction> {
         self.compilation
             .parse_parameter(token, value)
-            .or_else(|| self.common.parse_parameter(token, value))
+            .or_else(|| self.common.parse_shared_parameter(token, value))
     }
 }
 
@@ -341,7 +342,7 @@ impl<'a> ParameterParser<'a> for ClippyOptions {
                 return self
                     .compilation
                     .parse_parameter(token, value)
-                    .or_else(|| self.common.parse_parameter(token, value));
+                    .or_else(|| self.common.parse_shared_parameter(token, value));
             }
         };
         Some(TokenAction::Continue(spec))
@@ -359,7 +360,7 @@ impl<'a> ParameterParser<'a> for TestOptions {
                 self.unit_graph = true;
                 Some(TokenAction::Continue(None))
             }
-            _ => self.common.parse_parameter(token, value),
+            _ => self.common.parse_shared_parameter(token, value),
         }
     }
 }
@@ -371,9 +372,14 @@ impl<'a> ParameterParser<'a> for InstallOptions {
         value: Option<&'a str>,
     ) -> Option<TokenAction> {
         let spec = match (token.kind, token.text) {
-            // This is the crate version to install; RTK only needs to consume its value.
+            // This crate version requirement is distinct from common.version's root flag.
             // https://doc.rust-lang.org/cargo/commands/cargo-install.html#install-options
-            (TokenKind::Long, "version" | "vers") => Some(ValueSpec::value()),
+            (TokenKind::Long, "version" | "vers") => {
+                if let Some(value) = value {
+                    self.version = Some(value.to_owned());
+                }
+                Some(ValueSpec::value())
+            }
             (TokenKind::Long, "list") => {
                 self.list = true;
                 None
@@ -382,7 +388,7 @@ impl<'a> ParameterParser<'a> for InstallOptions {
                 return self
                     .compilation
                     .parse_parameter(token, value)
-                    .or_else(|| self.common.parse_parameter(token, value));
+                    .or_else(|| self.common.parse_shared_parameter(token, value));
             }
         };
         Some(TokenAction::Continue(spec))
@@ -439,7 +445,7 @@ impl<'a> ParameterParser<'a> for NextestOptions {
                 "config-file" | "user-config-file" | "tool-config-file" | "manifest-path",
             ) => Some(ValueSpec::value()),
             _ => {
-                if let Some(action) = self.common.parse_parameter(token, value) {
+                if let Some(action) = self.common.parse_shared_parameter(token, value) {
                     return Some(action);
                 }
                 if self.operation == NextestOperation::Unspecified
@@ -500,7 +506,7 @@ impl<'a> ParameterParser<'a> for FmtOptions {
         token: &Token<'a>,
         value: Option<&'a str>,
     ) -> Option<TokenAction> {
-        self.common.parse_parameter(token, value)
+        self.common.parse_shared_parameter(token, value)
     }
 }
 
@@ -539,15 +545,11 @@ impl CargoInvocation {
             &words[..]
         };
         let mut tokenizer = arg_tokenizer::Tokenizer::new(words, Dialect::Clap);
-        let mut no_command = NoCommandOptions::default();
-        let mut scratch_no_command = no_command;
+        let mut common = CommonOptions::default();
+        let mut scratch_common = common;
         // Prefix options own their values. The first free argument ends the prefix;
         // an unknown option also stops discovery because its arity is unknown.
-        let prefix = tokenizer.tokenize_until(&mut arg_tokenizer::syntax_callback(|token| {
-            scratch_no_command
-                .parse_parameter(token, None)
-                .unwrap_or(TokenAction::StopAfter(None))
-        }));
+        let prefix = tokenizer.tokenize_until(&mut scratch_common);
         let mut command = None;
         for token in &prefix {
             if token.kind == TokenKind::Positional && !token.is_free_positional() {
@@ -555,14 +557,11 @@ impl CargoInvocation {
             }
             if token.is_free_positional() {
                 // Combined root actions and explicit commands remain outside this partial model.
-                if no_command.version || no_command.list || no_command.explain {
+                if common.version || common.list || common.explain {
                     return None;
                 }
                 command = Some(CargoCommand::named(token.text)?);
                 break;
-            }
-            if token.kind == TokenKind::DashDash {
-                return None;
             }
             let value = if token.kind == TokenKind::Short && token.text == "Z" {
                 let value = token
@@ -577,37 +576,40 @@ impl CargoInvocation {
             } else {
                 token.value(&prefix)
             };
-            let _ = no_command.parse_parameter(token, value)?;
+            // The root parser also stops on unsupported prefix syntax and --.
+            let TokenAction::Continue(_) = common.parse_parameter(token, value)? else {
+                return None;
+            };
         }
-        let mut command = command.unwrap_or(CargoCommand::NoCommand(no_command));
+        let mut command = command.unwrap_or(CargoCommand::NoCommand(common));
         match &mut command {
             CargoCommand::NoCommand(_) => {}
             CargoCommand::Build(options) => {
-                options.common = no_command.common;
+                options.common = common;
                 parse_parameters_until(&mut tokenizer, options);
             }
             CargoCommand::Check(options) => {
-                options.common = no_command.common;
+                options.common = common;
                 parse_parameters_until(&mut tokenizer, options);
             }
             CargoCommand::Clippy(options) => {
-                options.common = no_command.common;
+                options.common = common;
                 parse_parameters_until(&mut tokenizer, options);
             }
             CargoCommand::Test(options) => {
-                options.common = no_command.common;
+                options.common = common;
                 parse_parameters_until(&mut tokenizer, options);
             }
             CargoCommand::Install(options) => {
-                options.common = no_command.common;
+                options.common = common;
                 parse_parameters_until(&mut tokenizer, options);
             }
             CargoCommand::Nextest(options) => {
-                options.common = no_command.common;
+                options.common = common;
                 parse_parameters_until(&mut tokenizer, options);
             }
             CargoCommand::Fmt(options) => {
-                options.common = no_command.common;
+                options.common = common;
                 parse_parameters_until(&mut tokenizer, options);
             }
         }
@@ -2180,7 +2182,7 @@ mod tests {
             let invocation = CargoInvocation::parse(&args).expect("no subcommand was supplied");
             assert_eq!(
                 *invocation.command(),
-                CargoCommand::NoCommand(NoCommandOptions::default()),
+                CargoCommand::NoCommand(CommonOptions::default()),
                 "{args:?}"
             );
             assert_eq!(invocation.command().as_str(), None);
@@ -2215,6 +2217,44 @@ mod tests {
     }
 
     #[test]
+    fn common_parser_stops_at_the_command_and_leaves_install_version_to_install() {
+        let args = [
+            "--config",
+            "clippy",
+            "install",
+            "demo",
+            "--version",
+            "^1.2",
+            "--list",
+        ];
+        let mut tokenizer = arg_tokenizer::Tokenizer::new(&args, Dialect::Clap);
+        let mut scratch_common = CommonOptions::default();
+        let prefix = tokenizer.tokenize_until(&mut scratch_common);
+        assert_eq!(prefix.last().unwrap().text, "install");
+        assert_eq!(prefix[0].value(&prefix), Some("clippy"));
+        assert_eq!(scratch_common, CommonOptions::default());
+
+        let mut options = InstallOptions::default();
+        parse_parameters_until(&mut tokenizer, &mut options);
+        assert_eq!(options.version.as_deref(), Some("^1.2"));
+        assert!(options.list);
+        assert_eq!(options.common, CommonOptions::default());
+    }
+
+    #[test]
+    fn common_parser_stops_at_unknown_prefix_options() {
+        for unknown in ["--future-option", "-X"] {
+            let args = [unknown, "--version", "check"];
+            let mut tokenizer = arg_tokenizer::Tokenizer::new(&args, Dialect::Clap);
+            let mut scratch_common = CommonOptions::default();
+            let prefix = tokenizer.tokenize_until(&mut scratch_common);
+            assert_eq!(prefix.len(), 1, "{unknown}");
+            assert_eq!(scratch_common, CommonOptions::default());
+            assert!(CargoInvocation::parse(&args).is_none());
+        }
+    }
+
+    #[test]
     fn common_requests_are_embedded_in_command_options() {
         for command in [
             "build", "check", "clippy", "test", "install", "nextest", "fmt",
@@ -2228,7 +2268,8 @@ mod tests {
                     *invocation.command().common(),
                     CommonOptions {
                         help: true,
-                        unstable_help: true
+                        unstable_help: true,
+                        ..Default::default()
                     },
                     "{args:?}"
                 );
@@ -2259,6 +2300,7 @@ mod tests {
             CommonOptions {
                 help: true,
                 unstable_help: true,
+                ..Default::default()
             }
         );
         assert_eq!(
@@ -2267,6 +2309,7 @@ mod tests {
                 common: CommonOptions {
                     help: true,
                     unstable_help: true,
+                    ..Default::default()
                 },
                 compilation: CompilationOptions {
                     message_format: MessageFormat::Json,
@@ -2278,11 +2321,8 @@ mod tests {
         assert!(invocation.common().unstable_help);
         assert_eq!(
             *invocation.command(),
-            CargoCommand::NoCommand(NoCommandOptions {
-                common: CommonOptions {
-                    unstable_help: true,
-                    ..Default::default()
-                },
+            CargoCommand::NoCommand(CommonOptions {
+                unstable_help: true,
                 list: true,
                 ..Default::default()
             })
@@ -2310,6 +2350,7 @@ mod tests {
                     ..Default::default()
                 },
                 list: true,
+                version: Some("1.2.3".to_owned()),
                 compilation: CompilationOptions {
                     message_format: MessageFormat::Json,
                     unit_graph: false,
@@ -2349,6 +2390,7 @@ mod tests {
                     unit_graph: false,
                 },
                 list: true,
+                version: None,
             })
         );
     }
@@ -2365,7 +2407,7 @@ mod tests {
         let mut options = NextestOptions {
             common: CommonOptions {
                 help: true,
-                unstable_help: false,
+                ..Default::default()
             },
             operation: NextestOperation::Run,
             ..Default::default()
@@ -2395,14 +2437,18 @@ mod tests {
         };
         assert!(options.version);
         assert!(options.explain);
+        assert!(!options.common.version);
+        assert!(!options.common.explain);
         assert_eq!(options.compilation.message_format, MessageFormat::Json);
         assert!(!invocation.common().help);
 
-        for version in [
-            vec!["--version", "1.2.3"],
-            vec!["--version=1.2.3"],
-            vec!["--vers", "1.2.3"],
-            vec!["--version"],
+        for (version, expected) in [
+            (vec!["--version", "1.2.3"], Some("1.2.3")),
+            (vec!["--version=1.2.3"], Some("1.2.3")),
+            (vec!["--vers", "1.2.3"], Some("1.2.3")),
+            (vec!["--version", "^1.2"], Some("^1.2")),
+            (vec!["--version=not-a-version"], Some("not-a-version")),
+            (vec!["--version"], None),
         ] {
             let args: Vec<_> = ["install", "demo"]
                 .into_iter()
@@ -2414,6 +2460,9 @@ mod tests {
                 panic!("expected install")
             };
             assert!(options.list);
+            assert_eq!(options.version.as_deref(), expected);
+            assert!(!options.common.version);
+            assert!(!options.common.list);
             assert!(!invocation.common().help);
         }
         let invocation = CargoInvocation::parse(&[
@@ -2558,8 +2607,11 @@ mod tests {
         ] {
             let args = [option, "--", "check"];
             let mut tokenizer = arg_tokenizer::Tokenizer::new(&args, Dialect::Clap);
-            let mut no_command = NoCommandOptions::default();
-            let tokens = tokenizer.tokenize_until(&mut no_command);
+            let tokens = if option == "--message-format" {
+                tokenizer.tokenize_until(&mut CheckOptions::default())
+            } else {
+                tokenizer.tokenize_until(&mut CommonOptions::default())
+            };
             assert_eq!(tokens[0].value(&tokens), None, "{option}");
             assert_eq!(tokens[1].kind, TokenKind::DashDash, "{option}");
         }
