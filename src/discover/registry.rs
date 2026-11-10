@@ -8,8 +8,8 @@ use std::sync::LazyLock;
 
 use super::lexer::{
     ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer, coalesce_words,
-    contains_unattestable_construct_in, is_crlf_at, redirect_has_file_target, shell_split,
-    split_on_operators, tokenize, tokenize_with_newlines,
+    contains_unattestable_construct_in, is_crlf_at, redirect_has_file_target, resolve_word_text,
+    shell_split, split_on_operators, tokenize, tokenize_with_newlines,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 use super::shell_wrapper::parse_shell_wrapper;
@@ -459,13 +459,23 @@ fn strip_git_global_opts(cmd: &str) -> String {
 }
 
 fn normalize_cargo_command(cmd: &str) -> String {
+    // Bash blanks separate the command name; other whitespace can belong to it.
+    // https://www.gnu.org/software/bash/manual/html_node/Definitions.html
     if cmd
         .strip_prefix("cargo")
-        .is_some_and(|tail| tail.starts_with(char::is_whitespace))
+        .is_some_and(|tail| tail.starts_with([' ', '\t']))
     {
-        let words = shell_split(cmd);
-        if let Some((command, _)) = crate::cmds::rust::cargo_cmd::CargoCommand::parse(&words[1..]) {
-            return format!("cargo {}", command.as_str());
+        let tokens = tokenize(cmd);
+        let raw_words = coalesce_words(cmd, &tokens);
+        let words: Vec<_> = raw_words[1..]
+            .iter()
+            .map(|(word, _)| resolve_word_text(word))
+            .collect();
+        if let Some((command, index)) = crate::cmds::rust::cargo_cmd::CargoCommand::parse(&words) {
+            // Preserve the raw suffix so argument-specific exclusions still see its
+            // original quoting and spacing after the canonical command name.
+            let (word, offset) = raw_words[index + 1];
+            return format!("cargo {}{}", command.as_str(), &cmd[offset + word.len()..]);
         }
     }
     cmd.to_owned()
@@ -2111,7 +2121,7 @@ fn rewrite_command_part(rule: &RtkRule, cmd_part: &str) -> Option<String> {
     if rule.rtk_cmd == "rtk cargo"
         && cmd_part
             .strip_prefix("cargo")
-            .is_some_and(|tail| tail.starts_with(char::is_whitespace))
+            .is_some_and(|tail| tail.starts_with([' ', '\t']))
     {
         return Some(format!("rtk {cmd_part}"));
     }
@@ -2214,6 +2224,9 @@ fn tool_form(cmd_clean: &str, rtk_equivalent: &str) -> String {
     let normalized = strip_absolute_path(
         &php_tool_form(cmd_clean, rtk_equivalent).unwrap_or_else(|| cmd_clean.to_string()),
     );
+    if rtk_equivalent == "rtk cargo" {
+        return normalize_cargo_command(&normalized);
+    }
     RULES
         .iter()
         .find(|r| r.rtk_cmd == rtk_equivalent)
@@ -7397,6 +7410,70 @@ mod tests {
             rewrite_command_no_prefixes("git push origin main", &excluded),
             None
         );
+    }
+
+    #[test]
+    fn test_exclude_cargo_command_covers_toolchain_and_global_prefixes() {
+        for command in [
+            "cargo test",
+            "cargo +stable test",
+            "cargo --locked test",
+            "cargo --config 'build.rustflags=[\"--cfg\", \"demo\"]' test --lib",
+            "cargo +nightly -Zunstable-options -C 'some path' test",
+            "cargo\t+stable\ttest --lib",
+            "cargo +stable 'te'\"st\" --lib",
+            "RUSTUP_TOOLCHAIN=nightly cargo +stable test",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &["cargo test".to_string()]),
+                None,
+                "{command}"
+            );
+        }
+        for command in ["cargo +stable check", "cargo --config test check"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &["cargo test".to_string()]),
+                Some(format!("rtk {command}")),
+                "{command}"
+            );
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo +stable test", &["cargo +stable test".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclude_cargo_arguments_keep_their_raw_spelling() {
+        for (pattern, command, excluded) in [
+            ("^cargo test$", "cargo +stable test", true),
+            ("^cargo test$", "cargo +stable test --lib", false),
+            ("cargo test --lib", "cargo --locked test --lib", true),
+            ("cargo test --lib", "cargo --locked test --bins", false),
+            ("^cargo test  --lib$", "cargo +stable test  --lib", true),
+            (
+                "^cargo test --package 'some package'$",
+                "cargo --locked test --package 'some package'",
+                true,
+            ),
+            (
+                "^cargo test --package 'some package'$",
+                "cargo --locked test --package \"some package\"",
+                false,
+            ),
+            (
+                "^cargo test$",
+                "cargo +nightly -Zunstable-options -C 'some path' test",
+                true,
+            ),
+        ] {
+            let expected = (!excluded).then(|| format!("rtk {command}"));
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[pattern.to_string()]),
+                expected,
+                "{pattern}: {command}"
+            );
+        }
     }
 
     #[test]

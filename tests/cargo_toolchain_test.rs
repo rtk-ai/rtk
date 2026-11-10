@@ -114,6 +114,67 @@ fn ambiguous_prefixes_and_unsupported_commands_are_not_rewritten() {
     }
 }
 
+#[test]
+fn non_shell_whitespace_does_not_identify_a_cargo_command() {
+    for gap in ['\u{a0}', '\u{2003}', '\u{202f}', '\r', '\u{b}', '\u{c}'] {
+        assert_rewrite(&format!("cargo{gap}check"), None);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn configured_cargo_exclusions_cover_prefixes_and_keep_argument_patterns() {
+    let config = common::tempdir();
+    let rtk_config = config.path().join("rtk");
+    std::fs::create_dir_all(&rtk_config).unwrap();
+    for (pattern, command, excluded) in [
+        ("cargo test", "cargo +stable test", true),
+        ("cargo test", "cargo --locked test", true),
+        ("cargo test", "cargo --config test check", false),
+        ("^cargo test$", "cargo +stable test", true),
+        ("^cargo test$", "cargo +stable test --lib", false),
+        (
+            "^cargo test --package 'some package'$",
+            "cargo --locked test --package 'some package'",
+            true,
+        ),
+        (
+            "^cargo test --package 'some package'$",
+            "cargo --locked test --package \"some package\"",
+            false,
+        ),
+    ] {
+        std::fs::write(
+            rtk_config.join("config.toml"),
+            format!(
+                "[hooks]\nexclude_commands = [{}]\n",
+                toml::Value::String(pattern.to_string())
+            ),
+        )
+        .unwrap();
+        let output = common::rtk_command()
+            .args(["rewrite", command])
+            .env("XDG_CONFIG_HOME", config.path())
+            .output()
+            .unwrap();
+        if excluded {
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{pattern}: {command}: {output:?}"
+            );
+            assert!(output.stdout.is_empty(), "{pattern}: {command}: {output:?}");
+        } else {
+            assert!(matches!(output.status.code(), Some(0 | 3)), "{output:?}");
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                format!("rtk {command}"),
+                "{pattern}: {command}"
+            );
+        }
+    }
+}
+
 #[cfg(unix)]
 mod execution {
     use super::common;
