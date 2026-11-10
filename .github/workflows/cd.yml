@@ -94,7 +94,12 @@ jobs:
       prerelease: true
     permissions:
       contents: write
-    secrets: inherit
+    secrets:
+      RTK_TELEMETRY_TOKEN: ${{ secrets.RTK_TELEMETRY_TOKEN }}
+      APP_CLIENT_ID: ${{ secrets.APP_CLIENT_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+      RTK_DISCORD_RELEASE: ${{ secrets.RTK_DISCORD_RELEASE }}
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
   # ═══════════════════════════════════════════════
   # MASTER PATH: Full release
@@ -129,7 +134,12 @@ jobs:
       tag: ${{ needs.release-please.outputs.tag_name }}
     permissions:
       contents: write
-    secrets: inherit
+    secrets:
+      RTK_TELEMETRY_TOKEN: ${{ secrets.RTK_TELEMETRY_TOKEN }}
+      APP_CLIENT_ID: ${{ secrets.APP_CLIENT_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+      RTK_DISCORD_RELEASE: ${{ secrets.RTK_DISCORD_RELEASE }}
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
   update-latest-tag:
     name: Update 'latest' tag

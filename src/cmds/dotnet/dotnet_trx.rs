@@ -21,7 +21,9 @@ fn extract_attr_value(
             continue;
         }
 
-        if let Ok(value) = attr.decode_and_unescape_value(reader.decoder()) {
+        if let Ok(value) =
+            attr.decoded_and_normalized_value(quick_xml::XmlVersion::Implicit1_0, reader.decoder())
+        {
             return Some(value.into_owned());
         }
     }

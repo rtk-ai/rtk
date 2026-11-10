@@ -100,6 +100,14 @@ Restart your agent. That's it: when it runs `git status`, RTK runs `rtk git stat
 
 <br>
 
+## Security Audit
+| | |
+|-|-|
+| Last audit | 2026-11-05 |
+| Status | ISSUES REMAINING |
+| Summary | Merged 532 upstream commits; 7 rustls/webpki/tokio advisories fixed in lockfiles; 3 advisories left (lru via ratatui, unmaintained paste); 49 Semgrep GitHub Actions tag-pinning findings and 39 gitleaks hits (test fixtures/docs, 0 verified by TruffleHog) left for review |
+| Report | [Security reports/security-audit-2026-11-05.md](Security%20reports/security-audit-2026-11-05.md) |
+
 ## Measure it: `rtk gain`
 
 Every command RTK touches is counted on your machine. One command shows what it saved, today and since you installed it.
