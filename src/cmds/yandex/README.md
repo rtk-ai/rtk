@@ -137,6 +137,21 @@ Drop: Expected/but bodies · long stacks · PEERDIR / `[PB]` / `Ok [n/m]` progre
 - **Full raw:** runner `RunOptions::with_tee("ya")` only — filters do **not** call `force_tee_hint` on full output (avoids double tee).
 - **Capped fail lists** (`CAP_ERRORS`): `fail_overflow_tee_hint` — `force_tee_tail_hint` on the **full** headline list with offset `shown + 1`.
 
+For `rtk ya test` / `rtk ya make -t*`, saved output also includes a short index
+of `[fail]` headlines and their **1-based physical lines in that saved file**.
+`rtk pipe -f ya` / `ya-test` saves stdin and provides the same index when failures
+are present. On Unix, a quoted `sed` command previews 20 lines at the first failure;
+use another listed line number to inspect a different failure.
+
+Locations follow the saved file's order: stdin verbatim in pipe mode, stdout
+followed by stderr in live mode. They are not offsets in the compact summary
+or in the interleaved live display. Only complete lines retained by the tee cap
+are indexed; a partial log is identified explicitly. The index uses
+`MAX_FAIL_BLOCKS` and reports the first remaining saved failure when capped.
+`RTK_TEE=0` disables the saved log and its locations.
+The recovery hints respect the output budget: a short live result may show only
+the saved-log path; pipe mode retains the usual `never_worse` fallback.
+
 ## Adapters
 
 | Fingerprint | Adapter | Notes |

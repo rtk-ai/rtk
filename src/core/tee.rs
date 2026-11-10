@@ -2,6 +2,7 @@
 
 use super::constants::RTK_DATA_DIR;
 use crate::core::config::Config;
+use std::io::Write;
 use std::path::PathBuf;
 
 /// Minimum output size to tee (smaller outputs don't need recovery)
@@ -51,7 +52,7 @@ fn get_tee_dir(config: &Config) -> Option<PathBuf> {
 }
 
 /// Rotate old tee files: keep only the last `max_files`, delete oldest.
-fn cleanup_old_files(dir: &std::path::Path, max_files: usize) {
+fn cleanup_old_files(dir: &std::path::Path, max_files: usize, keep: &std::path::Path) {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .ok()
         .into_iter()
@@ -64,12 +65,44 @@ fn cleanup_old_files(dir: &std::path::Path, max_files: usize) {
         return;
     }
 
-    // Sort by filename (which starts with epoch timestamp = chronological)
-    entries.sort_by_key(|e| e.file_name());
+    // Also handles files created by older versions with second-resolution names.
+    entries.sort_by_key(|e| (e.metadata().and_then(|m| m.modified()).ok(), e.file_name()));
 
     let to_remove = entries.len() - max_files;
-    for entry in entries.iter().take(to_remove) {
+    for entry in entries.iter().filter(|e| e.path() != keep).take(to_remove) {
         let _ = std::fs::remove_file(entry.path());
+    }
+}
+
+/// Coordinates refer only to the original prefix actually written to this file.
+pub struct SavedOutput {
+    pub path: PathBuf,
+    retained_bytes: usize,
+    truncated: bool,
+}
+
+impl SavedOutput {
+    pub fn hint(&self) -> String {
+        if self.truncated {
+            format!(
+                "[partial output: {} ({} bytes retained)]",
+                display_path(&self.path),
+                self.retained_bytes
+            )
+        } else {
+            // The process capture itself may already have reached RAW_CAP.
+            format!("[saved output: {}]", display_path(&self.path))
+        }
+    }
+
+    /// Exclude a partially saved final line and the synthetic truncation marker.
+    pub fn complete_prefix<'a>(&self, raw: &'a str) -> &'a str {
+        let prefix = &raw[..self.retained_bytes];
+        if self.truncated {
+            &prefix[..prefix.rfind('\n').map_or(0, |i| i + 1)]
+        } else {
+            prefix
+        }
     }
 }
 
@@ -110,7 +143,10 @@ fn write_tee_file(
     tee_dir: &std::path::Path,
     max_file_size: usize,
     max_files: usize,
-) -> Option<PathBuf> {
+) -> Option<SavedOutput> {
+    if max_files == 0 {
+        return None;
+    }
     std::fs::create_dir_all(tee_dir).ok()?;
 
     let slug = sanitize_slug(command_slug);
@@ -118,37 +154,49 @@ fn write_tee_file(
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs();
-    let filename = format!("{}_{}.log", epoch, slug);
-    let filepath = tee_dir.join(filename);
+    // Unique, private files: another invocation in the same second must never
+    // overwrite the log named by an already emitted source location.
+    let mut file = tempfile::Builder::new()
+        .prefix(&format!("{}_{}_", epoch, slug))
+        .suffix(".log")
+        .tempfile_in(tee_dir)
+        .ok()?;
 
-    // Truncate at max_file_size (find a safe UTF-8 char boundary)
+    let mut retained_bytes = raw.len().min(max_file_size);
+    while !raw.is_char_boundary(retained_bytes) {
+        retained_bytes -= 1;
+    }
+    // Round down, never beyond the configured byte cap.
     let content = if raw.len() > max_file_size {
-        let boundary = raw
-            .char_indices()
-            .take_while(|(i, _)| *i < max_file_size)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
         format!(
             "{}\n\n--- truncated at {} bytes ---",
-            &raw[..boundary],
+            &raw[..retained_bytes],
             max_file_size
         )
     } else {
         raw.to_string()
     };
 
-    std::fs::write(&filepath, content).ok()?;
+    file.write_all(content.as_bytes()).ok()?;
+    let (_, filepath) = file.keep().ok()?;
 
     // Rotate old files
-    cleanup_old_files(tee_dir, max_files);
+    cleanup_old_files(tee_dir, max_files, &filepath);
 
-    Some(filepath)
+    Some(SavedOutput {
+        path: filepath,
+        retained_bytes,
+        truncated: raw.len() > retained_bytes,
+    })
 }
 
 /// Write raw output to tee file if conditions are met.
 /// Returns file path on success, None if skipped/failed.
 pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf> {
+    tee_saved(raw, command_slug, exit_code).map(|saved| saved.path)
+}
+
+pub fn tee_saved(raw: &str, command_slug: &str, exit_code: i32) -> Option<SavedOutput> {
     // Check RTK_TEE=0 env override (disable)
     if std::env::var("RTK_TEE").ok().as_deref() == Some("0") {
         return None;
@@ -189,6 +237,10 @@ pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<Str
 }
 
 fn force_tee_path(content: &str, command_slug: &str) -> Option<PathBuf> {
+    force_tee_saved(content, command_slug).map(|saved| saved.path)
+}
+
+pub fn force_tee_saved(content: &str, command_slug: &str) -> Option<SavedOutput> {
     if std::env::var("RTK_TEE").ok().as_deref() == Some("0") {
         return None;
     }
@@ -274,6 +326,57 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn saved_coordinates_exclude_partial_utf8_line_and_truncation_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let raw = "[fail] complete\n[fail] partial 漢字\n[fail] omitted\n";
+        let cap = raw.find('漢').expect("UTF-8 character") + 1;
+        let saved = write_tee_file(raw, "ya", dir.path(), cap, 20).expect("save log");
+        assert_eq!(saved.complete_prefix(raw), "[fail] complete\n");
+        assert_eq!(saved.retained_bytes, cap - 1);
+        assert!(saved.hint().starts_with("[partial output:"));
+        let written = fs::read_to_string(&saved.path).expect("valid UTF-8");
+        assert!(written.starts_with(&raw[..cap - 1]));
+        assert!(!written.contains('漢'));
+        assert!(!written.contains("[fail] omitted"));
+    }
+
+    #[test]
+    fn complete_unterminated_final_line_has_a_coordinate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let raw = "\n[fail] last";
+        let saved = write_tee_file(raw, "ya", dir.path(), raw.len(), 20).expect("save log");
+        assert_eq!(saved.complete_prefix(raw), raw);
+        assert!(!saved.truncated);
+    }
+
+    #[test]
+    fn repeated_command_cannot_overwrite_an_existing_source_location() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = write_tee_file("[fail] first\n", "ya", dir.path(), 100, 20).expect("first log");
+        let second =
+            write_tee_file("[fail] second\n", "ya", dir.path(), 100, 20).expect("second log");
+        assert_ne!(first.path, second.path);
+        assert_eq!(
+            fs::read_to_string(first.path).expect("first log"),
+            "[fail] first\n"
+        );
+        assert_eq!(
+            fs::read_to_string(second.path).expect("second log"),
+            "[fail] second\n"
+        );
+    }
+
+    #[test]
+    fn rotation_never_returns_a_removed_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(write_tee_file("raw", "ya", dir.path(), 100, 0).is_none());
+        let first = write_tee_file("first", "ya", dir.path(), 100, 1).expect("first log");
+        let second = write_tee_file("second", "ya", dir.path(), 100, 1).expect("second log");
+        assert!(!first.path.exists());
+        assert_eq!(fs::read_to_string(second.path).expect("kept log"), "second");
+    }
+
+    #[test]
     fn test_sanitize_slug() {
         assert_eq!(sanitize_slug("cargo_test"), "cargo_test");
         assert_eq!(sanitize_slug("cargo test"), "cargo_test");
@@ -349,7 +452,7 @@ mod tests {
         );
         assert!(result.is_some());
 
-        let path = result.unwrap();
+        let path = result.unwrap().path;
         assert!(path.exists());
         let written = fs::read_to_string(&path).unwrap();
         assert!(written.contains("error: test failed"));
@@ -363,7 +466,7 @@ mod tests {
         let result = write_tee_file(&big_output, "test", tmpdir.path(), 1000, 20);
         assert!(result.is_some());
 
-        let path = result.unwrap();
+        let path = result.unwrap().path;
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("--- truncated at 1000 bytes ---"));
         assert!(content.len() < 2000);
@@ -383,7 +486,7 @@ mod tests {
         let result = write_tee_file(&japanese, "test_utf8", tmpdir.path(), 998, 20);
         assert!(result.is_some());
 
-        let path = result.unwrap();
+        let path = result.unwrap().path;
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("--- truncated at 998 bytes ---"));
         // Should contain 332 full characters (996 bytes), not panic
@@ -401,7 +504,7 @@ mod tests {
         let result = write_tee_file(&emojis, "test_emoji", tmpdir.path(), 201, 20);
         assert!(result.is_some());
 
-        let path = result.unwrap();
+        let path = result.unwrap().path;
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("--- truncated at 201 bytes ---"));
         // The emoji portion should be exactly 200 bytes (50 emojis),
@@ -421,7 +524,7 @@ mod tests {
             fs::write(dir.join(&filename), "content").unwrap();
         }
 
-        cleanup_old_files(dir, 20);
+        cleanup_old_files(dir, 20, std::path::Path::new(""));
 
         let remaining: Vec<_> = fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).collect();
         assert_eq!(remaining.len(), 20);

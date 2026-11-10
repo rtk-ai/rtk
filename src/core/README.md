@@ -117,6 +117,13 @@ Consumers must call `timer.track()` on **all** code paths — success, failure, 
 
 ### Tee (`tee_and_hint`)
 
+`tee_saved` / `force_tee_saved` additionally return `SavedOutput`, which records
+the unique file path and retained raw prefix. `complete_prefix` excludes a
+partially written final line and the truncation marker, so recovery indexes
+can refer to physical lines that actually exist in the saved log. Streamed
+runners can opt in through `RunOptions::source_hint`; their formatter receives
+the same raw text used to write the file, after stdout/stderr capture is complete.
+
 Consumers that parse structured output (JSON, NDJSON, state machines) should call `tee::tee_and_hint()` to save raw output for LLM recovery on failure. Tee must be called before `std::process::exit()`.
 
 For truncation recovery on **success** (e.g., list truncated at 20 items), use `tee::force_tee_hint()` which bypasses the tee mode check and writes regardless of exit code. This ensures LLMs always have a `[full output: ...]` recovery path instead of burning tokens working around missing data.
