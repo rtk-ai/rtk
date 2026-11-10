@@ -1096,6 +1096,10 @@ pub fn run(
             println!("      Actual limits use rolling 5-hour windows, not monthly caps.");
         }
 
+        if stdout_is_tty {
+            print_pro_hint_if_due(&tracker);
+        }
+
         return Ok(());
     }
 
@@ -1832,9 +1836,75 @@ pub(crate) fn share_cta_available() -> bool {
     cfg!(feature = "engine")
 }
 
+const PRO_HINT_MIN_DAYS: i64 = 7;
+const PRO_HINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+const PRO_HINT_MARKER: &str = "pro-hint-shown";
+
+fn pro_hint_due(
+    enabled: bool,
+    env_off: bool,
+    first_seen_days: i64,
+    since_last_shown: Option<std::time::Duration>,
+) -> bool {
+    let interval_passed = match since_last_shown {
+        Some(elapsed) => elapsed >= PRO_HINT_INTERVAL,
+        None => true,
+    };
+    enabled && !env_off && first_seen_days >= PRO_HINT_MIN_DAYS && interval_passed
+}
+
+fn print_pro_hint_if_due(tracker: &Tracker) {
+    let enabled = crate::core::config::cached_config().display.pro_hint;
+    let env_off = matches!(
+        crate::core::user_env::var("RTK_PRO_HINT").as_deref(),
+        Some("0")
+    );
+    let first_seen_days = tracker.first_seen_days().unwrap_or(0);
+    let marker = crate::core::tracking::get_db_path()
+        .ok()
+        .map(|db| db.with_file_name(PRO_HINT_MARKER));
+    let since_last_shown = marker
+        .as_ref()
+        .and_then(|m| std::fs::metadata(m).ok())
+        .and_then(|md| md.modified().ok())
+        .and_then(|t| t.elapsed().ok());
+    if !pro_hint_due(enabled, env_off, first_seen_days, since_last_shown) {
+        return;
+    }
+    println!(
+        "{}",
+        "Across a team? Spend by team and person, budgets, audit: pro.rtk-ai.app".dimmed()
+    );
+    println!(
+        "{}",
+        "(once a day at most; pro_hint = false under [display] in config.toml turns it off)"
+            .dimmed()
+    );
+    println!();
+    if let Some(m) = marker {
+        let _ = std::fs::write(m, b"");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pro_hint_waits_a_week_then_once_a_day() {
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        assert!(!pro_hint_due(true, false, 0, None));
+        assert!(!pro_hint_due(true, false, 6, None));
+        assert!(pro_hint_due(true, false, 7, None));
+        assert!(!pro_hint_due(true, false, 30, Some(day / 2)));
+        assert!(pro_hint_due(true, false, 30, Some(day)));
+    }
+
+    #[test]
+    fn pro_hint_respects_config_and_env() {
+        assert!(!pro_hint_due(false, false, 30, None));
+        assert!(!pro_hint_due(true, true, 30, None));
+    }
 
     #[test]
     fn share_cta_only_when_pipeline_command_exists() {
