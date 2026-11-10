@@ -646,6 +646,15 @@ fn flush_leading_context(
 }
 
 pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
+    compact_diff_with_indent(diff, max_lines, "")
+}
+
+/// Arc's second compaction pass distinguishes paths from indented hunk records.
+pub(crate) fn compact_diff_indented(diff: &str, max_lines: usize) -> String {
+    compact_diff_with_indent(diff, max_lines, "  ")
+}
+
+fn compact_diff_with_indent(diff: &str, max_lines: usize, indent: &str) -> String {
     let mut result = Vec::new();
     let mut current_file = String::new();
     let mut added = 0;
@@ -709,7 +718,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             hunk_shown = 0;
             // Preserve the full unified diff hunk header, including trailing
             // function / symbol context after the second @@ marker.
-            result.push(line.to_string());
+            result.push(format!("{indent}{line}"));
         } else if let Some(header) = hunk.as_mut() {
             if header.exhausted() {
                 hunk = None;
@@ -755,7 +764,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
                         &mut leading_context_total,
                         leading_context_cap,
                     );
-                    result.push(line.to_string());
+                    result.push(format!("{indent}{line}"));
                     hunk_shown += 1;
                 } else if is_del {
                     skipped_del += 1;
@@ -765,7 +774,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
                 leading_context.clear();
             } else if hunk_shown > 0 {
                 if hunk_shown < max_hunk_lines {
-                    result.push(line.to_string());
+                    result.push(format!("{indent}{line}"));
                     hunk_shown += 1;
                 }
             } else if leading_context_total < leading_context_cap {
@@ -776,7 +785,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
                 if leading_context.len() == max_leading_context {
                     leading_context.remove(0);
                 }
-                leading_context.push(line.to_string());
+                leading_context.push(format!("{indent}{line}"));
             }
 
             if header.exhausted() {

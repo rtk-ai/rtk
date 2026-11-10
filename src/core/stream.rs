@@ -17,18 +17,34 @@ use regex::Regex;
 /// never fails on the source encoding, so a garbled line still surfaces
 /// instead of vanishing along with everything downstream of it.
 fn read_lines_lossy(reader: impl Read) -> impl Iterator<Item = String> {
-    BufReader::new(reader).split(b'\n').filter_map(|res| {
-        let mut buf = match res {
-            Ok(buf) => buf,
-            Err(e) => {
-                eprintln!("rtk: stream read error: {}", e);
-                return None;
-            }
-        };
-        if buf.last() == Some(&b'\r') {
-            buf.pop();
+    let mut reader = BufReader::new(reader);
+    let mut buffer = Vec::new();
+    let mut done = false;
+    std::iter::from_fn(move || {
+        if done {
+            return None;
         }
-        Some(String::from_utf8_lossy(&buf).into_owned())
+        buffer.clear();
+        match reader.read_until(b'\n', &mut buffer) {
+            Ok(0) => {
+                done = true;
+                None
+            }
+            Ok(_) => {
+                if buffer.last() == Some(&b'\n') {
+                    buffer.pop();
+                    if buffer.last() == Some(&b'\r') {
+                        buffer.pop();
+                    }
+                }
+                Some(String::from_utf8_lossy(&buffer).into_owned())
+            }
+            Err(error) => {
+                done = true;
+                eprintln!("rtk: stream read error: {error}");
+                None
+            }
+        }
     })
 }
 
@@ -649,6 +665,27 @@ pub(crate) mod tests {
         // clean EOF would, but via the Err(_) arm instead of Ok(0).
         let lines: Vec<String> = read_lines_lossy(reader).collect();
         assert_eq!(lines, vec!["line one".to_string(), "line two".to_string()]);
+    }
+
+    #[test]
+    fn read_lines_preserves_unterminated_carriage_return() {
+        assert_eq!(
+            read_lines_lossy(&b"last\r"[..]).collect::<Vec<_>>(),
+            vec!["last\r"]
+        );
+    }
+
+    #[test]
+    fn read_lines_stops_after_persistent_error() {
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("persistent failure"))
+            }
+        }
+        let mut lines = read_lines_lossy(Broken);
+        assert_eq!(lines.next(), None);
+        assert_eq!(lines.next(), None);
     }
 
     struct LineFilter<F: FnMut(&str) -> Option<String>> {

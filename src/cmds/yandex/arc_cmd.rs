@@ -3,7 +3,7 @@
 //! Arc status/log resemble git; diffs are unified without `diff --git` headers, so we
 //! normalize then reuse [`crate::cmds::git::git::compact_diff`].
 
-use crate::cmds::git::git::compact_diff;
+use crate::cmds::git::git::compact_diff_indented;
 use crate::core::guard::never_worse;
 use crate::core::runner;
 use crate::core::utils::resolved_command;
@@ -596,7 +596,7 @@ pub fn filter_arc_diff(raw: &str) -> String {
     }
     let normalized = normalize_arc_unified_diff(&stripped);
     // Reuse git compact_diff structure, then tighten hunk bodies for token ROI.
-    let compacted = compact_diff(&normalized, ARC_DIFF_MAX_LINES);
+    let compacted = compact_diff_indented(&normalized, ARC_DIFF_MAX_LINES);
     tighten_arc_diff(&compacted)
 }
 
@@ -705,8 +705,7 @@ fn tighten_arc_diff(compacted: &str) -> String {
         }
 
         if in_hunk
-            && ((trimmed.starts_with('+') && !trimmed.starts_with("+++"))
-                || (trimmed.starts_with('-') && !trimmed.starts_with("---")))
+            && (trimmed.starts_with('+') || trimmed.starts_with('-'))
         {
             if shown < MAX_CHANGE_PER_HUNK {
                 out.push(format!("  {trimmed}"));
@@ -1059,6 +1058,16 @@ ccc333 subject three
             "savings {:.1}%\n{out}",
             savings(raw, &out)
         );
+    }
+
+    #[test]
+    fn diff_preserves_repeated_sign_content_and_caps_changes() {
+        let raw = "--- example.txt\n+++ example.txt\n@@ -1,2 +1,2 @@\n--- removed comment\n-old\n+++counter;\n+new\n";
+        let out = filter_arc_diff(raw);
+        assert!(out.contains("--- removed comment"), "{out}");
+        assert!(out.contains("+++counter;"), "{out}");
+        assert!(out.contains("1 more changed lines"), "{out}");
+        assert!(out.contains("+2 -2"), "{out}");
     }
 
     #[test]

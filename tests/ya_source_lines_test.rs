@@ -231,3 +231,34 @@ fn live_locations_follow_saved_stdout_then_stderr_and_preserve_exit_code() {
     assert!(output.contains("  1: [fail] stdout-second"), "{output}");
     assert!(output.contains("  3: [fail] stderr-first"), "{output}");
 }
+
+#[cfg(unix)]
+#[test]
+fn live_failure_after_invalid_utf8_is_captured_and_indexed() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ya = dir.path().join("ya");
+    let mut script = b"#!/bin/sh\nprintf 'bad: ".to_vec();
+    script.push(0xff);
+    script.extend_from_slice(b"\n'\nprintf '[fail] after-invalid-byte\nE   Expected: '");
+    script.extend_from_slice(
+        format!("\nprintf '{}'\nprintf '\\n'\nexit 7\n", "x".repeat(3000)).as_bytes(),
+    );
+    fs::write(&ya, script).expect("write fake ya");
+    fs::set_permissions(&ya, fs::Permissions::from_mode(0o755)).expect("chmod");
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let paths = std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&inherited));
+    let result = command(dir.path())
+        .args(["ya", "test", "fake-target"])
+        .env("PATH", std::env::join_paths(paths).expect("PATH"))
+        .output()
+        .expect("run ya");
+    assert_eq!(result.status.code(), Some(7));
+    let output = String::from_utf8(result.stdout).expect("utf8");
+    assert!(
+        output.contains("  2: [fail] after-invalid-byte"),
+        "{output}"
+    );
+    let saved = fs::read_to_string(saved_log(dir.path())).expect("saved log");
+    assert!(saved.starts_with("bad: \u{fffd}\n[fail] after-invalid-byte\n"));
+}
