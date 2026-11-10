@@ -1,0 +1,47 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<!-- RTK Pro card for the README. Light theme and copy from rtk-cloud-ldp
+     (design-pptx.md tokens, src/lib/i18n/locales/en.json strings). Rules kept:
+     green text is accent-deep on light, no red, no code, "control layer", no em dashes. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:ital,wght@0,500;0,600;1,500&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=block" rel="stylesheet">
+<style>
+:root{--bg:#FFFFFF;--mist:#F5F7FC;--card:#FFFFFF;--border:#E3E9F4;--border-strong:#CFD9EB;--ink:#060B18;--text:#3D4C6E;--muted:#64748B;--dim:#8A95AB;--accent:#00E599;--deep:#00754E}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:1280px;height:560px;background:transparent}
+.card{position:relative;width:1280px;height:560px;border-radius:20px;overflow:hidden;background:var(--bg);border:1px solid var(--border);isolation:isolate;font-family:'Inter',sans-serif;color:var(--text)}
+.scene{position:absolute;inset:0;z-index:-1;background:radial-gradient(ellipse 70% 90% at 32% 30%,rgba(0,229,153,.10),rgba(0,229,153,0) 70%)}
+.top{position:absolute;left:56px;right:56px;top:40px;display:flex;align-items:center}
+.brand{display:flex;align-items:center;gap:14px}
+.brand img{width:44px;height:44px;filter:invert(1) brightness(0)}
+.brand b{display:block;font-weight:700;font-size:22px;color:var(--ink);letter-spacing:-.01em;line-height:1}
+.brand small{display:block;margin-top:5px;font-family:'JetBrains Mono',monospace;font-weight:500;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+.cta{margin-left:auto;display:inline-flex;align-items:center;gap:8px;padding:12px 22px;border-radius:999px;background:linear-gradient(180deg,#BDF8E4,#E0FCF3);border:1px solid #9ECBBC;color:var(--deep);font-weight:600;font-size:15px}
+h1{position:absolute;left:56px;top:126px;font-family:'Geist',sans-serif;font-weight:600;font-size:48px;letter-spacing:-.025em;line-height:1.08;color:var(--ink)}
+h1 em{font-style:italic;font-weight:500}
+.sub{position:absolute;left:56px;top:190px;font-size:19px;color:var(--muted)}
+.row{position:absolute;left:56px;right:56px;top:252px;display:flex;gap:16px}
+.f{flex:1;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px 18px 22px;box-shadow:0 8px 24px rgba(8,18,48,.05)}
+.ico{width:42px;height:42px;border-radius:50%;border:1px solid var(--border-strong);display:flex;align-items:center;justify-content:center;color:var(--deep)}
+.ico svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.f h3{margin-top:14px;font-weight:600;font-size:17px;color:var(--ink);letter-spacing:-.01em}
+.f p{margin-top:6px;font-size:14px;line-height:1.5;color:var(--text)}
+.foot{position:absolute;left:0;right:0;bottom:0;height:52px;background:var(--mist);border-top:1px solid var(--border);display:flex;align-items:center;justify-content:center;gap:28px;font-size:13.5px;color:var(--muted)}
+.foot i{width:4px;height:4px;border-radius:50%;background:var(--border-strong)}
+</style></head>
+<body><div class="card"><div class="scene"></div>
+<div class="top">
+ <div class="brand"><img src="helmet.webp" alt=""><div><b>RTK Pro</b><small>AI control layer</small></div></div>
+ <span class="cta">Discover RTK Pro <span>→</span></span>
+</div>
+<h1>Scale AI agents. <em>Stay in control.</em></h1>
+<p class="sub">The control layer for every AI agent in your company.</p>
+<div class="row">
+ <div class="f"><div class="ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="20" r="2"/><path d="M6.7 7.3l3.3 3M17.3 7.3l-3.3 3M12 15v3"/></svg></div><h3>Gateway</h3><p>Every AI call in one place, whichever provider. Spend by team, person and model. Budgets that warn, then stop.</p></div>
+ <div class="f"><div class="ico"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-3z"/><path d="M9.5 12l2 2 3.5-4"/></svg></div><h3>Shield</h3><p>Secrets and personal data masked before any model sees them.</p></div>
+ <div class="f"><div class="ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M6.5 6.5l11 11"/></svg></div><h3>Policies</h3><p>Risky commands stopped before they run.</p></div>
+ <div class="f"><div class="ico"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg></div><h3>Team catalog</h3><p>Skills, MCP servers and pipelines, assigned per team and project.</p></div>
+ <div class="f"><div class="ico"><svg viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="16" rx="2"/><path d="M9 9h6"/><path d="M9 13h6"/><path d="M9 17h4"/></svg></div><h3>Audit</h3><p>Who did what, and whether it was allowed. Every action on record.</p></div>
+</div>
+<div class="foot"><span>Runs on each developer's machine</span><i></i><span>Never a secret value leaves it</span><i></i><span>The CLI stays free and open source</span></div>
+</div></body></html>

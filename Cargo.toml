@@ -86,7 +86,7 @@ which = "8"
 # `rtk gain --watch`: a live full-screen dashboard over the same two SQLite
 # sources the static view reads (core::tracking + the llm-proxy's own DB).
 # Opt-in, not on the hot startup path -- doesn't affect the <10ms budget.
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.29"
 
 [target.'cfg(unix)'.dependencies]
