@@ -234,8 +234,7 @@ pub fn classify_command(cmd: &str) -> Classification {
         } else {
             cmd_normalized
         };
-    // Use the same Cargo prefix parser as execution; normalization is only
-    // for matching. Rewriting preserves the original command verbatim.
+    // Match on the canonical Cargo command, but emit the original shell text when rewriting.
     let cmd_normalized = normalize_cargo_command(&cmd_normalized);
     let cmd_clean = cmd_normalized.as_str();
 
@@ -460,15 +459,14 @@ fn strip_git_global_opts(cmd: &str) -> String {
 }
 
 fn normalize_cargo_command(cmd: &str) -> String {
-    if !cmd.starts_with("cargo ") {
-        return cmd.to_owned();
-    }
-    let words = shell_split(cmd);
-    if words.first().map(String::as_str) == Some("cargo")
-        && let Some(invocation) = crate::cmds::rust::cargo_cmd::CargoInvocation::parse(&words[1..])
-        && let Some(name) = invocation.command().as_str()
+    if cmd
+        .strip_prefix("cargo")
+        .is_some_and(|tail| tail.starts_with(char::is_whitespace))
     {
-        return format!("cargo {}", name);
+        let words = shell_split(cmd);
+        if let Some((command, _)) = crate::cmds::rust::cargo_cmd::CargoCommand::parse(&words[1..]) {
+            return format!("cargo {}", command.as_str());
+        }
     }
     cmd.to_owned()
 }
@@ -2110,6 +2108,13 @@ fn rewrite_segment_inner(
 /// Rewrite the command part of a segment (trailing redirects already split
 /// off) with `rule`, or `None` when this rule does not rewrite it.
 fn rewrite_command_part(rule: &RtkRule, cmd_part: &str) -> Option<String> {
+    if rule.rtk_cmd == "rtk cargo"
+        && cmd_part
+            .strip_prefix("cargo")
+            .is_some_and(|tail| tail.starts_with(char::is_whitespace))
+    {
+        return Some(format!("rtk {cmd_part}"));
+    }
     if rule.rtk_cmd == "rtk golangci-lint run"
         && let Some(parts) = parse_golangci_run_parts(cmd_part)
     {
@@ -3386,10 +3391,9 @@ mod tests {
 
     #[test]
     fn test_registry_covers_all_cargo_subcommands() {
-        // Every filtered Cargo subcommand and fmt passthrough has a rule.
-        for subcmd in [
-            "build", "test", "clippy", "check", "fmt", "install", "nextest", "b", "c", "t",
-        ] {
+        // Verify that every CargoCommand variant (Build, Test, Clippy, Check, Fmt)
+        // except Other has a matching pattern in the registry
+        for subcmd in ["build", "test", "clippy", "check", "fmt"] {
             let cmd = format!("cargo {subcmd}");
             match classify_command(&cmd) {
                 Classification::Supported { .. } => {}

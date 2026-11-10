@@ -1870,8 +1870,18 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let matches = rtk_command().try_get_matches_from(args)?;
-    <Cli as clap::FromArgMatches>::from_arg_matches(&matches)
+    let raw_args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let matches = rtk_command().try_get_matches_from(&raw_args)?;
+    let mut cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches)?;
+    if let Commands::Cargo { args } = &mut cli.command {
+        // A flat trailing-args field preserves -- after its first argument, but clap
+        // consumes a leading --. Restore that separator from the raw OS argv suffix.
+        let start = raw_args.len() - args.len();
+        if start > 0 && raw_args[start - 1] == "--" {
+            args.insert(0, OsString::from("--"));
+        }
+    }
+    Ok(cli)
 }
 
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
@@ -4055,9 +4065,19 @@ mod tests {
     fn test_cargo_cli_preserves_global_options_and_separators() {
         for args in [
             vec!["+stable", "--locked", "check"],
-            vec!["--config", "check", "t", "--", "--nocapture"],
-            vec!["+nightly", "-Z", "unstable-options", "-C", "some path", "c"],
+            vec!["--config", "check", "test", "--", "--nocapture"],
+            vec![
+                "+nightly",
+                "-Z",
+                "unstable-options",
+                "-C",
+                "some path",
+                "check",
+            ],
             vec!["+stable", "--help"],
+            vec!["--", "check"],
+            vec!["--", "--", "check"],
+            vec!["check", "--", "--nocapture"],
         ] {
             let cli = try_parse_cli_from(["rtk", "cargo"].into_iter().chain(args.iter().copied()))
                 .unwrap();

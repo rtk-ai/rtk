@@ -456,14 +456,16 @@ struct HelpSpelling {
 fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
     HelpSpelling {
         short_h: !matches!(stem, "psql" | "ls" | "tree" | "grep"),
-        dialect: match stem {
-            "dotnet" => Dialect::Msbuild,
-            _ => Dialect::Posix,
+        dialect: if stem == "dotnet" {
+            Dialect::Msbuild
+        } else {
+            Dialect::Posix
         },
         past_boundary: stem == "npx"
             || matches!(
                 (stem, first.unwrap_or_default()),
-                ("go", "test" | "run")
+                ("cargo", "test" | "bench" | "run" | "nextest")
+                    | ("go", "test" | "run")
                     | ("uv", "run")
                     | ("npm" | "pnpm" | "yarn" | "bun", "run" | "exec" | "test")
             ),
@@ -472,29 +474,36 @@ fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
 }
 
 fn asks_for_usage(stem: &str, args: &[String]) -> bool {
-    use crate::cmds::rust::cargo_cmd::CargoInvocation;
-
-    // Cargo's parser owns its help/version semantics; unclassified arguments stay
-    // unclassified here. The Cargo runner forwards unsupported invocations unchanged.
-    if stem == "cargo" {
-        return CargoInvocation::parse(args).is_some_and(|invocation| invocation.requests_usage());
-    }
+    // Cargo's prefix does not change the command's existing help/version semantics.
+    let args = if stem == "cargo"
+        && let Some((_, index)) = crate::cmds::rust::cargo_cmd::CargoCommand::parse(args)
+    {
+        &args[index..]
+    } else {
+        args
+    };
     let first = args.first().map(String::as_str);
     let spelling = help_spelling(stem, first);
-    let tokens = arg_tokenizer::tokenize_grammar(
+    let takes_value = |kind: TokenKind, name: &str| {
+        let cargo_install_version = stem == "cargo"
+            && first == Some("install")
+            && kind == TokenKind::Long
+            && name == "version";
+        let git_message = stem == "git"
+            && match kind {
+                TokenKind::Short => matches!(name, "m" | "F"),
+                TokenKind::Long => matches!(name, "message" | "file"),
+                _ => false,
+            };
+        (cargo_install_version || git_message).then(ValueSpec::value)
+    };
+    let tokens = arg_tokenizer::tokenize_grammar(args, &takes_value, spelling.dialect);
+    if names_usage(
+        arg_tokenizer::before_dashdash(&tokens),
         args,
-        &|kind, name| {
-            let git_message = stem == "git"
-                && match kind {
-                    TokenKind::Short => matches!(name, "m" | "F"),
-                    TokenKind::Long => matches!(name, "message" | "file"),
-                    _ => false,
-                };
-            git_message.then(ValueSpec::value)
-        },
-        spelling.dialect,
-    );
-    if names_usage(arg_tokenizer::before_dashdash(&tokens), args, &spelling) {
+        &spelling,
+        &takes_value,
+    ) {
         return true;
     }
     if !spelling.past_boundary {
@@ -508,7 +517,8 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
         return false;
     };
     let forwarded = &args[boundary + 1..];
-    let inner = arg_tokenizer::tokenize(forwarded);
+    let no_values = |_: TokenKind, _: &str| None::<ValueSpec>;
+    let inner = arg_tokenizer::tokenize_grammar(forwarded, &no_values, Dialect::Posix);
     names_usage(
         arg_tokenizer::before_dashdash(&inner),
         forwarded,
@@ -518,6 +528,7 @@ fn asks_for_usage(stem: &str, args: &[String]) -> bool {
             past_boundary: false,
             whole_arg: &[],
         },
+        &no_values,
     )
 }
 
@@ -525,6 +536,7 @@ fn names_usage(
     tokens: &[arg_tokenizer::Token<'_>],
     args: &[String],
     spelling: &HelpSpelling,
+    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
 ) -> bool {
     tokens.iter().any(|t| {
         let arg = args.get(t.source_index).map(String::as_str);
@@ -535,6 +547,8 @@ fn names_usage(
             TokenKind::Long => {
                 (matches!(t.text, "help" | "version" | "?") || (spelling.short_h && t.text == "h"))
                     && t.linked.is_none()
+                    // `--version=1.2.3` on a flag that carries a value names a version too.
+                    && (t.attached.is_none() || takes_value(t.kind, t.text).is_none())
             }
             TokenKind::Short => spelling.short_h && t.text == "h" && arg == Some("-h"),
             _ => false,
@@ -572,13 +586,11 @@ pub fn run(
     mode: RunMode<'_>,
     opts: RunOptions<'_>,
 ) -> Result<i32> {
-    // Passthrough already preserves native help; its arguments need no scan.
-    let mode =
-        if !matches!(&mode, RunMode::Passthrough) && !opts.unguarded_help && requests_help(&cmd) {
-            RunMode::Passthrough
-        } else {
-            mode
-        };
+    let mode = if !opts.unguarded_help && requests_help(&cmd) {
+        RunMode::Passthrough
+    } else {
+        mode
+    };
     let result = run_inner(cmd, tool_name, args_display, mode, opts);
     // #2375
     stream::die_by_relayed_signal();
@@ -1769,14 +1781,14 @@ mod requests_help_tests {
         assert!(!asks("pnpm", &["exec", "--", "vitest", "run"]));
     }
 
-    /// Tools using generic help detection, crossed with every position a meta token can take. The
+    /// Every tool RTK wraps, crossed with every position a meta token can take. The
     /// property is the boundary, not a table of answers: before `--` the token is a
     /// request, past it the tool is being asked to match on it.
     #[test]
     fn fuzz_the_boundary_decides_and_position_does_not() {
         const TOOLS: &[&str] = &[
-            "git", "go", "npm", "pnpm", "docker", "kubectl", "gh", "mvn", "tsc", "pip", "uv",
-            "dotnet", "rg", "psql", "ls", "tree", "grep", "find", "wc",
+            "cargo", "git", "go", "npm", "pnpm", "docker", "kubectl", "gh", "mvn", "tsc", "pip",
+            "uv", "dotnet", "rg", "psql", "ls", "tree", "grep", "find", "wc",
         ];
         const BASES: &[&[&str]] = &[
             &[],
@@ -1812,49 +1824,6 @@ mod requests_help_tests {
     }
 
     #[test]
-    fn cargo_global_options_and_aliases_preserve_help_detection() {
-        assert!(asks(
-            "cargo",
-            &[
-                "+nightly",
-                "-Z",
-                "unstable-options",
-                "-C",
-                "some path",
-                "t",
-                "--",
-                "--help"
-            ]
-        ));
-        assert!(asks("cargo", &["--locked", "test", "--", "-h"]));
-        assert!(!asks("cargo", &["--offline", "b", "--", "--help"]));
-        assert!(asks("cargo", &["--config", "--help", "check"]));
-        assert!(!asks("cargo", &["--config=--help", "check"]));
-        assert!(!asks(
-            "cargo",
-            &["+stable", "install", "ripgrep", "--version", "1.2.3"]
-        ));
-    }
-
-    #[test]
-    fn unsupported_cargo_arguments_are_not_reparsed_by_generic_help_detection() {
-        for args in [
-            vec!["metadata", "--help"],
-            vec!["+stable", "--config", "check", "metadata", "--help"],
-            vec!["metadata", "--config=--help"],
-            vec!["metadata", "--", "--help"],
-            vec!["bench", "--", "--help"],
-            vec!["run", "--", "--help"],
-            vec!["metadata", "-vh"],
-            vec!["metadata", "--h"],
-            vec!["custom", "--version", "1.2.3"],
-            vec!["--unknown", "check", "--help"],
-        ] {
-            assert!(!asks("cargo", &args), "{args:?}");
-        }
-    }
-
-    #[test]
     fn a_forwarded_boundary_is_another_programs_argv() {
         // `cargo test -- --help` is libtest's usage; an integration case for it would
         // rebuild this crate's test binaries, so it is pinned here.
@@ -1879,8 +1848,8 @@ mod requests_help_tests {
         ));
         assert!(!asks("cargo", &["install", "ripgrep", "--version=1.2.3"]));
         assert!(
-            !asks("cargo", &["install", "--version"]),
-            "a missing crate version is not a version request"
+            asks("cargo", &["install", "--version"]),
+            "alone it still asks"
         );
         assert!(asks("cargo", &["build", "--help=never"]));
         assert!(asks("prettier", &["--help=x"]));
@@ -1909,7 +1878,7 @@ mod requests_help_tests {
                 let _ = requests_help_args(tool, &owned);
             }
         }
-        assert!(requests_help_args("cargo", &["-hh".to_string()]));
+        assert!(!requests_help_args("cargo", &["-hh".to_string()]));
         // Case matters; tools spell it lowercase.
         assert!(!requests_help_args("cargo", &["--HELP".to_string()]));
     }
@@ -1964,8 +1933,8 @@ mod requests_help_tests {
     fn a_cluster_is_not_the_flag() {
         assert!(!asks("ls", &["-lh"]), "but -h is ls's own");
         assert!(
-            asks("cargo", &["-qh"]),
-            "Cargo recognizes help inside a short-option cluster"
+            !asks("cargo", &["-qh"]),
+            "inside a cluster the h is not the flag"
         );
         assert!(asks("git", &["log", "--help"]));
         assert!(!asks("git", &["log", "-5"]));

@@ -11,7 +11,7 @@
 /// What kind of unit a [`Token`] represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
-    /// The literal `--` separator. Emitted once per region, for the first `--` encountered. What it
+    /// The literal `--` separator. Emitted exactly once, for the first `--` encountered. What it
     /// does to the arguments after it is the dialect's [`DashDashRole`] axis.
     DashDash,
     /// `--name` (see `Token::text` for the name, without the leading `--`).
@@ -22,8 +22,8 @@ pub enum TokenKind {
     /// One character of a `-x` / `-xyz` short-option cluster (see `Token::text`, without the
     /// leading `-`). A run of only digits (`-20`) is a widely-used shorthand for a numeric
     /// value in its own right (git log/head/tail's `-N` count) rather than a cluster of
-    /// per-digit boolean flags, so dialects with [`Dialect::numeric_shortcut`] keep it as one
-    /// token. Clap instead treats each digit as an ordinary short-option character.
+    /// per-digit boolean flags, so it is kept as one `Short` token with the whole digit run as
+    /// `text`, never decomposed.
     Short,
 }
 
@@ -78,21 +78,6 @@ impl<'a> Token<'a> {
                 .and_then(|index| tokens.get(index))
                 .map(|token| token.text)
         })
-    }
-
-    /// Whether this short token occupies its whole argument, with neither
-    /// cluster members nor an attached value. A separate linked value is fine.
-    /// `tokens` must be the complete token list this token came from.
-    #[allow(dead_code)] // Available to tools whose short flags cannot be clustered.
-    pub fn is_standalone_short(&self, tokens: &[Token<'_>]) -> bool {
-        self.kind == TokenKind::Short
-            && self.attached.is_none()
-            && tokens
-                .iter()
-                .filter(|t| t.source_index == self.source_index)
-                .take(2)
-                .count()
-                == 1
     }
 
     /// True for a genuine free-standing positional: `Positional` kind, not itself consumed as
@@ -217,7 +202,7 @@ fn is_double_dash_flag(t: &Token<'_>, dialect: Dialect, name: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SingleDash {
     /// A cluster of one-character flags, scanned char by char (`-rn` is `-r -n`). A run of only
-    /// digits can be exempt — see [`Dialect::numeric_shortcut`]. git, rg, golangci-lint, gradle.
+    /// digits is exempt — see [`TokenKind::Short`]. git, cargo, rg, golangci-lint, gradle.
     Cluster,
     /// One atomic flag name, distinct from its `--` spelling. dotnet's legacy MSBuild switches,
     /// maven's `-pl`/`-gs`/`-amd`. Tagged `TokenKind::Long` despite the single dash — these are
@@ -281,43 +266,18 @@ pub struct Dialect {
     pub name_case: NameCase,
     /// Whether `/flag` is a switch spelling (MSBuild's own) rather than a path.
     pub slash_flags: bool,
-    /// Whether a digit-only short argument (`-20`) stays one token instead of clustering.
-    pub numeric_shortcut: bool,
-    /// Whether `-ovalue` and `-o=value` both attach `value` to a value-taking short option.
-    pub short_value_equals: bool,
-    /// Default for separate values beginning with `-` (except a lone `-` and the `--`
-    /// boundary). [`ValueSpec::allow_hyphen_values`] can opt in when this is false.
-    pub allow_hyphen_values: bool,
 }
 
 // Presets read as grammar names at their call sites, not as constants.
 #[allow(non_upper_case_globals)]
 impl Dialect {
-    /// GNU/POSIX-ish: git, rg, golangci-lint.
+    /// GNU/POSIX-ish: git, cargo, rg, golangci-lint.
     pub const Posix: Self = Self {
         single_dash: SingleDash::Cluster,
         attach: Attach::Equals,
         dash_dash: DashDashRole::EndsOptions,
         name_case: NameCase::Sensitive,
         slash_flags: false,
-        numeric_shortcut: true,
-        short_value_equals: false,
-        allow_hyphen_values: true,
-    };
-
-    /// Clap's default option syntax: ordinary short clusters (including digits),
-    /// `-o=value` as well as `-ovalue`, and no separate dash-prefixed values by default.
-    /// A lone `-` is still a value; `--` ends option recognition.
-    ///
-    /// This is a tokenizer, not Clap's command parser. The caller supplies option arities;
-    /// subcommands, validation, value delimiters, and multiple values per occurrence are not
-    /// modeled here. `require_equals` is not implied by this preset.
-    /// <https://docs.rs/clap/4.6.7/clap/_concepts/index.html#argument-parsing>
-    pub const Clap: Self = Self {
-        numeric_shortcut: false,
-        short_value_equals: true,
-        allow_hyphen_values: false,
-        ..Self::Posix
     };
 
     /// MSBuild/dotnet-CLI-ish. `-flag`, `--flag` and `/flag` are all one atomic flag name, so
@@ -328,7 +288,6 @@ impl Dialect {
         dash_dash: DashDashRole::Forwards,
         name_case: NameCase::Folded,
         slash_flags: true,
-        ..Self::Posix
     };
 
     /// Apache commons-cli: POSIX, except that a short option is a whole multi-character word
@@ -385,9 +344,6 @@ pub struct ValueSpec {
     /// end-of-options boundary. A per-tool split, confirmed against each: grep and rg let any
     /// value-taking flag swallow it, git and cargo reject it whichever flag is asking.
     pub claims_dash_dash: bool,
-    /// Accept any separate dash-prefixed value even when the dialect rejects them by
-    /// default. Use the builder to also let this option consume a literal `--`.
-    pub allow_hyphen_values: bool,
 }
 
 impl ValueSpec {
@@ -397,7 +353,6 @@ impl ValueSpec {
         Self {
             attachment: Attachment::AttachedOrSeparate { solo_only: false },
             claims_dash_dash: false,
-            allow_hyphen_values: false,
         }
     }
 
@@ -406,7 +361,6 @@ impl ValueSpec {
         Self {
             attachment: Attachment::AttachedOnly,
             claims_dash_dash: false,
-            allow_hyphen_values: false,
         }
     }
 
@@ -416,25 +370,12 @@ impl ValueSpec {
         Self {
             attachment: Attachment::AttachedOrSeparate { solo_only: true },
             claims_dash_dash: false,
-            allow_hyphen_values: false,
         }
     }
 
     /// Lets a literal `--` be this flag's value instead of the end-of-options boundary.
     pub const fn claiming_dash_dash(self) -> Self {
         Self {
-            claims_dash_dash: true,
-            ..self
-        }
-    }
-
-    /// Like Clap's `Arg::allow_hyphen_values(true)`: an option waiting for a value consumes
-    /// even a known flag or a literal `--`. Attached values are unrestricted already.
-    /// <https://docs.rs/clap/4.6.7/clap/struct.Arg.html#method.allow_hyphen_values>
-    #[allow(dead_code)] // Supported override; Cargo's current option subset uses the default.
-    pub const fn allow_hyphen_values(self) -> Self {
-        Self {
-            allow_hyphen_values: true,
             claims_dash_dash: true,
             ..self
         }
@@ -466,132 +407,38 @@ pub fn tokenize_grammar<'a, T: AsRef<str>>(
     tokenize_scan(args, dialect, takes_value)
 }
 
-/// Batch control for an option, free positional, or separator, independent of its value rule.
-/// Separately consumed values do not invoke the callback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenAction {
-    Continue,
-    /// Include the current argument, finish its cluster and any separate option value,
-    /// then return the batch. The next call starts at the following argument.
-    Stop,
-}
-
-/// Where [`Tokenizer::parse_while`] finished after applying the parser's semantic updates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParseBoundary<'a> {
-    EndOfInput,
-    /// The parser requested a stop on this free positional, which is included in the parse.
-    Positional(&'a str),
-    /// The parser requested a stop on the `--` separator, which has been consumed.
-    DashDash,
-    /// The parser requested a stop on an option.
-    Stopped,
-}
-
-/// A destination that interprets option heads, free positionals and separators.
-/// `None` means this parser did not recognize the token; it can be offered to another parser.
-/// An unrecognized token at the tokenizer boundary continues without consuming a separate value.
-pub trait ParameterParser<'a> {
-    /// Return the batch action and, independently, the option's value-consumption rule.
-    /// Tokenization calls this with `None`; short attached and separate values are not resolved yet.
-    /// Callers use scratch state for that pass, then call the same method on their real
-    /// destination with [`Token::value`] from the returned batch. Consumed values are read
-    /// through their owners rather than passed to the parser as independent positionals.
-    fn parse_parameter(
-        &mut self,
-        token: &Token<'a>,
-        value: Option<&'a str>,
-    ) -> Option<(TokenAction, Option<ValueSpec>)>;
-}
-
-impl<'a> ParameterParser<'a> for () {
-    fn parse_parameter(
-        &mut self,
-        _token: &Token<'a>,
-        _value: Option<&'a str>,
-    ) -> Option<(TokenAction, Option<ValueSpec>)> {
-        None
-    }
-}
-
-/// Adapt a syntax-only callback to the parser interface. Its callback sees token heads
-/// before their values are resolved, following the original [`Tokenizer::tokenize_while`] contract.
-pub fn syntax_callback<'a, F>(callback: F) -> impl ParameterParser<'a>
-where
-    F: FnMut(&Token<'a>) -> (TokenAction, Option<ValueSpec>),
-{
-    SyntaxCallback(callback)
-}
-
-struct SyntaxCallback<F>(F);
-
-impl<'a, F> ParameterParser<'a> for SyntaxCallback<F>
-where
-    F: FnMut(&Token<'a>) -> (TokenAction, Option<ValueSpec>),
-{
-    fn parse_parameter(
-        &mut self,
-        token: &Token<'a>,
-        _value: Option<&'a str>,
-    ) -> Option<(TokenAction, Option<ValueSpec>)> {
-        Some((self.0)(token))
-    }
-}
-
-/// Resumable batch tokenizer. Callers can change the grammar between batches.
-/// Source indices address the original invocation; links address the returned batch.
-pub struct Tokenizer<'a, T> {
+/// Groups the mutable scan state threaded through [`tokenize_scan`]'s helper methods
+/// (`push_atomic_flag`/`link_next_value`), so a future piece of shared state means adding one
+/// field instead of a parameter to every helper and every call site.
+struct Scanner<'a, 'p, T> {
     tokens: Vec<Token<'a>>,
     args: &'a [T],
     i: usize,
     dialect: Dialect,
     emitted_dash_dash: bool,
-    stop_requested: bool,
+    takes_value: &'p dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
 }
 
-impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
-    fn push_token<P: ParameterParser<'a> + ?Sized>(
-        &mut self,
-        token: Token<'a>,
-        parser: &mut P,
-    ) -> Option<ValueSpec> {
-        let (action, value_spec) = parser
-            .parse_parameter(&token, None)
-            .unwrap_or((TokenAction::Continue, None));
-        self.tokens.push(token);
-        if action == TokenAction::Stop {
-            self.stop_requested = true;
-        }
-        value_spec
-    }
-
+impl<'a, 'p, T: AsRef<str>> Scanner<'a, 'p, T> {
     /// Pushes one atomic (non-clustering) flag token — used for `--flag` in every dialect, and
     /// for `-flag`/`/flag` where the dialect says so. `rest` is the flag text with its prefix
     /// already stripped; `prefix` records which one it was. Only the `/flag` spelling is barred
     /// from consuming a separate value: an MSBuild switch attaches its value with `:`
     /// (`/bl:x.binlog`), so `/r` (MSBuild's `restore`) must not swallow the token after it the
     /// way dotnet's own `-r <rid>` does.
-    fn push_atomic_flag<P: ParameterParser<'a> + ?Sized>(
-        &mut self,
-        rest: &'a str,
-        prefix: FlagPrefix,
-        parser: &mut P,
-    ) {
+    fn push_atomic_flag(&mut self, rest: &'a str, prefix: FlagPrefix) {
         let (name, attached) = split_attached(rest, self.dialect);
         let flag_index = self.tokens.len();
         let source_index = self.i;
-        let value_spec = self.push_token(
-            Token {
-                attached,
-                ..token(TokenKind::Long, name, source_index, prefix)
-            },
-            parser,
-        );
+        self.tokens.push(Token {
+            attached,
+            ..token(TokenKind::Long, name, source_index, prefix)
+        });
         self.i += 1;
 
         if attached.is_none() && prefix != FlagPrefix::Slash {
             // `solo_only` cannot apply here: a Long flag is always the whole argument.
-            if let Some(spec) = value_spec
+            if let Some(spec) = (self.takes_value)(TokenKind::Long, name)
                 && spec.attachment != Attachment::AttachedOnly
                 && self.link_next_value(flag_index, self.i, spec)
             {
@@ -611,14 +458,6 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
         if next.as_ref() == "--" && !self.emitted_dash_dash && !spec.claims_dash_dash {
             return false;
         }
-        if next.as_ref() != "--"
-            && next.as_ref() != "-"
-            && next.as_ref().starts_with('-')
-            && !self.dialect.allow_hyphen_values
-            && !spec.allow_hyphen_values
-        {
-            return false;
-        }
         let token_index = self.tokens.len();
         self.tokens.push(Token {
             linked: Some(flag_index),
@@ -629,117 +468,51 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
     }
 }
 
-impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
-    pub fn new(args: &'a [T], dialect: Dialect) -> Self {
-        Self {
-            tokens: Vec::with_capacity(args.len()),
-            args,
-            i: 0,
-            dialect,
-            emitted_dash_dash: false,
-            stop_requested: false,
-        }
-    }
+/// Core implementation shared by both public entry points.
+fn tokenize_scan<'a, T: AsRef<str>>(
+    args: &'a [T],
+    dialect: Dialect,
+    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+) -> Vec<Token<'a>> {
+    let mut scanner = Scanner {
+        tokens: Vec::with_capacity(args.len()),
+        args,
+        i: 0,
+        dialect,
+        emitted_dash_dash: false,
+        takes_value,
+    };
 
-    /// Begin a forwarded program's grammar at the current cursor. A later `--` belongs to
-    /// the new region; tokens already returned remain intact.
-    pub fn begin_region(&mut self, dialect: Dialect) {
-        self.dialect = dialect;
-        self.emitted_dash_dash = false;
-    }
+    while scanner.i < scanner.args.len() {
+        let arg = scanner.args[scanner.i].as_ref();
 
-    /// Tokenize while the parser permits continuation, finishing the argument that requests
-    /// [`TokenAction::Stop`], or reaching the end of input. An empty batch means input is exhausted.
-    ///
-    /// The parser sees each option, free positional and separator with `value: None`.
-    /// It supplies the rule before short attached and separate values are resolved. Option/value
-    /// pairs and short clusters are never split. Supply this batch to [`Token::value`].
-    /// The cursor and `--` state survive calls; only [`Self::begin_region`] resets that state.
-    pub fn tokenize_while<P: ParameterParser<'a> + ?Sized>(
-        &mut self,
-        parser: &mut P,
-    ) -> Vec<Token<'a>> {
-        self.stop_requested = false;
-        while self.i < self.args.len() {
-            self.scan_argument(parser);
-            if self.stop_requested {
-                break;
-            }
-        }
-        std::mem::take(&mut self.tokens)
-    }
-
-    /// Fill the destination while the parser permits continuation, using resolved option values.
-    /// Return after the first stop request's argument or at the end of input.
-    /// Each complete argument is tokenized with a scratch clone of the current destination,
-    /// then replayed on the real destination. Consumed value tokens are read through their
-    /// owners. Stops finish the current cluster and its values before returning, so the cursor
-    /// and `--` state also remain correct when the stop depends on a resolved value.
-    pub fn parse_while<P: ParameterParser<'a> + Clone>(
-        &mut self,
-        destination: &mut P,
-    ) -> ParseBoundary<'a> {
-        while self.i < self.args.len() {
-            let mut scratch = destination.clone();
-            self.stop_requested = false;
-            self.scan_argument(&mut scratch);
-            let mut boundary = None;
-            for token in &self.tokens {
-                if token.kind == TokenKind::Positional && !token.is_free_positional() {
-                    continue;
-                }
-                if let Some((TokenAction::Stop, _)) =
-                    destination.parse_parameter(token, token.value(&self.tokens))
-                    && boundary.is_none()
-                {
-                    boundary = Some(if token.is_free_positional() {
-                        ParseBoundary::Positional(token.text)
-                    } else if token.kind == TokenKind::DashDash {
-                        ParseBoundary::DashDash
-                    } else {
-                        ParseBoundary::Stopped
-                    });
-                }
-            }
-            self.tokens.clear();
-            if let Some(boundary) = boundary {
-                return boundary;
-            }
-        }
-        ParseBoundary::EndOfInput
-    }
-
-    fn scan_argument<P: ParameterParser<'a> + ?Sized>(&mut self, parser: &mut P) {
-        let arg = self.args[self.i].as_ref();
-
-        if self.emitted_dash_dash && !self.dialect.classifies_past_dash_dash() {
-            self.push_token(positional(arg, self.i), parser);
-            self.i += 1;
-            return;
+        if scanner.emitted_dash_dash && !scanner.dialect.classifies_past_dash_dash() {
+            scanner.tokens.push(positional(arg, scanner.i));
+            scanner.i += 1;
+            continue;
         }
 
         if arg == "--" {
-            if self.emitted_dash_dash {
+            if scanner.emitted_dash_dash {
                 // A second (or later) literal "--" is never itself the boundary — it's just
                 // ordinary text at this point, under every dialect.
-                self.push_token(positional(arg, self.i), parser);
+                scanner.tokens.push(positional(arg, scanner.i));
             } else {
-                self.push_token(
-                    token(TokenKind::DashDash, "", self.i, FlagPrefix::Dash),
-                    parser,
-                );
-                self.emitted_dash_dash = true;
+                scanner
+                    .tokens
+                    .push(token(TokenKind::DashDash, "", scanner.i, FlagPrefix::Dash));
+                scanner.emitted_dash_dash = true;
             }
-            self.i += 1;
-            return;
+            scanner.i += 1;
+            continue;
         }
 
         if let Some(rest) = arg.strip_prefix("--") {
-            self.push_atomic_flag(rest, FlagPrefix::DashDash, parser);
-            return;
+            scanner.push_atomic_flag(rest, FlagPrefix::DashDash);
+            continue;
         }
 
-        if self.dialect.slash_flags
+        if scanner.dialect.slash_flags
             && let Some(rest) = arg.strip_prefix('/')
         {
             // A real MSBuild switch name never contains another '/' -- without this guard,
@@ -748,60 +521,56 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
             // genuine switch by structure alone; this pure function has no I/O to resolve it
             // the way real MSBuild does (a filesystem check), but the impact is narrow --
             // only the loose flag lookup ([`has_flag`]) is affected.
-            let (name_part, _) = split_attached(rest, self.dialect);
+            let (name_part, _) = split_attached(rest, scanner.dialect);
             if !rest.is_empty() && !name_part.contains('/') {
-                self.push_atomic_flag(rest, FlagPrefix::Slash, parser);
-                return;
+                scanner.push_atomic_flag(rest, FlagPrefix::Slash);
+                continue;
             }
         }
 
         if arg.len() > 1 && arg.starts_with('-') {
-            if self.dialect.single_dash_is_atomic() {
+            if scanner.dialect.single_dash_is_atomic() {
                 // Under `AtomicAliasingLong` the single-dash spelling *is* the `--` flag, so it
                 // has to answer to `has_double_dash_flag` as well.
-                let prefix = match self.dialect.single_dash {
+                let prefix = match scanner.dialect.single_dash {
                     SingleDash::AtomicAliasingLong => FlagPrefix::DashDash,
                     SingleDash::Cluster | SingleDash::Atomic => FlagPrefix::Dash,
                 };
-                self.push_atomic_flag(&arg[1..], prefix, parser);
-                return;
+                scanner.push_atomic_flag(&arg[1..], prefix);
+                continue;
             }
 
             let cluster = &arg[1..];
 
-            if self.dialect.numeric_shortcut && is_digit_run(cluster) {
-                self.push_token(
-                    token(TokenKind::Short, cluster, self.i, FlagPrefix::Dash),
-                    parser,
-                );
-                self.i += 1;
-                return;
+            if is_digit_run(cluster) {
+                scanner.tokens.push(token(
+                    TokenKind::Short,
+                    cluster,
+                    scanner.i,
+                    FlagPrefix::Dash,
+                ));
+                scanner.i += 1;
+                continue;
             }
 
             let mut consumed_next = false;
-            let source_index = self.i;
+            let source_index = scanner.i;
 
             for (offset, ch) in cluster.char_indices() {
                 let char_len = ch.len_utf8();
                 let char_text = &cluster[offset..offset + char_len];
-                let flag_index = self.tokens.len();
-                let value_spec = self.push_token(
-                    token(TokenKind::Short, char_text, source_index, FlagPrefix::Dash),
-                    parser,
-                );
+                let flag_index = scanner.tokens.len();
+                scanner.tokens.push(token(
+                    TokenKind::Short,
+                    char_text,
+                    source_index,
+                    FlagPrefix::Dash,
+                ));
 
-                if let Some(spec) = value_spec {
+                if let Some(spec) = (scanner.takes_value)(TokenKind::Short, char_text) {
                     let remainder = &cluster[offset + char_len..];
                     if !remainder.is_empty() {
-                        // Clap's parse_short_arg strips exactly one '=' for a value-taking
-                        // option; a boolean flag does not claim the rest of its cluster.
-                        // https://github.com/clap-rs/clap/blob/v4.6.7/clap_builder/src/parser/parser.rs#L969-L987
-                        self.tokens[flag_index].attached =
-                            Some(if self.dialect.short_value_equals {
-                                remainder.strip_prefix('=').unwrap_or(remainder)
-                            } else {
-                                remainder
-                            });
+                        scanner.tokens[flag_index].attached = Some(remainder);
                     } else {
                         // is_solo: offset == 0 with an empty remainder means this char is the
                         // *entire* cluster (the arg was e.g. just "-n"); a later offset, or any
@@ -813,43 +582,22 @@ impl<'a, T: AsRef<str>> Tokenizer<'a, T> {
                         };
                         if takes_separate {
                             consumed_next =
-                                self.link_next_value(flag_index, source_index + 1, spec);
+                                scanner.link_next_value(flag_index, source_index + 1, spec);
                         }
                     }
                     break;
                 }
             }
 
-            self.i += if consumed_next { 2 } else { 1 };
-            return;
+            scanner.i += if consumed_next { 2 } else { 1 };
+            continue;
         }
 
-        self.push_token(positional(arg, self.i), parser);
-        self.i += 1;
+        scanner.tokens.push(positional(arg, scanner.i));
+        scanner.i += 1;
     }
-}
 
-/// Core implementation shared by both batch entry points.
-fn tokenize_scan<'a, T: AsRef<str>>(
-    args: &'a [T],
-    dialect: Dialect,
-    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
-) -> Vec<Token<'a>> {
-    let mut tokenizer = Tokenizer::new(args, dialect);
-    tokenizer.tokenize_while(&mut syntax_callback(|token| {
-        // Preserve the batch callback contract: it is an arity lookup, so it is not
-        // called for positionals, separators, atomic attached values or slash switches.
-        let value = match token.kind {
-            TokenKind::Long if token.attached.is_none() && !token.slash => {
-                takes_value(token.kind, token.text)
-            }
-            TokenKind::Short if !(dialect.numeric_shortcut && is_digit_run(token.text)) => {
-                takes_value(token.kind, token.text)
-            }
-            _ => None,
-        };
-        (TokenAction::Continue, value)
-    }))
+    scanner.tokens
 }
 
 /// Splits `s` into `(name, attached_value)` on the first separator allowed by the dialect's
@@ -900,46 +648,11 @@ mod frozen;
 mod differential;
 
 #[cfg(test)]
-mod clap_tests;
-
-#[cfg(test)]
-#[path = "arg_tokenizer/batch_tests.rs"]
-mod batch_tests;
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
     fn owned(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn standalone_short_flags_are_distinct_from_clusters_and_values() {
-        for (args, expected) in [
-            (vec!["-h"], true),
-            (vec!["-vh"], false),
-            (vec!["-hh"], false),
-            (vec!["-h=value"], false),
-        ] {
-            let tokens = tokenize(&args);
-            for token in tokens
-                .iter()
-                .filter(|t| t.kind == TokenKind::Short && t.text == "h")
-            {
-                assert_eq!(token.is_standalone_short(&tokens), expected, "{args:?}");
-            }
-        }
-        let args = ["-C", "some path"];
-        let tokens = tokenize_grammar(
-            &args,
-            &|kind, name| (kind == TokenKind::Short && name == "C").then(ValueSpec::value),
-            Dialect::Posix,
-        );
-        assert!(tokens[0].is_standalone_short(&tokens));
-        assert!(!tokens[1].is_standalone_short(&tokens));
-        let tokens = tokenize(&["--help", "help"]);
-        assert!(tokens.iter().all(|t| !t.is_standalone_short(&tokens)));
     }
 
     #[test]

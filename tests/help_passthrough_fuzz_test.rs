@@ -154,13 +154,6 @@ const CASES: &[Case] = &[
         tool: "cargo",
         native_args: &["test", "--help"],
     },
-    // Clap does not consume a separate option as --color's value. Preserve its
-    // missing-value diagnostic rather than treating --help as a color string.
-    Case {
-        rtk_args: &["cargo", "check", "--color", "--help"],
-        tool: "cargo",
-        native_args: &["check", "--color", "--help"],
-    },
     Case {
         rtk_args: &["cargo", "clippy", "--help"],
         tool: "cargo",
