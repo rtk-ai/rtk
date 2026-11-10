@@ -216,7 +216,8 @@ const MAX_SCHEMA_KEYS: usize = 16;
 /// Render `value` as a compact schema (`{a:int,b:{c:string}}`), with no
 /// indentation or newlines. On real payloads that is far smaller than the
 /// input; a short string value or a small array can still cost a few bytes
-/// more (`"a":"b"` becomes `a:string`).
+/// more (`"a":"b"` becomes `a:string`). Arrays show the first element's
+/// schema and explicitly flag differences within the requested depth.
 fn extract_schema(value: &Value, depth: usize, max_depth: usize) -> String {
     if depth > max_depth {
         return "...".to_string();
@@ -252,6 +253,16 @@ fn extract_schema(value: &Value, depth: usize, max_depth: usize) -> String {
                 let first_schema = extract_schema(&arr[0], depth + 1, max_depth);
                 if arr.len() == 1 {
                     format!("[{}]", first_schema)
+                } else if arr
+                    .iter()
+                    .skip(1)
+                    .any(|item| extract_schema(item, depth + 1, max_depth) != first_schema)
+                {
+                    format!(
+                        "[{}] ({}; mixed schemas, first shown)",
+                        first_schema,
+                        arr.len()
+                    )
                 } else {
                     format!("[{}] ({})", first_schema, arr.len())
                 }
@@ -352,6 +363,53 @@ mod tests {
         let schema = extract_schema(&json, 0, 5);
         assert!(schema.contains("items"));
         assert!(schema.contains("(3)"));
+    }
+
+    #[test]
+    fn test_keys_only_marks_heterogeneous_arrays() {
+        for (raw, expected) in [
+            (
+                r#"[{"a":1},{"b":"x","c":2}]"#,
+                "[{a:int}] (2; mixed schemas, first shown)",
+            ),
+            (
+                r#"[{"a":1},{"a":2},{"b":3}]"#,
+                "[{a:int}] (3; mixed schemas, first shown)",
+            ),
+            (
+                r#"[null,{"a":1}]"#,
+                "[null] (2; mixed schemas, first shown)",
+            ),
+            (
+                r#"{"items":[{"nested":{"a":1}},{"nested":{"b":2}}]}"#,
+                "{items:[{nested:{a:int}}] (2; mixed schemas, first shown)}",
+            ),
+        ] {
+            assert_eq!(render_json(raw, 5, true).unwrap(), expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn test_keys_only_homogeneous_arrays_stay_compact() {
+        for (raw, expected) in [
+            ("[]", "[]"),
+            ("[1]", "[int]"),
+            ("[1,2,3]", "[int] (3)"),
+            (r#"[{"a":1},{"a":2}]"#, "[{a:int}] (2)"),
+        ] {
+            assert_eq!(render_json(raw, 5, true).unwrap(), expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn test_keys_only_array_schema_comparison_respects_depth() {
+        let raw = r#"[{"nested":{"a":1}},{"nested":{"b":2}}]"#;
+        assert_eq!(render_json(raw, 0, true).unwrap(), "[...] (2)");
+        assert_eq!(render_json(raw, 1, true).unwrap(), "[{nested:...}] (2)");
+        assert_eq!(
+            render_json(raw, 2, true).unwrap(),
+            "[{nested:{a:...}}] (2; mixed schemas, first shown)"
+        );
     }
 
     fn assert_value_truncated(payload: &str) {
