@@ -19,7 +19,7 @@ rtk init --agent hermes --profile work --profile prod
 rtk init --agent hermes --profile all
 ```
 
-The installer writes the plugin to `~/.hermes/plugins/rtk-rewrite/` (shared by all profiles) and enables it through `plugins.enabled` in the Hermes configuration. When `--profile` is omitted, the default config (`~/.hermes/config.yaml`) is modified. If a named profile directory does not exist, RTK alerts you with the available profiles.
+The installer writes the plugin to `~/.hermes/plugins/rtk-rewrite/` (for the default profile) or `~/.hermes/profiles/<name>/plugins/rtk-rewrite/` (for named profiles) and enables it through `plugins.enabled` in the Hermes configuration. When `--profile` is omitted, the default config (`~/.hermes/config.yaml`) is modified. If a named profile directory does not exist, RTK alerts you with the available profiles.
 
 ## Uninstallation
 
@@ -27,10 +27,10 @@ The installer writes the plugin to `~/.hermes/plugins/rtk-rewrite/` (shared by a
 # Remove plugin and unpatch default config:
 rtk init --uninstall --agent hermes
 
-# Unpatch specific profile (keeps shared plugin for other profiles):
+# Unpatch specific profile and remove its profile plugin:
 rtk init --uninstall --agent hermes --profile work
 
-# Unpatch default config and all profiles, removing plugin:
+# Unpatch default config and all profiles, removing all plugins:
 rtk init --uninstall --agent hermes --profile all
 ```
 

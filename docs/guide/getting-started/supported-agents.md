@@ -211,14 +211,14 @@ rtk init --agent hermes --profile work,prod    # multiple named profiles
 rtk init --agent hermes --profile all          # default config and all profiles in ~/.hermes/profiles/
 ```
 
-Creates `~/.hermes/plugins/rtk-rewrite/` (shared by all profiles) and enables it through `plugins.enabled` in the Hermes config. By default, the top-level `~/.hermes/config.yaml` is patched. Use `--profile <name>` (or multiple names comma-separated / repeated) to patch specific profiles under `~/.hermes/profiles/<name>/config.yaml`, or `--profile all` to patch the default configuration and every discovered profile. If a specified profile directory does not exist, RTK alerts you with the available profiles.
+Creates the plugin directory (`~/.hermes/plugins/rtk-rewrite/` for the default profile, or `~/.hermes/profiles/<name>/plugins/rtk-rewrite/` for named profiles) and enables it through `plugins.enabled` in the Hermes config. By default, the top-level `~/.hermes/config.yaml` is patched. Use `--profile <name>` (or multiple names comma-separated / repeated) to patch specific profiles, or `--profile all` to patch the default configuration and every discovered profile. If a specified profile directory does not exist, RTK alerts you with the available profiles.
 
 Uninstall:
 
 ```bash
-rtk init --uninstall --agent hermes                # remove plugin and unpatch default config
-rtk init --uninstall --agent hermes --profile work # unpatch specific profile (keeps shared plugin)
-rtk init --uninstall --agent hermes --profile all  # unpatch all profiles and remove plugin
+rtk init --uninstall --agent hermes                # remove default plugin and unpatch default config
+rtk init --uninstall --agent hermes --profile work # unpatch specific profile and remove its profile plugin
+rtk init --uninstall --agent hermes --profile all  # unpatch all profiles and remove all plugins
 ```
 
 The plugin fails open. If `rtk` is missing at load time, the hook is not registered. If `rtk rewrite` errors, the tool is not `terminal`, the payload has no string `command`, or the plugin raises an exception, Hermes runs the original command unchanged. The same `rtk rewrite` limitations apply: already-prefixed `rtk` commands, compound shell commands, heredocs, and commands without filters are not rewritten.
