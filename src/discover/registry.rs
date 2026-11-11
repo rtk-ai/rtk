@@ -2438,6 +2438,14 @@ fn rewrite_powershell_cmdlet(cmd_part: &str, redirect_suffix: &str) -> Option<St
         return None;
     }
     let (cmdlet, _, _) = args.first().copied()?;
+    let reads_paths = ["Get-Content", "gc", "Get-ChildItem", "gci"]
+        .iter()
+        .any(|name| cmdlet.eq_ignore_ascii_case(name));
+    // The shell lexer treats bare glob characters as shellisms and omits them
+    // from the Arg tokens above. PowerShell must expand the original pattern.
+    if reads_paths && cmd_part.contains(['*', '?', '[', ']']) {
+        return None;
+    }
     if cmdlet.eq_ignore_ascii_case("Get-Content") || cmdlet.eq_ignore_ascii_case("gc") {
         return rewrite_powershell_get_content(&args, redirect_suffix);
     }
@@ -2459,6 +2467,12 @@ fn is_powershell_cmdlet(cmd_part: &str) -> bool {
         cmdlet.to_ascii_lowercase().as_str(),
         "get-content" | "gc" | "select-string" | "sls" | "get-childitem" | "gci"
     )
+}
+
+fn is_powershell_provider_path(token: &str) -> bool {
+    let path = token.trim_matches(['\'', '"']);
+    path.split_once(':')
+        .is_some_and(|(drive, _)| drive.len() != 1 || !drive.as_bytes()[0].is_ascii_alphabetic())
 }
 
 fn rewrite_powershell_get_content(
@@ -2487,6 +2501,17 @@ fn rewrite_powershell_get_content(
     }
 
     if paths.is_empty() {
+        return None;
+    }
+
+    if paths.iter().any(|path| {
+        let unquoted = path.trim_matches(['\'', '"']).to_ascii_lowercase();
+        // Batch files commonly use a legacy code page. `rtk read` preserves
+        // raw bytes, while Get-Content decodes them using its host's defaults.
+        is_powershell_provider_path(path)
+            || unquoted.ends_with(".bat")
+            || unquoted.ends_with(".cmd")
+    }) {
         return None;
     }
 
@@ -2586,6 +2611,10 @@ fn rewrite_powershell_get_child_item(
         i += 1;
     }
 
+    // Env:, Registry: and custom PSDrives do not name filesystem paths.
+    if paths.iter().any(|path| is_powershell_provider_path(path)) {
+        return None;
+    }
     output_args.extend(paths);
     let args = output_args.join(" ");
     if args.is_empty() {
@@ -9648,6 +9677,56 @@ mod tests {
                 status: RtkStatus::Existing
             }
         );
+    }
+
+    #[test]
+    fn test_runlog_powershell_path_providers_passthrough() {
+        for command in [
+            "Get-ChildItem Env:ANDROID*",
+            "Get-ChildItem Env:ANDROID_HOME",
+            "gci 'HKLM:\\Software'",
+            "Get-Content Env:PATH",
+            "Get-ChildItem -LiteralPath 'Project:\\source'",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "PowerShell owns provider resolution: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_runlog_powershell_path_batch_decoding_passthrough() {
+        for command in [
+            "Get-Content -LiteralPath 'start_all.bat'",
+            "Get-Content -Path 'START_ALL.BAT'",
+            "gc build.cmd",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "PowerShell owns legacy batch text decoding: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_runlog_powershell_path_wildcards_passthrough() {
+        for command in [
+            "Get-Content .work/local-backend-20261104/staging/module-header-fastpath-next/*.patch",
+            "Get-Content '*.patch'",
+            "gc src/file[12].rs",
+            "Get-Content -Path 'file?.txt'",
+            "Get-ChildItem src/*",
+            "gci -Recurse 'src/[ab]*'",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "PowerShell owns wildcard expansion: {command}"
+            );
+        }
     }
 
     #[test]
