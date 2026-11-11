@@ -11,8 +11,7 @@ publish = false
 [dependencies]
 rtk-engine = { path = "../engine" }
 
-[lints.rust]
-unsafe_code = "deny"
-warnings = "deny"
+[lints]
+workspace = true
 
 [dev-dependencies]

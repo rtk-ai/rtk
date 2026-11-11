@@ -1,5 +1,6 @@
 //! `rtk pipeline` and `rtk methods` command surface over the engine.
 
+use crate::core::child_command::ChildCommand;
 use crate::core::pipeline_config::{self, LoadedPipeline};
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -373,7 +374,7 @@ pub(crate) fn scan_for_secrets(sources: &[(String, String)]) -> Vec<String> {
 }
 
 pub(crate) fn gh_available() -> bool {
-    std::process::Command::new("gh")
+    ChildCommand::new("gh")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -534,7 +535,7 @@ pub(crate) fn publish_gist(
 
     let desc =
         format!("{name} \u{2014} rtk compression pipeline (install: rtk pipeline add <this url>)");
-    let output = std::process::Command::new("gh")
+    let output = ChildCommand::new("gh")
         .args(["gist", "create"])
         .arg(&file)
         .args(["--public", "--desc", &desc])

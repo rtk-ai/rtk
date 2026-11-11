@@ -1,10 +1,9 @@
 //! Builds direct and explicit-shell commands without guessing the caller's shell.
 
-use crate::core::utils::{ChildArgExt, resolve_binary, resolved_command};
+use crate::core::child_command::{ChildCommand, ShellKind, shell_kind};
+use crate::core::utils::{resolve_binary, resolved_command};
 use anyhow::{Result, bail};
 use std::borrow::Cow;
-use std::path::Path;
-use std::process::Command;
 
 /// POSIX "command not found".
 ///
@@ -31,7 +30,7 @@ pub const SHELL_ARITY_MESSAGE: &str = "--shell takes the complete command as one
 /// runners render it through their own failure path and exit with the code the
 /// shell they replaced would have returned.
 pub enum Launch {
-    Ready(Command),
+    Ready(ChildCommand),
     Unrunnable(Unrunnable),
 }
 
@@ -140,9 +139,10 @@ pub fn direct_command(args: &[String]) -> Result<Launch> {
             && outcome.code == EXIT_COMMAND_NOT_FOUND
             && (program.is_empty() || program.contains(SHELL_METACHARACTERS))
         {
+            let shell = default_shell();
             eprintln!(
-                "rtk: single-string command; running through {} -c — pass arguments separately, or use --shell for scripts",
-                default_shell()
+                "rtk: single-string command; running through {shell} {} — pass arguments separately, or use --shell for scripts",
+                script_flags(shell_kind(shell)).join(" ")
             );
             return shell_command(program, None);
         }
@@ -152,7 +152,7 @@ pub fn direct_command(args: &[String]) -> Result<Launch> {
     let mut command = resolved_command(program);
     // These arguments came off rtk's own command line, so they take the
     // encoding MSYS/Cygwin children expect on Windows (#3728).
-    command.child_args(program_args);
+    command.args(program_args);
     Ok(Launch::Ready(command))
 }
 
@@ -170,9 +170,47 @@ pub fn shell_command(script: &str, shell: Option<&str>) -> Result<Launch> {
         return Ok(Launch::Unrunnable(classify_unrunnable(program)));
     }
 
+    Ok(Launch::Ready(build_shell(program, script)))
+}
+
+/// The flags a shell of `kind` takes in front of its script.
+fn script_flags(kind: ShellKind) -> &'static [&'static str] {
+    match kind {
+        ShellKind::Posix => &["-c"],
+        ShellKind::PowerShell => &["-Command"],
+        ShellKind::Cmd => &["/S", "/C"],
+    }
+}
+
+/// `program` invoked with its command flag and `script`, in the form that
+/// shell parses.
+fn build_shell(program: &str, script: &str) -> ChildCommand {
+    let kind = shell_kind(program);
     let mut command = resolved_command(program);
-    command.arg(command_flag(program)).child_arg(script);
-    Ok(Launch::Ready(command))
+    command.args(script_flags(kind));
+    match kind {
+        // cmd reads its script off its own command line, so on Windows the
+        // script is written there wrapped in one pair of quotes and otherwise
+        // as given. Plain `/C` strips that pair too, except when the line holds
+        // exactly two quotes around an executable's name, where it keeps them;
+        // `/S` drops that heuristic, so cmd always strips exactly the wrapping
+        // pair. Elsewhere (cmd.exe reached through WSL interop) rtk writes no
+        // command line, only an argument vector, so the script is one argument
+        // and the interop layer quotes it.
+        ShellKind::Cmd => {
+            #[cfg(windows)]
+            command.verbatim_arg(&format!("\"{script}\""));
+            #[cfg(not(windows))]
+            command.arg(script);
+        }
+        // An MSYS/Cygwin shell's argv goes through `build_argv`/`globify`, and
+        // PowerShell splits by the MSVCRT rules the literal quoting is
+        // written for, so both take the literal default.
+        ShellKind::PowerShell | ShellKind::Posix => {
+            command.arg(script);
+        }
+    }
+    command
 }
 
 /// Build a direct command by default, or an explicit shell command when requested.
@@ -308,29 +346,14 @@ fn default_shell() -> &'static str {
     "sh"
 }
 
-fn command_flag(shell: &str) -> &'static str {
-    let basename = Path::new(shell)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(shell)
-        .to_ascii_lowercase();
-
-    match basename.as_str() {
-        "cmd" | "cmd.exe" => "/C",
-        "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => "-Command",
-        _ => "-c",
-    }
-}
-
 #[cfg(test)]
 mod label_scan;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsStr;
 
-    fn ready(launch: Launch) -> Command {
+    fn ready(launch: Launch) -> ChildCommand {
         match launch {
             Launch::Ready(command) => command,
             Launch::Unrunnable(unrunnable) => {
@@ -355,12 +378,19 @@ mod tests {
             "$HOME".to_string(),
         ];
         let command = ready(direct_command(&args).expect("build direct command"));
-        let actual: Vec<_> = command.get_args().collect();
+        let actual: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
 
-        assert_eq!(
-            actual,
-            [OsStr::new("a b"), OsStr::new("*"), OsStr::new("$HOME")]
-        );
+        // On Windows an argument is encoded for the child when it is appended,
+        // and that is the form `get_args` reports: `*` is one of the characters
+        // Cygwin's `globify` reinterprets, a space and `$` are not.
+        #[cfg(windows)]
+        let expected = ["a b", r#""*""#, "$HOME"];
+        #[cfg(not(windows))]
+        let expected = ["a b", "*", "$HOME"];
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -416,20 +446,20 @@ mod tests {
 
             let program = command.get_program().to_string_lossy().to_string();
             assert!(
-                Path::new(&program)
+                std::path::Path::new(&program)
                     .file_name()
                     .is_some_and(|name| name.to_string_lossy().starts_with(default_shell())),
                 "expected the platform shell, got {program}"
             );
-            let actual: Vec<_> = command.get_args().collect();
-            assert_eq!(
-                actual,
-                [
-                    OsStr::new(command_flag(default_shell())),
-                    OsStr::new(phrase)
-                ],
-                "{phrase:?}"
-            );
+            let actual: Vec<String> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            #[cfg(windows)]
+            let expected = ["/S".to_string(), "/C".to_string(), format!("\"{phrase}\"")];
+            #[cfg(not(windows))]
+            let expected = ["-c".to_string(), phrase.to_string()];
+            assert_eq!(actual, expected, "{phrase:?}");
         }
     }
 
@@ -483,12 +513,60 @@ mod tests {
         assert!(spawn_failure("prog", &unrelated).is_none());
     }
 
+    fn built_args(shell: &str, script: &str) -> Vec<String> {
+        build_shell(shell, script)
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
     #[test]
     fn shell_command_uses_shell_specific_flag() {
-        assert_eq!(command_flag("fish"), "-c");
-        assert_eq!(command_flag("/bin/zsh"), "-c");
-        assert_eq!(command_flag("cmd.exe"), "/C");
-        assert_eq!(command_flag("pwsh"), "-Command");
+        assert_eq!(built_args("fish", "x"), ["-c", "x"]);
+        assert_eq!(built_args("/bin/zsh", "x"), ["-c", "x"]);
+        #[cfg(windows)]
+        assert_eq!(built_args("cmd.exe", "x"), ["/S", "/C", r#""x""#]);
+        #[cfg(not(windows))]
+        assert_eq!(built_args("cmd.exe", "x"), ["/S", "/C", "x"]);
+        assert_eq!(built_args("pwsh", "x"), ["-Command", "x"]);
+    }
+
+    /// The script each shell's command line carries, on every platform.
+    ///
+    /// On Windows cmd's is written verbatim, wrapped once; elsewhere it is one
+    /// plain argument. The literal shells' encoding is applied only on Windows,
+    /// so elsewhere their bytes are asserted through the encoder the argument
+    /// goes through, and the argument vector holds the script as written.
+    #[test]
+    fn each_shell_receives_the_script_in_the_form_it_parses() {
+        // A quoted program path with a space and more quotes after it: cmd
+        // must see this script exactly as written.
+        const SCRIPT: &str = r#""C:\Program Files\Git\bin\git.exe" log --format="%h %s""#;
+        const LITERAL: &str = r#""\"C:\Program Files\Git\bin\git.exe\" log --format=\"%h %s\"""#;
+        const CMD_WRAPPED: &str = r##"""C:\Program Files\Git\bin\git.exe" log --format="%h %s"""##;
+
+        for shell in ["sh", "bash", "/usr/bin/bash", "pwsh", "PowerShell.exe"] {
+            let flag = match shell_kind(shell) {
+                ShellKind::Posix => "-c",
+                ShellKind::PowerShell => "-Command",
+                ShellKind::Cmd => panic!("{shell} is not cmd"),
+            };
+            assert_eq!(
+                build_shell(shell, SCRIPT)
+                    .literal_encoding(SCRIPT)
+                    .as_deref(),
+                Some(LITERAL),
+                "{shell}"
+            );
+            let sent = if cfg!(windows) { LITERAL } else { SCRIPT };
+            assert_eq!(built_args(shell, SCRIPT), [flag, sent], "{shell}");
+        }
+
+        for shell in ["cmd", "CMD.EXE", r"C:\Windows\System32\cmd.exe"] {
+            assert_eq!(shell_kind(shell), ShellKind::Cmd, "{shell}");
+            let sent = if cfg!(windows) { CMD_WRAPPED } else { SCRIPT };
+            assert_eq!(built_args(shell, SCRIPT), ["/S", "/C", sent], "{shell}");
+        }
     }
 
     #[test]
