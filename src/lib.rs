@@ -3606,9 +3606,9 @@ fn run_cli() -> Result<i32> {
         Commands::Uv { args } => uv_cmd::run(&args, cli.verbose)?,
 
         Commands::Go { command } => match command {
-            GoCommands::Test { args } => go_cmd::run_test(&args, cli.verbose)?,
-            GoCommands::Build { args } => go_cmd::run_build(&args, cli.verbose)?,
-            GoCommands::Vet { args } => go_cmd::run_vet(&args, cli.verbose)?,
+            GoCommands::Test { args } => go_cmd::run_test(&[], &args, cli.verbose)?,
+            GoCommands::Build { args } => go_cmd::run_build(&[], &args, cli.verbose)?,
+            GoCommands::Vet { args } => go_cmd::run_vet(&[], &args, cli.verbose)?,
             GoCommands::Other(args) => go_cmd::run_other(&args, cli.verbose)?,
         },
 
