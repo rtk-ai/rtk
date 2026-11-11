@@ -98,6 +98,20 @@ fn list_hermes_profiles(hermes_home: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// Normalize, trim, split, and deduplicate profile names, filtering out empty entries.
+fn sanitize_profiles(profiles: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    for p in profiles {
+        for segment in p.split(',') {
+            let trimmed = segment.trim();
+            if !trimmed.is_empty() && !result.iter().any(|existing: &String| existing == trimmed) {
+                result.push(trimmed.to_string());
+            }
+        }
+    }
+    result
+}
+
 /// Validate that every requested profile name exists on disk.
 /// Returns a formatted error listing the missing names and available profiles.
 fn validate_profiles(hermes_home: &Path, profiles: &[String]) -> Result<()> {
@@ -106,7 +120,7 @@ fn validate_profiles(hermes_home: &Path, profiles: &[String]) -> Result<()> {
         if name == PROFILE_ALL {
             continue;
         }
-        if !hermes_profile_dir(hermes_home, name).exists() {
+        if name.trim().is_empty() || !hermes_profile_dir(hermes_home, name).is_dir() {
             missing.push(name.as_str());
         }
     }
@@ -175,7 +189,14 @@ fn unpatch_hermes_config_file(config_path: &Path, ctx: InitContext, label: &str)
     Ok(true)
 }
 
-fn run_hermes_mode_at(hermes_home: &Path, ctx: InitContext, profiles: &[String]) -> Result<()> {
+fn run_hermes_mode_at(hermes_home: &Path, ctx: InitContext, raw_profiles: &[String]) -> Result<()> {
+    let profiles = sanitize_profiles(raw_profiles);
+    if !raw_profiles.is_empty() && profiles.is_empty() {
+        anyhow::bail!(
+            "Hermes profile name cannot be empty.\nUsage: rtk init --agent hermes --profile <name|all>"
+        );
+    }
+
     // Resolve the full set of configs to patch.
     let use_all = profiles.iter().any(|p| p == PROFILE_ALL);
     let named: Vec<&str> = profiles
@@ -295,8 +316,15 @@ pub fn uninstall_hermes(ctx: InitContext, profiles: &[String]) -> Result<()> {
 fn uninstall_hermes_at(
     hermes_home: &Path,
     ctx: InitContext,
-    profiles: &[String],
+    raw_profiles: &[String],
 ) -> Result<Vec<String>> {
+    let profiles = sanitize_profiles(raw_profiles);
+    if !raw_profiles.is_empty() && profiles.is_empty() {
+        anyhow::bail!(
+            "Hermes profile name cannot be empty.\nUsage: rtk init --uninstall --agent hermes --profile <name|all>"
+        );
+    }
+
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
@@ -1306,6 +1334,48 @@ mod tests {
             hermes_profile_plugin_dir(hermes_home, "work")
                 .join(HERMES_PLUGIN_INIT_FILE)
                 .exists()
+        );
+    }
+
+    #[test]
+    fn test_hermes_mode_sanitizes_commas_and_whitespace() {
+        let temp = TempDir::new().unwrap();
+        let hermes_home = temp.path();
+
+        let p1 = hermes_home.join("profiles").join("reviewer");
+        let p2 = hermes_home.join("profiles").join("writer");
+        fs::create_dir_all(&p1).unwrap();
+        fs::create_dir_all(&p2).unwrap();
+
+        // Simulate "reviewer," and " writer" (with trailing comma and spaces)
+        let raw_profiles = vec![
+            "reviewer,".to_string(),
+            " writer".to_string(),
+            "".to_string(),
+        ];
+        run_hermes_mode_at(hermes_home, InitContext::default(), &raw_profiles).unwrap();
+
+        // Must NOT create a config.yaml directly in ~/.hermes/profiles/
+        assert!(!hermes_home.join("profiles").join("config.yaml").exists());
+
+        // Both intended profiles must have the plugin and config
+        assert!(hermes_profile_plugin_dir(hermes_home, "reviewer").exists());
+        assert!(hermes_profile_plugin_dir(hermes_home, "writer").exists());
+        assert!(p1.join("config.yaml").exists());
+        assert!(p2.join("config.yaml").exists());
+    }
+
+    #[test]
+    fn test_hermes_mode_rejects_empty_profile_name() {
+        let temp = TempDir::new().unwrap();
+        let hermes_home = temp.path();
+
+        let raw_profiles = vec!["".to_string(), "   ".to_string(), ",".to_string()];
+        let err =
+            run_hermes_mode_at(hermes_home, InitContext::default(), &raw_profiles).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Hermes profile name cannot be empty")
         );
     }
 
