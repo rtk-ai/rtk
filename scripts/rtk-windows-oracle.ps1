@@ -683,12 +683,12 @@ function Invoke-GainGate {
     $env:CARGO_BUILD_JOBS = "4"
     try {
         $commands = @(
-            # Use two representative recursive rg searches so the gain sample stays
-            # portable on Windows and no single command dominates the benchmark.
-            ,@("rg", "fn ", "src")
-            ,@("rg", "test_", "src")
-            ,@("cargo", "test", "hooks::hook_cmd", "--", "--test-threads=1")
-            ,@("git", "log", "-n", "80", "--stat")
+            # Bound real source searches below tracking's oversized-row exclusion.
+            # Keep five recorded commands and avoid one dominating the sample.
+            ,@("rg", "fn ", "src/hooks/hook_cmd.rs")
+            ,@("rg", "test_", "src/hooks/hook_cmd.rs")
+            ,@("cargo", "test", "--lib", "hooks::hook_cmd", "--", "--test-threads=1")
+            ,@("git", "log", "-n", "40")
             ,@("git", "status")
         )
         foreach ($args in $commands) {

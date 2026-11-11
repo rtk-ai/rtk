@@ -1,4 +1,5 @@
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::display_args;
 use crate::core::stream::StreamFilter;
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::resolved_command;
@@ -128,7 +129,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     let cmd = new_gradle_command(args);
-    let args_display = args.join(" ");
+    let args_display = display_args(args);
     let tool = gradlew_binary();
 
     match detect_task(args) {

@@ -1,6 +1,6 @@
 # Codex CLI Hooks
 
-> Part of [`hooks/`](../README.md) — see also [`src/hooks/`](../../src/hooks/README.md) for installation code
+> Part of [`hooks/`](../README.md)
 
 ## Specifics
 
@@ -16,10 +16,8 @@ Codex requires `permissionDecision: "allow"` in the hook response for `updatedIn
 On native Windows, RTK emits `updatedInput` only for an explicit allow-rule match or the host's `bypassPermissions` mode. For default/ask decisions it emits no response, leaving Codex to run its native permission flow on the original command. This keeps the existing Windows approval boundary until rewritten-command classification is verified end to end. Elsewhere, the documented modes use the protocol-level `allow` described above. Missing or unknown permission modes, no match, malformed JSON, unsupported commands, heredocs, substitutions, and file redirections fail open: the hook exits successfully without stdout and Codex executes the original command.
 
 The Codex handler uses RTK's shared hook decision pipeline through `Host::Codex` outside Windows. The Windows compatibility path retains the existing Claude-style explicit allow-rule check; RTK does not parse Codex execution rules, and Codex's native execution layer remains responsible for those rules.
-An internal `AskRewrite` still emits the required protocol-level `allow` with
-`updatedInput`; it is not recorded internally as an explicit permission grant.
-This preserves transparent rewriting but does not remove the classifier
-limitation described above.
+
+Codex native execution remains responsible for its execution rules.
 
 ## History in workspace-write sandboxes
 

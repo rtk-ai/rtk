@@ -1,5 +1,6 @@
 //! Filters Graphite (gt) CLI output for stacking workflows.
 
+use crate::core::shell::display_args;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_LIST, reduced};
@@ -39,7 +40,7 @@ fn run_gt_filtered(
         cmd.arg(arg);
     }
 
-    let subcmd_str = subcmd.join(" ");
+    let subcmd_str = display_args(subcmd);
     if verbose > 0 {
         eprintln!("Running: gt {} {}", subcmd_str, args.join(" "));
     }
@@ -70,7 +71,7 @@ fn run_gt_filtered(
     let label = if args.is_empty() {
         format!("gt {}", subcmd_str)
     } else {
-        format!("gt {} {}", subcmd_str, args.join(" "))
+        format!("gt {} {}", subcmd_str, display_args(args))
     };
     let rtk_label = format!("rtk {}", label);
     timer.track(&label, &rtk_label, &raw, &shown);

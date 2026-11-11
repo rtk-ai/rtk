@@ -7,6 +7,7 @@
 
 use super::utils::{php_tool_command, strip_ansi_and_controls};
 use crate::core::runner;
+use crate::core::shell::display_args;
 use anyhow::Result;
 use regex::Regex;
 use std::sync::LazyLock;
@@ -32,7 +33,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "phpunit",
-        &args.join(" "),
+        &display_args(args),
         filter_phpunit_output,
         runner::RunOptions::stdout_only().tee("phpunit"),
     )

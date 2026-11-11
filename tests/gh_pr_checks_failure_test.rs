@@ -9,7 +9,9 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
+
+mod common;
 
 /// Writes an executable `name` in `dir` that runs `body`.
 fn fake_tool(dir: &Path, name: &str, body: &str) {
@@ -25,7 +27,7 @@ fn rtk_with(dir: &Path, args: &[&str]) -> Output {
         dir.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    Command::new(env!("CARGO_BIN_EXE_rtk"))
+    common::rtk_command()
         .args(args)
         .env("PATH", path)
         .output()

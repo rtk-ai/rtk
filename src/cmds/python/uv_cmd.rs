@@ -8,6 +8,7 @@
 //! tee file, breaking recovery.
 
 use crate::core::runner;
+use crate::core::shell::{display_args, with_args};
 use crate::core::stream::{self, FilterMode, StdinMode};
 use crate::core::tracking;
 use crate::core::truncate::{CAP_INVENTORY, CAP_WARNINGS};
@@ -47,11 +48,16 @@ const MAX_PROGRAM_LINE_CHARS: usize = 500;
 const TEE_SLUG_STDOUT: &str = "uv-run-stdout";
 const TEE_SLUG_STDERR: &str = "uv-run-stderr";
 
+fn runs_unfiltered(args: &[String]) -> bool {
+    args.first().map(String::as_str) != Some("run")
+        || crate::core::runner::requests_help_args("uv", args)
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
-    let args_display = args.join(" ");
-    let original_cmd = display_command("uv", &args_display);
-    let rtk_cmd = display_command("rtk uv", &args_display);
+    let args_display = display_args(args);
+    let original_cmd = with_args("uv", &args_display);
+    let rtk_cmd = with_args("rtk uv", &args_display);
 
     let mut cmd = resolved_command("uv");
     cmd.args(args);
@@ -60,9 +66,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: {}", original_cmd);
     }
 
-    if args.first().map(String::as_str) != Some("run") {
+    if runs_unfiltered(args) {
         let status = cmd.status().context("Failed to run uv")?;
-        timer.track_passthrough(&original_cmd, &format!("{rtk_cmd} (passthrough)"));
+        timer.track_passthrough(&original_cmd, &tracking::passthrough_label(&original_cmd));
         return Ok(exit_code_from_status(&status, "uv"));
     }
 
@@ -75,18 +81,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         result.exit_code,
     );
 
-    runner::print_with_hint(&filtered, &result.raw, &result.raw, "uv", result.exit_code);
-    timer.track(&original_cmd, &rtk_cmd, &result.raw, &filtered);
+    let shown =
+        runner::print_with_hint(&filtered, &result.raw, &result.raw, "uv", result.exit_code);
+    timer.track(&original_cmd, &rtk_cmd, &result.raw, &shown);
 
     Ok(result.exit_code)
-}
-
-fn display_command(prefix: &str, args_display: &str) -> String {
-    if args_display.trim().is_empty() {
-        prefix.to_string()
-    } else {
-        format!("{prefix} {args_display}")
-    }
 }
 
 fn filter_uv_run_output(output: &str, stdout: &str, stderr: &str, exit_code: i32) -> String {
@@ -352,6 +351,19 @@ fn is_error_continuation(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn uv_routes_a_usage_request_to_the_unfiltered_path() {
+        let owned = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(super::runs_unfiltered(&owned(&["run", "--help"])));
+        assert!(super::runs_unfiltered(&owned(&["run", "-h"])));
+        assert!(super::runs_unfiltered(&owned(&[
+            "run", "--", "pytest", "--help"
+        ])));
+        assert!(super::runs_unfiltered(&owned(&["pip", "list"])));
+        assert!(!super::runs_unfiltered(&owned(&["run", "pytest"])));
+        assert!(!super::runs_unfiltered(&owned(&["run", "pytest", "-q"])));
+    }
+
     use super::{CAP_INVENTORY, MAX_TRACEBACK_FRAMES, filter_uv_run_output};
     use crate::core::utils::count_tokens;
 

@@ -3,8 +3,10 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+mod common;
+
 fn rtk_stdin(args: &[&str], input: &str) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut child = common::rtk_command()
         .env("LC_ALL", "C")
         .args(args)
         .stdin(Stdio::piped())
@@ -63,7 +65,7 @@ fn rtk_output_in_dir(dir: &std::path::Path, args: &[&str]) -> (String, String, O
     } else {
         dir.to_path_buf()
     };
-    let out = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let out = common::rtk_command()
         .env("LC_ALL", "C")
         .args(args)
         .current_dir(dir)
@@ -84,11 +86,19 @@ fn rtk_in_dir(dir: &std::path::Path, args: &[&str]) -> (String, Option<i32>) {
 }
 
 fn rg_available() -> bool {
-    Command::new("rg")
+    common::native_command("rg")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// git in `dir`, isolated as the rtk children these tests compare it with are.
+fn git(dir: &std::path::Path) -> Command {
+    let mut cmd = common::native_command("git");
+    cmd.current_dir(dir);
+    common::isolate_git(&mut cmd);
+    cmd
 }
 
 fn init_git_repo() -> tempfile::TempDir {
@@ -99,9 +109,8 @@ fn init_git_repo() -> tempfile::TempDir {
         &["config", "user.name", "t"][..],
         &["commit", "-q", "--allow-empty", "-m", "init"][..],
     ] {
-        let ok = Command::new("git")
+        let ok = git(dir.path())
             .args(args)
-            .current_dir(dir.path())
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -120,11 +129,7 @@ fn init_dirty_git_repo() -> tempfile::TempDir {
 }
 
 fn git_in_dir(dir: &std::path::Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("spawn git");
+    let out = git(dir).args(args).output().expect("spawn git");
     assert!(
         out.status.success(),
         "git command failed: {args:?}\nstdout: {}\nstderr: {}",
@@ -137,7 +142,7 @@ fn assert_rtk_git_matches_native(
     dir: &std::path::Path,
     git_args: &[&str],
 ) -> (String, String, Option<i32>) {
-    let raw = Command::new("git")
+    let raw = common::native_command("git")
         .args(git_args)
         .current_dir(dir)
         .output()
@@ -215,9 +220,8 @@ fn git_log_patch_output_matches_raw_git() {
     git_in_dir(dir.path(), &["add", "history.txt"]);
     git_in_dir(dir.path(), &["commit", "-q", "-m", "add history fixture"]);
 
-    let raw = Command::new("git")
+    let raw = git(dir.path())
         .args(["log", "-p", "--all"])
-        .current_dir(dir.path())
         .output()
         .expect("spawn raw git log");
     assert!(raw.status.success());
@@ -375,9 +379,8 @@ fn git_log_malformed_digit_run_propagates_real_git_error() {
     // reaching the formatting code that would use it.
     let dir = init_git_repo();
 
-    let raw = Command::new("git")
+    let raw = git(dir.path())
         .args(["log", "-5x"])
-        .current_dir(dir.path())
         .output()
         .expect("spawn raw git log");
     assert!(!raw.status.success(), "expected real git to reject -5x");
@@ -597,7 +600,7 @@ fn git_diff_output_modes_dirty_match_native() {
 #[test]
 fn git_diff_no_compact_dirty_matches_native_diff() {
     let dir = init_dirty_git_repo();
-    let raw = Command::new("git")
+    let raw = common::native_command("git")
         .args(["diff", "HEAD"])
         .current_dir(dir.path())
         .output()
@@ -861,4 +864,66 @@ fn git_show_quiet_loses_to_a_patch_request_from_either_side() {
             "{args:?} should suppress the body: {stdout:?}"
         );
     }
+}
+
+/// A repo whose `big.txt` is comfortably over the 8 KiB blob-window budget, so
+/// `rtk git show HEAD:big.txt` windows it and any misrouting is visible in the output.
+fn repo_with_a_large_blob() -> tempfile::TempDir {
+    let dir = init_git_repo();
+    let body: String = (0..600).map(|i| format!("line {i} a:b url:1\n")).collect();
+    std::fs::write(dir.path().join("big.txt"), &body).expect("write big.txt");
+    git_in_dir(dir.path(), &["add", "-A"]);
+    git_in_dir(dir.path(), &["commit", "-qm", "big blob"]);
+    dir
+}
+
+const BLOB_HINT: &str = "[see remaining: rtk proxy git show HEAD:big.txt | tail -n +";
+
+#[test]
+fn git_show_cluster_flag_value_is_not_mistaken_for_the_blob_object() {
+    // `-wG a:b HEAD:big.txt`: `a:b` is `-G`'s value, not a second object. Counting it as a
+    // positional makes `can_window` false and dumps the whole file instead of windowing it.
+    let dir = repo_with_a_large_blob();
+
+    let (stdout, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["git", "show", "-wG", "a:b", "HEAD:big.txt"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert!(
+        stdout.contains(BLOB_HINT),
+        "-wG a:b should still window the blob: {stdout:?}"
+    );
+}
+
+#[test]
+fn git_show_rename_limit_clusters_under_diffs_grammar_not_logs() {
+    // `git show -wl 100` is diff-family: `-l` is the rename limit and consumes the `100` even
+    // when clustered. Under `git log`'s grammar `-l` is solo-only, which would leave `100` as a
+    // second positional and drop the blob window.
+    let dir = repo_with_a_large_blob();
+
+    let (stdout, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["git", "show", "-wl", "100", "HEAD:big.txt"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert!(
+        stdout.contains(BLOB_HINT),
+        "-wl 100 should still window the blob: {stdout:?}"
+    );
+}
+
+#[test]
+fn git_show_blob_spec_after_double_dash_is_a_pathspec_not_an_object() {
+    // Past `--` even a string `cat-file` resolves to a blob is a pathspec: git matches it
+    // against no file and prints the bare commit, so RTK must not dump the blob instead.
+    let dir = repo_with_a_large_blob();
+
+    let (stdout, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["git", "show", "HEAD", "--", "HEAD:big.txt"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert!(
+        !stdout.contains(BLOB_HINT) && !stdout.contains("line 0 a:b"),
+        "pathspec past -- must not be windowed as a blob: {stdout:?}"
+    );
 }

@@ -1,4 +1,6 @@
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::display_args;
+use crate::core::tracking;
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
 use regex::Regex;
@@ -15,8 +17,8 @@ static TEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Matches the munit summary line (also used by discipline-munit / ZIO Test):
-/// [info] Passed: Total N, Failed N, Errors N, Passed N
-/// [info] Failed: Total N, Failed N, Errors N, Passed N
+/// `[info] Passed: Total N, Failed N, Errors N, Passed N`
+/// `[info] Failed: Total N, Failed N, Errors N, Passed N`
 static MUNIT_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\[info\] (?:Passed|Failed): Total \d+, Failed (\d+), Errors (\d+), Passed (\d+)")
         .unwrap()
@@ -31,15 +33,15 @@ static SUITE_SUMMARY_RE: LazyLock<Regex> =
 static RUN_TIME_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"Run completed in (\d+) seconds?").unwrap());
 
-/// Matches [info] Compiling N Scala source(s)
+/// Matches `[info] Compiling N Scala source(s)`
 static COMPILE_COUNT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[info\] Compiling (\d+) Scala source").unwrap());
 
-/// Matches [success] Total time: Ns
+/// Matches `[success] Total time: Ns`
 static SUCCESS_TIME_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[success\] Total time: (\d+) s").unwrap());
 
-/// Matches [error] lines
+/// Matches `[error]` lines
 static ERROR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[error\]").unwrap());
 
 /// Lines that are SBT noise (loading, resolving, downloading, etc.)
@@ -96,16 +98,14 @@ fn run_task(
         eprintln!("Running: sbt {} {}", sbt_task, rest.join(" "));
     }
 
-    let args_display = if rest.is_empty() {
-        sbt_task.to_string()
-    } else {
-        format!("{} {}", sbt_task, rest.join(" "))
-    };
+    let words: Vec<&str> = std::iter::once(sbt_task)
+        .chain(rest.iter().map(String::as_str))
+        .collect();
 
     runner::run_filtered(
         cmd,
         "sbt",
-        &args_display,
+        &display_args(&words),
         filter,
         RunOptions::with_tee(tee_label),
     )
@@ -151,20 +151,10 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
             "sbt_test"
         };
 
-        let rest: Vec<String> = args[1..]
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        let args_display = if rest.is_empty() {
-            subcommand
-        } else {
-            format!("{} {}", subcommand, rest.join(" "))
-        };
-
         return runner::run_filtered(
             cmd,
             "sbt",
-            &args_display,
+            &tracking::args_display(args),
             filter_sbt_test,
             RunOptions::with_tee(tee_label),
         );
@@ -185,7 +175,7 @@ struct FailureBlock {
 /// On success: compact single-line summary.
 /// On failure: show each failed test with its detail lines (works for native
 /// ScalaTest assertion failures, Mockito Scala verification failures, and
-/// ScalaMock expectation failures — all of which emit details as [info] lines).
+/// ScalaMock expectation failures — all of which emit details as `[info]` lines).
 fn filter_sbt_test(output: &str) -> String {
     let mut succeeded: u32 = 0;
     let mut failed: u32 = 0;
@@ -402,7 +392,7 @@ fn filter_sbt_test(output: &str) -> String {
 /// Filter SBT compile output.
 ///
 /// On success: compact summary with source count and time.
-/// On failure: show all [error] lines.
+/// On failure: show all `[error]` lines.
 fn filter_sbt_compile(output: &str) -> String {
     // Nothing in, nothing out (Transparency: never emit tokens the command didn't).
     if output.trim().is_empty() {

@@ -106,7 +106,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     if verbose > 0 { eprintln!("Running: mycmd {}", args.join(" ")); }
 
     runner::run_filtered(
-        cmd, "mycmd", &args.join(" "),
+        cmd, "mycmd", &display_args(args),
         filter_mycmd_output,
         runner::RunOptions::stdout_only().tee("mycmd"),
     )
@@ -124,6 +124,7 @@ Use `runner::run_streamed()` when the command is long-running or produces unboun
 For block-based errors where blocks start with a regex match and continue on indented lines. Handles skip prefixes, block counting, and summary automatically.
 
 ```rust
+use crate::core::shell::display_args;
 use crate::core::stream::{BlockStreamFilter, RegexBlockFilter};
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
@@ -134,7 +135,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .skip_prefixes(&["warning:", "note:"]);
 
     runner::run_streamed(
-        cmd, "mycmd", &args.join(" "),
+        cmd, "mycmd", &display_args(args),
         Box::new(BlockStreamFilter::new(filter)),
         runner::RunOptions::with_tee("mycmd"),
     )

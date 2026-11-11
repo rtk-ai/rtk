@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
   <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk" alt="Release"></a>
-  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
+  <a href="#라이선스"><img src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20BUSL--1.1-blue.svg" alt="License: Apache-2.0 and BUSL-1.1"></a>
   <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1478373640461488159?label=Discord&logo=discord" alt="Discord"></a>
   <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk" alt="Homebrew"></a>
 </p>
@@ -89,7 +89,17 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 ### Cargo
 
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk
+cargo install --git https://github.com/rtk-ai/rtk rtk
+```
+
+### Apache-2.0 에디션 (오픈 소스 전용, 상업적 사용 허용)
+
+BUSL-1.1 압축 엔진 없이 빌드한 동일한 `rtk` 바이너리입니다. 훅 재작성 시스템과 모든 명령 필터를 Apache-2.0 으로만 제공합니다.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | RTK_EDITION=oss sh
+brew install rtk-ai/tap/rtk-oss
+cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
 ```
 
 ### 확인
@@ -155,7 +165,7 @@ rtk jest                        # Jest 컴팩트
 rtk vitest                      # Vitest 컴팩트
 rtk pytest                      # Python 테스트 (-90%)
 rtk go test                     # Go 테스트 (-90%)
-rtk test <cmd>                  # 실패만 표시 (-90%)
+rtk test <cmd> [args...]        # 실패만 표시 (-90%), argv 직접 실행
 ```
 
 ### 빌드 & 린트
@@ -175,7 +185,7 @@ rtk discover                    # 놓친 절약 기회 발견
 
 ## 문서
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - 일반적인 문제 해결
+- **[TROUBLESHOOTING.md](docs/guide/resources/troubleshooting.md)** - 일반적인 문제 해결
 - **[INSTALL.md](INSTALL.md)** - 상세 설치 가이드
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - 기술 아키텍처
 
@@ -188,6 +198,8 @@ rtk discover                    # 놓친 절약 기회 발견
 ## 라이선스
 
 Apache 2.0 라이선스 - 자세한 내용은 [LICENSE](LICENSE)를 참조하세요.
+
+> `engine/` and `proxy/` are licensed BUSL-1.1 — see their LICENSE files.
 
 ## 면책 조항
 

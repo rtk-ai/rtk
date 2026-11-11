@@ -12,7 +12,9 @@
 //! - `RTK_TRUST_PROJECT_FILTERS=1` overrides for CI pipelines
 
 use super::integrity;
-use crate::core::constants::{RTK_DATA_DIR, TRUSTED_FILTERS_JSON};
+use crate::core::constants::TRUSTED_FILTERS_JSON;
+use crate::core::user_dirs;
+use crate::core::user_env;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -47,8 +49,8 @@ pub enum TrustStatus {
 // ---------------------------------------------------------------------------
 
 fn store_path() -> Result<PathBuf> {
-    let data_dir = dirs::data_local_dir().context("Cannot determine local data directory")?;
-    Ok(data_dir.join(RTK_DATA_DIR).join(TRUSTED_FILTERS_JSON))
+    let data_dir = user_dirs::data().context("Cannot determine local data directory")?;
+    Ok(data_dir.join(TRUSTED_FILTERS_JSON))
 }
 
 fn read_store() -> Result<TrustStore> {
@@ -101,12 +103,12 @@ pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
 /// Reads the file once, hashes those bytes, and returns the trust status with
 /// the verified content. Content is `Some` only for `Trusted` / `EnvOverride`.
 pub fn check_trust_with_content(filter_path: &Path) -> Result<(TrustStatus, Option<String>)> {
-    if std::env::var("RTK_TRUST_PROJECT_FILTERS").as_deref() == Ok("1") {
-        let in_ci = std::env::var("CI").is_ok()
-            || std::env::var("GITHUB_ACTIONS").is_ok()
-            || std::env::var("GITLAB_CI").is_ok()
-            || std::env::var("JENKINS_URL").is_ok()
-            || std::env::var("BUILDKITE").is_ok();
+    if user_env::var("RTK_TRUST_PROJECT_FILTERS").as_deref() == Some("1") {
+        let in_ci = user_env::var("CI").is_some()
+            || user_env::var("GITHUB_ACTIONS").is_some()
+            || user_env::var("GITLAB_CI").is_some()
+            || user_env::var("JENKINS_URL").is_some()
+            || user_env::var("BUILDKITE").is_some();
         if in_ci {
             let content = std::fs::read_to_string(filter_path)
                 .with_context(|| format!("Failed to read filter: {}", filter_path.display()))?;
@@ -204,15 +206,26 @@ pub fn gated_filter_paths() -> Vec<PathBuf> {
 }
 
 pub fn gated_filter_paths_labeled() -> Vec<(&'static str, PathBuf)> {
-    let mut paths = vec![("project", PathBuf::from(".rtk/filters.toml"))];
-    if let Some(dir) = dirs::config_dir() {
-        paths.push((
-            "global",
-            dir.join(RTK_DATA_DIR)
-                .join(crate::core::constants::FILTERS_TOML),
-        ));
+    let mut paths = vec![("project", user_dirs::in_working_dir(".rtk/filters.toml"))];
+    if let Some(dir) = user_dirs::config() {
+        paths.push(("global", dir.join(crate::core::constants::FILTERS_TOML)));
     }
     paths
+}
+
+pub fn gated_pipeline_paths() -> Vec<PathBuf> {
+    let mut out = vec![crate::core::pipeline_config::project_pipeline_path()];
+    let dir = crate::core::pipeline_config::project_pipelines_dir();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"))
+            .collect();
+        files.sort();
+        out.extend(files);
+    }
+    out
 }
 
 pub fn untrusted_active_filter_count() -> usize {
@@ -304,11 +317,67 @@ pub fn run_trust(list: bool, yes: bool) -> Result<()> {
         eprintln!("  Enabled — revoke with `rtk untrust`.");
     }
 
+    for pipeline_path in gated_pipeline_paths() {
+        if !pipeline_path.exists() {
+            continue;
+        }
+        let bytes = std::fs::read(&pipeline_path)
+            .with_context(|| format!("Failed to read {}", pipeline_path.display()))?;
+        let content = String::from_utf8_lossy(&bytes);
+        match crate::core::pipeline_config::trust_summary(&content) {
+            Err(err) => {
+                had_error = true;
+                eprintln!(
+                    "  {} — invalid pipeline TOML, not loaded: {}",
+                    pipeline_path.display(),
+                    err
+                );
+            }
+            Ok(summary) => {
+                found_any = true;
+                if matches!(
+                    check_trust(&pipeline_path).unwrap_or(TrustStatus::Untrusted),
+                    TrustStatus::Trusted | TrustStatus::EnvOverride
+                ) {
+                    eprintln!("  {} already trusted.", pipeline_path.display());
+                    enabled_any = true;
+                } else {
+                    let yellow = "\x1b[33m";
+                    let reset = "\x1b[0m";
+                    eprintln!();
+                    eprintln!(
+                        "{yellow}Detected a project pipeline in {} — it reshapes tool output for the agent:{reset}",
+                        pipeline_path.display()
+                    );
+                    for line in &summary {
+                        eprintln!("{yellow}    {line}{reset}");
+                    }
+                    if yes || confirm_enable_at_tty()? {
+                        let hash = crate::hooks::integrity::compute_hash_bytes(&bytes);
+                        trust_filter_with_hash(&pipeline_path, &hash)?;
+                        enabled_any = true;
+                        eprintln!("  Enabled — revoke with `rtk untrust`.");
+                        #[cfg(feature = "engine")]
+                        crate::core::pipeline_cmd::print_auth_guidance(
+                            &crate::core::pipeline_config::load().resolved,
+                        );
+                    } else {
+                        eprintln!(
+                            "  Not enabled — re-run `rtk trust --yes` to trust non-interactively."
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     if !found_any {
         if had_error {
             anyhow::bail!("Filter file present but not valid TOML — see the error above.");
         }
-        anyhow::bail!("No custom filters found (.rtk/filters.toml or ~/.config/rtk/filters.toml)");
+        anyhow::bail!(
+            "No custom filters or pipeline found (.rtk/filters.toml, ~/.config/rtk/filters.toml, .rtk/pipeline.toml)"
+        );
     }
     if !enabled_any {
         if !interactive {
@@ -351,7 +420,9 @@ pub fn confirm_enable_at_tty() -> Result<bool> {
 /// Run `rtk untrust` — revoke trust for project-local filters.
 pub fn run_untrust() -> Result<()> {
     let mut revoked_any = false;
-    for filter_path in gated_filter_paths() {
+    let mut gated = gated_filter_paths();
+    gated.extend(gated_pipeline_paths());
+    for filter_path in gated {
         if untrust_filter(&filter_path).unwrap_or(false) {
             revoked_any = true;
             println!("Trust revoked for {}", filter_path.display());
@@ -484,8 +555,8 @@ mod tests {
     #[test]
     fn test_gated_filter_paths_covers_project_and_global() {
         let paths = gated_filter_paths();
-        assert_eq!(paths[0], PathBuf::from(".rtk/filters.toml"));
-        if dirs::config_dir().is_some() {
+        assert_eq!(paths[0], user_dirs::in_working_dir(".rtk/filters.toml"));
+        if user_dirs::config().is_some() {
             assert_eq!(paths.len(), 2);
             assert!(paths[1].ends_with("filters.toml"));
             assert!(paths[1].is_absolute());
@@ -564,8 +635,8 @@ mod tests {
         std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
 
         // Both env vars must be set: trust override + CI indicator
-        let status = temp_env::with_vars(
-            [
+        let status = user_env::with_vars(
+            &[
                 ("RTK_TRUST_PROJECT_FILTERS", Some("1")),
                 ("CI", Some("true")),
             ],

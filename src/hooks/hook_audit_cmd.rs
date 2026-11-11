@@ -234,9 +234,9 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn test_default_log_path_prefers_userprofile_when_home_missing() {
-        let home = std::env::temp_dir().join(format!("rtk-test-audit-home-{}", std::process::id()));
-        temp_env::with_vars(
-            [
+        let home = crate::core::test_isolation::scratch_dir().join("rtk-test-audit-home");
+        crate::core::user_env::with_vars(
+            &[
                 ("HOME", None::<&str>),
                 ("RTK_AUDIT_DIR", None),
                 ("USERPROFILE", Some(home.to_str().unwrap())),

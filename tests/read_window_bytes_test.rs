@@ -1,9 +1,11 @@
 use std::fs;
 use std::io::Write;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
+
+mod common;
 
 fn read_stdin(input: &[u8], args: &[&str]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut child = common::rtk_command()
         .args(["read", "-"])
         .args(args)
         .stdin(Stdio::piped())
@@ -30,7 +32,7 @@ fn read_windows_preserve_non_utf8_files() {
         ("--head-lines", b"\xff\xfe bad\nline2\n".as_slice()),
         ("--tail-lines", b"line2\nline3\n".as_slice()),
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let output = common::rtk_command()
             .arg("read")
             .arg(&file)
             .args([flag, "2"])
@@ -64,7 +66,7 @@ fn read_windows_preserve_binary_boundaries_for_files_and_stdin() {
             ("--head-lines", "99", input),
             ("--tail-lines", "99", input),
         ] {
-            let from_file = Command::new(env!("CARGO_BIN_EXE_rtk"))
+            let from_file = common::rtk_command()
                 .arg("read")
                 .arg(&file)
                 .args([flag, count])
@@ -79,6 +81,75 @@ fn read_windows_preserve_binary_boundaries_for_files_and_stdin() {
                 );
                 assert_eq!(output.stdout, expected, "{flag} {count}");
             }
+        }
+    }
+}
+
+#[test]
+fn plain_reads_pass_non_utf8_bytes_through_for_files_and_stdin() {
+    let dir = tempfile::tempdir().expect("create test directory");
+    let file = dir.path().join("latin1.log");
+    for input in [
+        b"line one\nlatin-1 byte: \xe9\nline three\n".as_slice(),
+        b"\xff\r\nvalid\n\0\xfe".as_slice(),
+    ] {
+        fs::write(&file, input).expect("write non-UTF-8 file");
+        let from_file = common::rtk_command()
+            .arg("read")
+            .arg(&file)
+            .output()
+            .expect("run rtk read");
+        let from_stdin = read_stdin(input, &[]);
+        for output in [from_file, from_stdin] {
+            assert!(output.status.success(), "{:?}", output.stderr);
+            assert_eq!(output.stdout, input);
+        }
+    }
+}
+
+#[test]
+fn text_options_still_report_non_utf8_input() {
+    let dir = tempfile::tempdir().expect("create test directory");
+    let file = dir.path().join("latin1.log");
+    let input = b"line one\nlatin-1 byte: \xe9\nline three\n";
+    fs::write(&file, input).expect("write non-UTF-8 file");
+    let valid_file = dir.path().join("valid.log");
+    let valid = b"line one\nascii\nline three\n";
+    fs::write(&valid_file, valid).expect("write valid file");
+    for args in [
+        ["-l", "minimal"].as_slice(),
+        ["--level", "aggressive"].as_slice(),
+        ["--line-numbers"].as_slice(),
+        ["--max-lines", "2"].as_slice(),
+    ] {
+        let from_file = common::rtk_command()
+            .arg("read")
+            .arg(&file)
+            .args(args)
+            .output()
+            .expect("run rtk read");
+        let from_stdin = read_stdin(input, args);
+        for (source, output) in [
+            (file.display().to_string(), from_file),
+            ("-".into(), from_stdin),
+        ] {
+            assert_eq!(output.status.code(), Some(1), "{args:?} on {source}");
+            assert!(output.stdout.is_empty(), "{args:?}: {:?}", output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains(&format!("cat: {source}: ")),
+                "{args:?}: {stderr}"
+            );
+        }
+        // The same options accept valid input, so the failure above is the decode.
+        let from_valid_file = common::rtk_command()
+            .arg("read")
+            .arg(&valid_file)
+            .args(args)
+            .output()
+            .expect("run rtk read");
+        for output in [from_valid_file, read_stdin(valid, args)] {
+            assert!(output.status.success(), "{args:?}: {:?}", output.stderr);
         }
     }
 }
@@ -109,17 +180,28 @@ fn read_windows_still_apply_text_filtering_and_line_numbers() {
         ),
         (
             ["--head-lines", "1", "--line-numbers"].as_slice(),
-            "1 │ // comment\n",
+            "1\t// comment\n",
         ),
         (
             ["--tail-lines", "1", "--line-numbers"].as_slice(),
-            "1 │ fn gamma() {}\n",
+            "1\tfn gamma() {}\n",
         ),
     ] {
         let output = read_stdin(input, args);
         assert!(output.status.success(), "{args:?}: {:?}", output.stderr);
         assert_eq!(output.stdout, expected.as_bytes(), "{args:?}");
     }
+}
+
+#[test]
+fn read_line_numbers_align_multi_digit_widths_with_a_tab() {
+    let input = b"a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n";
+    let output = read_stdin(input, &["--line-numbers"]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(
+        output.stdout,
+        b" 1\ta\n 2\tb\n 3\tc\n 4\td\n 5\te\n 6\tf\n 7\tg\n 8\th\n 9\ti\n10\tj\n11\tk\n12\tl\n"
+    );
 }
 
 #[cfg(unix)]
@@ -134,7 +216,7 @@ fn rewritten_head_spellings_match_native_on_non_utf8_files() {
     fs::write(&file, b"\xff\xfe bad\nline2\nline3\n").expect("write binary file");
     for flags in ["-2", "-n 2", "--lines 2", "--lines=2", ""] {
         let command = format!("head {flags} {}", file.display());
-        let rewrite = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let rewrite = common::rtk_command()
             .current_dir(dir.path())
             .env("CLAUDE_CONFIG_DIR", &claude_dir)
             .env("XDG_CONFIG_HOME", &config_dir)
@@ -153,7 +235,7 @@ fn rewritten_head_spellings_match_native_on_non_utf8_files() {
             rewritten.trim(),
             format!("rtk read {} --head-lines {count}", file.display())
         );
-        let actual = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let actual = common::rtk_command()
             .args(
                 rewritten
                     .trim()
@@ -163,7 +245,7 @@ fn rewritten_head_spellings_match_native_on_non_utf8_files() {
             )
             .output()
             .expect("execute rewritten head");
-        let native = Command::new("head")
+        let native = common::native_command("head")
             .args(flags.split_whitespace())
             .arg(&file)
             .output()

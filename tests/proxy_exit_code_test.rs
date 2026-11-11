@@ -1,9 +1,9 @@
-use std::process::Command;
+mod common;
 
 #[test]
 #[cfg(windows)]
 fn proxy_preserves_child_nonzero_exit_code() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let output = common::rtk_command()
         .args(["proxy", "cmd", "/d", "/c", "exit", "7"])
         .output()
         .expect("run rtk proxy");

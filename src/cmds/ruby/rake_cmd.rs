@@ -5,6 +5,7 @@
 //! Uses `ruby_exec("rake")` to auto-detect `bundle exec`.
 
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{ruby_exec, strip_ansi};
 use anyhow::Result;
@@ -68,7 +69,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "rake",
-        &args.join(" "),
+        &display_args(args),
         filter_minitest_output,
         runner::RunOptions::with_tee("rake"),
     )
