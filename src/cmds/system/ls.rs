@@ -178,11 +178,33 @@ fn shows_dotfiles(tokens: &[Token<'_>]) -> bool {
         .any(|t| is_short_in(t, &['a', 'A']) || matches!(long_name(t), Some("all" | "almost-all")))
 }
 
+/// Flags that add a column before each entry (`-i`, `-s`) or decorate its name (`-F`, `-p`,
+/// `-Q`). The compact view reads the permissions from the first column and adds its own `/`,
+/// so it cannot render them; the native listing is printed instead.
+fn changes_entry_format(tokens: &[Token<'_>]) -> bool {
+    tokens.iter().any(|t| {
+        is_short_in(t, &['F', 'p', 'i', 's', 'Q'])
+            || matches!(
+                long_name(t),
+                Some(
+                    "classify"
+                        | "file-type"
+                        | "indicator-style"
+                        | "inode"
+                        | "size"
+                        | "quote-name"
+                        | "quoting-style"
+                )
+            )
+    })
+}
+
 /// What the user's arguments ask for: how to render the listing, and the argv to hand the
 /// child `ls`.
 struct LsPlan {
     show_all: bool,
     show_long: bool,
+    native_only: bool,
     child_args: Vec<String>,
 }
 
@@ -218,6 +240,7 @@ fn plan_for(args: &[String], flavor: Flavor) -> LsPlan {
     LsPlan {
         show_all,
         show_long,
+        native_only: changes_entry_format(&tokens),
         child_args: build_child_args(&tokens, flavor),
     }
 }
@@ -303,6 +326,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let LsPlan {
         show_all,
         show_long,
+        native_only,
         child_args,
     } = plan(args);
 
@@ -327,6 +351,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "ls",
         &label,
         |raw, code| match (code, &native) {
+            (0, Some((native, _))) if native_only => native.clone(),
             (0, _) => render(raw, listed, show_all, show_long, verbose),
             (_, Some((native, _))) => never_worse(native, raw).to_string(),
             (_, None) => raw.to_string(),
@@ -824,6 +849,36 @@ mod tests {
         assert!(almost.show_all);
         // -h is dropped because RTK renders sizes itself; -1 is a flag, not a digit-run value.
         assert_eq!(plan_of(&["-lh1"]).child_args, vec!["-l", "-1", "--", "."]);
+    }
+
+    #[test]
+    fn test_plan_entry_format_flags_keep_the_native_listing() {
+        for args in [
+            &["-F"][..],
+            &["-p"],
+            &["-i"],
+            &["-s"],
+            &["-il"],
+            &["-Q"],
+            &["--classify"],
+            &["--indicator-style=slash"],
+            &["--file-type"],
+            &["--ino"],
+            &["--size"],
+            &["--quoting-style", "c"],
+        ] {
+            assert!(plan_of(args).native_only, "ls {args:?}");
+        }
+        for args in [
+            &[][..],
+            &["-la"],
+            &["-lh"],
+            &["-ltr"],
+            &["-1"],
+            &["-I", "-i"],
+        ] {
+            assert!(!plan_of(args).native_only, "ls {args:?}");
+        }
     }
 
     #[test]
