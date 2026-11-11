@@ -541,6 +541,29 @@ enum Commands {
         /// Preview changes without writing any files (combine with -v to show content)
         #[arg(long = "dry-run", conflicts_with = "show")]
         dry_run: bool,
+
+        /// Hermes profile(s) to target (only valid with --agent hermes).
+        ///
+        /// By default (no --profile), RTK patches the Hermes default config
+        /// (~/.hermes/config.yaml).  Use this flag to target one or more named
+        /// profiles that live under ~/.hermes/profiles/<name>/config.yaml.
+        ///
+        /// Examples:
+        ///   --profile work                 target the "work" profile only
+        ///   --profile work,personal        target both "work" and "personal"
+        ///   --profile work --profile ci    same as above (repeatable)
+        ///   --profile all                  target the default config AND every
+        ///                                  profile found in ~/.hermes/profiles/
+        ///
+        /// An error is reported if a named profile does not exist on disk.
+        /// Available profiles are listed in the error message.
+        #[arg(
+            long = "profile",
+            value_name = "PROFILE",
+            value_delimiter = ',',
+            num_args = 1..,
+        )]
+        hermes_profiles: Vec<String>,
     },
 
     /// Download with compact output (strips progress bars)
@@ -3013,6 +3036,7 @@ fn run_cli() -> Result<i32> {
             codex,
             copilot,
             dry_run,
+            hermes_profiles,
         } => {
             let ctx = hooks::init::InitContext {
                 verbose: cli.verbose,
@@ -3032,6 +3056,11 @@ fn run_cli() -> Result<i32> {
             };
             if show {
                 hooks::init::show_config(codex, agent == Some(AgentTarget::Omp))?;
+            } else if !hermes_profiles.is_empty() && agent != Some(AgentTarget::Hermes) {
+                anyhow::bail!(
+                    "--profile is only valid with --agent hermes.\n\
+                     Usage: rtk init --agent hermes --profile <name|all>"
+                );
             } else if uninstall && copilot {
                 if global {
                     hooks::init::uninstall_copilot_global(ctx)?;
@@ -3046,7 +3075,7 @@ fn run_cli() -> Result<i32> {
                     codex,
                     patch_mode,
                     ctx,
-                    hooks::init::uninstall_hermes,
+                    |ctx| hooks::init::uninstall_hermes(ctx, &hermes_profiles),
                     hooks::init::uninstall_with_patch_mode,
                 );
             } else if gemini {
@@ -3076,7 +3105,7 @@ fn run_cli() -> Result<i32> {
                 }
                 hooks::init::run_kimi_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
-                hooks::init::run_hermes_mode(ctx)?;
+                hooks::init::run_hermes_mode(ctx, &hermes_profiles)?;
             } else if agent == Some(AgentTarget::Droid) {
                 hooks::init::run_droid_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Vibe) {
@@ -4333,8 +4362,79 @@ mod tests {
     fn test_try_parse_init_agent_hermes() {
         let cli = try_parse_cli_from(["rtk", "init", "--agent", "hermes"]).unwrap();
         match cli.command {
-            Commands::Init { agent, .. } => {
+            Commands::Init {
+                agent,
+                hermes_profiles,
+                ..
+            } => {
                 assert_eq!(agent, Some(AgentTarget::Hermes));
+                assert!(hermes_profiles.is_empty());
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_hermes_with_profiles() {
+        let cli =
+            try_parse_cli_from(["rtk", "init", "--agent", "hermes", "--profile", "work"]).unwrap();
+        match cli.command {
+            Commands::Init {
+                agent,
+                hermes_profiles,
+                ..
+            } => {
+                assert_eq!(agent, Some(AgentTarget::Hermes));
+                assert_eq!(hermes_profiles, vec!["work"]);
+            }
+            _ => panic!("Expected Init command"),
+        }
+
+        let cli = try_parse_cli_from([
+            "rtk",
+            "init",
+            "--agent",
+            "hermes",
+            "--profile",
+            "work,personal",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Init {
+                hermes_profiles, ..
+            } => {
+                assert_eq!(hermes_profiles, vec!["work", "personal"]);
+            }
+            _ => panic!("Expected Init command"),
+        }
+
+        let cli = try_parse_cli_from([
+            "rtk",
+            "init",
+            "--agent",
+            "hermes",
+            "--profile",
+            "work",
+            "--profile",
+            "personal",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Init {
+                hermes_profiles, ..
+            } => {
+                assert_eq!(hermes_profiles, vec!["work", "personal"]);
+            }
+            _ => panic!("Expected Init command"),
+        }
+
+        let cli =
+            try_parse_cli_from(["rtk", "init", "--agent", "hermes", "--profile", "all"]).unwrap();
+        match cli.command {
+            Commands::Init {
+                hermes_profiles, ..
+            } => {
+                assert_eq!(hermes_profiles, vec!["all"]);
             }
             _ => panic!("Expected Init command"),
         }
