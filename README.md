@@ -236,7 +236,7 @@ Nothing changes for the developer. No secret value ever leaves the machine. The 
 
 ## Works in your agent
 
-RTK supports 18 AI coding tools. With a **hook** or **plugin**, `rtk init` installs it and compression is automatic. With a **rules file**, RTK asks the model to prefer `rtk` commands instead.
+RTK supports 19 AI coding tools. With a **hook** or **plugin**, `rtk init` installs it and compression is automatic. With a **rules file**, RTK asks the model to prefer `rtk` commands instead.
 
 | Tool | Install | How |
 |------|---------|-----|
@@ -257,6 +257,7 @@ RTK supports 18 AI coding tools. With a **hook** or **plugin**, `rtk init` insta
 | **Kilo Code** | `rtk init --agent kilocode` | rules file |
 | **Google Antigravity** | `rtk init --agent antigravity` (or `-g`) | rules file |
 | **Kimi AI** | `rtk init --agent kimi` | rules file |
+| **Kiro CLI** (formerly Q Developer CLI) | `rtk init --agent kiro` (or `-g`) | rules file |
 
 Per-agent setup, what each hook API allows, override controls: **[Supported Agents](https://www.rtk-ai.app/docs/getting-started/supported-agents/)** · **[Agent Coverage](https://www.rtk-ai.app/docs/resources/agent-coverage/)**
 
