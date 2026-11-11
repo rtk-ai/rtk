@@ -132,10 +132,12 @@ fn resolve_sha(src: &GithubSource) -> Option<String> {
 fn http_get(url: &str) -> Result<String> {
     // GET of a public GitHub endpoint the user asked for; inbound content only.
     // nosemgrep: ureq-outside-telemetry
-    ureq::get(url)
+    let mut response = ureq::get(url)
         .call()
-        .with_context(|| format!("GET {url}"))?
-        .into_string()
+        .with_context(|| format!("GET {url}"))?;
+    response
+        .body_mut()
+        .read_to_string()
         .context("read response")
 }
 

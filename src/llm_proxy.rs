@@ -542,11 +542,15 @@ pub fn is_rtk_proxy_at(addr: &str, timeout: Duration) -> bool {
 }
 
 fn health_check_with_timeout(bind: &str, timeout: Duration) -> bool {
-    ureq::get(&format!("http://{bind}/health"))
-        .timeout(timeout)
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .build()
+        .new_agent();
+    agent
+        .get(&format!("http://{bind}/health"))
         .call()
         .ok()
-        .and_then(|resp| resp.into_string().ok())
+        .and_then(|mut response| response.body_mut().read_to_string().ok())
         .is_some_and(|body| is_rtk_proxy_health(&body))
 }
 

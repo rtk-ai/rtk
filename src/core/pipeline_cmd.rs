@@ -220,10 +220,10 @@ fn read_source(source: &str) -> Result<String> {
         let url = gist_raw_url(source);
         // GET of a URL the user typed on the CLI; inbound content only.
         // nosemgrep: ureq-outside-telemetry
-        return ureq::get(&url)
-            .call()
-            .context("fetch pipeline")?
-            .into_string()
+        let mut response = ureq::get(&url).call().context("fetch pipeline")?;
+        return response
+            .body_mut()
+            .read_to_string()
             .context("read fetched pipeline");
     }
     std::fs::read_to_string(source).with_context(|| format!("read {source}"))

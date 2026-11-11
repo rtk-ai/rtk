@@ -255,14 +255,17 @@ fn send_erasure_request(device_hash: &str) -> Result<()> {
         "action": "erasure",
     });
 
-    let mut req = ureq::post(&url).set("Content-Type", "application/json");
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(5)))
+        .build()
+        .new_agent();
+    let mut req = agent.post(&url).header("Content-Type", "application/json");
 
     if let Some(token) = option_env!("RTK_TELEMETRY_TOKEN") {
-        req = req.set("X-RTK-Token", token);
+        req = req.header("X-RTK-Token", token);
     }
 
-    req.timeout(std::time::Duration::from_secs(5))
-        .send_string(&payload.to_string())?;
+    req.send(payload.to_string())?;
 
     Ok(())
 }

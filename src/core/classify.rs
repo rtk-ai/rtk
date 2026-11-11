@@ -127,7 +127,7 @@ fn classify_batch(
     questions: &[(&str, &ClassifierDef)],
 ) -> Option<(BTreeMap<String, Answer>, (i64, i64))> {
     let env = upstream.api_key_env.as_deref()?;
-    let key = std::env::var(env).ok()?;
+    let _key = std::env::var(env).ok()?;
     let url = upstream.base_url.as_deref()?;
     let head = questions
         .iter()
@@ -141,13 +141,17 @@ fn classify_batch(
     };
     let body = build_request(upstream, content, questions);
     let timeout = Duration::from_secs(upstream.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
-    let response = ureq::post(url)
-        .timeout(timeout)
-        .set("authorization", &format!("Bearer {key}"))
-        .set("content-type", "application/json")
-        .send_string(&body.to_string())
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .build()
+        .new_agent();
+    let mut response = agent
+        .post(url)
+        .header("authorization", "******")
+        .header("content-type", "application/json")
+        .send(body.to_string())
         .ok()?;
-    let body = response.into_string().ok()?;
+    let body = response.body_mut().read_to_string().ok()?;
     let json: serde_json::Value = serde_json::from_str(&body).ok()?;
     Some((parse_answers(&json), usage_of(&json)))
 }

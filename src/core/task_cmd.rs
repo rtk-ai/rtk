@@ -382,22 +382,25 @@ fn post_json(
     body: &serde_json::Value,
     limit: std::time::Duration,
 ) -> Result<serde_json::Value> {
-    let mut req = ureq::post(url)
-        .timeout(limit)
-        .set("Content-Type", "application/json");
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(limit))
+        .http_status_as_error(false)
+        .build()
+        .new_agent();
+    let mut req = agent.post(url).header("Content-Type", "application/json");
     for (key, value) in headers {
-        req = req.set(key, value);
+        req = req.header(*key, *value);
     }
-    let response = req.send_string(&body.to_string()).map_err(|e| match e {
-        ureq::Error::Status(code, response) => {
-            let detail = response.into_string().unwrap_or_default();
-            anyhow::anyhow!("worker call failed ({code}): {detail}")
-        }
-        other => anyhow::anyhow!("worker call failed: {other}"),
-    })?;
-    let text = response
-        .into_string()
-        .context("worker response read failed")?;
+    let mut response = req
+        .send(body.to_string())
+        .map_err(|e| anyhow::anyhow!("worker call failed: {e}"))?;
+    let status = response.status();
+    let text = response.body_mut().read_to_string();
+    if !status.is_success() {
+        let detail = text.unwrap_or_default();
+        anyhow::bail!("worker call failed ({}): {detail}", status.as_u16());
+    }
+    let text = text.context("worker response read failed")?;
     serde_json::from_str(&text).context("worker response was not JSON")
 }
 
