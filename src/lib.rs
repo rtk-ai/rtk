@@ -2278,16 +2278,21 @@ fn build_kubectl_alias_args(
     K8sAlias::Filtered(args)
 }
 
-fn build_kubectl_get_args(global: &KubectlGlobalArgs, args: Vec<String>) -> Vec<String> {
-    let mut args = args.into_iter();
-    let Some(resource) = args.next() else {
-        return global.to_args();
-    };
+fn build_kubectl_get_args(global: &KubectlGlobalArgs, mut args: Vec<String>) -> Vec<String> {
+    let tokens = core::arg_tokenizer::tokenize(&args);
+    let index = core::arg_tokenizer::injection_point(&tokens, args.len());
+    args.splice(index..index, global.to_args());
+    args
+}
 
-    std::iter::once(resource)
-        .chain(global.to_args())
-        .chain(args)
-        .collect()
+fn build_kubectl_logs_args(
+    global: &KubectlGlobalArgs,
+    pod: String,
+    container: Option<String>,
+) -> Vec<String> {
+    let mut args = build_k8s_logs_args(pod, container);
+    args.splice(1..1, global.to_args());
+    args
 }
 
 fn build_kubectl_passthrough_args(
@@ -3014,21 +3019,28 @@ fn run_cli() -> Result<i32> {
                 let args = build_kubectl_get_args(&global, args);
                 container::run_kubectl_get(&args, cli.verbose)?
             }
-            KubectlCommands::Pods { selector, all, extra } => match build_kubectl_alias_args("pods", &global, selector, all, extra) {
-                K8sAlias::Filtered(args) => container::run(container::ContainerCmd::KubectlPods, &args, cli.verbose)?,
+            KubectlCommands::Pods {
+                selector,
+                all,
+                extra,
+            } => match build_kubectl_alias_args("pods", &global, selector, all, extra) {
+                K8sAlias::Filtered(args) => {
+                    container::run(container::ContainerCmd::KubectlPods, &args, cli.verbose)?
+                }
                 K8sAlias::Raw(args) => container::run_kubectl_passthrough(&args, cli.verbose)?,
             },
-            KubectlCommands::Services { selector, all, extra } => match build_kubectl_alias_args("services", &global, selector, all, extra) {
-                K8sAlias::Filtered(args) => container::run(container::ContainerCmd::KubectlServices, &args, cli.verbose)?,
+            KubectlCommands::Services {
+                selector,
+                all,
+                extra,
+            } => match build_kubectl_alias_args("services", &global, selector, all, extra) {
+                K8sAlias::Filtered(args) => {
+                    container::run(container::ContainerCmd::KubectlServices, &args, cli.verbose)?
+                }
                 K8sAlias::Raw(args) => container::run_kubectl_passthrough(&args, cli.verbose)?,
             },
             KubectlCommands::Logs { pod, container: c } => {
-                let mut args = vec![pod];
-                args.extend(global.to_args());
-                if let Some(container) = c {
-                    args.push("-c".to_string());
-                    args.push(container);
-                }
+                let args = build_kubectl_logs_args(&global, pod, c);
                 container::run(container::ContainerCmd::KubectlLogs, &args, cli.verbose)?
             }
             KubectlCommands::Other(args) => {
@@ -4812,7 +4824,8 @@ mod tests {
                         command:
                             KubectlCommands::Pods { selector, all, .. }
                             | KubectlCommands::Services { selector, all, .. },
-                    } => build_kubectl_alias_args(resource, &global, selector, all, vec![]).filtered_args(),
+                    } => build_kubectl_alias_args(resource, &global, selector, all, vec![])
+                        .filtered_args(),
                     _ => panic!("Expected a kubectl alias"),
                 };
                 let mut expected = vec!["--context", "prod", "--kubeconfig", "/tmp/kube.conf"];
@@ -4836,7 +4849,11 @@ mod tests {
             namespace: None,
             impersonate: None,
         };
-        assert!(build_kubectl_alias_args("pods", &global, None, false, vec![]).filtered_args().is_empty());
+        assert!(
+            build_kubectl_alias_args("pods", &global, None, false, vec![])
+                .filtered_args()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4899,7 +4916,42 @@ mod tests {
     }
 
     #[test]
-    fn test_build_kubectl_get_args_places_globals_after_resource() {
+    fn test_kubectl_get_flag_first_keeps_output_value_together() {
+        let cli = Cli::try_parse_from([
+            "rtk", "kubectl", "get", "-n", "staging", "-o", "wide", "pods",
+        ])
+        .expect("flag-first get parses");
+        match cli.command {
+            Commands::Kubectl {
+                global,
+                command: KubectlCommands::Get { args },
+            } => {
+                assert_eq!(
+                    build_kubectl_get_args(&global, args),
+                    ["-o", "wide", "pods", "-n", "staging"],
+                );
+            }
+            _ => panic!("Expected kubectl get"),
+        }
+    }
+
+    #[test]
+    fn test_kubectl_get_without_resource_forwards_globals() {
+        let cli = Cli::try_parse_from(["rtk", "kubectl", "--context", "x", "get"])
+            .expect("get without resource parses");
+        match cli.command {
+            Commands::Kubectl {
+                global,
+                command: KubectlCommands::Get { args },
+            } => {
+                assert_eq!(build_kubectl_get_args(&global, args), ["--context", "x"]);
+            }
+            _ => panic!("Expected kubectl get"),
+        }
+    }
+
+    #[test]
+    fn test_build_kubectl_get_args_keeps_resource_and_flag_values_together() {
         let global = KubectlGlobalArgs {
             context: Some("prod".into()),
             kubeconfig: None,
@@ -4909,8 +4961,51 @@ mod tests {
 
         assert_eq!(
             build_kubectl_get_args(&global, vec!["pods".into(), "-o".into(), "json".into()]),
-            vec!["pods", "--context", "prod", "-n", "default", "-o", "json"]
+            vec!["pods", "-o", "json", "--context", "prod", "-n", "default"]
         );
+    }
+
+    #[test]
+    fn test_kubectl_get_injects_globals_before_double_dash() {
+        let global = KubectlGlobalArgs {
+            context: Some("prod".into()),
+            kubeconfig: None,
+            namespace: None,
+            impersonate: None,
+        };
+        assert_eq!(
+            build_kubectl_get_args(&global, vec!["pods".into(), "--".into(), "literal".into()]),
+            ["pods", "--context", "prod", "--", "literal"],
+        );
+    }
+
+    #[test]
+    fn test_kubectl_logs_forwards_actual_argument_vector() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "kubectl",
+            "logs",
+            "my-pod",
+            "-n",
+            "staging",
+            "--context",
+            "dev",
+            "-c",
+            "app",
+        ])
+        .expect("logs with globals and container parses");
+        match cli.command {
+            Commands::Kubectl {
+                global,
+                command: KubectlCommands::Logs { pod, container },
+            } => {
+                assert_eq!(
+                    build_kubectl_logs_args(&global, pod, container),
+                    ["my-pod", "--context", "dev", "-n", "staging", "-c", "app"],
+                );
+            }
+            _ => panic!("Expected kubectl logs"),
+        }
     }
 
     #[test]

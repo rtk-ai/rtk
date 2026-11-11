@@ -5749,6 +5749,33 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_kubectl_alias_guards_preserve_generic_get() {
+        for resource in ["pods", "services"] {
+            for args in ["-l -x", "-n *", "--namespace=", "-n"] {
+                let command = format!("kubectl get {resource} {args}");
+                assert_eq!(
+                    rewrite_command_no_prefixes(&command, &[]),
+                    Some(format!("rtk {command}")),
+                    "unsafe alias arguments must keep get: {command}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_rewrite_kubectl_all_namespaces_uses_alias() {
+        for resource in ["pods", "services"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(
+                    &format!("kubectl get {resource} --all-namespaces"),
+                    &[],
+                ),
+                Some(format!("rtk kubectl {resource} --all-namespaces")),
+            );
+        }
+    }
+
+    #[test]
     fn test_rewrite_kubectl_get_pods_to_direct_alias() {
         assert_eq!(
             rewrite_command_no_prefixes("kubectl get pods -n default", &[]),
