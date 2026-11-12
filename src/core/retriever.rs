@@ -21,6 +21,9 @@ pub const MIN_FAILURE_BYTES: usize = 500;
 const HASH_HEX_LEN: usize = 16;
 const DEFAULT_TEE_MAX_FILES: usize = 20;
 const DEFAULT_TEE_MAX_FILE_SIZE: usize = 1_048_576;
+// Fixed independently of retained output: dynamic command names must not grow
+// the statistics indefinitely. This leaves room for both modes' usual filters.
+const MAX_STATS_ROWS: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -262,7 +265,32 @@ fn init_schema(conn: &Connection) -> Result<()> {
         "ALTER TABLE recall ADD COLUMN recalled INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    init_stats_retention(conn)?;
     Ok(())
+}
+
+fn init_stats_retention(conn: &Connection) -> Result<()> {
+    // The trigger runs only for a new (slug, mode), not an upsert's UPDATE arm.
+    // Keeping eviction in the INSERT makes the bound atomic across connections
+    // and composes with callers that already own a transaction.
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER IF NOT EXISTS recall_stats_cap
+         AFTER INSERT ON recall_stats
+         WHEN (SELECT COUNT(*) FROM recall_stats) > {MAX_STATS_ROWS}
+         BEGIN
+             DELETE FROM recall_stats WHERE rowid IN (
+                 SELECT rowid FROM recall_stats WHERE rowid != NEW.rowid
+                 ORDER BY elisions + recalls ASC, rowid ASC
+                 LIMIT (SELECT COUNT(*) FROM recall_stats) - {MAX_STATS_ROWS}
+             );
+         END;
+         DELETE FROM recall_stats WHERE rowid IN (
+             SELECT rowid FROM recall_stats
+             ORDER BY elisions + recalls ASC, rowid ASC
+             LIMIT MAX((SELECT COUNT(*) FROM recall_stats) - {MAX_STATS_ROWS}, 0)
+         );"
+    ))
+    .context("bound recall statistics")
 }
 
 fn stat_family(slug: &str) -> &str {
@@ -1305,6 +1333,184 @@ mod tests {
             .expect("tee row");
         assert_eq!((sqlite.elisions, sqlite.recalls), (1, 0));
         assert_eq!((tee.elisions, tee.recalls), (1, 1));
+    }
+
+    fn stats_count(conn: &Connection) -> usize {
+        conn.query_row("SELECT COUNT(*) FROM recall_stats", [], |r| r.get(0))
+            .expect("count statistics")
+    }
+
+    fn stats_counts(conn: &Connection, slug: &str, mode: &str) -> Option<(i64, i64)> {
+        conn.query_row(
+            "SELECT elisions, recalls FROM recall_stats WHERE slug = ?1 AND mode = ?2",
+            params![slug, mode],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .expect("read statistics")
+    }
+
+    #[test]
+    fn test_stats_cap_bounds_dynamic_command_names() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let cfg = RetrieverConfig {
+            compression: false,
+            ..temp_cfg(dir.path())
+        };
+        let conn = open(&cfg).expect("open store");
+        for i in 0..MAX_STATS_ROWS * 2 {
+            // Digits after a letter bypass stat_family's invocation suffix rule.
+            let slug = format!("cargo_task{i}");
+            assert_eq!(stat_key(&slug), slug);
+            store_inner(&cfg, b"output\n", &slug, Some(0), 1).expect("store output");
+            assert_eq!(stats_count(&conn), (i + 1).min(MAX_STATS_ROWS));
+        }
+        assert!(stats_counts(&conn, "cargo_task0", "sqlite").is_none());
+        assert_eq!(
+            stats_counts(&conn, &format!("cargo_task{}", MAX_STATS_ROWS), "sqlite"),
+            Some((1, 0)),
+            "equal-use ties discard the oldest insertion first"
+        );
+    }
+
+    #[test]
+    fn test_stats_cap_preserves_frequent_filters_and_separate_modes() {
+        let conn = Connection::open_in_memory().expect("open store");
+        init_schema(&conn).expect("initialize schema");
+        for mode in ["sqlite", "tee"] {
+            for _ in 0..5 {
+                bump_stat(&conn, "cargo_test", mode, "elisions");
+            }
+            bump_stat(&conn, "cargo_test", mode, "recalls");
+        }
+        for i in 0..MAX_STATS_ROWS * 2 {
+            let mode = if i % 2 == 0 { "sqlite" } else { "tee" };
+            bump_stat(&conn, &format!("bun_task{i}"), mode, "elisions");
+        }
+        for mode in ["sqlite", "tee"] {
+            assert_eq!(stats_counts(&conn, "cargo_test", mode), Some((5, 1)));
+            for _ in 0..10 {
+                bump_stat(&conn, "cargo_test", mode, "elisions");
+                bump_stat(&conn, "cargo_test", mode, "recalls");
+            }
+            assert_eq!(stats_counts(&conn, "cargo_test", mode), Some((15, 11)));
+        }
+        assert_eq!(stats_count(&conn), MAX_STATS_ROWS, "one cap across modes");
+    }
+
+    #[test]
+    fn test_stats_cap_keeps_new_filter_even_when_existing_counts_are_higher() {
+        let conn = Connection::open_in_memory().expect("open store");
+        init_schema(&conn).expect("initialize schema");
+        for i in 0..MAX_STATS_ROWS {
+            let slug = format!("deno_task{i}");
+            bump_stat(&conn, &slug, "sqlite", "elisions");
+            bump_stat(&conn, &slug, "sqlite", "elisions");
+        }
+        bump_stat(&conn, "new_filter", "tee", "recalls");
+        assert_eq!(stats_count(&conn), MAX_STATS_ROWS);
+        assert_eq!(stats_counts(&conn, "new_filter", "tee"), Some((0, 1)));
+        assert!(stats_counts(&conn, "deno_task0", "sqlite").is_none());
+        assert_eq!(stats_counts(&conn, "deno_task1", "sqlite"), Some((2, 0)));
+    }
+
+    #[test]
+    fn test_stats_cap_trims_existing_oversized_store_on_open() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let cfg = temp_cfg(dir.path());
+        let conn = open(&cfg).expect("open store");
+        insert_row(&conn, "aaa111111111", "cargo_test");
+        conn.execute_batch("DROP TRIGGER recall_stats_cap")
+            .expect("simulate schema before stats cap");
+        for i in 0..MAX_STATS_ROWS + 20 {
+            bump_stat(&conn, &format!("cargo_task{i}"), "sqlite", "elisions");
+        }
+        bump_stat(&conn, "cargo_task0", "sqlite", "recalls");
+        drop(conn);
+
+        let stats = stats_snapshot_with(&cfg).expect("open existing store for snapshot");
+        assert_eq!(stats.len(), MAX_STATS_ROWS);
+        let conn = open(&cfg).expect("reopen store");
+        assert_eq!(stats_counts(&conn, "cargo_task0", "sqlite"), Some((1, 1)));
+        assert!(stats_counts(&conn, "cargo_task20", "sqlite").is_none());
+        assert_eq!(stats_counts(&conn, "cargo_task21", "sqlite"), Some((1, 0)));
+        assert!(
+            load_by_hash(&conn, "aaa111111111")
+                .expect("recall row")
+                .is_some()
+        );
+        bump_stat(&conn, "new_filter", "tee", "elisions");
+        assert_eq!(
+            stats_count(&conn),
+            MAX_STATS_ROWS,
+            "trigger restored on open"
+        );
+    }
+
+    #[test]
+    fn test_stats_cap_rolls_back_with_callers_transaction() {
+        let conn = Connection::open_in_memory().expect("open store");
+        init_schema(&conn).expect("initialize schema");
+        for i in 0..MAX_STATS_ROWS {
+            bump_stat(&conn, &format!("cargo_task{i}"), "sqlite", "elisions");
+        }
+        let tx = conn
+            .unchecked_transaction()
+            .expect("begin caller transaction");
+        bump_stat(&tx, "new_filter", "tee", "elisions");
+        assert_eq!(stats_count(&tx), MAX_STATS_ROWS);
+        assert!(stats_counts(&tx, "cargo_task0", "sqlite").is_none());
+        tx.rollback().expect("roll back caller transaction");
+        assert_eq!(stats_count(&conn), MAX_STATS_ROWS);
+        assert_eq!(stats_counts(&conn, "cargo_task0", "sqlite"), Some((1, 0)));
+        assert!(stats_counts(&conn, "new_filter", "tee").is_none());
+    }
+
+    #[test]
+    fn test_stats_cap_concurrent_connections_preserve_updates_and_bound() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let cfg = temp_cfg(dir.path());
+        let conn = open(&cfg).expect("open store");
+        bump_stat(&conn, "cargo_test", "sqlite", "elisions");
+        bump_stat(&conn, "cargo_test", "tee", "elisions");
+        let barrier = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            for worker in 0..4 {
+                let cfg = &cfg;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let mut conn = open(cfg).expect("open worker connection");
+                    // Exercise competing writers without thousands of durable
+                    // autocommits exhausting the production best-effort timeout
+                    // on slower Windows runners. Retention must compose with a
+                    // caller-owned transaction and preserve its committed counts.
+                    conn.busy_timeout(std::time::Duration::from_secs(60))
+                        .expect("set test contention timeout");
+                    barrier.wait();
+                    let tx = conn
+                        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                        .expect("serialize worker transaction");
+                    for i in 0..MAX_STATS_ROWS / 2 {
+                        for mode in ["sqlite", "tee"] {
+                            bump_stat(&tx, "cargo_test", mode, "elisions");
+                            bump_stat(&tx, "cargo_test", mode, "recalls");
+                        }
+                        let slug = format!("cargo_taskw{worker}x{i}");
+                        bump_stat(&tx, &slug, "sqlite", "elisions");
+                        assert!(stats_count(&tx) <= MAX_STATS_ROWS);
+                    }
+                    tx.commit().expect("commit worker statistics");
+                });
+            }
+        });
+        assert_eq!(stats_count(&conn), MAX_STATS_ROWS);
+        for mode in ["sqlite", "tee"] {
+            assert_eq!(
+                stats_counts(&conn, "cargo_test", mode),
+                Some(((MAX_STATS_ROWS * 2 + 1) as i64, (MAX_STATS_ROWS * 2) as i64)),
+                "concurrent upserts must retain both counters"
+            );
+        }
     }
 
     #[test]
