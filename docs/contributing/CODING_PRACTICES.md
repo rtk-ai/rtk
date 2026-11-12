@@ -85,8 +85,8 @@ Example from `src/cmds/git/git_cmd.rs`:
 
 ```rust
 let limits = config::limits();
-let max_files = limits.status_max_files;
-let max_untracked = limits.status_max_untracked;
+let max_files = limits.status_max_files.unwrap_or(usize::MAX);
+let max_untracked = limits.status_max_untracked.unwrap_or(usize::MAX);
 ```
 
 ---
