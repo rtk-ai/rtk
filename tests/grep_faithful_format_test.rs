@@ -1,4 +1,6 @@
-#![cfg(unix)]
+//! Runs on every platform: each test that shells out to `grep` or `rg`
+//! skips itself when that engine is not installed, so Windows CI exercises
+//! the filters instead of compiling an empty test binary.
 //! For un-capped searches `rtk grep X` must be byte-identical to `grep X`.
 //! Every scenario runs twice, with and without `-n`, so both the presence and
 //! the absence of the line number are pinned: grep prints one only when asked,
