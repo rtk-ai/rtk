@@ -1,7 +1,7 @@
 //! Filters pnpm output — dependency trees, install logs, outdated packages.
 
 use crate::core::guard::never_worse;
-use crate::core::stream::exec_capture;
+use crate::core::stream::{CaptureResult, exec_capture};
 use crate::core::tracking;
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::resolved_command;
@@ -393,7 +393,9 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
     let result = exec_capture(&mut cmd).context("Failed to run pnpm list")?;
 
     if !result.success() {
-        eprint!("{}", result.stderr);
+        // pnpm itself reports list errors on stderr; stdout only carries the
+        // reason when a wrapper in front of pnpm refuses the command (#4858).
+        print_failure(&result, None);
         return Ok(result.exit_code);
     }
 
@@ -503,7 +505,7 @@ fn run_install(args: &[String], verbose: u8) -> Result<i32> {
     let result = exec_capture(&mut cmd).context("Failed to run pnpm install")?;
 
     if !result.success() {
-        eprint!("{}", result.stderr);
+        print_failure(&result, Some(filter_pnpm_failure));
         return Ok(result.exit_code);
     }
 
@@ -516,6 +518,62 @@ fn run_install(args: &[String], verbose: u8) -> Result<i32> {
     timer.track("pnpm install", "rtk pnpm install", &combined, shown);
 
     Ok(0)
+}
+
+/// Print the output of a failed pnpm run.
+///
+/// stderr alone is enough when pnpm wrote there. When it is empty, the reason
+/// is on stdout (pnpm 9/10 install errors, or a wrapper that refuses the
+/// command), so show stdout, filtered when a filter is given. A filter that
+/// keeps nothing must not hide the failure, so fall back to the raw stdout.
+fn print_failure(result: &CaptureResult, filter: Option<fn(&str) -> String>) {
+    if !result.stderr.trim().is_empty() {
+        eprint!("{}", result.stderr);
+        return;
+    }
+    let shown = match filter {
+        Some(filter) => match filter(&result.stdout) {
+            filtered if filtered.trim().is_empty() => result.stdout.clone(),
+            filtered => never_worse(&result.stdout, &filtered).to_string(),
+        },
+        None => result.stdout.clone(),
+    };
+    print!("{}", shown);
+    if !shown.ends_with('\n') && !shown.is_empty() {
+        println!();
+    }
+}
+
+/// Filter the stdout of a failed pnpm install.
+///
+/// Unlike `filter_pnpm_install`, which keeps a few summary lines of a green
+/// install, this drops only what is known to be noise (progress lines, the
+/// `+++` bar, the update-available box) and keeps every other line as is:
+/// failure reasons come in shapes no keyword list covers (`%2F` in a scoped
+/// 404, `ELIFECYCLE`, an indented lockfile mismatch, a script's own output).
+fn filter_pnpm_failure(output: &str) -> String {
+    let mut result: Vec<&str> = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        // "Progress: …", or "../.. | Progress: …" in a workspace
+        let is_progress = trimmed.starts_with("Progress:") || trimmed.contains("| Progress:");
+        let is_bar = !trimmed.is_empty() && trimmed.chars().all(|c| c == '+' || c == '-');
+        let is_update_box = trimmed.starts_with(['╭', '│', '╰']);
+        if is_progress || is_bar || is_update_box {
+            continue;
+        }
+        // Collapse the blank lines left around dropped ones.
+        if trimmed.is_empty() && result.last().is_none_or(|l| l.trim().is_empty()) {
+            continue;
+        }
+        result.push(line);
+    }
+
+    while result.last().is_some_and(|l| l.trim().is_empty()) {
+        result.pop();
+    }
+    result.join("\n")
 }
 
 /// Filter pnpm install output - remove progress bars, keep summary
@@ -703,5 +761,67 @@ mod tests {
             .unwrap();
         assert!(!react.dev_dependency, "react should be prod");
         assert!(eslint.dev_dependency, "eslint should be dev");
+    }
+
+    // Fixtures: real pnpm 10.34.9 stdout (stderr was empty), paths replaced by /project.
+
+    #[test]
+    fn test_failure_filter_keeps_scoped_404() {
+        let raw = include_str!("../../../tests/fixtures/pnpm_install_fetch_404_scoped_raw.txt");
+        let out = filter_pnpm_failure(raw);
+        assert!(out.contains("ERR_PNPM_FETCH_404"), "got: {out}");
+        assert!(
+            out.contains("@ferr079-nope%2Fpkg-zz: Not Found"),
+            "got: {out}"
+        );
+        assert!(out.contains("@ferr079-nope/pkg-zz is not in the npm registry"));
+        assert!(!out.contains("Progress:"), "got: {out}");
+        assert!(!out.contains("Update available"), "got: {out}");
+    }
+
+    #[test]
+    fn test_failure_filter_keeps_postinstall_reason() {
+        let raw = include_str!("../../../tests/fixtures/pnpm_install_postinstall_failed_raw.txt");
+        let out = filter_pnpm_failure(raw);
+        assert!(
+            out.contains("native build failed: missing libfoo"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("\u{2009}ELIFECYCLE\u{2009} Command failed with exit code 7."),
+            "got: {out}"
+        );
+        assert!(
+            !out.lines().any(|l| l.trim() == "+"),
+            "no lone progress bar, got: {out}"
+        );
+        assert!(!out.contains("Progress:"), "got: {out}");
+    }
+
+    #[test]
+    fn test_failure_filter_keeps_frozen_lockfile_mismatch() {
+        let raw = include_str!("../../../tests/fixtures/pnpm_install_frozen_lockfile_raw.txt");
+        let out = filter_pnpm_failure(raw);
+        assert!(out.contains("ERR_PNPM_OUTDATED_LOCKFILE"), "got: {out}");
+        assert!(
+            out.contains("  - is-number (lockfile: 7.0.0, manifest: ^6.0.0)"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn test_failure_filter_drops_workspace_progress() {
+        let raw = "../.. | Progress: resolved 3, reused 3, downloaded 0, added 0\n\
+                   . | Progress: resolved 3, reused 3, downloaded 0, added 0, done\n\
+                   \u{2009}ERR_PNPM_FETCH_404\u{2009} GET https://registry.npmjs.org/@a%2Fb: Not Found - 404\n";
+        assert_eq!(
+            filter_pnpm_failure(raw),
+            "\u{2009}ERR_PNPM_FETCH_404\u{2009} GET https://registry.npmjs.org/@a%2Fb: Not Found - 404"
+        );
+    }
+
+    #[test]
+    fn test_failure_filter_only_noise_is_empty() {
+        assert_eq!(filter_pnpm_failure("Progress: resolved 1\n+\n\n"), "");
     }
 }
