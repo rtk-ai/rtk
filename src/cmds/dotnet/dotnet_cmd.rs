@@ -13,7 +13,6 @@ use crate::core::utils::{resolved_command, truncate};
 use crate::dotnet_format_report;
 use crate::dotnet_trx;
 use anyhow::{Context, Result};
-use quick_xml::Reader;
 use quick_xml::events::Event;
 use serde_json::Value;
 use std::ffi::OsString;
@@ -711,60 +710,55 @@ fn scan_mtp_kind_in_file(path: &Path) -> MtpProjectKind {
         Err(_) => return MtpProjectKind::None,
     };
 
-    let mut reader = Reader::from_str(&content);
-    reader.config_mut().trim_text(false);
-    let mut buf = Vec::new();
-    let mut inside_mtp_element = false;
-    let mut mtp_element_text = String::new();
+    let mut reader = dotnet_trx::xml_reader(&content);
+    // The text of the MTP property being read, if inside one.
+    let mut value: Option<String> = None;
+    let is_true = |value: &Option<String>| {
+        value
+            .as_deref()
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
+    };
 
+    // Decided after the loop: a malformed end tag or a truncated file still ends a
+    // value read in full.
     loop {
-        match reader.read_event_into(&mut buf) {
+        match reader.read_event() {
             Ok(Event::Start(e)) => {
                 let name_lower = e.local_name().as_ref().to_ascii_lowercase();
                 // All project-file MTP properties run in VSTest bridge mode and require
                 // MTP-specific args to come after `--`. Only global.json MTP mode is native.
-                inside_mtp_element = matches!(
+                let is_mtp_element = matches!(
                     name_lower.as_str(),
                     "usemicrosofttestingplatformrunner"
                         | "usetestingplatformrunner"
                         | "testingplatformdotnettestsupport"
                 );
-                if inside_mtp_element {
-                    mtp_element_text.clear();
+                value = is_mtp_element.then(String::new);
+            }
+            Ok(event @ (Event::Text(_) | Event::CData(_) | Event::GeneralRef(_))) => {
+                if let Some(value) = value.as_mut() {
+                    dotnet_trx::push_content(&event, value);
                 }
             }
-            Ok(Event::Text(e)) if inside_mtp_element => {
-                if let Ok(text) = quick_xml::escape::unescape(e.as_ref()) {
-                    mtp_element_text.push_str(&text);
-                }
-            }
-            Ok(Event::GeneralRef(e)) if inside_mtp_element => {
-                let text = e
-                    .resolve_char_ref()
-                    .ok()
-                    .flatten()
-                    .map(|ch| ch.to_string())
-                    .or_else(|| {
-                        quick_xml::escape::resolve_predefined_entity(e.as_ref()).map(str::to_owned)
-                    });
-                if let Some(text) = text {
-                    mtp_element_text.push_str(&text);
-                }
-            }
+            // MSBuild reads a property as its inner XML, which a child element makes
+            // something other than `true`.
+            Ok(Event::Empty(_)) => value = None,
             Ok(Event::End(_)) => {
-                if inside_mtp_element && mtp_element_text.trim().eq_ignore_ascii_case("true") {
-                    return MtpProjectKind::VsTestBridge;
+                if is_true(&value) {
+                    break;
                 }
-                inside_mtp_element = false;
+                value = None;
             }
-            Ok(Event::Eof) => break,
-            Err(_) => break,
+            Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
-        buf.clear();
     }
 
-    MtpProjectKind::None
+    if is_true(&value) {
+        MtpProjectKind::VsTestBridge
+    } else {
+        MtpProjectKind::None
+    }
 }
 
 fn parse_global_json_mtp_mode(path: &Path) -> bool {
@@ -2745,6 +2739,61 @@ mod tests {
         )
         .expect("write csproj");
 
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
+    }
+
+    #[test]
+    fn test_scan_mtp_kind_reads_the_value_around_markup() {
+        let temp_dir = test_isolation::tempdir();
+        let csproj = temp_dir.path().join("MTP.Tests.csproj");
+        for (property, expected) in [
+            (
+                "<UseTestingPlatformRunner>true<!-- opt in --></UseTestingPlatformRunner>",
+                MtpProjectKind::VsTestBridge,
+            ),
+            (
+                "<UseTestingPlatformRunner><![CDATA[true]]></UseTestingPlatformRunner>",
+                MtpProjectKind::VsTestBridge,
+            ),
+            (
+                "<UseTestingPlatformRunner>true</UseTestingplatformRunner>",
+                MtpProjectKind::VsTestBridge,
+            ),
+            (
+                "<Description>Tom & Jerry</Description><UseTestingPlatformRunner>true</UseTestingPlatformRunner>",
+                MtpProjectKind::VsTestBridge,
+            ),
+            (
+                "<UseTestingPlatformRunner>tr<!-- x -->ue-ish</UseTestingPlatformRunner>",
+                MtpProjectKind::None,
+            ),
+            (
+                "<UseTestingPlatformRunner>false</UseTestingPlatformRunner>",
+                MtpProjectKind::None,
+            ),
+            (
+                "<UseTestingPlatformRunner>tr<X/>ue</UseTestingPlatformRunner>",
+                MtpProjectKind::None,
+            ),
+            (
+                "<UseTestingPlatformRunner>true<X></X></UseTestingPlatformRunner>",
+                MtpProjectKind::None,
+            ),
+        ] {
+            fs::write(
+                &csproj,
+                format!("<Project><PropertyGroup>{property}</PropertyGroup></Project>"),
+            )
+            .expect("write csproj");
+            assert_eq!(scan_mtp_kind_in_file(&csproj), expected, "{property}");
+        }
+
+        // A file cut off right after the value ends at EOF, not on an end tag.
+        fs::write(
+            &csproj,
+            "<Project><PropertyGroup><UseTestingPlatformRunner>true",
+        )
+        .expect("write csproj");
         assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
     }
 

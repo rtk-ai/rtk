@@ -3,28 +3,54 @@
 use crate::binlog::{FailedTest, TestSummary};
 use chrono::{DateTime, FixedOffset};
 use quick_xml::Reader;
-use quick_xml::events::{BytesRef, BytesStart, Event};
+use quick_xml::events::{BytesStart, Event};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-fn local_name(name: &str) -> &str {
-    name.rsplit(':').next().unwrap_or(name)
+/// A reader for the XML files dotnet tooling and hand edits produce, shared with the
+/// MSBuild property scan. A bare `&` in text is read as text: ill-formed, but common enough
+/// in third-party TRX writers and edited project files that rejecting it would
+/// discard a whole file over one character.
+pub(crate) fn xml_reader(content: &str) -> Reader<&[u8]> {
+    let mut reader = Reader::from_str(content);
+    reader.config_mut().allow_dangling_amp = true;
+    reader
 }
 
-fn resolve_reference(reference: &BytesRef<'_>) -> Option<String> {
-    reference
-        .resolve_char_ref()
-        .ok()
-        .flatten()
-        .map(|ch| ch.to_string())
-        .or_else(|| {
-            quick_xml::escape::resolve_predefined_entity(reference.as_ref()).map(str::to_owned)
-        })
+/// Appends the character data `event` carries. Text and CDATA come with XML 1.0
+/// line endings; a reference is resolved, or kept as written when it is not a valid
+/// character (`&#0;`) or names an entity declared in a DTD, which this reader does
+/// not load. A resolved reference can be any character, controls included: text
+/// bound for the terminal goes through [`terminal_text`].
+pub(crate) fn push_content(event: &Event<'_>, out: &mut String) {
+    match event {
+        Event::Text(text) => out.push_str(&text.xml10_content()),
+        Event::CData(cdata) => out.push_str(&cdata.xml10_content()),
+        Event::GeneralRef(reference) => {
+            if let Ok(Some(ch)) = reference.resolve_char_ref() {
+                out.push(ch);
+            } else if let Some(resolved) = quick_xml::escape::resolve_predefined_entity(reference) {
+                out.push_str(resolved);
+            } else {
+                out.push('&');
+                out.push_str(reference);
+                out.push(';');
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Text from the TRX made safe to print. A CR written as `&#xD;` survives XML
+/// line-ending normalization, so every CR becomes a line break; any other control
+/// character (an `&#x1B;` escape sequence, a backspace) is dropped.
+fn terminal_text(text: &str) -> String {
+    crate::core::utils::sanitize_for_terminal(&text.replace("\r\n", "\n").replace('\r', "\n"))
 }
 
 fn extract_attr_value(start: &BytesStart<'_>, key: &str) -> Option<String> {
     for attr in start.attributes().flatten() {
-        if local_name(attr.key.as_ref()) != key {
+        if attr.key.local_name().as_ref() != key {
             continue;
         }
 
@@ -67,15 +93,12 @@ fn format_duration_between(
 }
 
 fn parse_trx_time_bounds(content: &str) -> Option<(DateTime<FixedOffset>, DateTime<FixedOffset>)> {
-    let mut reader = Reader::from_str(content);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
+    let mut reader = xml_reader(content);
 
     loop {
-        match reader.read_event_into(&mut buf) {
+        match reader.read_event() {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                if local_name(e.name().as_ref()) != "Times" {
-                    buf.clear();
+                if e.local_name().as_ref() != "Times" {
                     continue;
                 }
 
@@ -89,8 +112,6 @@ fn parse_trx_time_bounds(content: &str) -> Option<(DateTime<FixedOffset>, DateTi
             Err(_) => return None,
             _ => {}
         }
-
-        buf.clear();
     }
 
     None
@@ -218,9 +239,7 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
         StackTrace,
     }
 
-    let mut reader = Reader::from_str(content);
-    reader.config_mut().trim_text(false);
-    let mut buf = Vec::new();
+    let mut reader = xml_reader(content);
     let mut summary = TestSummary::default();
     let mut saw_test_run = false;
     let mut in_failed_result = false;
@@ -231,8 +250,8 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
     let mut capture_field: Option<CaptureField> = None;
 
     loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => match e.local_name().as_ref() {
                 "TestRun" => saw_test_run = true,
                 "Times" => {
                     let start = extract_attr_value(&e, "start");
@@ -257,7 +276,7 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
                         message_buf.clear();
                         stack_buf.clear();
                         failed_test_name = extract_attr_value(&e, "testName")
-                            .unwrap_or_else(|| "unknown".to_string());
+                            .map_or_else(|| "unknown".to_string(), |n| terminal_text(&n));
                     }
                 }
                 "ErrorInfo" if in_failed_result => {
@@ -273,7 +292,7 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
                 }
                 _ => {}
             },
-            Ok(Event::Empty(e)) => match local_name(e.name().as_ref()) {
+            Ok(Event::Empty(e)) => match e.local_name().as_ref() {
                 "Times" => {
                     let start = extract_attr_value(&e, "start");
                     let finish = extract_attr_value(&e, "finish");
@@ -291,7 +310,7 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
                         extract_attr_value(&e, "outcome").unwrap_or_else(|| "Unknown".to_string());
                     if outcome == "Failed" {
                         let name = extract_attr_value(&e, "testName")
-                            .unwrap_or_else(|| "unknown".to_string());
+                            .map_or_else(|| "unknown".to_string(), |n| terminal_text(&n));
                         summary.failed_tests.push(FailedTest {
                             name,
                             details: Vec::new(),
@@ -300,43 +319,14 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
                 }
                 _ => {}
             },
-            Ok(Event::Text(e)) => {
-                if !in_failed_result {
-                    buf.clear();
-                    continue;
-                }
-
-                let text =
-                    quick_xml::escape::unescape(e.as_ref()).unwrap_or_else(|_| e.as_ref().into());
+            Ok(event @ (Event::Text(_) | Event::CData(_) | Event::GeneralRef(_))) => {
                 match capture_field {
-                    Some(CaptureField::Message) => message_buf.push_str(&text),
-                    Some(CaptureField::StackTrace) => stack_buf.push_str(&text),
+                    Some(CaptureField::Message) => push_content(&event, &mut message_buf),
+                    Some(CaptureField::StackTrace) => push_content(&event, &mut stack_buf),
                     None => {}
                 }
             }
-            Ok(Event::CData(e)) => {
-                if !in_failed_result {
-                    buf.clear();
-                    continue;
-                }
-
-                let text = e.as_ref();
-                match capture_field {
-                    Some(CaptureField::Message) => message_buf.push_str(text),
-                    Some(CaptureField::StackTrace) => stack_buf.push_str(text),
-                    None => {}
-                }
-            }
-            Ok(Event::GeneralRef(e)) if in_failed_result => {
-                if let Some(text) = resolve_reference(&e) {
-                    match capture_field {
-                        Some(CaptureField::Message) => message_buf.push_str(&text),
-                        Some(CaptureField::StackTrace) => stack_buf.push_str(&text),
-                        None => {}
-                    }
-                }
-            }
-            Ok(Event::End(e)) => match local_name(e.name().as_ref()) {
+            Ok(Event::End(e)) => match e.local_name().as_ref() {
                 "Message" | "StackTrace" => {
                     capture_field = None;
                 }
@@ -346,12 +336,14 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
                 "UnitTestResult" if in_failed_result => {
                     let mut details = Vec::new();
 
-                    let message = message_buf.trim();
+                    let message = terminal_text(&message_buf);
+                    let message = message.trim();
                     if !message.is_empty() {
                         details.push(message.to_string());
                     }
 
-                    let stack = stack_buf.trim();
+                    let stack = terminal_text(&stack_buf);
+                    let stack = stack.trim();
                     if !stack.is_empty() {
                         let stack_lines: Vec<&str> = stack.lines().take(3).collect();
                         if !stack_lines.is_empty() {
@@ -376,8 +368,6 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
             Err(_) => return None,
             _ => {}
         }
-
-        buf.clear();
     }
 
     if !saw_test_run {
@@ -458,6 +448,54 @@ mod tests {
             "MyTests.Calculator.Add&Subtract_ShouldFail"
         );
         assert_eq!(summary.failed_tests[0].details[0], "Expected: <5> & got 4");
+    }
+
+    #[test]
+    fn test_parse_trx_content_keeps_cdata_normalizes_crlf_and_unknown_entities() {
+        let trx = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n\
+<TestRun><Results>\r\n\
+<UnitTestResult testName=\"T\" outcome=\"Failed\"><Output><ErrorInfo>\r\n\
+<Message>Assert failed\r\n  at <![CDATA[a<b && c]]> &custom; &#x41;</Message>\r\n\
+</ErrorInfo></Output></UnitTestResult>\r\n\
+</Results></TestRun>";
+
+        let summary = parse_trx_content(trx).expect("valid TRX");
+        assert_eq!(
+            summary.failed_tests[0].details,
+            vec!["Assert failed\n  at a<b && c &custom; A".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_trx_content_reads_bare_ampersands_and_control_references() {
+        let trx = r#"<TestRun><Results>
+<UnitTestResult testName="Parse(&#x1B;[2Ja&#x8;)" outcome="Failed"><Output><ErrorInfo>
+<Message>&#x1B;[2J&#x1B;[HExpected a & b&#xD;got c&#x7; &#0;</Message>
+<StackTrace>at A()&#xD;&#xA;at B()</StackTrace>
+</ErrorInfo></Output></UnitTestResult>
+<UnitTestResult testName="Bare(&#x1B;[Hb)" outcome="Failed"/>
+</Results></TestRun>"#;
+
+        let summary = parse_trx_content(trx).expect("a bare & must not discard the file");
+        assert_eq!(summary.failed_tests[0].name, "Parse(a)");
+        assert_eq!(summary.failed_tests[1].name, "Bare(b)");
+        assert_eq!(
+            summary.failed_tests[0].details,
+            vec![
+                "Expected a & b\ngot c &#0;".to_string(),
+                "at A()\nat B()".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_trx_time_bounds_reads_past_a_bare_ampersand() {
+        let trx = r#"<TestRun name="Tom & Jerry"><Description>A & B</Description>
+<Times start="2026-01-01T10:00:00+00:00" finish="2026-01-01T10:00:02+00:00" />
+</TestRun>"#;
+
+        let (start, finish) = parse_trx_time_bounds(trx).expect("time bounds");
+        assert_eq!((finish - start).num_seconds(), 2);
     }
 
     #[test]
