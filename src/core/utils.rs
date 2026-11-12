@@ -541,14 +541,25 @@ impl ChildArgExt for Command {
     }
 }
 
-/// Windows: `"` is the only character std encodes differently from libuv, so
-/// re-encode just those arguments and leave the rest on std's path. `.bat`/`.cmd`
-/// shims stay on it too — cmd.exe parses by its own rules and `raw_arg` would
-/// bypass the escaping std applies for them.
+/// Windows: std only wraps arguments that contain a space or tab, leaving
+/// quotes (`"`, `'`) and MSYS/Cygwin `globify` characters (`\`, `*`, `?`, `[`,
+/// `{`) unquoted on the raw command line. When an MSYS-linked child (such as
+/// Git for Windows `/usr/bin/grep`) parses an unquoted token containing those
+/// characters, `build_argv`/`globify` strips backslashes before glob metachars
+/// (turning `^\[` into `^[`, #4737) or misparses inner quotes (#3727).
+/// Wrapping those tokens in `"` via `quote_arg_for_child` marks them as quoted
+/// for MSYS (suppressing `globify` while preserving non-quote backslashes) and
+/// decodes identically under MSVCRT/UCRT `CommandLineToArgvW`. `.bat`/`.cmd`
+/// shims stay on std's path — cmd.exe parses by its own rules.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn needs_child_quoting(arg: &str) -> bool {
+    arg.contains(['"', '\'', '\\', '*', '?', '[', '{'])
+}
+
 #[cfg(windows)]
 fn push_child_arg(cmd: &mut Command, arg: &OsStr) {
     match arg.to_str() {
-        Some(s) if s.contains('"') && !is_batch_program(cmd) => {
+        Some(s) if needs_child_quoting(s) && !is_batch_program(cmd) => {
             std::os::windows::process::CommandExt::raw_arg(cmd, quote_arg_for_child(s));
         }
         _ => {
@@ -1284,13 +1295,27 @@ mod tests {
         assert_eq!(quote_arg_for_child(r#"a b "c""#), r#""a b \"c\"""#);
     }
 
+    #[test]
+    fn test_needs_child_quoting_covers_msys_globify_and_quote_chars() {
+        // #4737: escaped brackets and alternation patterns need outer quotes so
+        // MSYS2 `globify` does not strip the backslashes on an unquoted token.
+        assert!(needs_child_quoting(r"^\["));
+        assert!(needs_child_quoting(r"x\|\[a"));
+        assert_eq!(quote_arg_for_child(r"^\["), r#""^\[""#);
+        assert_eq!(quote_arg_for_child(r"x\|\[a"), r#""x\|\[a""#);
+
+        // Plain flags and filenames stay on std's path.
+        assert!(!needs_child_quoting("-n"));
+        assert!(!needs_child_quoting("q.jsonl"));
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn test_child_arg_re_encodes_only_arguments_holding_a_quote() {
         let mut cmd = Command::new("grep");
-        cmd.child_args(["-c", r#""type""#, "q.jsonl"]);
+        cmd.child_args(["-c", r#""type""#, r"^\[", "q.jsonl"]);
         let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, ["-c", r#""\"type\"""#, "q.jsonl"]);
+        assert_eq!(args, ["-c", r#""\"type\"""#, r#""^\[""#, "q.jsonl"]);
     }
 
     #[cfg(target_os = "windows")]
