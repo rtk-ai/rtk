@@ -1,0 +1,60 @@
+FFFFFFFFFFFFFF                                                           [100%]
+=================================== FAILURES ===================================
+E   AssertionError: failure number 00
+    assert 0 == -1
+/home/user/project/test_many.py:2: AssertionError: failure number 00
+E   AssertionError: failure number 01
+    assert 1 == -1
+/home/user/project/test_many.py:5: AssertionError: failure number 01
+E   AssertionError: failure number 02
+    assert 2 == -1
+/home/user/project/test_many.py:8: AssertionError: failure number 02
+E   AssertionError: failure number 03
+    assert 3 == -1
+/home/user/project/test_many.py:11: AssertionError: failure number 03
+E   AssertionError: failure number 04
+    assert 4 == -1
+/home/user/project/test_many.py:14: AssertionError: failure number 04
+E   AssertionError: failure number 05
+    assert 5 == -1
+/home/user/project/test_many.py:17: AssertionError: failure number 05
+E   AssertionError: failure number 06
+    assert 6 == -1
+/home/user/project/test_many.py:20: AssertionError: failure number 06
+E   AssertionError: failure number 07
+    assert 7 == -1
+/home/user/project/test_many.py:23: AssertionError: failure number 07
+E   AssertionError: failure number 08
+    assert 8 == -1
+/home/user/project/test_many.py:26: AssertionError: failure number 08
+E   AssertionError: failure number 09
+    assert 9 == -1
+/home/user/project/test_many.py:29: AssertionError: failure number 09
+E   AssertionError: failure number 10
+    assert 10 == -1
+/home/user/project/test_many.py:32: AssertionError: failure number 10
+E   AssertionError: failure number 11
+    assert 11 == -1
+/home/user/project/test_many.py:35: AssertionError: failure number 11
+E   AssertionError: failure number 12
+    assert 12 == -1
+/home/user/project/test_many.py:38: AssertionError: failure number 12
+E   AssertionError: failure number 13
+    assert 13 == -1
+/home/user/project/test_many.py:41: AssertionError: failure number 13
+=========================== short test summary info ============================
+FAILED test_many.py::test_f00 - AssertionError: failure number 00
+FAILED test_many.py::test_f01 - AssertionError: failure number 01
+FAILED test_many.py::test_f02 - AssertionError: failure number 02
+FAILED test_many.py::test_f03 - AssertionError: failure number 03
+FAILED test_many.py::test_f04 - AssertionError: failure number 04
+FAILED test_many.py::test_f05 - AssertionError: failure number 05
+FAILED test_many.py::test_f06 - AssertionError: failure number 06
+FAILED test_many.py::test_f07 - AssertionError: failure number 07
+FAILED test_many.py::test_f08 - AssertionError: failure number 08
+FAILED test_many.py::test_f09 - AssertionError: failure number 09
+FAILED test_many.py::test_f10 - AssertionError: failure number 10
+FAILED test_many.py::test_f11 - AssertionError: failure number 11
+FAILED test_many.py::test_f12 - AssertionError: failure number 12
+FAILED test_many.py::test_f13 - AssertionError: failure number 13
+14 failed in 0.01s

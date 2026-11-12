@@ -20,6 +20,10 @@ static PYTEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("valid pytest summary regex")
 });
+static LINE_FAILURE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?P<location>(?P<file>\S.*?):[0-9]+): (?P<message>\S.*)$")
+        .expect("valid pytest line failure regex")
+});
 
 #[derive(Debug, PartialEq)]
 enum ParseState {
@@ -104,13 +108,35 @@ fn injected_args(args: &[String]) -> Vec<&'static str> {
     // so the compact output can report expected failures and — crucially —
     // unexpected passes (XPASS), which signal a behavior change.
     if !has_report_flag {
-        injected.push(if tb == Some("no") { "-rfExX" } else { "-rxX" });
+        injected.push(match tb {
+            Some("no") => "-rfExX",
+            // Line tracebacks have locations but no test-name headers. Request the
+            // failure names as well; errors already have their own named blocks.
+            Some("line") => "-rfxX",
+            _ => "-rxX",
+        });
     }
     injected
 }
 
 const PYTEST_NO_TESTS: &str = "Pytest: No tests collected";
 const PYTEST_EXIT_NO_TESTS: i32 = 5;
+
+struct PytestFailure {
+    body: String,
+    // A line traceback has no native block header. Use its location, or the
+    // corresponding short-summary node ID when that can be matched safely.
+    line_name: Option<String>,
+}
+
+impl From<String> for PytestFailure {
+    fn from(body: String) -> Self {
+        Self {
+            body,
+            line_name: None,
+        }
+    }
+}
 
 pub(crate) fn filter_pytest_output(output: &str) -> String {
     // pytest colors its summary even when piped (force-color CI/venv setups), and the
@@ -120,7 +146,8 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
     let output = cleaned.as_str();
     let mut state = ParseState::Header;
     let mut test_files: Vec<String> = Vec::new();
-    let mut failures: Vec<String> = Vec::new();
+    let mut failures: Vec<PytestFailure> = Vec::new();
+    let mut failure_summaries: Vec<String> = Vec::new();
     let mut current_failure: Vec<String> = Vec::new();
     let mut xfail_lines: Vec<String> = Vec::new();
     let mut summary_line = String::new();
@@ -139,7 +166,7 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         {
             state = ParseState::Failures;
             if !current_failure.is_empty() {
-                failures.push(current_failure.join("\n"));
+                failures.push(current_failure.join("\n").into());
                 current_failure.clear();
             }
             continue;
@@ -147,7 +174,7 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             state = ParseState::Summary;
             // Save current failure if any
             if !current_failure.is_empty() {
-                failures.push(current_failure.join("\n"));
+                failures.push(current_failure.join("\n").into());
                 current_failure.clear();
             }
             continue;
@@ -178,14 +205,14 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                     && trimmed.trim_matches('=').trim() == "warnings summary"
                 {
                     if !current_failure.is_empty() {
-                        failures.push(current_failure.join("\n"));
+                        failures.push(current_failure.join("\n").into());
                         current_failure.clear();
                     }
                     state = ParseState::TestProgress;
                 } else if is_block_header(trimmed) {
                     // New failure section
                     if !current_failure.is_empty() {
-                        failures.push(current_failure.join("\n"));
+                        failures.push(current_failure.join("\n").into());
                         current_failure.clear();
                     }
                     current_failure.push(trimmed.to_string());
@@ -196,7 +223,7 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             ParseState::Summary => {
                 // FAILED test lines
                 if trimmed.starts_with("FAILED") || trimmed.starts_with("ERROR") {
-                    failures.push(trimmed.to_string());
+                    failure_summaries.push(trimmed.to_string());
                 } else if trimmed.starts_with("XFAIL") || trimmed.starts_with("XPASS") {
                     xfail_lines.push(trimmed.to_string());
                 }
@@ -206,11 +233,112 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
 
     // Save last failure if any
     if !current_failure.is_empty() {
-        failures.push(current_failure.join("\n"));
+        failures.push(current_failure.join("\n").into());
     }
+
+    if !expand_line_failures(
+        &mut failures,
+        &mut failure_summaries,
+        parse_summary_line(&summary_line).failed,
+    ) {
+        // Do not guess which failure owns a location in an incomplete or
+        // ambiguous report, including captured output that mimics a traceback.
+        return output.to_string();
+    }
+    failures.extend(failure_summaries.into_iter().map(PytestFailure::from));
 
     // Build compact output
     build_pytest_summary(&summary_line, &test_files, &failures, &xfail_lines)
+}
+
+fn line_failure_location(line: &str) -> Option<(&str, &str)> {
+    if line.starts_with("E ") || line.starts_with('>') {
+        return None;
+    }
+    let captures = LINE_FAILURE_RE.captures(line)?;
+    if captures.name("message")?.as_str().starts_with("in ") {
+        return None;
+    }
+    Some((
+        captures.name("file")?.as_str(),
+        captures.name("location")?.as_str(),
+    ))
+}
+
+fn same_report_file(location: &str, node_id: &str) -> bool {
+    let file = location.replace('\\', "/");
+    let expected = node_id.split("::").next().unwrap_or(node_id);
+    let expected = expected.replace('\\', "/");
+    let expected = expected.trim_start_matches("./");
+    file == expected || file.ends_with(&format!("/{expected}"))
+}
+
+fn expand_line_failures(
+    failures: &mut Vec<PytestFailure>,
+    summaries: &mut Vec<String>,
+    expected_failures: usize,
+) -> bool {
+    let headerless: Vec<usize> = failures
+        .iter()
+        .enumerate()
+        .filter(|(_, failure)| {
+            !failure.body.lines().next().is_some_and(is_block_header)
+                && failure
+                    .body
+                    .lines()
+                    .any(|line| line_failure_location(line).is_some())
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let index = match headerless.as_slice() {
+        [] => return true,
+        [index] => *index,
+        _ => return false,
+    };
+    let names: Vec<&str> = summaries
+        .iter()
+        .filter_map(|line| line.strip_prefix("FAILED "))
+        .map(|line| line.split_once(" - ").map_or(line, |(name, _)| name))
+        .collect();
+    if !names.is_empty() && names.len() != expected_failures {
+        return false;
+    }
+    let lines: Vec<&str> = failures[index].body.lines().collect();
+    let endings: Vec<_> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let (file, location) = line_failure_location(line)?;
+            (names.is_empty() || names.iter().any(|name| same_report_file(file, name)))
+                .then_some((index, file, location))
+        })
+        .collect();
+    if endings.len() != expected_failures || endings.is_empty() {
+        return false;
+    }
+    let mut expanded = Vec::new();
+    let mut start = 0;
+    for (number, &(end, file, location)) in endings.iter().enumerate() {
+        let name = if let Some(name) = names.get(number) {
+            if !same_report_file(file, name) {
+                return false;
+            }
+            *name
+        } else {
+            location
+        };
+        expanded.push(PytestFailure {
+            body: lines[start..=end].join("\n"),
+            line_name: Some(name.to_string()),
+        });
+        start = end + 1;
+    }
+    if lines[start..].iter().any(|line| !line.trim().is_empty()) {
+        return false;
+    }
+    failures.splice(index..=index, expanded);
+    summaries.retain(|line| !line.starts_with("FAILED "));
+    true
 }
 
 #[derive(Default)]
@@ -227,7 +355,7 @@ struct PytestCounts {
 fn build_pytest_summary(
     summary: &str,
     _test_files: &[String],
-    failures: &[String],
+    failures: &[PytestFailure],
     xfail_lines: &[String],
 ) -> String {
     let counts = parse_summary_line(summary);
@@ -300,10 +428,12 @@ fn build_pytest_summary(
 
     for (i, failure) in failures.iter().take(MAX_PYTEST_FAILURES).enumerate() {
         // Extract test name and key error info
-        let lines: Vec<&str> = failure.lines().collect();
+        let lines: Vec<&str> = failure.body.lines().collect();
 
         // First line is usually test name (after ___)
-        if let Some(first_line) = lines.first() {
+        if let Some(name) = &failure.line_name {
+            result.push_str(&format!("{}. [FAIL] {name}\n", i + 1));
+        } else if let Some(first_line) = lines.first() {
             if is_block_header(first_line) {
                 // Extract test name between ___
                 let test_name = first_line.trim_matches('_').trim();
@@ -342,12 +472,17 @@ fn build_pytest_summary(
             .unwrap_or(body.len());
         let traceback = &body[..traceback_end];
         let frame = |l: &&str| !is_error_line(l) && frame_file(l).is_some();
-        let location = traceback.iter().rposition(frame);
-        let location_file = location.and_then(|at| frame_file(traceback[at]));
-        let anchor = traceback
-            .iter()
-            .position(frame)
-            .filter(|&at| !collecting && frame_file(traceback[at]) != location_file);
+        let location = if failure.line_name.is_some() {
+            // pytest emits the one-line location after captured output, so it
+            // must survive even though captured text is excluded below.
+            body.len().checked_sub(1)
+        } else {
+            traceback.iter().rposition(frame)
+        };
+        let location_file = location.and_then(|at| frame_file(body[at]));
+        let anchor = traceback.iter().position(frame).filter(|&at| {
+            failure.line_name.is_none() && !collecting && frame_file(traceback[at]) != location_file
+        });
         let error_total = traceback.iter().filter(|l| is_error_line(l)).count();
         let error_shown = error_total.min(MAX_ERROR_LINES);
         let error_head = error_shown / 2;
@@ -367,6 +502,8 @@ fn build_pytest_summary(
                 error_index <= error_head || error_index > error_tail_start
             } else if Some(index) == location || Some(index) == anchor {
                 true
+            } else if failure.line_name.is_some() && index >= traceback_end {
+                false
             } else {
                 let trimmed = line.trim();
                 let line_lower = line.to_lowercase();
@@ -396,7 +533,14 @@ fn build_pytest_summary(
             "\n… +{} more failures\n",
             failures.len() - MAX_PYTEST_FAILURES
         ));
-        let all_failures = failures.join("\n\n");
+        let all_failures = failures
+            .iter()
+            .map(|failure| match &failure.line_name {
+                Some(name) => format!("{name}\n{}", failure.body),
+                None => failure.body.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
         if let Some(hint) = crate::core::tee::force_tee_hint(&all_failures, "pytest-failures") {
             result.push_str(&format!("  {}\n", hint));
         }
@@ -955,7 +1099,13 @@ Failures:
             injected_args(&args(&["--tb=short", "-x", "--tb=no"])),
             ["-q", "-rfExX"]
         );
-        assert_eq!(injected_args(&args(&["--tb=line"])), ["-q", "-rxX"]);
+        assert_eq!(injected_args(&args(&["--tb=line"])), ["-q", "-rfxX"]);
+        assert_eq!(injected_args(&args(&["--tb", "line"])), ["-q", "-rfxX"]);
+        assert_eq!(
+            injected_args(&args(&["--tb=no", "--tb=line"])),
+            ["-q", "-rfxX"]
+        );
+        assert_eq!(injected_args(&args(&["--tb=line", "-rN"])), ["-q"]);
         assert_eq!(
             injected_args(&args(&["--tb=no", "--tb=long"])),
             ["-q", "-rxX"]
@@ -1430,8 +1580,13 @@ Failures:
             r#"Pytest: 0 passed, 2 failed in 0.01s
 
 Failures:
+1. [FAIL] /home/user/project/test_tl.py:6
      E   assert 1 == 2
+     /home/user/project/test_tl.py:6: assert 1 == 2
+
+2. [FAIL] /home/user/project/test_tl.py:10
      E   AssertionError: assert ['foo.py:3: E...ine too long'] == []
+     Left contains one more item: 'foo.py:3: E501 line too long'
      /home/user/project/test_tl.py:10: AssertionError: assert ['foo.py:3: E...ine too long'] == []"#
         );
     }
@@ -1647,8 +1802,13 @@ Failures:
 1. [ERROR] at setup of test_setup_err
      E   ConnectionError: db down
 
+2. [FAIL] /home/user/project/test_mixed.py:14
      E   assert (1 + 1) == 3
+     /home/user/project/test_mixed.py:14: assert (1 + 1) == 3
+
+3. [FAIL] /home/user/project/test_mixed.py:18
      E   AssertionError: inner mismatch
+     assert 'a' == 'b'
      /home/user/project/test_mixed.py:18: AssertionError: inner mismatch"#
         );
     }
