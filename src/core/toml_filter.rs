@@ -480,6 +480,36 @@ pub fn command_matches_filter(command: &str) -> bool {
     MATCH_SET.is_match(command)
 }
 
+static INTERNED_RTK_EQUIVALENTS: LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, &'static str>>,
+> = LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Return the canonical `rtk <cmd>` label when `command` (already stripped of
+/// leading env vars and absolute binary path) is handled by an active TOML
+/// filter rather than a built-in Rust command.
+pub fn matching_filter_rtk_equivalent(command: &str) -> Option<&'static str> {
+    if toml_disabled() {
+        return None;
+    }
+    let base = command.split_whitespace().next().unwrap_or("");
+    if base.is_empty() || is_rtk_reserved_command(base) {
+        return None;
+    }
+    if !command_matches_filter(command) {
+        return None;
+    }
+    let key = format!("rtk {}", base);
+    let mut map = INTERNED_RTK_EQUIVALENTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(&interned) = map.get(&key) {
+        return Some(interned);
+    }
+    let leaked: &'static str = Box::leak(key.clone().into_boxed_str());
+    map.insert(key, leaked);
+    Some(leaked)
+}
+
 fn build_match_set() -> RegexSet {
     let patterns = collect_match_patterns();
     RegexSet::new(&patterns).unwrap_or_else(|_| {
