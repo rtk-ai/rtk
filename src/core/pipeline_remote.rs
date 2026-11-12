@@ -373,8 +373,8 @@ fn repo_readme(card_md: &str, full: &str, headline: Option<&str>) -> String {
 /// stay readable. Terminals that refuse raw mode get a numbered prompt.
 pub(crate) fn select_menu(items: &[(&str, &str)], default: usize) -> Result<Option<usize>> {
     use colored::Colorize;
-    use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
-    use crossterm::{cursor, execute, terminal};
+    use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
+    use ratatui::crossterm::{cursor, execute, terminal};
     use std::io::Write;
 
     if items.is_empty() {
