@@ -153,9 +153,13 @@ Under the EU General Data Protection Regulation, you have the right to:
 
 ## Erasure Procedure
 
-1. Run `rtk telemetry forget` — this disables telemetry, deletes your device salt, ping marker, and local tracking database (`history.db`), then sends an erasure request to the server.
+1. Run `rtk telemetry forget` — this disables telemetry, deletes your device salt, ping marker, local tracking database (`history.db`), recall database (including SQLite sidecars), and legacy/posthook tee logs, then sends an erasure request to the server.
 2. If the server is unreachable, the CLI prints your full device hash and fallback instructions to email contact@rtk-ai.app for manual erasure.
 3. You can also email contact@rtk-ai.app directly to request manual erasure.
+
+Recovery cleanup uses `RTK_RECALL_DB` / `[retriever].database_path` and `RTK_TEE_DIR` / `[retriever].tee_directory` (including migrated `[tee].directory`), falling back to the standard recall database and tee directory. Both backends are cleared regardless of the current recovery mode or disable switches. Missing files are harmless. Cleanup removes top-level tee files named `<epoch>_<sanitized-slug>.log` and files matching `<epoch-ms>_<pid>-<sequence>_<sanitized-slug>.log` directly inside the `posthook` subdirectory. Unrelated files and other subdirectories are preserved. File symlinks and symlinked tee or `posthook` directories are refused and cleanup failures return a nonzero exit status.
+
+Stop other RTK commands before erasing recovery data. An exclusive SQLite lock check refuses a busy recall database; removal is not an atomic barrier against another process starting afterward. This removes currently stored output; subsequent commands can store new output unless recovery is also disabled with `rtk config recall disabled`. Configuration and unrelated local files are retained.
 
 ## Data Handling
 

@@ -106,7 +106,6 @@ pub fn force_tee_tail_hint(
     }
 }
 
-#[cfg(feature = "engine")]
 /// Posthook recall store subdirectory (own rotation budget: posthook writes
 /// must never evict Bash-failure recovery logs).
 pub const POSTHOOK_SUBDIR: &str = "posthook";
