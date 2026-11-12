@@ -1,0 +1,51 @@
+Compiling root (1 Scala source)
+Compiled root (1478ms)
+Compiling root-test (6 Scala sources)
+Compiled root-test (1048ms)
+Test run example.CalculatorSuite1 started
+example.CalculatorSuite1: finished 0.044s
+Test run example.CalculatorSuite1 finished: 0 failed, 0 ignored, 4 total 0.062s
+Execution took 13ms
+4 tests, 4 passed
+All tests in example.CalculatorSuite1 passed
+
+Test run example.CalculatorSuite2 started
+example.CalculatorSuite2: finished 0.004s
+Test run example.CalculatorSuite2 finished: 0 failed, 0 ignored, 4 total 0.004s
+Execution took 3ms
+4 tests, 4 passed
+All tests in example.CalculatorSuite2 passed
+
+Test run example.CalculatorSuite3 started
+example.CalculatorSuite3: finished 0.001s
+Test run example.CalculatorSuite3 finished: 0 failed, 0 ignored, 4 total 0.002s
+Execution took 1ms
+4 tests, 4 passed
+All tests in example.CalculatorSuite3 passed
+
+Test run example.CalculatorSuite4 started
+example.CalculatorSuite4: finished 0.008s
+Test run example.CalculatorSuite4 finished: 0 failed, 0 ignored, 4 total 0.008s
+Execution took 7ms
+4 tests, 4 passed
+All tests in example.CalculatorSuite4 passed
+
+Test run example.CalculatorSuite5 started
+example.CalculatorSuite5: finished 0.002s
+Test run example.CalculatorSuite5 finished: 0 failed, 0 ignored, 4 total 0.002s
+Execution took 2ms
+4 tests, 4 passed
+All tests in example.CalculatorSuite5 passed
+
+Test run example.CalculatorSuite6 started
+example.CalculatorSuite6: finished 0.003s
+Test run example.CalculatorSuite6 finished: 0 failed, 0 ignored, 4 total 0.003s
+Execution took 2ms
+4 tests, 4 passed
+All tests in example.CalculatorSuite6 passed
+
+The test execution was successfully closed.
+===========================================================================================================================================================================
+Total duration: 28ms
+All 6 test suites passed.
+===========================================================================================================================================================================

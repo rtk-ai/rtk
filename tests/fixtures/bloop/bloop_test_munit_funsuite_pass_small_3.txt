@@ -1,0 +1,16 @@
+Compiling root (1 Scala source)
+Compiled root (1475ms)
+Compiling root-test (1 Scala source)
+Compiled root-test (689ms)
+Test run example.CalculatorSuite started
+example.CalculatorSuite: finished 0.039s
+Test run example.CalculatorSuite finished: 0 failed, 0 ignored, 4 total 0.053s
+Execution took 12ms
+4 tests, 4 passed
+All tests in example.CalculatorSuite passed
+
+The test execution was successfully closed.
+===========================================================================================================================================================================
+Total duration: 12ms
+All 1 test suites passed.
+===========================================================================================================================================================================
