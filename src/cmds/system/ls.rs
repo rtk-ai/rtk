@@ -183,6 +183,7 @@ fn shows_dotfiles(tokens: &[Token<'_>]) -> bool {
 struct LsPlan {
     show_all: bool,
     show_long: bool,
+    recursive: bool,
     child_args: Vec<String>,
 }
 
@@ -215,9 +216,15 @@ fn plan_for(args: &[String], flavor: Flavor) -> LsPlan {
             }
     });
 
+    // `-R` makes ls print one section per directory, each headed by its path.
+    let recursive = tokens
+        .iter()
+        .any(|t| is_short_in(t, &['R']) || long_name(t) == Some("recursive"));
+
     LsPlan {
         show_all,
         show_long,
+        recursive,
         child_args: build_child_args(&tokens, flavor),
     }
 }
@@ -303,6 +310,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let LsPlan {
         show_all,
         show_long,
+        recursive,
         child_args,
     } = plan(args);
 
@@ -327,7 +335,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "ls",
         &label,
         |raw, code| match (code, &native) {
-            (0, _) => render(raw, listed, show_all, show_long, verbose),
+            (0, _) => render(raw, listed, show_all, show_long, recursive, verbose),
             (_, Some((native, _))) => never_worse(native, raw).to_string(),
             (_, None) => raw.to_string(),
         },
@@ -348,8 +356,19 @@ fn native_listing(args: &[String]) -> Option<(String, bool)> {
     ))
 }
 
-fn render(raw: &str, native: Option<&str>, show_all: bool, show_long: bool, verbose: u8) -> String {
-    let (entries, parsed_count, truncated, filtered) = compact_ls(raw, show_all, show_long);
+fn render(
+    raw: &str,
+    native: Option<&str>,
+    show_all: bool,
+    show_long: bool,
+    recursive: bool,
+    verbose: u8,
+) -> String {
+    let (entries, parsed_count, truncated, filtered) = if recursive {
+        compact_recursive(raw, show_all, show_long)
+    } else {
+        compact_ls(raw, show_all, show_long)
+    };
 
     // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
     // This is safer than returning "(empty)" for a non-empty directory.
@@ -391,6 +410,57 @@ fn render(raw: &str, native: Option<&str>, show_all: bool, show_long: bool, verb
         Some(native) => never_worse(native, &out).to_string(),
         None => out,
     }
+}
+
+/// Compact `ls -R` output one directory at a time. Each section is a `path:` header followed by
+/// that directory's listing; the header stays above its entries, which are indented under it, so
+/// the agent can tell which directory a file belongs to.
+fn compact_recursive(
+    raw: &str,
+    show_all: bool,
+    show_long: bool,
+) -> (String, usize, Vec<String>, Vec<String>) {
+    let mut out = String::new();
+    let mut parsed_count: usize = 0;
+    let mut truncated: Vec<String> = Vec::new();
+    let mut filtered: Vec<String> = Vec::new();
+
+    for section in raw.split("\n\n") {
+        let mut lines = section.lines().peekable();
+        // A section header is the first line ending in ':' that is not a long-format entry, so a
+        // file operand named `file:` is not mistaken for one. Only the separator colon is removed.
+        let header = lines
+            .next_if(|line| {
+                line.ends_with(':') && !line.starts_with("total ") && parse_ls_line(line).is_none()
+            })
+            .and_then(|line| line.strip_suffix(':'));
+        let body: Vec<&str> = lines.collect();
+        if header.is_none() && body.is_empty() {
+            continue;
+        }
+
+        let (entries, count, cut, hid) = compact_ls(&body.join("\n"), show_all, show_long);
+        parsed_count += count;
+        truncated.extend(cut);
+        filtered.extend(hid);
+
+        if let Some(path) = header {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(path);
+            out.push_str(":\n");
+            for line in entries.lines().filter(|line| *line != "(empty)") {
+                out.push_str("  ");
+                out.push_str(line);
+                out.push('\n');
+            }
+        } else {
+            out.push_str(&entries);
+        }
+    }
+
+    (out, parsed_count, truncated, filtered)
 }
 
 /// Build the recovery hint for entries dropped from the listing —
@@ -1330,7 +1400,7 @@ mod tests {
             .map(|n| long_line(if n.contains('.') { '-' } else { 'd' }, n))
             .collect();
         let native = one_per_line(&["a.rs", "docs", "src", "tests"]);
-        assert_eq!(render(&raw, Some(&native), false, false, 0), native);
+        assert_eq!(render(&raw, Some(&native), false, false, false, 0), native);
     }
 
     #[test]
@@ -1342,7 +1412,7 @@ mod tests {
             long_line('-', "README.md")
         );
         let native = one_per_line(&["Cargo.toml", "README.md", "target"]);
-        assert_eq!(render(&raw, Some(&native), false, false, 0), native);
+        assert_eq!(render(&raw, Some(&native), false, false, false, 0), native);
     }
 
     #[test]
@@ -1355,7 +1425,7 @@ mod tests {
         let mut names: Vec<&str> = files.iter().map(String::as_str).collect();
         names.push("node_modules");
         let native = one_per_line(&names);
-        let out = render(&raw, Some(&native), false, false, 0);
+        let out = render(&raw, Some(&native), false, false, false, 0);
         assert!(out.starts_with("file_with_a_long_name_000.txt\n"), "{out}");
         assert!(out.contains("... (40 more, 1 filtered)"), "{out}");
         assert!(estimate_tokens(&out) < estimate_tokens(&native));
@@ -1382,7 +1452,7 @@ mod tests {
                     })
                     .collect();
                 let native = one_per_line(&names[..n]);
-                let out = render(&raw, Some(&native), false, false, 0);
+                let out = render(&raw, Some(&native), false, false, false, 0);
                 assert!(
                     estimate_tokens(&out) <= estimate_tokens(&native),
                     "rtk ls emitted {out:?} for native {native:?}"
@@ -1395,8 +1465,8 @@ mod tests {
     fn test_render_unparsed_listing_is_held_to_native() {
         let raw = "Desktop:\ntotal 0\n\ngo:\ntotal 0\n";
         let native = "Desktop:\n\ngo:\n";
-        assert_eq!(render(raw, Some(native), false, false, 0), native);
-        assert_eq!(render(raw, None, false, false, 0), raw);
+        assert_eq!(render(raw, Some(native), false, false, false, 0), native);
+        assert_eq!(render(raw, None, false, false, false, 0), raw);
     }
 
     #[test]
@@ -1405,28 +1475,106 @@ mod tests {
                    -rw-r--r--  1 user  staff  1234 Oct 28 16:25:03 2026 Cargo.toml\n\
                    drwxr-xr-x  2 user  staff    64 Oct 28 16:25:03 2026 src\n";
         let native = "Cargo.toml\nsrc\n";
-        assert_eq!(render(raw, Some(native), false, false, 0), native);
+        assert_eq!(render(raw, Some(native), false, false, false, 0), native);
     }
 
     #[test]
     fn test_render_long_listing_keeps_compact_when_it_saves() {
         let raw = format!("{}{}", long_line('d', "src"), long_line('-', "a.rs"));
         let compact = "644  src/\n644  a.rs  1.2K\n";
-        assert_eq!(render(&raw, Some(&raw), false, true, 0), compact);
-        assert_eq!(render(&raw, None, false, true, 0), compact);
+        assert_eq!(render(&raw, Some(&raw), false, true, false, 0), compact);
+        assert_eq!(render(&raw, None, false, true, false, 0), compact);
     }
 
     #[test]
     fn test_render_long_listing_is_held_to_native() {
         let raw = format!("{}{}", long_line('d', "src"), long_line('-', "a.rs"));
         let native = "a.rs\n";
-        assert_eq!(render(&raw, Some(native), false, true, 0), native);
+        assert_eq!(render(&raw, Some(native), false, true, false, 0), native);
     }
 
     #[test]
     fn test_render_without_native_keeps_compact() {
         let raw = format!("{}{}", long_line('d', "src"), long_line('-', "a.rs"));
-        assert_eq!(render(&raw, None, false, false, 0), "src/\na.rs\n");
+        assert_eq!(render(&raw, None, false, false, false, 0), "src/\na.rs\n");
+    }
+
+    #[test]
+    fn test_compact_recursive_keeps_each_entry_under_its_directory() {
+        let raw = "src:\n\
+                   total 8\n\
+                   -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n\
+                   \n\
+                   src/sub:\n\
+                   total 0\n";
+        let (entries, parsed, _truncated, _filtered) = compact_recursive(raw, false, true);
+        assert_eq!(entries, "src:\n  644  main.rs  1.2K\n\nsrc/sub:\n");
+        assert_eq!(parsed, 1);
+    }
+
+    #[test]
+    fn test_compact_recursive_without_long_format_is_names_only() {
+        let raw = "src:\n\
+                   total 8\n\
+                   -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n\
+                   \n\
+                   src/sub:\n\
+                   total 8\n\
+                   -rw-r--r--  1 user  staff    12 Jan  1 12:00 notes.md\n";
+        let (entries, _parsed, _truncated, _filtered) = compact_recursive(raw, false, false);
+        assert_eq!(entries, "src:\n  main.rs\n\nsrc/sub:\n  notes.md\n");
+    }
+
+    #[test]
+    fn test_compact_recursive_keeps_colons_in_directory_names() {
+        let raw = "dir::\n\
+                   total 8\n\
+                   -rw-r--r--  1 user  staff  0 Jan  1 12:00 q\n";
+        let (entries, _parsed, _truncated, _filtered) = compact_recursive(raw, false, true);
+        assert_eq!(entries, "dir::\n  644  q  0B\n");
+    }
+
+    #[test]
+    fn test_compact_recursive_file_operand_ending_in_colon_is_an_entry() {
+        let raw = "-rw-r--r--  1 user  staff  1234 Jan  1 12:00 file:\n\
+                   \n\
+                   src:\n\
+                   total 8\n\
+                   -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n";
+        let (entries, parsed, _truncated, _filtered) = compact_recursive(raw, false, true);
+        assert_eq!(entries, "644  file:  1.2K\n\nsrc:\n  644  main.rs  1.2K\n");
+        assert_eq!(parsed, 2);
+    }
+
+    #[test]
+    fn test_plan_recognises_recursive_flag() {
+        assert!(plan_of(&["-R"]).recursive);
+        assert!(plan_of(&["-laR"]).recursive);
+        assert!(plan_of(&["--recursive"]).recursive);
+        assert!(!plan_of(&["-la"]).recursive);
+    }
+
+    #[test]
+    fn test_render_recursive_long_listing_indents_entries_under_headers() {
+        let raw = "src:\n\
+                   total 8\n\
+                   -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n\
+                   \n\
+                   src/sub:\n\
+                   total 8\n\
+                   -rw-r--r--  1 user  staff    12 Jan  1 12:00 notes.md\n";
+        let out = render(raw, None, false, true, true, 0);
+        assert_eq!(
+            out,
+            "src:\n  644  main.rs  1.2K\n\nsrc/sub:\n  644  notes.md  12B\n"
+        );
+    }
+
+    #[test]
+    fn test_render_recursive_empty_sections_match_native() {
+        let raw = "src:\ntotal 0\n\nsrc/sub:\ntotal 0\n";
+        let native = "src:\n\nsrc/sub:\n";
+        assert_eq!(render(raw, Some(native), false, false, true, 0), native);
     }
 
     #[test]
@@ -1434,8 +1582,8 @@ mod tests {
         let raw = "total 0\n\
                    drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .\n\
                    drwxr-xr-x  2 user  staff  64 Jan  1 12:00 ..\n";
-        assert_eq!(render(raw, Some(""), false, false, 0), "");
-        assert_eq!(render(raw, None, false, true, 0), "(empty)\n");
+        assert_eq!(render(raw, Some(""), false, false, false, 0), "");
+        assert_eq!(render(raw, None, false, true, false, 0), "(empty)\n");
     }
 
     #[test]
