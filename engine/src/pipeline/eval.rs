@@ -146,10 +146,11 @@ fn evaluate_list<'p>(
     resolved: &'p Resolved,
     position: Position,
     facts: &Facts,
+    keep: &dyn Fn(&ResolvedRule) -> bool,
 ) -> Vec<Decision<'p>> {
     let mut decisions = Vec::new();
     for rule in resolved.rules_at(position) {
-        if !rule.def.enabled || rule.def.pro_inert {
+        if !rule.def.enabled || rule.def.pro_inert || !keep(rule) {
             continue;
         }
         if !rule_matches(rule, facts) {
@@ -171,11 +172,24 @@ pub fn evaluate<'p>(
     position: Position,
     facts: &Facts,
 ) -> Vec<Decision<'p>> {
-    let specific = evaluate_list(resolved, position, facts);
+    evaluate_where(resolved, position, facts, &|_| true)
+}
+
+/// [`evaluate`] over the rules `keep` admits. The others are skipped as if
+/// they were not in the file: they neither stop the list nor count as a
+/// match that holds back the `any` fallback, so two passes can share a
+/// position without one silencing the other.
+pub fn evaluate_where<'p>(
+    resolved: &'p Resolved,
+    position: Position,
+    facts: &Facts,
+    keep: &dyn Fn(&ResolvedRule) -> bool,
+) -> Vec<Decision<'p>> {
+    let specific = evaluate_list(resolved, position, facts, keep);
     if !specific.is_empty() || position.subject == Subject::Any {
         return specific;
     }
-    evaluate_list(resolved, position.any_sibling(), facts)
+    evaluate_list(resolved, position.any_sibling(), facts, keep)
 }
 
 pub fn interpolate(template: &str, facts: &Facts) -> String {
@@ -569,6 +583,33 @@ use  = ["dedup"]
             &str_facts(&[("format", "json")]),
         );
         assert_eq!(fallback[0].rule.name, "fallback");
+    }
+
+    #[test]
+    fn rules_left_out_by_evaluate_where_do_not_hold_back_the_any_fallback() {
+        let user = load(
+            Scope::User,
+            "u.toml",
+            r#"
+[[hook.after_tool.shell]]
+name = "skipped"
+use  = ["ansi"]
+
+[[hook.after_tool.any]]
+name = "fallback"
+use  = ["dedup"]
+"#,
+        );
+        let (resolved, _) = resolve(&[user]);
+        let position = Position::hook(Event::AfterTool, Subject::Shell);
+        let facts = str_facts(&[("format", "term")]);
+        assert_eq!(
+            evaluate(&resolved, position, &facts)[0].rule.name,
+            "skipped"
+        );
+        let kept = evaluate_where(&resolved, position, &facts, &|r| r.name != "skipped");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].rule.name, "fallback");
     }
 
     #[test]

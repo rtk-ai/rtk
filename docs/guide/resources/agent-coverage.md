@@ -63,6 +63,8 @@ Rows are grouped by what works — output compression first, then command rewrit
 | `hook.after_tool.*` | Claude Code |
 | `proxy.request.*` | any agent you can point at the daemon (the last column above) |
 
+A [note rule](../pipelines/writing-pipelines.md#notes-after-a-tool) (`emit = "note"`) reaches the agent as `additionalContext` on the `after_tool` hook, so today only Claude Code receives notes. Other agents marked "Add context" accept that field, but RTK does not install an `after_tool` hook for them yet.
+
 A non-shell rule can `deny` or `passthrough`. It cannot rewrite the call — that
 is a `shell` capability, because rewriting a command is what RTK does.
 

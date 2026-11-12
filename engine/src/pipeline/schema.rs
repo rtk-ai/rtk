@@ -10,7 +10,7 @@ pub const PRO_METHODS: &[&str] = &["redact"];
 
 const RULE_KEYS: &[&str] = &[
     "name", "when", "any", "use", "action", "task", "upstream", "message", "mode", "continue",
-    "enabled", "shadow",
+    "enabled", "shadow", "emit",
 ];
 const DIRECTIVE_KEYS: &[&str] = &["name", "use", "text", "file", "channel", "enabled"];
 const TASK_KEYS: &[&str] = &[
@@ -68,6 +68,10 @@ pub struct RuleDef {
     pub upstream: Option<String>,
     pub message: Option<String>,
     pub mode: Option<String>,
+    /// Where a transform chain's result goes after a tool: `output` (the
+    /// default) replaces the tool output, `note` hands it to the agent as
+    /// added context and leaves the output untouched.
+    pub emit: Option<String>,
     pub continue_: bool,
     pub enabled: bool,
     pub shadow: bool,
@@ -466,7 +470,7 @@ fn parse_rule(
                     }
                 };
             }
-            "action" | "task" | "upstream" | "message" | "mode" => match value.as_str() {
+            "action" | "task" | "upstream" | "message" | "mode" | "emit" => match value.as_str() {
                 Some(text) => {
                     let text = Some(text.to_string());
                     match key.as_str() {
@@ -474,6 +478,7 @@ fn parse_rule(
                         "task" => rule.task = text,
                         "upstream" => rule.upstream = text,
                         "mode" => rule.mode = text,
+                        "emit" => rule.emit = text,
                         _ => rule.message = text,
                     }
                 }
