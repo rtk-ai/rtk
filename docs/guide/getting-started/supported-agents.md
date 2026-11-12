@@ -44,6 +44,7 @@ Agent runs "cargo test"
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | Rust binary (`PreToolUse`) | Yes |
 | Kilo Code | Rules file (prompt-level) | N/A |
+| Kiro CLI | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rust binary (`PreToolUse` plugin) | Yes |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
 
@@ -277,6 +278,24 @@ rtk init --agent kilocode    # creates .kilocode/rules/rtk-rules.md in current p
 
 Kilo Code reads `.kilocode/rules/` as custom instructions. RTK adds guidance telling Kilo Code to prefer `rtk <cmd>` over raw commands.
 
+### Kiro CLI
+
+```bash
+rtk init --agent kiro         # creates .kiro/steering/rtk.md in current project
+rtk init -g --agent kiro      # creates ~/.kiro/steering/rtk.md machine-wide
+```
+
+Kiro CLI (formerly the Amazon Q Developer CLI) hooks are allow/deny only, so RTK drops
+`rtk-awareness-full.md` into Kiro's [steering](https://kiro.dev/docs/steering) directory instead —
+every markdown file under `.kiro/steering/` is auto-loaded as instructions.
+
+Uninstall:
+
+```bash
+rtk init --agent kiro --uninstall       # project
+rtk init -g --agent kiro --uninstall    # global
+```
+
 ### Google Antigravity (CLI, IDE & 2.0)
 
 ```bash
@@ -326,7 +345,7 @@ Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any o
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Kilo Code) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Codex, Factory Droid, Antigravity) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Pi, Hermes) use in-place mutation via the agent's extension or plugin API.
+Rules file integrations (Cline, Windsurf, Kilo Code, Kiro CLI) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Codex, Factory Droid, Antigravity) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Pi, Hermes) use in-place mutation via the agent's extension or plugin API.
 
 ## Windows support
 

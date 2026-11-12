@@ -213,6 +213,133 @@ fn run_kimi_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
+// Kiro CLI support
+//
+// Kiro CLI (kiro.dev, formerly the Amazon Q Developer CLI) hooks are gate-only:
+// a `PreToolUse`/`PreTaskExec` hook can block a command (exit code 2) but cannot
+// rewrite it, so `git status` -> `rtk git status` is impossible via a hook. Kiro
+// auto-loads every markdown file from its steering directories — `.kiro/steering/`
+// in the project root, `~/.kiro/steering/` for a global install (docs:
+// kiro.dev/docs/steering) — so we drop an RTK instructions file there, the same
+// mechanism Kimi uses for AGENTS.md.
+
+/// The steering file Kiro reads from `.kiro/steering/` (project) or
+/// `~/.kiro/steering/` (global). Fully owned by RTK once installed.
+const KIRO_STEERING_FILE: &str = "rtk.md";
+
+pub fn run_kiro_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let base_dir = if global {
+        user_dirs::home()
+            .context("Could not determine user home directory")?
+            .join(".kiro/steering")
+    } else {
+        user_dirs::current_dir()?.join(".kiro/steering")
+    };
+    run_kiro_mode_at(&base_dir, ctx)
+}
+
+fn run_kiro_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
+    let steering_path = base_dir.join(KIRO_STEERING_FILE);
+
+    let existing = fs::read_to_string(&steering_path).unwrap_or_default();
+    if existing.contains("RTK") || existing.contains("rtk") {
+        if !dry_run {
+            println!("\nRTK already configured for Kiro CLI.\n");
+            println!("  Steering: {} (already present)", steering_path.display());
+        }
+    } else {
+        let new_content = if existing.trim().is_empty() {
+            RTK_AWARENESS_FULL.to_string()
+        } else {
+            format!("{}\n\n{}", existing.trim(), RTK_AWARENESS_FULL)
+        };
+        if dry_run {
+            println!(
+                "[dry-run] would write {}: (and create the .kiro/steering/ dir if missing)",
+                steering_path.display()
+            );
+            if verbose > 0 {
+                println!("[dry-run] content:\n{}", new_content);
+            }
+        } else {
+            fs::create_dir_all(base_dir).context("Failed to create .kiro/steering directory")?;
+            fs::write(&steering_path, &new_content)
+                .context("Failed to write .kiro/steering/rtk.md")?;
+
+            if verbose > 0 {
+                eprintln!("Wrote .kiro/steering/rtk.md");
+            }
+
+            println!("\nRTK configured for Kiro CLI.\n");
+            println!("  Steering: {} (installed)", steering_path.display());
+        }
+    }
+    print_instructions_agents_awareness_note("Kiro CLI", ctx);
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        println!("  Kiro CLI will now use rtk commands for token savings.");
+        println!("  Test with: git status\n");
+    }
+
+    Ok(())
+}
+
+pub fn uninstall_kiro_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let base_dir = if global {
+        user_dirs::home()
+            .context("Could not determine user home directory")?
+            .join(".kiro/steering")
+    } else {
+        user_dirs::current_dir()?.join(".kiro/steering")
+    };
+    uninstall_kiro_mode_at(&base_dir, ctx)
+}
+
+fn uninstall_kiro_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
+    let steering_path = base_dir.join(KIRO_STEERING_FILE);
+
+    let mut removed = Vec::new();
+    if steering_path.exists() {
+        if dry_run {
+            println!("[dry-run] would remove {}", steering_path.display());
+        } else {
+            // nosemgrep: filesystem-deletion -- uninstall removes only RTK's Kiro steering file.
+            fs::remove_file(&steering_path)
+                .with_context(|| format!("Failed to remove {}", steering_path.display()))?;
+            if verbose > 0 {
+                eprintln!("Removed: {}", steering_path.display());
+            }
+        }
+        removed.push(format!("Steering file: {}", steering_path.display()));
+    }
+
+    if removed.is_empty() {
+        println!("RTK Kiro CLI support was not installed (nothing to remove)");
+    } else {
+        let header = if dry_run {
+            "[dry-run] would uninstall RTK for Kiro CLI:"
+        } else {
+            "RTK uninstalled for Kiro CLI:"
+        };
+        println!("{header}");
+        for item in removed {
+            println!("  - {item}");
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::codex::{codex_rtk_md_content, run_codex_mode_with_paths};
@@ -276,6 +403,48 @@ mod tests {
         let second = fs::read_to_string(&path).unwrap();
         assert_eq!(first, second, "Idempotent: content should not change");
     }
+
+    #[test]
+    fn test_kiro_mode_creates_steering_file() {
+        let temp = TempDir::new().unwrap();
+        let steering_dir = temp.path().join(".kiro/steering");
+        run_kiro_mode_at(&steering_dir, InitContext::default()).unwrap();
+
+        let steering_path = steering_dir.join("rtk.md");
+        assert!(steering_path.exists(), "Kiro steering file should be created");
+        assert_eq!(
+            fs::read_to_string(&steering_path).unwrap(),
+            RTK_AWARENESS_FULL
+        );
+    }
+
+    #[test]
+    fn test_kiro_mode_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let steering_dir = temp.path().join(".kiro/steering");
+        run_kiro_mode_at(&steering_dir, InitContext::default()).unwrap();
+
+        let path = steering_dir.join("rtk.md");
+        let first = fs::read_to_string(&path).unwrap();
+
+        // Second run should not overwrite.
+        run_kiro_mode_at(&steering_dir, InitContext::default()).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), first, "Idempotent");
+    }
+
+    #[test]
+    fn test_kiro_uninstall_removes_steering_file() {
+        let temp = TempDir::new().unwrap();
+        let steering_dir = temp.path().join(".kiro/steering");
+        run_kiro_mode_at(&steering_dir, InitContext::default()).unwrap();
+        assert!(steering_dir.join("rtk.md").exists());
+
+        uninstall_kiro_mode_at(&steering_dir, InitContext::default()).unwrap();
+        assert!(
+            !steering_dir.join("rtk.md").exists(),
+            "uninstall should remove the steering file"
+        );
+    }
     #[test]
     fn test_agents_get_appropriate_awareness_at_every_level() {
         for level in [
@@ -301,6 +470,14 @@ mod tests {
             assert!(
                 agents_md.contains(RTK_AWARENESS_FULL),
                 "kimi with level {level}"
+            );
+
+            let kiro_steering = temp.path().join(".kiro/steering");
+            run_kiro_mode_at(&kiro_steering, ctx).unwrap();
+            assert_eq!(
+                fs::read_to_string(kiro_steering.join("rtk.md")).unwrap(),
+                RTK_AWARENESS_FULL,
+                "kiro with level {level}"
             );
 
             let codex_agents = temp.path().join("codex").join(AGENTS_MD);

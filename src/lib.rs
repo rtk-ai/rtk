@@ -56,6 +56,8 @@ pub enum AgentTarget {
     Antigravity,
     /// Kimi AI
     Kimi,
+    /// Kiro CLI (aws/kiro, formerly the Amazon Q Developer CLI)
+    Kiro,
     /// Pi coding agent
     Pi,
     /// Hermes CLI
@@ -2413,6 +2415,9 @@ where
     } else if agent == Some(AgentTarget::Vibe) {
         hooks::init::uninstall_vibe(ctx)?;
         Ok(0)
+    } else if agent == Some(AgentTarget::Kiro) {
+        hooks::init::uninstall_kiro_mode(global, ctx)?;
+        Ok(0)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -3111,6 +3116,8 @@ fn run_cli() -> Result<i32> {
                     anyhow::bail!("Kimi AI is project-scoped. Use: rtk init --agent kimi");
                 }
                 hooks::init::run_kimi_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Kiro) {
+                hooks::init::run_kiro_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
             } else if agent == Some(AgentTarget::Droid) {

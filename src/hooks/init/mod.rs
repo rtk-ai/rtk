@@ -64,7 +64,7 @@ pub use copilot::{run_copilot, run_copilot_global, uninstall_copilot, uninstall_
 pub use droid::{run_droid_mode, uninstall_droid};
 pub use gemini::run_gemini;
 pub use hermes::{run_hermes_mode, uninstall_hermes};
-pub use instructions_agents::{run_kilocode_mode, run_kimi_mode};
+pub use instructions_agents::{run_kilocode_mode, run_kimi_mode, run_kiro_mode, uninstall_kiro_mode};
 pub use pi::{run_omp_mode_with_patch_mode, run_pi_mode_with_patch_mode};
 pub use trae::{run_trae_mode, uninstall_trae_mode};
 pub use vibe::{run_vibe_mode, uninstall_vibe};

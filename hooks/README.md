@@ -4,7 +4,7 @@
 
 **Deployed hook artifacts** — the files and agent-specific configuration installed on user machines by `rtk init`. External scripts and plugins are thin delegates to `rtk rewrite`; native processors such as Codex call the same Rust rewrite registry directly. Zero filtering logic is duplicated in this directory.
 
-Contains per-agent hook scripts and configuration files for the supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Oh My Pi, Mistral Vibe, Trae, Google Antigravity). `rtk init` installs them.
+Contains per-agent hook scripts and configuration files for the supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Oh My Pi, Mistral Vibe, Trae, Google Antigravity, Kimi, Kiro CLI). `rtk init` installs them.
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init/`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
@@ -49,6 +49,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
 - **[`vibe/`](vibe/README.md)** — Rust binary hook (`rtk hook vibe`), `pre_tool` entry in `~/.vibe/hooks.toml`, `hook_specific_output.tool_input` rewrite plus `system_message` for UI visibility
 - **[`antigravity/`](antigravity/README.md)** — Rust binary hook (`rtk hook antigravity`), `PreToolUse` plugin entry in `.agents/plugins/rtk/hooks.json` or `~/.gemini/config/plugins/rtk/hooks.json`, transparent rewrite via `overwrite.CommandLine`
+- **[`kiro/`](kiro/README.md)** — Rules file (prompt-level), `.kiro/steering/rtk.md` (project) or `~/.kiro/steering/rtk.md` (global)
 
 ## Supported Agents
 
@@ -63,6 +64,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Gemini CLI | Rust binary (`rtk hook gemini`) | Transparent rewrite | Yes (`hookSpecificOutput`) |
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
+| Kiro CLI | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Codex CLI | Rust binary (`rtk hook codex`) | Transparent rewrite | Yes (`updatedInput`) |
 | OpenCode | TypeScript plugin (`execute.before` in 2.0, `tool.execute.before` in 1.x >= 1.18.29) | In-place mutation | Yes |
 | Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
@@ -378,7 +380,7 @@ New integrations must follow the [Exit Code Contract](#exit-code-contract) and [
 |------|-----------|-------------|----------|
 | **Full hook** | Shell script or Rust binary, intercepts commands via agent's hook API | High — must track agent API changes | Claude Code, Cursor, Copilot, Gemini, Codex, Antigravity |
 | **Plugin** | TypeScript/JS/Python plugin in agent's plugin system | Medium — agent manages loading | OpenCode, Hermes, Pi, Oh My Pi |
-| **Rules file** | Prompt-level instructions the agent reads | Low — no code to break | Cline, Windsurf |
+| **Rules file** | Prompt-level instructions the agent reads | Low — no code to break | Cline, Windsurf, Kiro CLI |
 
 ### Eligibility
 
