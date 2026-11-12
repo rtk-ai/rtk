@@ -1,5 +1,6 @@
 //! Windows Task Scheduler, user-level (no admin): an "at log on" task running
-//! with limited rights (`/RL LIMITED`). `schtasks` has no native way to pass
+//! with limited rights, plus a repeating trigger that relaunches a proxy
+//! that died (a no-op while it is alive). `schtasks` has no native way to pass
 //! individual environment variables to a task, so the task runs a small
 //! `cmd /C` wrapper that sets `RTK_PROXY_CONFIG` and redirects stdout/stderr
 //! into the log file itself (there's no journald/launchd-style log capture
@@ -9,28 +10,34 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const MECHANISM: &str = "Task Scheduler (log-on trigger)";
+pub const MECHANISM: &str = "Task Scheduler (log-on trigger, relaunched when it exits)";
 
 const TASK_NAME: &str = "rtk-proxy";
 
+fn current_user() -> Option<String> {
+    let name = std::env::var("USERNAME").ok().filter(|n| !n.is_empty())?;
+    Some(match std::env::var("USERDOMAIN") {
+        Ok(domain) if !domain.is_empty() => format!("{domain}\\{name}"),
+        _ => name,
+    })
+}
+
 pub fn install(bin: &Path, config_path: &Path, log_path: &Path) -> Result<PathBuf> {
-    let cmd = format!(
-        "cmd /C \"set RTK_PROXY_CONFIG={config} && \"{bin}\" start >> \"{log}\" 2>&1\"",
-        config = config_path.display(),
-        bin = bin.display(),
-        log = log_path.display(),
-    );
+    let xml =
+        super::windows_task::definition(bin, config_path, log_path, current_user().as_deref());
+    let xml_path = super::state_dir()?.join("rtk-proxy-task.xml");
+    std::fs::write(&xml_path, super::windows_task::encode(&xml))
+        .with_context(|| format!("writing {}", xml_path.display()))?;
     let status = Command::new("schtasks")
-        .args([
-            "/Create", "/F", "/TN", TASK_NAME, "/SC", "ONLOGON", "/RL", "LIMITED", "/TR", &cmd,
-        ])
+        .args(["/Create", "/F", "/TN", TASK_NAME, "/XML"])
+        .arg(&xml_path)
         .status()
-        .context("running schtasks /Create")?;
+        .context("running schtasks /Create");
+    let _ = std::fs::remove_file(&xml_path);
+    let status = status?;
     if !status.success() {
         bail!("schtasks /Create failed ({status})");
     }
-    // schtasks has no on-disk definition file the caller can inspect directly;
-    // report the task name in its place for the CLI message.
     Ok(PathBuf::from(TASK_NAME))
 }
 
