@@ -334,7 +334,7 @@ where
     // store a recovery entry for output that is already shown whole. Each stream goes back to
     // its own, exactly as captured. A stdout-only filter is given stdout alone, so its output is
     // never compared with the joined text.
-    if !opts.filter_stdout_only && filtered == *raw {
+    if !opts.filter_stdout_only && stream::is_handed_back(&filtered, raw) {
         print!("{}", result.raw_stdout);
         eprint!("{}", result.raw_stderr);
         timer.track(cmd_label, &format!("rtk {}", cmd_label), raw, raw);
@@ -633,7 +633,9 @@ fn run_inner(
                 stream::run_streaming(&mut cmd, StdinMode::Null, FilterMode::Streaming(filter))
                     .with_context(|| format!("Failed to run {}", tool_name))?;
 
-            if let Some(label) = opts.tee_label
+            // Output handed back is shown as captured: there is nothing more to recover.
+            if !result.handed_back
+                && let Some(label) = opts.tee_label
                 && let Some(hint) =
                     crate::core::tee::tee_and_hint(&result.raw, label, result.exit_code)
             {
@@ -2551,7 +2553,8 @@ mod err_test_runner_tests {
 }
 
 /// The stream split itself is checked end to end, through the real binary, in
-/// `tests/cargo_nextest_output_test.rs`.
+/// `tests/cargo_nextest_output_test.rs` (captured) and `tests/cargo_test_output_test.rs`
+/// (streamed).
 #[cfg(all(test, unix))]
 mod handed_back_output_tests {
     use super::*;
@@ -2579,19 +2582,90 @@ mod handed_back_output_tests {
             .expect("count the stored entries")
     }
 
-    /// Runs `cmd` through the runner with the recall store in a directory of its own and
-    /// returns the exit code and how many entries the store holds afterwards.
+    /// Runs `run` with the recall store in a directory of its own and returns the exit code
+    /// and how many entries the store holds afterwards.
+    fn count_stored(run: impl FnOnce() -> Result<i32>) -> (i32, i64) {
+        let dir = tempdir();
+        let db = dir.path().join("recall.db");
+        let code = with_path("RTK_RECALL_DB", Some(&db), || {
+            run().expect("run the command")
+        });
+        (code, stored_entries(&db))
+    }
+
+    /// Runs `cmd` through the captured runner; see [`count_stored`].
     fn run_and_count(
         cmd: Command,
         filter: impl Fn(&str) -> String,
         opts: RunOptions<'_>,
     ) -> (i32, i64) {
-        let dir = tempdir();
-        let db = dir.path().join("recall.db");
-        let code = with_path("RTK_RECALL_DB", Some(&db), || {
-            run_filtered(cmd, "sh", "-c script", filter, opts).expect("run the command")
-        });
-        (code, stored_entries(&db))
+        count_stored(|| run_filtered(cmd, "sh", "-c script", filter, opts))
+    }
+
+    /// A stream filter that shows nothing while the command runs and, once it has exited,
+    /// what its function makes of the output.
+    struct AtExit<F: Fn(&str) -> String>(F);
+
+    impl<F: Fn(&str) -> String> StreamFilter for AtExit<F> {
+        fn feed_line(&mut self, _line: &str) -> Option<String> {
+            None
+        }
+        fn flush(&mut self) -> String {
+            String::new()
+        }
+        fn on_exit(&mut self, _exit_code: i32, raw: &str) -> Option<String> {
+            Some((self.0)(raw))
+        }
+    }
+
+    /// Runs `cmd` through the streamed runner with `filter`; see [`count_stored`].
+    fn stream_and_count(cmd: Command, filter: impl StreamFilter) -> (i32, i64) {
+        count_stored(|| {
+            run_streamed(
+                cmd,
+                "sh",
+                "-c script",
+                Box::new(filter),
+                RunOptions::with_tee("sh"),
+            )
+        })
+    }
+
+    /// The streamed counterpart of `a_filtered_failed_run_stores_its_output`, and the control
+    /// for the test after it.
+    #[test]
+    fn a_streamed_failed_run_summarised_at_exit_stores_its_output() {
+        let (code, entries) = stream_and_count(
+            failing_command(">&2"),
+            AtExit(|_: &str| "condensed\n".to_string()),
+        );
+        assert_eq!((code, entries), (3, 1));
+    }
+
+    #[test]
+    fn a_streamed_failed_run_handed_back_stores_nothing() {
+        let (code, entries) = stream_and_count(failing_command(">&2"), AtExit(str::to_string));
+        assert_eq!((code, entries), (3, 0));
+    }
+
+    /// A stream filter that shows every line as it comes and nothing at exit.
+    struct EveryLineLive;
+
+    impl StreamFilter for EveryLineLive {
+        fn feed_line(&mut self, line: &str) -> Option<String> {
+            Some(format!("{line}\n"))
+        }
+        fn flush(&mut self) -> String {
+            String::new()
+        }
+    }
+
+    /// Only a filter's answer at exit hands the output back. One that showed every line
+    /// live still stores the output, even though what it showed equals it.
+    #[test]
+    fn a_streamed_run_shown_live_still_stores_its_output() {
+        let (code, entries) = stream_and_count(failing_command(">&2"), EveryLineLive);
+        assert_eq!((code, entries), (3, 1));
     }
 
     /// A failed run whose output the filter shrinks keeps the full output for `rtk recall`.

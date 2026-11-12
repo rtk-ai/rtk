@@ -20,59 +20,21 @@ const FAILED_RUN_STDERR: &str = include_str!("fixtures/cargo_nextest_slow_flaky_
 const PASSING_COLOUR_STDERR: &str = include_str!("fixtures/cargo_nextest_pass_color_raw.txt");
 const FAILING_COLOUR_STDERR: &str = include_str!("fixtures/cargo_nextest_fail_color_raw.txt");
 
-struct Outcome {
-    stdout: String,
-    stderr: String,
-    code: Option<i32>,
-}
-
 /// Runs `rtk cargo nextest <args>` against a `cargo` stub that prints `stub_stdout` on stdout and
 /// `stub_stderr` on stderr, and exits with `stub_code`. nextest prints its run status and its
 /// build output on stderr and a listing on stdout, which is the split the stub reproduces.
-fn run_with_stub(args: &[&str], stub_stdout: &str, stub_stderr: &str, stub_code: i32) -> Outcome {
-    let dir = common::tempdir();
-    let stdout_file = dir.path().join("stub_stdout.txt");
-    let stderr_file = dir.path().join("stub_stderr.txt");
-    let stub_path = dir.path().join("cargo");
-
-    std::fs::write(&stdout_file, stub_stdout).expect("write stub stdout");
-    std::fs::write(&stderr_file, stub_stderr).expect("write stub stderr");
-    std::fs::write(
-        &stub_path,
-        format!(
-            "#!/bin/sh\ncat '{}'\ncat '{}' >&2\nexit {}\n",
-            stdout_file.display(),
-            stderr_file.display(),
-            stub_code
-        ),
+fn run_with_stub(
+    args: &[&str],
+    stub_stdout: &str,
+    stub_stderr: &str,
+    stub_code: i32,
+) -> common::Outcome {
+    common::run_with_cargo_stub(
+        &[&["nextest"], args].concat(),
+        stub_stdout,
+        stub_stderr,
+        stub_code,
     )
-    .expect("write stub");
-    let mut perms = std::fs::metadata(&stub_path)
-        .expect("stat stub")
-        .permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-    std::fs::set_permissions(&stub_path, perms).expect("chmod stub");
-
-    let path_with_stub = format!(
-        "{}:{}",
-        dir.path().display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-
-    let out = common::rtk_command()
-        .env("PATH", path_with_stub)
-        .env("LC_ALL", "C")
-        .current_dir(dir.path())
-        .args(["cargo", "nextest"])
-        .args(args)
-        .output()
-        .expect("spawn rtk");
-
-    Outcome {
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        code: out.status.code(),
-    }
 }
 
 fn assert_shown_as_printed(args: &[&str], printed_stdout: &str, printed_stderr: &str, code: i32) {

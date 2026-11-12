@@ -1,0 +1,16 @@
+   Compiling ok v0.1.0 (/tmp/ok)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/main.rs (target/debug/deps/ok-82f6215a41f55fb7)
+
+thread 'tests::expected_panic' (9915) panicked at src/main.rs:35:9:
+expected boom
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'tests::fails' (9916) panicked at src/main.rs:23:9:
+assertion `left == right` failed: boom
+  left: 2
+ right: 3
+
+thread 'tests::fails_plain' (9917) panicked at src/main.rs:28:9:
+plain panic
+error: test failed, to rerun pass `--bin ok`

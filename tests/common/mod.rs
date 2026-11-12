@@ -72,3 +72,64 @@ pub fn tempdir() -> tempfile::TempDir {
 pub fn temp_git_repo() -> tempfile::TempDir {
     scratch::temp_git_repo()
 }
+
+/// What rtk printed on each stream, and the exit code it returned.
+pub struct Outcome {
+    pub stdout: String,
+    pub stderr: String,
+    pub code: Option<i32>,
+}
+
+/// Runs `rtk cargo <args>` under `LC_ALL=C` against a `cargo` stub first on PATH, which prints
+/// `stub_stdout` on stdout, then `stub_stderr` on stderr, and exits with `stub_code`.
+#[cfg(unix)]
+pub fn run_with_cargo_stub(
+    args: &[&str],
+    stub_stdout: &str,
+    stub_stderr: &str,
+    stub_code: i32,
+) -> Outcome {
+    let dir = tempdir();
+    let stdout_file = dir.path().join("stub_stdout.txt");
+    let stderr_file = dir.path().join("stub_stderr.txt");
+    let stub_path = dir.path().join("cargo");
+
+    std::fs::write(&stdout_file, stub_stdout).expect("write stub stdout");
+    std::fs::write(&stderr_file, stub_stderr).expect("write stub stderr");
+    std::fs::write(
+        &stub_path,
+        format!(
+            "#!/bin/sh\ncat '{}'\ncat '{}' >&2\nexit {}\n",
+            stdout_file.display(),
+            stderr_file.display(),
+            stub_code
+        ),
+    )
+    .expect("write stub");
+    let mut perms = std::fs::metadata(&stub_path)
+        .expect("stat stub")
+        .permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&stub_path, perms).expect("chmod stub");
+
+    let path_with_stub = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = rtk_command()
+        .env("PATH", path_with_stub)
+        .env("LC_ALL", "C")
+        .current_dir(dir.path())
+        .arg("cargo")
+        .args(args)
+        .output()
+        .expect("spawn rtk");
+
+    Outcome {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        code: out.status.code(),
+    }
+}

@@ -259,6 +259,9 @@ pub struct StreamResult {
     pub raw_stdout: String,
     pub raw_stderr: String,
     pub filtered: String,
+    /// The filter handed its input back at exit, so each stream was printed as captured
+    /// and the output is shown whole.
+    pub handed_back: bool,
 }
 
 impl StreamResult {
@@ -422,6 +425,21 @@ pub fn status_to_exit_code(status: std::process::ExitStatus) -> i32 {
 // ISSUE #897: ChildGuard RAII prevents zombie processes that caused kernel panic
 pub const RAW_CAP: usize = 10_485_760; // 10 MiB
 
+/// Whether a filter handed back the text it was given, the run's stdout followed by its
+/// stderr, byte for byte. The runners then print each stream as captured and keep no
+/// recovery copy, since the output shown is all that was captured.
+pub fn is_handed_back(filter_output: &str, raw: &str) -> bool {
+    filter_output == raw
+}
+
+/// A reader that closed the pipe has stopped listening, which is not a failure of the run.
+fn write_unless_broken_pipe(dest: &mut dyn Write, text: &str) -> io::Result<()> {
+    match write!(dest, "{}", text) {
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        written => written,
+    }
+}
+
 pub fn run_streaming(
     cmd: &mut Command,
     stdin_mode: StdinMode,
@@ -445,6 +463,7 @@ pub fn run_streaming(
             raw_stdout: String::new(),
             raw_stderr: String::new(),
             filtered: String::new(),
+            handed_back: false,
         });
     }
 
@@ -666,19 +685,22 @@ pub fn run_streaming(
     let exit_code = status_to_exit_code(status);
     let raw = format!("{}{}", raw_stdout, raw_stderr);
 
+    let mut handed_back = false;
     if let Some(mut f) = saved_filter
         && let Some(post) = f.on_exit(exit_code, &raw)
     {
+        // A filter that hands back the joined text has nothing to say about the run: each
+        // stream goes back to its own, as captured, instead of all of it going to the stream
+        // the last line came from.
+        handed_back = is_handed_back(&post, &raw);
         filtered.push_str(&post);
-        let mut dest: Box<dyn Write> = if filter_fd_is_stderr {
-            Box::new(io::stderr().lock())
+        if handed_back {
+            write_unless_broken_pipe(&mut io::stdout().lock(), &raw_stdout)?;
+            write_unless_broken_pipe(&mut io::stderr().lock(), &raw_stderr)?;
+        } else if filter_fd_is_stderr {
+            write_unless_broken_pipe(&mut io::stderr().lock(), &post)?;
         } else {
-            Box::new(io::stdout().lock())
-        };
-        match write!(dest, "{}", post) {
-            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
-            Err(e) => return Err(e.into()),
-            Ok(_) => {}
+            write_unless_broken_pipe(&mut io::stdout().lock(), &post)?;
         }
     }
 
@@ -688,6 +710,7 @@ pub fn run_streaming(
         raw_stdout,
         raw_stderr,
         filtered,
+        handed_back,
     })
 }
 
@@ -992,6 +1015,7 @@ pub(crate) mod tests {
             raw_stdout: String::new(),
             raw_stderr: String::new(),
             filtered: String::new(),
+            handed_back: false,
         };
         assert!(r.success());
     }
@@ -1004,6 +1028,7 @@ pub(crate) mod tests {
             raw_stdout: String::new(),
             raw_stderr: String::new(),
             filtered: String::new(),
+            handed_back: false,
         };
         assert!(!r.success());
     }
@@ -1016,6 +1041,7 @@ pub(crate) mod tests {
             raw_stdout: String::new(),
             raw_stderr: String::new(),
             filtered: String::new(),
+            handed_back: false,
         };
         assert!(!r.success());
     }
