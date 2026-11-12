@@ -29,6 +29,20 @@ export function _resetCachedRtkPath(): void {
 }
 
 /**
+ * Reads an environment variable by name, ignoring the case of the key. An
+ * exact match wins; otherwise the first key that matches case-insensitively
+ * is used, which is how Windows itself resolves `Path` vs `PATH`.
+ */
+export function envVar(env: Record<string, string | undefined>, name: string): string | undefined {
+  if (env[name] !== undefined) return env[name]
+  const upper = name.toUpperCase()
+  for (const key of Object.keys(env)) {
+    if (key.toUpperCase() === upper) return env[key]
+  }
+  return undefined
+}
+
+/**
  * Resolves the rtk binary from the system PATH.
  *
  * PATH only, deliberately. OpenCode's bash/shell tool runs commands with
@@ -41,13 +55,19 @@ export function _resetCachedRtkPath(): void {
  *
  * Windows still probes PATHEXT, which is the #1993 fix: `which` does not exist
  * there.
+ *
+ * Both variables are read case-insensitively (#4625): Windows stores them as
+ * `Path` and `PATHEXT`, and OpenCode's Bun runtime exposes `process.env` with
+ * that native casing, so `process.env.PATH` is undefined there even though
+ * the variable is set. Node and PowerShell paper over the difference; Bun does
+ * not.
  */
 export function resolveRtkPath(): string | null {
   if (cachedRtkPath && existsSync(cachedRtkPath)) return cachedRtkPath
 
-  const dirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean)
+  const dirs = (envVar(process.env, "PATH") ?? "").split(delimiter).filter(Boolean)
   const exts = process.platform === "win32"
-    ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";")
+    ? (envVar(process.env, "PATHEXT") ?? ".EXE;.CMD;.BAT;.COM").split(";")
     : [""]
 
   for (const dir of dirs) {

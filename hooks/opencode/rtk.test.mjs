@@ -4,6 +4,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from "node:os"
 import { delimiter, join } from "node:path"
 import RtkOpenCodePlugin, {
+  envVar,
   probeRtkHookOpencode,
   resolveRtkPath,
   runHookOpencode,
@@ -240,6 +241,17 @@ test("RTK_DISABLED=1 passes commands through with a live rtk behind it", async (
   } finally {
     delete process.env.RTK_DISABLED
   }
+})
+
+test("envVar reads PATH under Windows' native `Path` casing", () => {
+  // OpenCode's Bun runtime on Windows exposes the variable as `Path` only
+  // (#4625); Node's process.env hides that, so a plain object stands in.
+  assert.equal(envVar({ Path: "C:\tools" }, "PATH"), "C:\tools")
+  assert.equal(envVar({ PathExt: ".EXE;.CMD" }, "PATHEXT"), ".EXE;.CMD")
+  // An exact key still wins over a differently-cased one.
+  assert.equal(envVar({ path: "lower", PATH: "upper" }, "PATH"), "upper")
+  assert.equal(envVar({ HOME: "/root" }, "PATH"), undefined)
+  assert.equal(envVar({}, "PATH"), undefined)
 })
 
 test("resolveRtkPath skips a directory named rtk", () => {
