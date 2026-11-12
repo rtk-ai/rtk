@@ -1,5 +1,6 @@
 //! Scans AI coding sessions to find commands that could benefit from RTK filtering.
 
+pub(crate) mod families;
 pub mod fish_script;
 pub mod provider;
 pub mod registry;
@@ -18,8 +19,9 @@ use registry::{
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
-use crate::core::cmdline::lexer::{self, CommandStart, join_continuations, tokenize, words};
+use crate::core::cmdline::lexer::{self, join_continuations, tokenize, words};
 use crate::core::cmdline::rtk::rtk_invocation;
+use crate::core::cmdline::walker::Position;
 use crate::core::tracking::{HookDecisionRecord, Tracker};
 use crate::core::user_dirs;
 use crate::discover::registry::prefix_contains_rtk_disabled;
@@ -276,7 +278,7 @@ fn judge_disabled_segment(
     raw_cmd: &str,
     env_prefix: &str,
     actual_cmd: &str,
-    start: CommandStart,
+    start: Position,
     ctx: &CoverageContext,
 ) -> DisabledSegment {
     if !matches!(
@@ -424,9 +426,9 @@ impl Tally {
                 .and_then(|prev| parts.get(prev))
                 .is_some_and(|prev| prev.feeds_pipe);
             let start = if consumes_a_pipe {
-                CommandStart::PipeStage
+                Position::STAGE
             } else {
-                CommandStart::Pipeline
+                Position::START
             };
             // `output_len` measures what came back from the tool call, which
             // is what the last command in the line wrote. An earlier one
@@ -1120,6 +1122,23 @@ mod tests {
         }
     }
 
+    /// Only an assignment to `RTK_DISABLED` by that name is a bypass.
+    #[test]
+    fn test_other_variables_holding_the_text_are_no_bypass() {
+        for line in [
+            "XRTK_DISABLED=1 git status",
+            "M=RTK_DISABLED=1 git status",
+            "M='RTK_DISABLED=1' git status",
+        ] {
+            let tally = tally_of(&[line], &test_ctx(true));
+            assert_eq!(tally.rtk_disabled_count, 0, "{line:?}");
+        }
+        assert_eq!(
+            tally_of(&["RTK_DISABLED=1 git status"], &test_ctx(true)).rtk_disabled_count,
+            1
+        );
+    }
+
     /// A command that runs rtk counts as adoption however its first word is
     /// spelled, and `rtk bypass` (or its deprecated alias `rtk proxy`) does
     /// not, as in `rtk session`.
@@ -1281,7 +1300,7 @@ mod tests {
         // without the assignment, not as a bypass.
         fn judge(raw: &str, ctx: &CoverageContext) -> DisabledSegment {
             let (env_prefix, actual_cmd) = strip_disabled_prefix_for_analytics(raw);
-            judge_disabled_segment(raw, env_prefix, actual_cmd, CommandStart::Pipeline, ctx)
+            judge_disabled_segment(raw, env_prefix, actual_cmd, Position::START, ctx)
         }
         let unbypassed = |line: &str| DisabledSegment::Unbypassed(line.to_string());
         let ctx = test_ctx(true);

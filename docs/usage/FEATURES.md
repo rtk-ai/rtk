@@ -1301,11 +1301,11 @@ rtk init -g --uninstall         # Uninstall
 Internal command used by the hooks. The exit code carries the permission decision, taken from Claude Code's permission rules applied to every command in a chain:
 
 - `0`: prints the rewritten command; allow rules cover every command, so the hook may allow it without asking
-- `1`: no output, no rewrite (no RTK equivalent, nothing to rewrite, a command excluded in config, a construct RTK does not rewrite such as `$(...)` or a file redirect, or a deny rule matched inside a shell wrapper's script); the command runs unchanged
-- `2`: a deny matched (checked before anything else). With no output, a deny rule matched and the hook defers to the agent's own deny. With output, an rtk pipeline rule denied or routed the command, and the hook blocks it with that message
+- `1`: no output, no rewrite (no RTK equivalent, nothing to rewrite, a command excluded in config, a construct RTK does not rewrite such as `$(...)` or a file redirect, or a deny rule matched inside a shell wrapper's script, or not ruled out there because the script has more prefixes than RTK reads); the command runs unchanged
+- `2`: no output; a deny rule matched (checked before anything else), and the hook defers to the agent's own deny. rtk's pipeline rules are applied by `rtk hook claude`, not by `rtk rewrite`
 - `3`: prints the rewritten command; an ask rule matched, or allow rules do not cover every command, including when there are no rules at all; the agent asks for confirmation
 
-An integration therefore reads stdout on `0` and `3` (and on `2`, for the block message), and keeps the confirmation prompt on `3`. With `RTK_REWRITE_HOST=openclaw`, an integration that handles approval itself gets `0` in place of every `3` that does not come from an ask rule; an integration that allows without asking on `0` therefore runs `rtk rewrite` without that variable.
+An integration therefore reads stdout on `0` and `3`, and keeps the confirmation prompt on `3`. With `RTK_REWRITE_HOST=openclaw`, an integration that handles approval itself gets `0` in place of every `3` that does not come from an ask rule; an integration that allows without asking on `0` therefore runs `rtk rewrite` without that variable.
 
 ```bash
 rtk rewrite "git status"           # -> "rtk git status" (exit 3 with no rules)
@@ -1373,8 +1373,9 @@ Some hosts evaluate the command string with a POSIX-compatible layer even when
 the user's shell is fish: a multi-line fish script (`if ... end`, `; and`,
 `; or`) then fails to parse before RTK even starts. The hook detects
 **unambiguous** scripts (a fish-only keyword such as `end`, `begin`, `switch`,
-`and`, `or`, `not` at command position, with no POSIX `then`/`fi`/`do`/`done`
-marker) and hands them back for explicit fish execution:
+`and`, `or`, `not` at command position, with no word only bash reserves, such
+as `then`, `fi`, `do`, `done` or `until`, at command position) and hands them
+back for explicit fish execution:
 
 ```
 if test -d src\n  git status\nend

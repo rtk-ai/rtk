@@ -1,7 +1,9 @@
 //! A bash reserved word is never a command, so the rewrite never puts `rtk` in
 //! front of one: `rtk until false; do …; done` or `rtk esac` is a syntax error
-//! where the line was a loop or a `case`. Nor does it put one inside a
-//! `[[ … ]]` expression or before a `case` pattern, where nothing is a command.
+//! where the line was a loop or a `case`. The command behind a reserved word
+//! bash runs a pipeline after (`then`, `do`, `time`, ...) is rewritten. Nor
+//! does it put one inside a `[[ … ]]` expression or before a `case` pattern,
+//! where nothing is a command.
 //! Only a filter that matches such a word can offer the rewrite, which a
 //! trusted project filter matching every command does here. Word text (an
 //! extglob group, an array literal, a `${ }`) is never a command either, and
@@ -63,13 +65,24 @@ fn rewrite(dir: &Path, cmd: &str) -> String {
     stdout
 }
 
+/// `rtk` goes in front of the command behind a reserved word, never in front
+/// of the word itself.
 #[test]
-fn no_rewrite_starts_with_a_reserved_word() {
+fn rtk_never_precedes_a_reserved_word() {
     let dir = project();
     for (cmd, expected) in [
-        ("until false; do git status; done", ""),
-        ("select x in a; do ls; done", ""),
-        ("if true; then ls x; elif true; then ls y; fi", ""),
+        (
+            "until false; do git status; done",
+            "until false; do rtk git status; done",
+        ),
+        (
+            "select x in a; do ls; done",
+            "select x in a; do rtk ls; done",
+        ),
+        (
+            "if true; then ls x; elif true; then ls y; fi",
+            "if true; then rtk ls x; elif true; then rtk ls y; fi",
+        ),
         ("case x in x) ls;; esac", "case x in x) rtk ls;; esac"),
         ("function f { ls; }", ""),
         ("coproc ls -la", ""),
@@ -98,8 +111,14 @@ fn no_rewrite_inside_a_test_expression() {
             "[[ ( -f a || -d b ) && -e c ]] && rtk ls",
         ),
         ("[[(-f a||-d b)]] || ls", "[[(-f a||-d b)]] || rtk ls"),
-        ("if [[ -f a || -d b ]]; then ls; fi", ""),
-        ("while [[ -f a && -d b ]]; do ls; done", ""),
+        (
+            "if [[ -f a || -d b ]]; then ls; fi",
+            "if [[ -f a || -d b ]]; then rtk ls; fi",
+        ),
+        (
+            "while [[ -f a && -d b ]]; do ls; done",
+            "while [[ -f a && -d b ]]; do rtk ls; done",
+        ),
         (
             "ls && [[ -f a || -d b ]] && ls",
             "rtk ls && [[ -f a || -d b ]] && rtk ls",
@@ -143,7 +162,10 @@ fn no_rewrite_inside_an_arithmetic_command() {
         ),
         ("time (( a || b ))", ""),
         ("time -p (( a || b ))", ""),
-        ("if (( a || b )); then ls; fi", ""),
+        (
+            "if (( a || b )); then ls; fi",
+            "if (( a || b )); then rtk ls; fi",
+        ),
         ("( (( a || b )) && ls )", "( (( a || b )) && rtk ls )"),
         (
             "(( ( a ) || ( b ) )) && ls",
@@ -227,6 +249,15 @@ fn reserved_word_after_a_closer() {
         (
             "if (true) then [[ -f a || ls ]] && git status; fi",
             "if (true) then [[ -f a || ls ]] && rtk git status; fi",
+        ),
+        // The command after a coprocess is rewritten.
+        (
+            "coproc NAME [[ -f a || ls ]]; ls",
+            "coproc NAME [[ -f a || ls ]]; rtk ls",
+        ),
+        (
+            "coproc NAME ( [[ -f a || ls ]] && ls ); ls",
+            "coproc NAME ( [[ -f a || ls ]] && ls ); rtk ls",
         ),
         (
             "while (( 0 )) do [[ -f a || ls ]]; done; git status",
