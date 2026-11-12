@@ -464,13 +464,16 @@ const DIRECT_READS: [(&str, &str); 10] = [
 /// constant is looked up. `None` for anything else, such as a name built at
 /// run time.
 fn env_var_name(arg: &str) -> Option<String> {
-    use crate::hooks::constants::{COPILOT_HOME_ENV, DROID_HOME_ENV, PI_CODING_AGENT_DIR_ENV};
+    use crate::hooks::constants::{
+        COPILOT_HOME_ENV, DROID_HOME_ENV, DSH_HOME_ENV, PI_CODING_AGENT_DIR_ENV,
+    };
     if let Some(literal) = arg.strip_prefix('"').and_then(|a| a.strip_suffix('"')) {
         return Some(literal.to_string());
     }
     let value = match arg.rsplit("::").next().unwrap_or(arg) {
         "COPILOT_HOME_ENV" => COPILOT_HOME_ENV,
         "DROID_HOME_ENV" => DROID_HOME_ENV,
+        "DSH_HOME_ENV" => DSH_HOME_ENV,
         "PI_CODING_AGENT_DIR_ENV" => PI_CODING_AGENT_DIR_ENV,
         "REWRITE_HOST_ENV" => crate::hooks::decision::REWRITE_HOST_ENV,
         "TELEMETRY_DISABLED_ENV" => crate::core::telemetry_cmd::TELEMETRY_DISABLED_ENV,
