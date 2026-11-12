@@ -190,7 +190,11 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
             let raw_summary =
                 normalize_build_summary(binlog::parse_build_from_text(&raw), command_success);
             let summary = merge_build_summaries(binlog_summary, raw_summary);
-            (format_build_output(&summary, &binlog_path), true)
+            let needs_raw_fallback = build_needs_raw_fallback(command_success, &summary);
+            (
+                format_build_output(&summary, &binlog_path),
+                needs_raw_fallback,
+            )
         }
         "test" => {
             // First try to parse from binlog/console output
@@ -1296,6 +1300,13 @@ fn test_needs_raw_fallback(summary: &binlog::TestSummary) -> bool {
         || summary.failed_tests.iter().any(|t| t.details.is_empty())
 }
 
+/// A failed `dotnet build` needs the raw stream only when the summary could not
+/// name any error. When it did, `format_build_output` already prints every
+/// parsed diagnostic, so prepending raw stdout repeats each one (#914).
+fn build_needs_raw_fallback(command_success: bool, summary: &binlog::BuildSummary) -> bool {
+    !command_success && summary.errors.is_empty()
+}
+
 /// On success, or when `needs_raw_fallback` is false, only the filtered summary is emitted;
 /// otherwise raw stdout (or stderr if stdout is empty) is prepended.
 fn compose_failure_output(
@@ -1855,6 +1866,31 @@ mod tests {
             ..Default::default()
         };
         assert!(test_needs_raw_fallback(&summary));
+    }
+
+    #[test]
+    fn test_build_needs_raw_fallback_only_when_no_errors_parsed() {
+        let mut summary = binlog::BuildSummary::default();
+        assert!(
+            super::build_needs_raw_fallback(false, &summary),
+            "a failed build with no parsed errors needs the raw stream"
+        );
+        assert!(
+            !super::build_needs_raw_fallback(true, &summary),
+            "a successful build never needs a fallback"
+        );
+
+        summary.errors.push(binlog::BinlogIssue {
+            code: "CS1002".to_string(),
+            file: "Program.cs".to_string(),
+            line: 4,
+            column: 6,
+            message: "; expected".to_string(),
+        });
+        assert!(
+            !super::build_needs_raw_fallback(false, &summary),
+            "parsed errors are already printed by format_build_output; raw would duplicate them"
+        );
     }
 
     #[test]
