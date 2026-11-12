@@ -467,6 +467,28 @@ fn has_source_syntax(text: &str) -> bool {
     text.contains('#') || text.contains("\\\n")
 }
 
+/// A line read once for its continuations, as the hook reads it: joined, or as
+/// written when it is too complex to join, which `joined` tells apart.
+pub(crate) struct JoinedLine<'a> {
+    pub(crate) text: Cow<'a, str>,
+    pub(crate) joined: bool,
+}
+
+impl<'a> JoinedLine<'a> {
+    pub(crate) fn of(text: &'a str) -> Self {
+        match join_continuations(text) {
+            Ok(joined) => Self {
+                text: joined,
+                joined: true,
+            },
+            Err(_) => Self {
+                text: Cow::Borrowed(text),
+                joined: false,
+            },
+        }
+    }
+}
+
 /// What to read of a [`join_continuations`] answer: the line, or every reading of one
 /// too complex to read.
 pub(crate) fn every_reading<'a>(
@@ -927,20 +949,24 @@ fn contains_substitution(cmd: &str) -> bool {
     })
 }
 
+/// Whether the redirect token `value` opens a heredoc or a herestring. The operator
+/// arrives as `<<` with any fd digits folded in front (`3<<`); the `-` of `<<-` stays
+/// in the next word, and a herestring `<<<` arrives as `<<` then `<`.
+pub(crate) fn is_heredoc_operator(value: &str) -> bool {
+    value
+        .trim_start_matches(|ch: char| ch.is_ascii_digit())
+        .starts_with("<<")
+}
+
 // A redirect that takes a word names a file unless that word is `/dev/null`;
 // a bare `>&` before a word is `>word 2>&1` — a file target too. A heredoc or
 // herestring also returns true, whatever its delimiter: its body is inline
 // data that no caller can attest.
 pub(crate) fn redirect_has_file_target(tokens: &[Token<'_>], i: usize) -> bool {
     let value = tokens[i].value;
-    // A heredoc operator arrives as `<<` with any fd digits folded in front
-    // (`3<<`); the `-` of `<<-` stays in the next word, and a herestring `<<<`
-    // arrives as `<<` then `<`. Its operand is a delimiter, so a delimiter
-    // spelled `/dev/null` must not reach the exemption below.
-    if value
-        .trim_start_matches(|ch: char| ch.is_ascii_digit())
-        .starts_with("<<")
-    {
+    // Its operand is a delimiter, so a delimiter spelled `/dev/null` must not
+    // reach the exemption below.
+    if is_heredoc_operator(value) {
         return true;
     }
     if !redirect_takes_a_word(value) {
@@ -2170,37 +2196,57 @@ pub(crate) fn reserved_options_read(
 /// where a substitution starts and stops — one counting a bracket the other
 /// does not is a command appearing or vanishing. They share this rather than
 /// each keeping their own count.
+///
+/// A backquote is read as a substitution only by a walk that asks for it
+/// ([`SubstitutionDepth::with_backquotes`]): an unquoted, unescaped one is a bare
+/// `` ` `` token, and the next such token closes what it opens.
 #[derive(Default)]
-pub(crate) struct SubstitutionDepth(usize);
+pub(crate) struct SubstitutionDepth {
+    brackets: usize,
+    reads_backquotes: bool,
+    in_backquotes: bool,
+}
 
 impl SubstitutionDepth {
+    /// A tracker that also reads `` `…` `` as a substitution.
+    pub(crate) fn with_backquotes() -> Self {
+        Self {
+            reads_backquotes: true,
+            ..Self::default()
+        }
+    }
+
     /// Whether the token being looked at sits inside a substitution, where
     /// nothing ends a command out here.
     pub(crate) fn is_inside(&self) -> bool {
-        self.0 > 0
+        self.brackets > 0 || self.in_backquotes
     }
 
     /// Take `tok` into account, and say whether it was the bracketing of a
-    /// substitution — the `(` that opens one or the `)` that closes it — which
-    /// is never a boundary in its own right.
+    /// substitution — the `(` that opens one or the `)` that closes it, or a
+    /// backquote — which is never a boundary in its own right.
     pub(crate) fn absorbs(&mut self, cmd: &str, tok: &Token<'_>) -> bool {
         if tok.kind != TokenKind::Shellism {
             return false;
         }
         match tok.value {
+            "`" if self.reads_backquotes => {
+                self.in_backquotes = !self.in_backquotes;
+                true
+            }
             // Brackets nest, so one inside a substitution counts too: without
             // that its `)` closes the substitution a bracket early and the real
             // closing `)` reads as a boundary.
-            "(" if self.0 > 0 => {
-                self.0 += 1;
+            "(" if self.brackets > 0 => {
+                self.brackets += 1;
                 true
             }
             "(" if opens_substitution(cmd, tok.offset) => {
-                self.0 += 1;
+                self.brackets += 1;
                 true
             }
-            ")" if self.0 > 0 => {
-                self.0 -= 1;
+            ")" if self.brackets > 0 => {
+                self.brackets -= 1;
                 true
             }
             _ => false,
@@ -2343,9 +2389,10 @@ impl SegmentWalk<'_> {
 /// Segments `cmd` for the **permission gate** (`hooks/permissions.rs::check_command_with_rules`):
 /// every segment this returns is independently checked against deny/ask/allow
 /// rules, so this is the most paranoid of the three compound-command segmenters
-/// in this codebase. The other two, [`split_for_classify`] (analytics/discovery
-/// classification) and `discover/registry.rs::rewrite_compound`'s token walk
-/// (actual rewrite), both read the line through [`read_grammar`].
+/// in this codebase. The other two, [`split_for_classify`] (classification of a lone
+/// line) and `discover/registry.rs::rewrite_compound`'s token walk (actual rewrite),
+/// both read the line through [`read_grammar`]. Discover and analytics take their
+/// commands from the rewrite's walk (`discover/registry.rs::split_command_chain_parts`).
 ///
 /// All three agree on where a command begins and ends. Where a row below still
 /// differs, the difference is the consumer's purpose, not an accident, and
@@ -2364,7 +2411,7 @@ impl SegmentWalk<'_> {
 /// | brackets of word text (`a=(…)`, `!(…)`, `${…}`) | `(` and `)` split | not a boundary: the text is one word | same as classification |
 /// | trailing redirect | truncates the segment, so nothing rides in behind one | kept | kept, so the rewrite reproduces the real shape |
 /// | leading redirect | stepped over with its attached operand, rest kept | kept | kept |
-/// | newline | splits | does not split | does not split |
+/// | newline | splits | does not split | splits a block into its lines first, never within one |
 /// | lone `\r` (no following `\n`) | splits | does not split | does not split |
 ///
 /// It breaks on a newline and on a lone `\r`, descends into `$( )`, and truncates each
@@ -4046,6 +4093,48 @@ mod tests {
             reserved_options_read(time, cmd, &tokens, 0).last,
             Some((5, 7))
         );
+    }
+
+    /// For each token of `cmd` that is not a blank, whether it is outside every
+    /// substitution `depth` tracks, and so can end a command.
+    fn outside_substitutions(cmd: &str, mut depth: SubstitutionDepth) -> Vec<(String, bool)> {
+        tokenize(cmd)
+            .iter()
+            .filter(|tok| !tok.is_blank())
+            .map(|tok| {
+                let inside = depth.absorbs(cmd, tok) || depth.is_inside();
+                (tok.value.to_string(), !inside)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_a_backquote_is_a_substitution_only_for_a_walk_that_asks() {
+        let cmd = "a `b | c` | d";
+        let outside = |depth| {
+            outside_substitutions(cmd, depth)
+                .into_iter()
+                .filter(|(_, outside)| *outside)
+                .map(|(value, _)| value)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            outside(SubstitutionDepth::with_backquotes()),
+            ["a", "|", "d"]
+        );
+        assert_eq!(
+            outside(SubstitutionDepth::default()),
+            ["a", "`", "b", "|", "c", "`", "|", "d"]
+        );
+        // A quoted or escaped backquote is no token of its own: it opens nothing, so
+        // the pipe in the escaped pair is outside, and the one in quotes is no token.
+        for (text, pipes) in [("a \"`b | c`\" | d", 1), ("a \\`b | c\\` | d", 2)] {
+            let found = outside_substitutions(text, SubstitutionDepth::with_backquotes())
+                .into_iter()
+                .filter(|(value, outside)| value == "|" && *outside)
+                .count();
+            assert_eq!(found, pipes, "{text:?}");
+        }
     }
 
     fn classify_texts(cmd: &str) -> Vec<&str> {

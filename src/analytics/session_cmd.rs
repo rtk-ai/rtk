@@ -1,9 +1,10 @@
 //! Compares RTK-routed vs raw commands in a coding session.
 
+use crate::core::cmdline::lexer::JoinedLine;
 use crate::core::utils::format_tokens;
 use crate::discover::is_already_rtk;
 use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
-use crate::discover::registry::{Classification, classify_command, split_command_chain};
+use crate::discover::registry::{Classification, classify_command, split_command_chain_parts};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -33,14 +34,15 @@ impl SessionSummary {
 ///   adopted usage), or
 /// - would be rewritten by the hook (classify_command returns Supported)
 ///
-/// Chained commands (e.g. "cd ./path && rtk ls") are split so each part
-/// is classified independently — matching the discover module's behavior.
+/// Chained commands (e.g. "cd ./path && rtk ls") and the lines of a multi-line call are
+/// split so each part is classified independently — matching the discover module's behavior.
 fn count_rtk_commands(cmds: &[ExtractedCommand]) -> (usize, usize, usize) {
     let mut total: usize = 0;
     let mut rtk: usize = 0;
     for c in cmds {
-        let parts = split_command_chain(&c.command);
-        for part in &parts {
+        let line = JoinedLine::of(&c.command);
+        for part in split_command_chain_parts(&line) {
+            let part = part.text;
             total += 1;
             if is_already_rtk(part)
                 || matches!(classify_command(part), Classification::Supported { .. })
@@ -232,6 +234,35 @@ mod tests {
         assert_eq!(total, 3);
         assert_eq!(rtk, 3);
         assert_eq!(output, 6000);
+    }
+
+    #[test]
+    fn test_count_reads_a_block_with_its_continuations_joined() {
+        let cmds = vec![make_cmd("git status \\\n --short\ngit log", None)];
+        let (total, rtk, _) = count_rtk_commands(&cmds);
+        assert_eq!((total, rtk), (2, 2));
+    }
+
+    #[test]
+    fn test_count_each_line_of_a_block_also_one_rtk_does_not_handle() {
+        let cmds = vec![make_cmd("cd x\ngit status", None)];
+        let (total, rtk, _) = count_rtk_commands(&cmds);
+        assert_eq!((total, rtk), (2, 1));
+    }
+
+    #[test]
+    fn test_count_a_refused_block_as_one_command() {
+        // The rewrite refuses a block with a subshell line and reaches none of its lines.
+        let cmds = vec![make_cmd("( cd x && ls )\ngit status", None)];
+        let (total, rtk, _) = count_rtk_commands(&cmds);
+        assert_eq!((total, rtk), (1, 0));
+    }
+
+    #[test]
+    fn test_count_no_command_in_a_call_of_comments() {
+        let cmds = vec![make_cmd("# just a note", None), make_cmd("# a\n# b", None)];
+        let (total, rtk, _) = count_rtk_commands(&cmds);
+        assert_eq!((total, rtk), (0, 0));
     }
 
     #[test]

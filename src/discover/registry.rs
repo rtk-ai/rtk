@@ -19,12 +19,13 @@ use crate::core::arg_tokenizer::{self, TokenKind as ArgKind};
 use crate::core::cmdline::bash_grammar::{ReservedWord, reserved_word};
 use crate::core::cmdline::edit::{Edit, apply_edits};
 use crate::core::cmdline::lexer::{
-    CompoundSpan, Nesting, PipeKind, QuoteScan, Reading, SubstitutionDepth, Token, TokenKind, Word,
-    ansi_c_quote_defeats_lexer, contains_unattestable_construct_in, content_bounds,
-    function_definition_closer, is_ifs, join_continuations, quotes_balanced, read_nesting,
-    redirect_has_file_target, redirect_takes_a_word, resolve_word_text, resolve_words, shell_split,
-    split_for_classify, split_ifs, squeeze_blanks, starts_with_grammar, tokenize, tokenize_trimmed,
-    trim_ifs, trim_ifs_end, trim_ifs_start, without_comments, words,
+    CompoundSpan, JoinedLine, Nesting, PipeKind, QuoteScan, Reading, SubstitutionDepth, Token,
+    TokenKind, Word, ansi_c_quote_defeats_lexer, contains_unattestable_construct_in,
+    content_bounds, function_definition_closer, is_heredoc_operator, is_ifs, join_continuations,
+    quotes_balanced, read_nesting, redirect_has_file_target, redirect_takes_a_word,
+    resolve_word_text, resolve_words, shell_split, split_for_classify, split_ifs, squeeze_blanks,
+    starts_with_grammar, tokenize, tokenize_trimmed, trim_ifs, trim_ifs_end, trim_ifs_start,
+    without_comments, words,
 };
 use crate::core::cmdline::rtk::rtk_invocation;
 use crate::core::cmdline::walker::{self, Line, Peel, Position};
@@ -452,60 +453,133 @@ fn extract_base_command(cmd: &str) -> &str {
 }
 
 /// Quote-aware heredoc detection — `<<` inside quotes is not a heredoc.
-pub fn has_heredoc(cmd: &str) -> bool {
-    tokens_have_heredoc(&tokenize(cmd))
-}
-
 fn tokens_have_heredoc(tokens: &[Token<'_>]) -> bool {
     tokens
         .iter()
-        .any(|t| t.kind == TokenKind::Redirect && t.value.starts_with("<<"))
+        .any(|t| t.kind == TokenKind::Redirect && is_heredoc_operator(t.value))
 }
 
-/// One command in a chain, with what a report needs to know about where it sat.
-pub struct ChainPart<'a> {
-    pub text: &'a str,
-    /// Whether a `|` follows, so this command's output is consumed by the next
-    /// one rather than read by the person who ran it.
-    pub feeds_pipe: bool,
+/// One command of a call, with what a report needs to know about it.
+pub(crate) struct ChainPart<'a> {
+    pub(crate) text: &'a str,
+    /// Whether it is a stage of a pipeline after the first, so it reads the output of
+    /// the stage before it.
+    pub(crate) consumes_pipe: bool,
+    /// Whether the command after its assignments and `env` words runs rtk, which the
+    /// classifier leaves aside although rtk runs a tool.
+    pub(crate) runs_rtk: bool,
 }
 
-pub fn split_command_chain_parts(cmd: &str) -> Vec<ChainPart<'_>> {
-    let trimmed = trim_ifs(cmd);
-    if trimmed.is_empty() {
-        return vec![];
+/// The commands of `line`, cut where the rewrite cuts it: each is a segment of the
+/// rewrite's own reading ([`cut_line`], over the lex and reading it works from), every
+/// stage of a pipeline included, the middle ones too. A block is read line by line as
+/// the rewrite reads it ([`block_lines`]): a line is a command unit, a trailing operator
+/// joins the next line, and a blank or comment-only line is none. The `\r` of a CRLF is
+/// the last byte of its line, in its last word or its comment, as bash reads it. What the
+/// rewrite leaves whole is one text, as it leaves it: a block it refuses to read line by
+/// line, a multi-line call that could not be joined, and a heredoc or `$((` call.
+///
+/// What the cut reads past is no command: what follows a subshell's `)`, and a part that
+/// holds only a comment or a group's own syntax ([`holds_no_command`]). A call of
+/// comments alone has none.
+pub(crate) fn split_command_chain_parts<'a>(line: &'a JoinedLine<'_>) -> Vec<ChainPart<'a>> {
+    let lex = CompoundLex::new(&line.text);
+    let lines = match read_lines(&lex) {
+        Lines::Units(_) if !line.joined => Lines::Refused,
+        lines => lines,
+    };
+    let mut parts = Vec::new();
+    match lines {
+        Lines::Opaque | Lines::Refused => {
+            if let Some(whole) = lex.whole() {
+                let part = Part::new(0..whole.tokens.len(), false);
+                push_chain_part(&whole, part, false, &mut parts);
+            }
+        }
+        Lines::Whole => {
+            if let Some(whole) = lex.whole() {
+                push_chain_parts(&whole, &mut parts);
+            }
+        }
+        Lines::Units(units) => {
+            for unit in units {
+                if let Some(slice) = Slice::new(lex.text, &lex.tokens[unit]) {
+                    push_chain_parts(&slice, &mut parts);
+                }
+            }
+        }
     }
+    parts
+}
 
-    // Lexer-based for `<<`; string-based for `$((` (lexer splits it across tokens).
-    if has_heredoc(trimmed) || trimmed.contains("$((") {
-        return vec![ChainPart {
-            text: trimmed,
-            feeds_pipe: false,
-        }];
+/// The parts of one unit of a call: the commands of its cuts.
+fn push_chain_parts<'a>(unit: &Slice<'a, '_>, parts: &mut Vec<ChainPart<'a>>) {
+    let read = LineRead::new(unit);
+    for cut in cut_line(unit, &read) {
+        match cut {
+            Cut::Command(part) => push_chain_part(unit, part, false, parts),
+            Cut::Pipeline(analysis) => {
+                for (index, stage) in analysis.stages.into_iter().enumerate() {
+                    push_chain_part(unit, stage, index > 0, parts);
+                }
+            }
+        }
     }
+}
 
-    // Every stage, not just the one before the first `|`. A pipeline's later
-    // stages are commands the agent ran, and stopping at the pipe made them
-    // invisible to classification — `rtk discover` could not report what it
-    // never looked at (#3683).
-    split_for_classify(trimmed)
+/// The part of `unit` that `part` cuts, as a [`ChainPart`], unless it is no command:
+/// nothing bash reads there, or a group's own syntax. `consumes_pipe` says whether it is a
+/// pipeline's stage after the first.
+fn push_chain_part<'a>(
+    unit: &Slice<'a, '_>,
+    part: Part,
+    consumes_pipe: bool,
+    parts: &mut Vec<ChainPart<'a>>,
+) {
+    if part.after_subshell {
+        return;
+    }
+    let Some(command) = Slice::new(unit.text, &unit.tokens[part.range]) else {
+        return;
+    };
+    let words = command.words();
+    if holds_no_command(&words) {
+        return;
+    }
+    let program = env_run_end(&words).map_or(0, |end| words.partition_point(|w| w.start < end));
+    parts.push(ChainPart {
+        text: command.as_str(),
+        consumes_pipe,
+        runs_rtk: rtk_invocation(&words[program..]).is_some(),
+    });
+}
+
+/// Whether the part with these `words` holds no command: it has no word, only a comment;
+/// its words are all reserved (`do`, `then`, `{`); or its first closes a group of command
+/// lists (`}`, `done`, `fi`, `esac`), after which bash reads no command, only that group's
+/// redirects (`} > test.log`, `done < list.txt`), which belong to the commands inside it.
+fn holds_no_command(words: &[Word<'_>]) -> bool {
+    let Some(first) = words.first() else {
+        return true;
+    };
+    match reserved_word(first.text) {
+        Some(first) if first.closes_command_lists() => true,
+        Some(_) => words.iter().all(|word| reserved_word(word.text).is_some()),
+        None => false,
+    }
+}
+
+/// The text of each of [`split_command_chain_parts`]'s commands for `cmd`.
+#[cfg(test)]
+pub(crate) fn split_command_chain(cmd: &str) -> Vec<String> {
+    split_command_chain_parts(&JoinedLine::of(cmd))
         .into_iter()
-        .map(|s| ChainPart {
-            text: s.text,
-            feeds_pipe: s.feeds_pipe,
-        })
+        .map(|p| p.text.to_string())
         .collect()
 }
 
-pub fn split_command_chain(cmd: &str) -> Vec<&str> {
-    split_command_chain_parts(cmd)
-        .into_iter()
-        .map(|p| p.text)
-        .collect()
-}
-
-/// Which commands of `full` the rewriter acts on, one flag per
-/// [`split_command_chain`] part.
+/// Which commands of `line` the rewriter acts on, one flag per part of `parts`, which are
+/// `line`'s own ([`split_command_chain_parts`]).
 ///
 /// Put to the rewriter rather than re-derived from `PipelineSafety`, so the two
 /// cannot drift: a second copy of the rule is a second thing to keep in step.
@@ -520,24 +594,29 @@ pub fn split_command_chain(cmd: &str) -> Vec<&str> {
 /// one of the rules that are safe to run at the end of a pipeline. A command
 /// the rewriter passes over offers nothing to save.
 pub(crate) fn stages_the_rewriter_reaches(
-    full: &str,
+    line: &JoinedLine<'_>,
+    parts: &[ChainPart<'_>],
     excluded: &[ExcludePattern],
     normalized_prefixes: &[String],
 ) -> Vec<bool> {
-    // The rewrite emits the line with its continuations joined, so read it the same.
-    let joined = join_continuations(full);
-    let before = split_command_chain(joined.as_deref().unwrap_or(full));
-    let Some(rewritten) = rewrite_command_precompiled(full, excluded, normalized_prefixes) else {
-        return vec![false; before.len()];
+    // The rewrite emits the line with its continuations joined, which `line` already is.
+    let Some(rewritten) = rewrite_command_precompiled(&line.text, excluded, normalized_prefixes)
+    else {
+        return vec![false; parts.len()];
     };
-    let after = split_command_chain(&rewritten);
+    let rewritten = JoinedLine::of(&rewritten);
+    let after = split_command_chain_parts(&rewritten);
     // A rewrite substitutes commands and keeps every separator, so the chains
     // line up command for command. If they ever do not, nothing can be located
     // and claiming a saving would be a guess.
-    if before.len() != after.len() {
-        return vec![false; before.len()];
+    if parts.len() != after.len() {
+        return vec![false; parts.len()];
     }
-    before.iter().zip(after).map(|(b, a)| *b != a).collect()
+    parts
+        .iter()
+        .zip(after)
+        .map(|(before, after)| before.text != after.text)
+        .collect()
 }
 
 fn normalize_php_tool_command(cmd: &str) -> String {
@@ -1039,15 +1118,15 @@ fn rewrite_line(cmd: &str, compiled: &[ExcludePattern], normalized_prefixes: &[S
         return Answer::default();
     };
     let line = CompoundLex::new(&normalized);
-    if line.text.is_empty() || line.has_heredoc() || line.text.contains("$((") {
+    if line.text.is_empty() {
         return Answer::default();
     }
 
     let mut rewriter = Rewriter::new(compiled, normalized_prefixes, 0);
-    let text = if line.text.contains('\n') {
-        rewrite_multiline_block(&line, &mut rewriter)
-    } else {
-        rewrite_single(&line, &mut rewriter)
+    let text = match read_lines(&line) {
+        Lines::Opaque | Lines::Refused => None,
+        Lines::Whole => rewrite_single(&line, &mut rewriter),
+        Lines::Units(units) => rewrite_multiline_block(&line, &units, &mut rewriter),
     };
     Answer {
         text,
@@ -1249,16 +1328,34 @@ fn classify_line(line: &str) -> LineRole {
     LineRole::Independent
 }
 
-/// Rewrite each line of a multi-line block independently (issue #1243).
-///
-/// Split points are the newline tokens the quote-aware lexer emits, so a
-/// newline inside a quoted string (e.g. a multi-line commit message) never
-/// becomes a boundary. Lines continued by a trailing `&&`/`||`/`|`/`|&` are
-/// joined and rewritten as one logical command, the newlines and blank lines
-/// inside it kept as written; any line [`classify_line`] marks unsafe passes
-/// the whole block through. Blank lines are preserved verbatim, as is
-/// indentation. A line ends at its `\n` only: the `\r` of a CRLF is the last
-/// byte of the line's last word, as bash reads it.
+/// How the rewrite reads a line it has joined, and so how the report counts the commands
+/// of a call.
+enum Lines {
+    /// A heredoc or an arithmetic `$((`: one text, never rewritten.
+    Opaque,
+    /// One list of commands: a line, or a block whose newlines are all in quotes.
+    Whole,
+    /// A block it does not read line by line: a newline in it is out of the reader's
+    /// hands, or a line is not a command of its own. Nothing in it is rewritten.
+    Refused,
+    /// A block read line by line: the token range of each unit, a line with the lines a
+    /// trailing operator joins to it. A blank or comment-only line is no unit.
+    Units(Vec<Range<usize>>),
+}
+
+fn read_lines(line: &CompoundLex<'_>) -> Lines {
+    // Lexer-based for `<<`; string-based for `$((` (lexer splits it across tokens).
+    if line.has_heredoc() || line.text.contains("$((") {
+        Lines::Opaque
+    } else if line.text.contains('\n') {
+        block_lines(line)
+    } else {
+        Lines::Whole
+    }
+}
+
+/// Rewrite each line of a multi-line block independently (issue #1243), as
+/// [`block_lines`] reads it. Blank lines and indentation stay as written.
 ///
 /// A compound command that one line opens and a later one closes holds the
 /// lines between as part of its lists: when a pipe joins it to another
@@ -1266,17 +1363,50 @@ fn classify_line(line: &str) -> LineRole {
 /// on all of those lines are left as written, as on one line
 /// ([`Rewriter::segment`]).
 ///
-/// If any newline byte was swallowed by quote state, the block passes through
-/// untouched: rewriting (or prefixing) such a block would act on lines no
-/// permission verdict was computed for. Passthrough hands the original command to
-/// the agent's native permission handling instead. Genuine quoted newlines
-/// (multi-line commit messages) also land here; forgoing that rewrite is the safe
-/// trade.
-fn rewrite_multiline_block(block: &CompoundLex<'_>, rewriter: &mut Rewriter<'_>) -> Option<String> {
+/// If a block is refused, it passes through untouched: rewriting (or prefixing) it would
+/// act on lines no permission verdict was computed for. Passthrough hands the original
+/// command to the agent's native permission handling instead. A quoted newline beside a
+/// real one (a multi-line commit message and another line) lands here too; forgoing that
+/// rewrite is the safe trade.
+fn rewrite_multiline_block(
+    block: &CompoundLex<'_>,
+    units: &[Range<usize>],
+    rewriter: &mut Rewriter<'_>,
+) -> Option<String> {
+    let cmd = block.text;
+    let tokens = &block.tokens;
+
+    // Each unit is read first: a compound command it opens or closes may span others.
+    let mut reads: Vec<(Range<usize>, LineRead)> = Vec::new();
+    for unit in units {
+        if let Some(slice) = Slice::new(cmd, &tokens[unit.clone()])
+            && !already_rtk(&slice)
+        {
+            reads.push((unit.clone(), LineRead::new(&slice)));
+        }
+    }
+
+    let kept = kept_across_lines(tokens.len(), &reads);
+    for (unit, read) in &reads {
+        if let Some(slice) = Slice::new(cmd, &tokens[unit.clone()]) {
+            rewrite_read(slice, read, &kept[unit.clone()], rewriter);
+        }
+    }
+    rewriter.apply(cmd)
+}
+
+/// How a block of several lines reads. Split points are the newline tokens the
+/// quote-aware lexer emits, so a newline inside a quoted string (e.g. a multi-line
+/// commit message) never becomes a boundary. Lines continued by a trailing
+/// `&&`/`||`/`|`/`|&` are one unit, the newlines and blank lines inside it kept as
+/// written; any line [`classify_line`] marks unsafe refuses the whole block. A line ends
+/// at its `\n` only: the `\r` of a CRLF is the last byte of the line's last word, as bash
+/// reads it.
+fn block_lines(block: &CompoundLex<'_>) -> Lines {
     let cmd = block.text;
     let tokens = &block.tokens;
     if ansi_c_quote_defeats_lexer(cmd) {
-        return None;
+        return Lines::Refused;
     }
 
     let newlines: Vec<usize> = tokens
@@ -1293,10 +1423,20 @@ fn rewrite_multiline_block(block: &CompoundLex<'_>, rewriter: &mut Rewriter<'_>)
         // Every newline swallowed by quote state with quotes balanced at EOF
         // is one logical command (a multi-line commit message), not a hidden
         // extra line; rewrite it whole, as develop always did (#3319 fuzz).
-        if newlines.is_empty() && quotes_balanced(cmd) {
-            return rewrite_single(block, rewriter);
-        }
-        return None;
+        return if newlines.is_empty() && quotes_balanced(cmd) {
+            Lines::Whole
+        } else {
+            Lines::Refused
+        };
+    }
+    // A newline inside a substitution, a backquoted one included, belongs to the command
+    // that substitution runs: the lines around it are no commands of their own.
+    let mut substitution = SubstitutionDepth::with_backquotes();
+    if tokens.iter().any(|tok| {
+        substitution.absorbs(cmd, tok);
+        tok.kind == TokenKind::Newline && substitution.is_inside()
+    }) {
+        return Lines::Refused;
     }
 
     // Each line is the run of tokens between the newlines around it.
@@ -1318,12 +1458,10 @@ fn rewrite_multiline_block(block: &CompoundLex<'_>, rewriter: &mut Rewriter<'_>)
         .map(|line| classify_line(trim_ifs(line_text(line))))
         .collect();
     if roles.contains(&LineRole::Unsafe) {
-        return None;
+        return Lines::Refused;
     }
 
-    // Each unit, a line with the lines its operators join to it, is read
-    // first: a compound command it opens or closes may span others.
-    let mut units: Vec<(Range<usize>, LineRead)> = Vec::new();
+    let mut units = Vec::new();
     let mut i = 0;
     while i < lines.len() {
         if roles[i] == LineRole::Passive {
@@ -1343,30 +1481,18 @@ fn rewrite_multiline_block(block: &CompoundLex<'_>, rewriter: &mut Rewriter<'_>)
             if roles[next] == LineRole::Passive {
                 // Comment line inside a continuation: joined textually, the comment
                 // would take in the lines after it (#3188 review).
-                return None;
+                return Lines::Refused;
             }
             end = next;
         }
 
         let range = lines[i].start..lines[end].end;
         if let Some((first, last)) = content_bounds(&tokens[range.clone()]) {
-            let unit = range.start + first..range.start + last + 1;
-            if let Some(slice) = Slice::new(cmd, &tokens[unit.clone()])
-                && !already_rtk(&slice)
-            {
-                units.push((unit, LineRead::new(&slice)));
-            }
+            units.push(range.start + first..range.start + last + 1);
         }
         i = end + 1;
     }
-
-    let kept = kept_across_lines(tokens.len(), &units);
-    for (unit, read) in &units {
-        if let Some(slice) = Slice::new(cmd, &tokens[unit.clone()]) {
-            rewrite_read(slice, read, &kept[unit.clone()], rewriter);
-        }
-    }
-    rewriter.apply(cmd)
+    Lines::Units(units)
 }
 
 /// For each of the `len` tokens of a line or a block, whether it sits in a
@@ -1418,90 +1544,168 @@ fn kept_across_lines(len: usize, units: &[(Range<usize>, LineRead)]) -> Vec<bool
         .collect()
 }
 
-/// Where a pipeline's stages are, as indices into its line's tokens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One command the walk cut ([`cut_line`]), as positions in its line's tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Part {
+    /// Its tokens, blanks around them included. They may be nothing but blanks, which
+    /// [`Slice::new`] reads as no command.
+    range: Range<usize>,
+    /// It is a pipeline's stage that stands right behind a subshell's `)`, where bash reads
+    /// no command and the rewrite leaves it as written. [`cut_line`] cuts no
+    /// [`Cut::Command`] there.
+    after_subshell: bool,
+}
+
+impl Part {
+    fn new(range: Range<usize>, after_subshell: bool) -> Self {
+        Self {
+            range,
+            after_subshell,
+        }
+    }
+}
+
+/// Where a pipeline's stages are, as the walk ([`cut_line`]) passed them.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PipelineAnalysis {
-    /// Where the pipeline ends: at `next_clause`, or at the end of the line.
+    /// Each stage, in order. A group a stage after the first opens is cut into its
+    /// commands, which all read the pipe, as [`cut_line`] cuts them.
+    stages: Vec<Part>,
+    /// Where the pipeline ends: at the operator or background `&` that follows it, or at
+    /// the end of the line.
     end: usize,
-    /// The operator or background `&` that follows the pipeline.
-    next_clause: Option<usize>,
     /// Where the last stage starts, when every stage holds a command and no
     /// `|&` joins two of them.
     final_stage_start: Option<usize>,
     all_consumers_safe: bool,
 }
 
-fn analyze_pipeline(
-    line: &Slice<'_, '_>,
-    readings: &[Reading],
-    segment_start: usize,
-    first_pipe: usize,
-) -> PipelineAnalysis {
-    let tokens = line.tokens;
-    // A stage ends where its last word does, which keeps an escaped blank:
-    // `head\ ` is the program `head␠`, not a safe consumer.
-    let stage = |range: Range<usize>| Slice::new(line.text, &tokens[range]);
-    // Only a token read as command text joins or ends a stage: the `||` of a
-    // `[[ ]]` expression is part of that stage's command.
-    let in_commands = |i: usize| readings[i] == Reading::Commands;
-    let next_clause = tokens
-        .iter()
-        .enumerate()
-        .skip(first_pipe + 1)
-        .find(|&(i, tok)| {
-            in_commands(i)
-                && (tok.kind == TokenKind::Operator
-                    || (tok.kind == TokenKind::Shellism && tok.value == "&"))
-        })
-        .map(|(i, _)| i);
-    let end = next_clause.unwrap_or(tokens.len());
+/// A pipeline the walk is inside: the stages it has passed.
+struct PipelineWalk {
+    stages: Vec<Part>,
+    stage_start: usize,
+    /// A `|&` joins two stages.
+    stderr_piped: bool,
+    /// A stage after the first redirects to a file.
+    redirects_to_a_file: bool,
+    /// The groups the stages after the first have opened and not closed, innermost last.
+    groups: Vec<Group>,
+    /// The stage the walk is in stands right behind a subshell's `)`.
+    after_subshell: bool,
+}
 
-    let mut stage_start = segment_start;
-    let mut final_stage_start = None;
-    let mut has_supported_structure = true;
-    let mut consumers_all_safe = true;
+/// A group a pipeline's stage after the first opens.
+#[derive(Clone, Copy)]
+enum Group {
+    /// A subshell, which a `)` closes.
+    Subshell,
+    /// A `{ }` group or a compound a reserved word opens, which the word at this position
+    /// closes, when the line holds it.
+    Compound(Option<usize>),
+}
 
-    for (i, tok) in tokens.iter().enumerate().take(end).skip(first_pipe) {
-        if !in_commands(i) {
-            continue;
+impl PipelineWalk {
+    /// A pipeline whose first stage the walk has passed, at the first `|` (`pipe`).
+    fn begin(first: Part, pipe: usize, kind: PipeKind) -> Self {
+        Self {
+            stages: vec![first],
+            stage_start: pipe + 1,
+            stderr_piped: kind == PipeKind::StdoutAndStderr,
+            redirects_to_a_file: false,
+            groups: Vec::new(),
+            after_subshell: false,
         }
-        if tok.kind == TokenKind::Redirect {
-            if redirect_has_file_target(tokens, i) {
-                consumers_all_safe = false;
-            }
-            continue;
-        }
-        let TokenKind::Pipe(kind) = tok.kind else {
-            continue;
-        };
-
-        let current = stage(stage_start..i);
-        if current.is_none() || kind == PipeKind::StdoutAndStderr {
-            has_supported_structure = false;
-        }
-        if i > first_pipe && !current.is_some_and(|stage| is_safe_pipe_consumer(&stage)) {
-            consumers_all_safe = false;
-        }
-
-        stage_start = i + 1;
-        final_stage_start = Some(stage_start);
     }
 
-    match stage(stage_start..end) {
-        None => has_supported_structure = false,
-        Some(last) if !is_safe_pipe_consumer(&last) => consumers_all_safe = false,
-        Some(_) => {}
+    /// A `|` at `pipe` ends the stage the walk is in.
+    fn pipe(&mut self, pipe: usize, kind: PipeKind) {
+        self.cut(pipe);
+        self.stderr_piped |= kind == PipeKind::StdoutAndStderr;
     }
 
-    PipelineAnalysis {
-        end,
-        next_clause,
-        final_stage_start: if has_supported_structure {
-            final_stage_start
+    /// The token at `at` ends the stage the walk is in, or the command of a group it is
+    /// in, and the next starts after it.
+    fn cut(&mut self, at: usize) {
+        self.end_stage(at);
+        self.stage_start = at + 1;
+    }
+
+    /// The token at `at`, inside a group, ends the command the walk is in, and the next
+    /// starts after it. A command of nothing but blanks, such as what lies between a `case`
+    /// pattern's words, is none: it makes no stage.
+    fn cut_in_group(&mut self, at: usize, tokens: &[Token<'_>]) {
+        if tokens[self.stage_start..at]
+            .iter()
+            .all(|tok| tok.is_blank())
+        {
+            self.stage_start = at + 1;
+            self.after_subshell = false;
         } else {
-            None
-        },
-        all_consumers_safe: has_supported_structure && consumers_all_safe,
+            self.cut(at);
+        }
+    }
+
+    fn in_group(&self) -> bool {
+        !self.groups.is_empty()
+    }
+
+    /// A `(` at `at` opens a subshell, which ends what stands before it.
+    fn open_subshell(&mut self, at: usize) {
+        self.cut(at);
+        self.groups.push(Group::Subshell);
+    }
+
+    /// Whether the word at `at` opens one of `compounds`: a `{` group, or a `while`, `for`,
+    /// `if`, `case` or other compound a reserved word opens, which the word at its `close`
+    /// closes. As anywhere, the word belongs to the command it stands in front of.
+    fn open_compound(&mut self, at: usize, compounds: &[CompoundSpan]) -> bool {
+        let Some(span) = compounds.iter().find(|span| span.open == Some(at)) else {
+            return false;
+        };
+        self.groups.push(Group::Compound(span.close));
+        true
+    }
+
+    /// Whether `tok`, at `at`, closes the innermost group the walk is in, which it then
+    /// leaves. What follows a subshell's `)` is no command.
+    fn close_group(&mut self, at: usize, tok: &Token<'_>) -> bool {
+        match self.groups.last() {
+            Some(Group::Subshell) if tok.value == ")" => {
+                self.cut(at);
+                self.after_subshell = true;
+            }
+            Some(Group::Compound(close)) if *close == Some(at) => {}
+            _ => return false,
+        }
+        self.groups.pop();
+        true
+    }
+
+    fn end_stage(&mut self, end: usize) {
+        let after_subshell = std::mem::take(&mut self.after_subshell);
+        self.stages
+            .push(Part::new(self.stage_start..end, after_subshell));
+    }
+
+    /// The pipeline, ended at `end`.
+    fn finish(mut self, line: &Slice<'_, '_>, end: usize) -> PipelineAnalysis {
+        self.end_stage(end);
+        // A stage ends where its last word does, which keeps an escaped blank:
+        // `head\ ` is the program `head␠`, not a safe consumer.
+        let stage = |part: &Part| Slice::new(line.text, &line.tokens[part.range.clone()]);
+        let has_supported_structure =
+            !self.stderr_piped && self.stages.iter().all(|part| stage(part).is_some());
+        let consumers_safe = !self.redirects_to_a_file
+            && self.stages[1..]
+                .iter()
+                .all(|part| stage(part).is_some_and(|stage| is_safe_pipe_consumer(&stage)));
+        PipelineAnalysis {
+            final_stage_start: has_supported_structure
+                .then(|| self.stages.last().map_or(end, |last| last.range.start)),
+            all_consumers_safe: has_supported_structure && consumers_safe,
+            stages: self.stages,
+            end,
+        }
     }
 }
 
@@ -1510,9 +1714,7 @@ fn analyze_pipeline(
 /// first stage's (#3171).
 fn rewrite_pipeline(
     line: &Slice<'_, '_>,
-    segment_start: usize,
-    first_pipe: usize,
-    analysis: PipelineAnalysis,
+    analysis: &PipelineAnalysis,
     kept: &[bool],
     rewriter: &mut Rewriter<'_>,
 ) {
@@ -1527,7 +1729,7 @@ fn rewrite_pipeline(
     if !rewritten && analysis.all_consumers_safe {
         rewriter.segment(
             line,
-            segment_start..first_pipe,
+            analysis.stages[0].range.clone(),
             RewriteContext::PipelineProducer,
             kept,
         );
@@ -1608,25 +1810,44 @@ impl LineRead {
     }
 }
 
-/// [`rewrite_compound`] for a line already read, with the tokens where a
-/// command is left as written.
-fn rewrite_read(line: Slice<'_, '_>, read: &LineRead, kept: &[bool], rewriter: &mut Rewriter<'_>) {
+/// One command of a line, or one pipeline of them, as the rewrite cuts the line.
+enum Cut {
+    /// A command between two separators.
+    Command(Part),
+    /// A pipeline and where its stages are. The rewrite takes its last stage, or else its
+    /// first, and never one in the middle.
+    Pipeline(PipelineAnalysis),
+}
+
+/// Where the rewrite cuts `line`, which `read` has read: at an operator, a background `&`,
+/// a subshell's bracket and a `case` pattern, past function definitions and substitutions
+/// (a backquoted one included), and across the stages of a pipeline, which ends at the
+/// next operator, the `)` of a subshell it stands in, or the end of the line. A group a
+/// stage after the first opens is cut into the commands it holds, all of them stages that
+/// read the pipe, and the pipeline goes on past it. The one walk both the rewrite and the
+/// report's commands read; the rewrite leaves a line with a pipe and a bracket as written
+/// ([`LineRead::left_whole`]), so it never asks for the cut of such a line.
+///
+/// A range of a cut may hold nothing but blanks, which [`Slice::new`] reads as no command.
+fn cut_line(line: &Slice<'_, '_>, read: &LineRead) -> Vec<Cut> {
     let tokens = line.tokens;
     let readings = &read.readings;
-    if read.left_whole(tokens) {
-        return;
-    }
+    let mut cuts = Vec::new();
 
-    // Where the last subshell's closing `)` ended, as a token index.
+    // Where the last subshell's closing `)` ended, as a token index. What stands right
+    // behind it is no command: bash reads none there, and the rewrite leaves it as written.
     let mut subshell_end = None;
-    let segment =
-        |range: Range<usize>, subshell_end: Option<usize>, rewriter: &mut Rewriter<'_>| {
-            if subshell_end != Some(range.start) {
-                rewriter.segment(&line, range, RewriteContext::Normal, kept);
-            }
-        };
+    let command = |cuts: &mut Vec<Cut>, range: Range<usize>, subshell_end: Option<usize>| {
+        if subshell_end != Some(range.start) {
+            cuts.push(Cut::Command(Part::new(range, false)));
+        }
+    };
     let mut seg_start = 0;
-    let mut substitution = SubstitutionDepth::default();
+    // A backquote runs a command in service of the outer one, as `$( )` does.
+    let mut substitution = SubstitutionDepth::with_backquotes();
+    // The pipeline the walk is in: its tokens are read for its stages alone, up to the
+    // operator or `&` that ends it.
+    let mut pipeline: Option<PipelineWalk> = None;
 
     for (i, tok) in tokens.iter().enumerate() {
         // A blank ends nothing here: a newline that reaches this loop follows
@@ -1636,17 +1857,24 @@ fn rewrite_read(line: Slice<'_, '_>, read: &LineRead, kept: &[bool], rewriter: &
         }
         match readings[i] {
             // A `case` pattern runs nothing, so it belongs to no command: what
-            // precedes it ends, and the arm's commands start after its `)`.
+            // precedes it ends, and the arm's commands start after its `)`, in a
+            // `case` a pipeline's stage opens too.
             Reading::Pattern => {
-                segment(seg_start..i, subshell_end, rewriter);
-                seg_start = i + 1;
+                match &mut pipeline {
+                    None => {
+                        command(&mut cuts, seg_start..i, subshell_end);
+                        seg_start = i + 1;
+                    }
+                    Some(walk) if walk.in_group() => walk.cut_in_group(i, tokens),
+                    Some(_) => {}
+                }
                 continue;
             }
+            Reading::Commands => {}
             // A `[[ ]]` expression is part of the command `[[` starts, and
             // word text part of the command its word belongs to: nothing
             // inside either ends that command.
-            Reading::Expression | Reading::WordText => continue,
-            Reading::Commands => {}
+            _ => continue,
         }
         // `$( )`, `<( )` and `>( )` all run a command in service of the outer
         // one — as text it is built from, or as a file it reads. Filtering that
@@ -1656,6 +1884,41 @@ fn rewrite_read(line: Slice<'_, '_>, read: &LineRead, kept: &[bool], rewriter: &
         if substitution.absorbs(line.text, tok) || substitution.is_inside() {
             continue;
         }
+        if let Some(walk) = &mut pipeline {
+            // An operator or a background `&` ends a list of commands.
+            let ends_list = tok.kind == TokenKind::Operator
+                || (tok.kind == TokenKind::Shellism && tok.value == "&");
+            match tok.kind {
+                TokenKind::Pipe(kind) => {
+                    walk.pipe(i, kind);
+                    continue;
+                }
+                TokenKind::Redirect => {
+                    walk.redirects_to_a_file |= redirect_has_file_target(tokens, i);
+                    continue;
+                }
+                // A group a stage opens holds commands that all read the pipe: they are
+                // cut as any list of commands is, and the pipeline goes on past the group.
+                TokenKind::Shellism if tok.value == "(" => {
+                    walk.open_subshell(i);
+                    continue;
+                }
+                _ if walk.open_compound(i, &read.compounds) => continue,
+                _ if walk.close_group(i, tok) => continue,
+                _ if ends_list && walk.in_group() => {
+                    walk.cut_in_group(i, tokens);
+                    continue;
+                }
+                // These end the pipeline, and are read as any other boundary, as is the
+                // `)` of a subshell the pipeline stands in.
+                _ if ends_list || (tok.kind == TokenKind::Shellism && tok.value == ")") => {}
+                _ => continue,
+            }
+        }
+        if let Some(walk) = pipeline.take() {
+            cuts.push(Cut::Pipeline(walk.finish(line, i)));
+            seg_start = i;
+        }
         // `ls() { …; }` names a function, so the word before the pair runs
         // nothing: it stays as written, and the body is read as usual.
         if let Some(closer) = function_definition_closer(tokens, i) {
@@ -1664,22 +1927,16 @@ fn rewrite_read(line: Slice<'_, '_>, read: &LineRead, kept: &[bool], rewriter: &
         }
         let boundary = match tok.kind {
             TokenKind::Operator => true,
-            TokenKind::Pipe(_) => {
-                let analysis = analyze_pipeline(&line, readings, seg_start, i);
-                rewrite_pipeline(&line, seg_start, i, analysis, kept, rewriter);
-                match analysis.next_clause {
-                    Some(next_clause) => {
-                        seg_start = next_clause;
-                        continue;
-                    }
-                    None => return,
-                }
+            TokenKind::Pipe(kind) => {
+                let first = Part::new(seg_start..i, subshell_end == Some(seg_start));
+                pipeline = Some(PipelineWalk::begin(first, i, kind));
+                continue;
             }
             TokenKind::Shellism => matches!(tok.value, "&" | "(" | ")"),
             _ => false,
         };
         if boundary {
-            segment(seg_start..i, subshell_end, rewriter);
+            command(&mut cuts, seg_start..i, subshell_end);
             seg_start = i + 1;
             if tok.value == ")" {
                 subshell_end = Some(seg_start);
@@ -1687,7 +1944,27 @@ fn rewrite_read(line: Slice<'_, '_>, read: &LineRead, kept: &[bool], rewriter: &
         }
     }
 
-    segment(seg_start..tokens.len(), subshell_end, rewriter);
+    match pipeline {
+        Some(walk) => cuts.push(Cut::Pipeline(walk.finish(line, tokens.len()))),
+        None => command(&mut cuts, seg_start..tokens.len(), subshell_end),
+    }
+    cuts
+}
+
+/// [`rewrite_compound`] for a line already read, with the tokens where a
+/// command is left as written.
+fn rewrite_read(line: Slice<'_, '_>, read: &LineRead, kept: &[bool], rewriter: &mut Rewriter<'_>) {
+    if read.left_whole(line.tokens) {
+        return;
+    }
+    for cut in cut_line(&line, read) {
+        match cut {
+            Cut::Command(part) => {
+                rewriter.segment(&line, part.range, RewriteContext::Normal, kept);
+            }
+            Cut::Pipeline(analysis) => rewrite_pipeline(&line, &analysis, kept, rewriter),
+        }
+    }
 }
 
 fn rewrite_line_range(cmd: &str) -> Option<String> {
@@ -3338,8 +3615,15 @@ mod tests {
     use super::super::report::RtkStatus;
     use super::*;
     use crate::core::cmdline::family::Form;
-    use crate::core::cmdline::lexer::{read_grammar, shell_split};
+    use crate::core::cmdline::lexer::shell_split;
     use crate::core::test_isolation;
+
+    /// [`stages_the_rewriter_reaches`] for `cmd` read as the report reads a call.
+    fn reaches(cmd: &str) -> Vec<bool> {
+        let line = JoinedLine::of(cmd);
+        let parts = split_command_chain_parts(&line);
+        stages_the_rewriter_reaches(&line, &parts, &[], &[])
+    }
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
@@ -3607,10 +3891,7 @@ mod tests {
                 split_for_permissions(bracketed),
                 vec!["case $x in (ls", "echo 1", "esac"]
             );
-            assert_eq!(
-                split_command_chain(bracketed),
-                vec!["case $x in", "echo 1", "esac"]
-            );
+            assert_eq!(split_command_chain(bracketed), vec!["case $x in", "echo 1"]);
         }
 
         /// Every stage of a pipeline is a command that ran, and all three see
@@ -3678,7 +3959,7 @@ mod tests {
                 (
                     "case $x in a) echo esac;; ls) ls;; esac",
                     &["case $x in a", "echo esac", "ls", "ls", "esac"],
-                    &["case $x in", "echo esac", "ls", "esac"],
+                    &["case $x in", "echo esac", "ls"],
                     "case $x in a) echo esac;; ls) rtk ls;; esac",
                 ),
             ] {
@@ -3699,7 +3980,7 @@ mod tests {
         fn no_supported_piece_inside_expressions_and_patterns() {
             use super::super::{Classification, classify_command};
 
-            fn supported(cmd: &str) -> Vec<&str> {
+            fn supported(cmd: &str) -> Vec<String> {
                 split_command_chain(cmd)
                     .into_iter()
                     .filter(|part| {
@@ -3826,14 +4107,356 @@ mod tests {
                 Some("rtk ls {a,b}.txt".into()),
                 "brace expansion is part of the command, not a boundary"
             );
+            // The `}` is the group's own syntax, no command of it.
             let cmd = "{ git status; cargo build; }";
             assert_eq!(
                 split_command_chain(cmd),
-                vec!["{ git status", "cargo build", "}"]
+                vec!["{ git status", "cargo build"]
             );
             assert_eq!(
                 rewrite_command_no_prefixes(cmd, &[]),
                 Some("{ git status; rtk cargo build; }".into())
+            );
+        }
+    }
+
+    /// Which parts of a line the report counts as commands, and which of them read a pipe.
+    mod chain_parts {
+        use super::*;
+
+        /// Each part's text, and whether it reads the output of a pipe.
+        fn parts_of(cmd: &str) -> Vec<(String, bool)> {
+            split_command_chain_parts(&JoinedLine::of(cmd))
+                .into_iter()
+                .map(|part| (part.text.to_string(), part.consumes_pipe))
+                .collect()
+        }
+
+        #[test]
+        fn a_groups_own_syntax_is_no_command() {
+            // A closing word and the redirects after it belong to the group, whose
+            // commands are counted inside it.
+            for (cmd, expected) in [
+                (
+                    "{ cargo test; } > test.log 2>&1; tail -20 test.log",
+                    &["{ cargo test", "tail -20 test.log"][..],
+                ),
+                (
+                    "while read l; do cargo test; done > out; git log",
+                    &["while read l", "do cargo test", "git log"],
+                ),
+                ("{ { a; } 2>&1; } > f", &["{ { a"]),
+                ("if x; then y; fi 2>&1; z", &["if x", "then y", "z"]),
+                ("case $x in a) b;; esac < f", &["case $x in", "b"]),
+                ("{ a; } > $(mktemp -p /tmp) 2>&1", &["{ a"]),
+                ("for f in a; do b; done < list.txt", &["for f in a", "do b"]),
+                // A redirect before the command is part of it, and one alone is a
+                // command bash runs, behind a reserved word too.
+                ("{ > out cargo test; }", &["{ > out cargo test"]),
+                (
+                    "while x; do 2>/dev/null; done",
+                    &["while x", "do 2>/dev/null"],
+                ),
+                ("> out.log", &["> out.log"]),
+            ] {
+                assert_eq!(split_command_chain(cmd), expected, "{cmd:?}");
+            }
+        }
+
+        /// A stage after a pipe reads it, also when what stands in front of the pipe is no
+        /// command of its own.
+        #[test]
+        fn a_stage_after_a_pipe_reads_it() {
+            let part = |text: &str, consumes: bool| (text.to_string(), consumes);
+            assert_eq!(
+                parts_of("a | b | c"),
+                [part("a", false), part("b", true), part("c", true)]
+            );
+            assert_eq!(
+                parts_of("{ a; } 2>&1 | b"),
+                [part("{ a", false), part("b", true)]
+            );
+            assert_eq!(parts_of("(a) | b"), [part("a", false), part("b", true)]);
+            assert_eq!(
+                parts_of("for x in y; do a; done | b; c"),
+                [
+                    part("for x in y", false),
+                    part("do a", false),
+                    part("b", true),
+                    part("c", false)
+                ]
+            );
+        }
+
+        #[test]
+        fn what_follows_a_subshell_is_no_command() {
+            assert_eq!(
+                split_command_chain("(git status) 2>&1; git log"),
+                ["git status", "git log"]
+            );
+            assert_eq!(
+                split_command_chain("(cd x && ls) > out; git status"),
+                ["cd x", "ls", "git status"]
+            );
+            assert_eq!(
+                split_command_chain("(a) > out | b && (c) 2>&1"),
+                ["a", "b", "c"]
+            );
+        }
+
+        /// A group a stage after a pipe opens holds commands that all read the pipe, and
+        /// the pipeline goes on past it. The `)` of a subshell a pipeline stands in ends it.
+        #[test]
+        fn a_group_after_a_pipe_holds_stages() {
+            let part = |text: &str, consumes: bool| (text.to_string(), consumes);
+            for (cmd, expected) in [
+                (
+                    "git log | (head -5; tail -5)",
+                    vec![
+                        part("git log", false),
+                        part("head -5", true),
+                        part("tail -5", true),
+                    ],
+                ),
+                (
+                    "cargo build 2>&1 | (grep error || true)",
+                    vec![
+                        part("cargo build 2>&1", false),
+                        part("grep error", true),
+                        part("true", true),
+                    ],
+                ),
+                (
+                    "cat file | (cd dir && git apply)",
+                    vec![
+                        part("cat file", false),
+                        part("cd dir", true),
+                        part("git apply", true),
+                    ],
+                ),
+                (
+                    "git status | head -5 | (cat)",
+                    vec![
+                        part("git status", false),
+                        part("head -5", true),
+                        part("cat", true),
+                    ],
+                ),
+                (
+                    "git log | { head -5; tail -5; }",
+                    vec![
+                        part("git log", false),
+                        part("{ head -5", true),
+                        part("tail -5", true),
+                    ],
+                ),
+                (
+                    "a | (b; c) 2>&1 | d && e",
+                    vec![
+                        part("a", false),
+                        part("b", true),
+                        part("c", true),
+                        part("d", true),
+                        part("e", false),
+                    ],
+                ),
+                (
+                    "a | { b; } | c; d",
+                    vec![
+                        part("a", false),
+                        part("{ b", true),
+                        part("c", true),
+                        part("d", false),
+                    ],
+                ),
+                (
+                    "git log | while read l; do echo; tail -1; done; d",
+                    vec![
+                        part("git log", false),
+                        part("while read l", true),
+                        part("do echo", true),
+                        part("tail -1", true),
+                        part("d", false),
+                    ],
+                ),
+                (
+                    "ls | case x in a) cat;; b) tail -1;; esac",
+                    vec![
+                        part("ls", false),
+                        part("case x in", true),
+                        part("cat", true),
+                        part("tail -1", true),
+                    ],
+                ),
+                (
+                    "git log | if true; then tail -1; fi",
+                    vec![
+                        part("git log", false),
+                        part("if true", true),
+                        part("then tail -1", true),
+                    ],
+                ),
+                (
+                    "git log | for f in a; do tail -1; done | wc -l",
+                    vec![
+                        part("git log", false),
+                        part("for f in a", true),
+                        part("do tail -1", true),
+                        part("wc -l", true),
+                    ],
+                ),
+                (
+                    "a | (b & c); d",
+                    vec![
+                        part("a", false),
+                        part("b", true),
+                        part("c", true),
+                        part("d", false),
+                    ],
+                ),
+                (
+                    "a | (b | c) & d",
+                    vec![
+                        part("a", false),
+                        part("b", true),
+                        part("c", true),
+                        part("d", false),
+                    ],
+                ),
+                (
+                    "(git log | head)",
+                    vec![part("git log", false), part("head", true)],
+                ),
+                (
+                    "git log | head; (git diff | tail) && x",
+                    vec![
+                        part("git log", false),
+                        part("head", true),
+                        part("git diff", false),
+                        part("tail", true),
+                        part("x", false),
+                    ],
+                ),
+                // A `{` that is an argument opens nothing.
+                (
+                    "a | grep { ; b",
+                    vec![part("a", false), part("grep {", true), part("b", false)],
+                ),
+            ] {
+                assert_eq!(parts_of(cmd), expected, "{cmd:?}");
+            }
+        }
+
+        #[test]
+        fn a_part_of_reserved_words_alone_is_no_command() {
+            assert_eq!(
+                split_command_chain("ls | while read c; do\n  echo a; rc=1\ndone; echo done"),
+                ["ls", "while read c", "echo a", "rc=1", "echo done"]
+            );
+            assert_eq!(
+                split_command_chain("if x; then y; else z; fi; w"),
+                ["if x", "then y", "else z", "w"]
+            );
+            assert_eq!(
+                split_command_chain("case $x in ls) echo 1;; esac"),
+                ["case $x in", "echo 1"]
+            );
+            // A word that is not reserved makes it a command, and a reserved word that
+            // is no more than another's argument is no reserved word.
+            assert_eq!(
+                split_command_chain("echo done; do x"),
+                ["echo done", "do x"]
+            );
+        }
+
+        /// A `case` pattern in a `case` a stage opens belongs to no command, as anywhere.
+        #[test]
+        fn a_case_pattern_in_a_pipeline_belongs_to_no_command() {
+            assert_eq!(
+                split_command_chain("ls | case x in a) cat;; esac"),
+                ["ls", "case x in", "cat"]
+            );
+            // Nor is it a stage of its own: the pipeline's last stage is still rewritten.
+            for (cmd, rewritten) in [
+                (
+                    "git log | case x in a) cat;; esac | grep foo",
+                    "git log | case x in a) cat;; esac | rtk grep foo",
+                ),
+                (
+                    "git log | case x in a|b) ;; *) cat;; esac | grep foo",
+                    "git log | case x in a|b) ;; *) cat;; esac | rtk grep foo",
+                ),
+            ] {
+                assert_eq!(
+                    rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                    Some(rewritten),
+                    "{cmd:?}"
+                );
+            }
+        }
+
+        /// The name of a function a call defines runs nothing; its body holds commands.
+        #[test]
+        fn a_functions_body_holds_its_commands() {
+            for (cmd, expected) in [
+                (
+                    "f() { cargo test; }; git log",
+                    &["{ cargo test", "git log"][..],
+                ),
+                (
+                    "cargo test\nf() { git status; }",
+                    &["cargo test", "{ git status"],
+                ),
+                (
+                    "f() (git status; git log); cargo test",
+                    &["git status", "git log", "cargo test"],
+                ),
+                ("f() { a; } > out; b", &["{ a", "b"]),
+                // `function` has no pair, and its body is read as the command it is.
+                (
+                    "function f { git status; }; git log",
+                    &["function f { git status", "git log"],
+                ),
+            ] {
+                assert_eq!(split_command_chain(cmd), expected, "{cmd:?}");
+            }
+        }
+
+        #[test]
+        fn a_backquote_holds_no_boundary() {
+            assert_eq!(
+                split_command_chain("git log | grep `cat f | head -1`"),
+                ["git log", "grep `cat f | head -1`"]
+            );
+            assert_eq!(
+                split_command_chain("echo `a && b | c`; git log"),
+                ["echo `a && b | c`", "git log"]
+            );
+            assert_eq!(
+                split_command_chain("a | b `c | d` | e"),
+                ["a", "b `c | d`", "e"]
+            );
+            // A backquote in double quotes is part of its word, and so is a pipe in it.
+            assert_eq!(
+                split_command_chain("git log | grep \"`cat f | head -1`\""),
+                ["git log", "grep \"`cat f | head -1`\""]
+            );
+            // What a backquote runs, its redirects included, is the command's inside.
+            assert_eq!(
+                split_command_chain("cargo test `cat f >/dev/null 2>&1; a`"),
+                ["cargo test `cat f >/dev/null 2>&1; a`"]
+            );
+        }
+
+        #[test]
+        fn a_substitution_left_open_holds_what_follows_it() {
+            assert_eq!(
+                split_command_chain("a | b && echo $(c | d"),
+                ["a", "b", "echo $(c | d"]
+            );
+            assert_eq!(
+                split_command_chain("a | b $(c | d) | e && f"),
+                ["a", "b $(c | d)", "e", "f"]
             );
         }
     }
@@ -4293,25 +4916,25 @@ mod tests {
     /// [`PipelineAnalysis`] with its token indices turned into byte offsets.
     struct PipelineOffsets {
         end_offset: usize,
-        next_clause_offset: Option<usize>,
         final_stage_start: Option<usize>,
         all_consumers_safe: bool,
     }
 
+    /// The first pipeline [`cut_line`] finds in `cmd`.
     fn analyze_test_pipeline(cmd: &str) -> PipelineOffsets {
         let line = CompoundLex::new(cmd);
         let whole = line.whole().expect("test command must hold a command");
-        let first_pipe = whole
-            .tokens
-            .iter()
-            .position(|token| matches!(token.kind, TokenKind::Pipe(_)))
-            .expect("test command must contain a pipe");
-        let readings = read_grammar(whole.text, whole.tokens);
-        let analysis = analyze_pipeline(&whole, &readings, 0, first_pipe);
+        let read = LineRead::new(&whole);
+        let analysis = cut_line(&whole, &read)
+            .into_iter()
+            .find_map(|cut| match cut {
+                Cut::Pipeline(analysis) => Some(analysis),
+                Cut::Command(_) => None,
+            })
+            .expect("test command must contain a pipeline");
         let offset = |i: usize| whole.tokens.get(i).map_or(cmd.len(), |t| t.offset);
         PipelineOffsets {
             end_offset: offset(analysis.end),
-            next_clause_offset: analysis.next_clause.map(offset),
             final_stage_start: analysis.final_stage_start.map(offset),
             all_consumers_safe: analysis.all_consumers_safe,
         }
@@ -4323,7 +4946,6 @@ mod tests {
         let analysis = analyze_test_pipeline(cmd);
 
         assert_eq!(analysis.end_offset, cmd.len());
-        assert_eq!(analysis.next_clause_offset, None);
         assert_eq!(
             cmd[analysis.final_stage_start.unwrap()..analysis.end_offset].trim(),
             "wc -l"
@@ -4332,9 +4954,24 @@ mod tests {
 
     #[test]
     fn test_analyze_pipeline_rejects_stderr_pipe() {
-        let analysis = analyze_test_pipeline("cargo test |& grep FAILED");
+        for cmd in [
+            "cargo test |& grep FAILED",
+            "cargo test | grep FAILED |& wc -l",
+        ] {
+            let analysis = analyze_test_pipeline(cmd);
 
-        assert_eq!(analysis.final_stage_start, None);
+            assert_eq!(analysis.final_stage_start, None, "{cmd}");
+        }
+    }
+
+    /// A background `&` ends a pipeline as an operator does, and a pipe or a redirect
+    /// after it belongs to the next one.
+    #[test]
+    fn test_a_pipeline_ends_at_a_background_ampersand() {
+        assert_eq!(split_command_chain("a | b & c | d"), ["a", "b", "c", "d"]);
+        let cmd = "a | b & c | d";
+        let analysis = analyze_test_pipeline(cmd);
+        assert_eq!(analysis.end_offset, cmd.find('&').unwrap());
     }
 
     #[test]
@@ -4351,7 +4988,6 @@ mod tests {
         let next_clause_offset = cmd.find("&&").unwrap();
 
         assert_eq!(analysis.end_offset, next_clause_offset);
-        assert_eq!(analysis.next_clause_offset, Some(next_clause_offset));
         assert_eq!(
             cmd[analysis.final_stage_start.unwrap()..analysis.end_offset].trim(),
             "grep FAILED"
@@ -4588,6 +5224,106 @@ mod tests {
             }
             // Unsupported or Ignored is fine
         }
+    }
+
+    #[test]
+    fn test_chain_parts_read_the_lines_of_a_block_as_the_rewrite_does() {
+        for (cmd, parts) in [
+            ("a; b\nc | d", vec!["a", "b", "c", "d"]),
+            ("a\n\nb", vec!["a", "b"]),
+            ("a # c\nb", vec!["a # c", "b"]),
+            ("# only\na", vec!["a"]),
+            ("a &&\n\nb", vec!["a", "b"]),
+            ("a 'b\nc'", vec!["a 'b\nc'"]),
+            ("[[ a && b ]]\nfoo", vec!["[[ a && b ]]", "foo"]),
+            ("printf 'a\rb'\nfoo", vec!["printf 'a\rb'", "foo"]),
+            // The `\r` of a CRLF is the last byte of its line, in its last word or its
+            // comment: a line of it alone is a command bash runs.
+            ("a\r\n\r\nb\r\n", vec!["a\r", "\r", "b\r"]),
+            ("a\nb\r\n", vec!["a", "b\r"]),
+            ("a\r\nb", vec!["a\r", "b"]),
+            ("a # c\r\nb", vec!["a # c\r", "b"]),
+            // Comments alone hold no command.
+            ("# a\n# b", vec![]),
+            ("# a", vec![]),
+            ("a; # b", vec!["a"]),
+            ("echo `date`\nfoo", vec!["echo `date`", "foo"]),
+            // A newline the rewrite joins to the next line separates words, as the
+            // rewrite reads it.
+            ("echo \\|\nfoo", vec!["echo \\|\nfoo"]),
+            // Not line by line: what the rewrite refuses stays one text, as it leaves it.
+            // Known limit: the lines of such a block are not counted one by one, though
+            // bash runs them so; a block reader on the lexer's nesting would read them.
+            ("if a\nthen\nb\nfi", vec!["if a\nthen\nb\nfi"]),
+            ("a[1 # 2]=b\nfoo", vec!["a[1 # 2]=b\nfoo"]),
+            ("echo `a\nb`\nfoo", vec!["echo `a\nb`\nfoo"]),
+            (
+                "( cargo build )\ncargo test\ngit log",
+                vec!["( cargo build )\ncargo test\ngit log"],
+            ),
+            (
+                "(\ncd x && ls\n) > out\ncargo test",
+                vec!["(\ncd x && ls\n) > out\ncargo test"],
+            ),
+            (
+                "while x; do y; done\ngit log",
+                vec!["while x; do y; done\ngit log"],
+            ),
+            (
+                "{ cargo build; }\ncargo test",
+                vec!["{ cargo build; }\ncargo test"],
+            ),
+            (
+                "git log | (\nhead\n)\ngit status",
+                vec!["git log | (\nhead\n)\ngit status"],
+            ),
+        ] {
+            assert_eq!(split_command_chain(cmd), parts, "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn test_a_line_left_inside_a_backquote_refuses_its_block() {
+        assert_eq!(
+            rewrite_command_no_prefixes("echo `\ngit status\n`\ngit log", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git log `a\nb`\ngit status", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git status\necho `ls\n`", &[]),
+            None
+        );
+        // A backquote that closes on its line, or is escaped, in single quotes or in a
+        // comment, is no open substitution.
+        for cmd in [
+            "echo `date`\ngit status",
+            "echo \\`\ngit status",
+            "echo '`'\ngit status",
+            "ls # it`s\ngit status",
+        ] {
+            assert!(
+                rewrite_command_no_prefixes(cmd, &[])
+                    .is_some_and(|out| out.ends_with("rtk git status")),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_block_the_rewrite_splits_lines_up_with_its_rewrite() {
+        // A CRLF block too: a `\r` in a line's last word keeps its command from every
+        // rule, and one in its comment does not.
+        assert_eq!(reaches("ls -la\r\nfoo bar\r\n"), [true, false]);
+        assert_eq!(reaches("git status\r\ngit log"), [false, true]);
+        assert_eq!(reaches("git status # x\r\ngit log"), [true, true]);
+        assert_eq!(reaches("git status\nfoo bar\r\n"), [true, false]);
+        assert_eq!(
+            reaches("git status\nfoo bar\n# c\ngit log"),
+            [true, false, true]
+        );
     }
 
     #[test]
@@ -4853,6 +5589,19 @@ mod tests {
             vec!["a", "b", "c"],
             "a pipeline followed by another clause"
         );
+        // A pipe or an operator inside a substitution belongs to the command it runs.
+        assert_eq!(
+            split_command_chain("a | b $(c | d) | e"),
+            vec!["a", "b $(c | d)", "e"]
+        );
+        assert_eq!(
+            split_command_chain("a | b $(c && d); e"),
+            vec!["a", "b $(c && d)", "e"]
+        );
+        assert_eq!(
+            split_command_chain("a | b <(c | d) && e"),
+            vec!["a", "b <(c | d)", "e"]
+        );
         // A heredoc or arithmetic expansion is still handed over whole.
         assert_eq!(
             split_command_chain("cat <<EOF | wc -l"),
@@ -4887,7 +5636,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                stages_the_rewriter_reaches(cmd, &[], &[]),
+                reaches(cmd),
                 expected,
                 "{cmd:?} rewrites to {:?}",
                 rewrite_command_no_prefixes(cmd, &[])
@@ -4895,23 +5644,24 @@ mod tests {
         }
     }
 
-    /// A command that feeds a pipe writes for another command to consume, and
-    /// the report treats that differently from one whose output came back — so
-    /// the flag has to follow the `|`, not the position in the chain.
+    /// A command that reads a pipe consumes what another command wrote, and the
+    /// report treats that differently from one that stands on its own — so the
+    /// flag has to follow the `|`, not the position in the chain.
     #[test]
-    fn test_only_a_command_before_a_pipe_feeds_one() {
+    fn test_only_a_command_after_a_pipe_consumes_one() {
         for (cmd, expected) in [
-            ("a | b | c", vec![true, true, false]),
-            ("a && b | c ; d", vec![false, true, false, false]),
+            ("a | b | c", vec![false, true, true]),
+            ("a && b | c ; d", vec![false, false, true, false]),
             ("a || b", vec![false, false]),
             ("a", vec![false]),
             ("cat <<EOF | wc -l", vec![false]),
+            ("a |\nb\nc", vec![false, true, false]),
         ] {
-            let feeds: Vec<bool> = split_command_chain_parts(cmd)
+            let consumes: Vec<bool> = split_command_chain_parts(&JoinedLine::of(cmd))
                 .iter()
-                .map(|p| p.feeds_pipe)
+                .map(|p| p.consumes_pipe)
                 .collect();
-            assert_eq!(feeds, expected, "wrong pipe-feeding for {cmd:?}");
+            assert_eq!(consumes, expected, "wrong pipe-reading for {cmd:?}");
         }
     }
 
@@ -4927,7 +5677,7 @@ mod tests {
             "git status",
         ] {
             assert_eq!(
-                stages_the_rewriter_reaches(cmd, &[], &[]).len(),
+                reaches(cmd).len(),
                 split_command_chain(cmd).len(),
                 "flag count does not match part count for {cmd:?}"
             );
@@ -4985,7 +5735,7 @@ mod tests {
     #[test]
     fn test_a_bypass_does_not_stop_a_sibling_clause() {
         assert_eq!(
-            stages_the_rewriter_reaches("RTK_DISABLED=1 cargo test && git status", &[], &[]),
+            reaches("RTK_DISABLED=1 cargo test && git status"),
             vec![false, true]
         );
     }
@@ -5006,6 +5756,9 @@ mod tests {
     #[test]
     fn test_split_heredoc_no_split() {
         let cmd = "cat <<'EOF'\nhello && world\nEOF";
+        assert_eq!(split_command_chain(cmd), vec![cmd]);
+        // With an fd number in front, its body is no command either.
+        let cmd = "cat 0<<EOF\ngit push --force\ngit log\nEOF";
         assert_eq!(split_command_chain(cmd), vec![cmd]);
     }
 
