@@ -240,6 +240,15 @@ fn match_go_tool(args: &[OsString]) -> Option<(GoTool, &[OsString])> {
     None
 }
 
+// helper to remove a leading "run" from golangci-lint args, if present, to avoid duplicating the subcommand.
+fn strip_leading_golangci_run(args: &[OsString]) -> &[OsString] {
+    if args.first().is_some_and(|arg| arg == "run") {
+        &args[1..]
+    } else {
+        args
+    }
+}
+
 /// Run `go tool golangci-lint` and filter its output via the golangci JSON filter.
 /// Reusing parts of golangci_cmd.
 fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
@@ -251,6 +260,9 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
     cmd.arg("tool").arg("golangci-lint");
 
     let has_format = has_golangci_format_flag(args);
+
+    // Remove an existing leading "run" to avoid duplicating the subcommand.
+    let args = strip_leading_golangci_run(args);
 
     if !has_format {
         if version >= 2 {
@@ -1312,6 +1324,40 @@ utils.go:15:5: unreachable code"#;
         let (tool, rest) = match_go_tool(&args).expect("should match");
         assert_eq!(tool, GoTool::GolangciLint);
         assert_eq!(rest.len(), 2); // ["run", "./..."]
+    }
+
+    #[test]
+    fn test_strip_leading_golangci_run() {
+        assert_eq!(
+            strip_leading_golangci_run(&os(&["run", "./..."])),
+            os(&["./..."])
+        );
+    }
+
+    #[test]
+    fn test_strip_leading_golangci_run_without_run() {
+        assert_eq!(strip_leading_golangci_run(&os(&["./..."])), os(&["./..."]));
+    }
+
+    #[test]
+    fn test_strip_leading_golangci_run_preserves_remaining_args() {
+        assert_eq!(
+            strip_leading_golangci_run(&os(&["run", "--verbose", "./..."])),
+            os(&["--verbose", "./..."])
+        );
+    }
+
+    #[test]
+    fn test_strip_leading_golangci_run_only_removes_leading_run() {
+        assert_eq!(
+            strip_leading_golangci_run(&os(&["./...", "run"])),
+            os(&["./...", "run"])
+        );
+    }
+
+    #[test]
+    fn test_strip_leading_golangci_run_empty_args() {
+        assert!(strip_leading_golangci_run(&os(&[])).is_empty());
     }
 
     #[test]
