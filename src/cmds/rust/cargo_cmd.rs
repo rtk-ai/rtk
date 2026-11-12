@@ -1,5 +1,6 @@
 //! Filters cargo output — build errors, test results, clippy warnings.
 
+use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
 use crate::core::args_utils;
 use crate::core::runner;
 use crate::core::shell::display_args;
@@ -352,71 +353,138 @@ fn run_cargo_streamed(
     )
 }
 
-fn has_json_message_format(args: &[String]) -> bool {
-    let mut json = false;
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        if let Some(val) = arg.strip_prefix("--message-format=") {
-            json = val.contains("json");
-        } else if arg == "--message-format"
-            && let Some(val) = iter.next()
-        {
-            json = val.contains("json");
+/// Runs `cargo <subcommand> <args>` unfiltered, as `rtk cargo` does for a subcommand it has
+/// no filter for. `args` already has its `--` restored.
+fn run_cargo_passthrough(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
+    let os_args: Vec<OsString> = std::iter::once(subcommand)
+        .chain(args.iter().map(String::as_str))
+        .map(OsString::from)
+        .collect();
+    run_passthrough(&os_args, verbose)
+}
+
+/// The diagnostic format a `cargo build`, `check`, `clippy` or `test` run prints. `Short` and
+/// `Rejected` pass through unfiltered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageFormat {
+    Human,
+    /// One line per diagnostic: the user already asked cargo for terse output.
+    Short,
+    /// `json`, alone or refined by the `json-*` values.
+    Json,
+    /// Values cargo refuses before building anything, with an error message of its own.
+    Rejected,
+}
+
+/// The `--message-format` cargo applies for `args`, which must have their `--` restored.
+///
+/// Cargo reads every occurrence before `--`, splits each value on `,` and ignores ASCII case.
+/// `human`, `short` and `json` each set the format and must come first: two of them, or one
+/// twice, is an error. `json-diagnostic-short`, `json-diagnostic-rendered-ansi` and
+/// `json-render-diagnostics` refine a JSON format, setting one when none is set yet.
+fn message_format(args: &[String]) -> MessageFormat {
+    // Only this flag's value is read. Cargo never takes an argument starting with `-` as
+    // another flag's separate value, so no other flag can swallow `--message-format`, and
+    // `Dialect::Posix` makes everything after `--` a positional.
+    let is_message_format =
+        |kind: TokenKind, name: &str| kind == TokenKind::Long && name == "message-format";
+    let takes_value =
+        |kind: TokenKind, name: &str| is_message_format(kind, name).then(ValueSpec::value);
+    let tokens = arg_tokenizer::tokenize_grammar(args, &takes_value, Dialect::Posix);
+    let mut format = None;
+    for token in tokens.iter().filter(|t| is_message_format(t.kind, t.text)) {
+        let Some(value) = token.value(&tokens) else {
+            return MessageFormat::Rejected;
+        };
+        for item in value.split(',') {
+            format = match (item.to_ascii_lowercase().as_str(), format) {
+                ("human", None) => Some(MessageFormat::Human),
+                ("short", None) => Some(MessageFormat::Short),
+                ("json", None) => Some(MessageFormat::Json),
+                (
+                    "json-diagnostic-short"
+                    | "json-diagnostic-rendered-ansi"
+                    | "json-render-diagnostics",
+                    None | Some(MessageFormat::Json),
+                ) => Some(MessageFormat::Json),
+                _ => return MessageFormat::Rejected,
+            };
         }
     }
-    json
+    format.unwrap_or(MessageFormat::Human)
 }
 
 fn run_build(args: &[String], verbose: u8) -> Result<i32> {
-    if has_json_message_format(args) {
-        return run_cargo_filtered_with_exit("build", args, verbose, |o, exit| {
+    let restored = args_utils::restore_double_dash(args);
+    match message_format(&restored) {
+        MessageFormat::Json => run_cargo_filtered_with_exit("build", args, verbose, |o, exit| {
             filter_cargo_build_labeled(o, "build", exit)
-        });
-    }
-    run_cargo_streamed(
-        "build",
-        args,
-        verbose,
-        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
+        }),
+        MessageFormat::Short | MessageFormat::Rejected => {
+            run_cargo_passthrough("build", &restored, verbose)
+        }
+        MessageFormat::Human => run_cargo_streamed(
             "build",
-        ))),
-    )
+            args,
+            verbose,
+            Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
+                "build",
+            ))),
+        ),
+    }
 }
 
 fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     // No json branch here on purpose: --message-format=json only reformats the
     // build phase, the test harness output stays human-readable. CargoTestHandler
     // reads both — it aggregates the `test result:` lines and, on a compile error,
-    // parses the json diagnostics in format_summary.
-    run_cargo_streamed(
-        "test",
-        args,
-        verbose,
-        Box::new(BlockStreamFilter::new(CargoTestHandler::new())),
-    )
+    // parses the json diagnostics in format_summary. It cannot read short
+    // diagnostics, so a short-format run passes through.
+    let restored = args_utils::restore_double_dash(args);
+    match message_format(&restored) {
+        MessageFormat::Short | MessageFormat::Rejected => {
+            run_cargo_passthrough("test", &restored, verbose)
+        }
+        MessageFormat::Human | MessageFormat::Json => run_cargo_streamed(
+            "test",
+            args,
+            verbose,
+            Box::new(BlockStreamFilter::new(CargoTestHandler::new())),
+        ),
+    }
 }
 
 fn run_clippy(args: &[String], verbose: u8) -> Result<i32> {
-    if has_json_message_format(args) {
-        return run_cargo_filtered_with_exit("clippy", args, verbose, filter_cargo_clippy_json);
+    let restored = args_utils::restore_double_dash(args);
+    match message_format(&restored) {
+        MessageFormat::Json => {
+            run_cargo_filtered_with_exit("clippy", args, verbose, filter_cargo_clippy_json)
+        }
+        MessageFormat::Short | MessageFormat::Rejected => {
+            run_cargo_passthrough("clippy", &restored, verbose)
+        }
+        MessageFormat::Human => run_cargo_filtered("clippy", args, verbose, filter_cargo_clippy),
     }
-    run_cargo_filtered("clippy", args, verbose, filter_cargo_clippy)
 }
 
 fn run_check(args: &[String], verbose: u8) -> Result<i32> {
-    if has_json_message_format(args) {
-        return run_cargo_filtered_with_exit("check", args, verbose, |o, exit| {
+    let restored = args_utils::restore_double_dash(args);
+    match message_format(&restored) {
+        MessageFormat::Json => run_cargo_filtered_with_exit("check", args, verbose, |o, exit| {
             filter_cargo_build_labeled(o, "check", exit)
-        });
-    }
-    run_cargo_streamed(
-        "check",
-        args,
-        verbose,
-        Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
+        }),
+        MessageFormat::Short | MessageFormat::Rejected => {
+            run_cargo_passthrough("check", &restored, verbose)
+        }
+        MessageFormat::Human => run_cargo_streamed(
             "check",
-        ))),
-    )
+            args,
+            verbose,
+            Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label(
+                "check",
+            ))),
+        ),
+    }
 }
 
 fn run_install(args: &[String], verbose: u8) -> Result<i32> {
@@ -3095,80 +3163,93 @@ error: aborting due to 1 previous error
         );
     }
 
-    #[test]
-    fn test_json_format_inline_eq() {
-        assert!(has_json_message_format(&["--message-format=json".into()]));
+    fn format_of(args: &[&str]) -> MessageFormat {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        message_format(&args)
     }
 
     #[test]
-    fn test_json_format_space_separated() {
-        assert!(has_json_message_format(&[
-            "--message-format".into(),
-            "json".into(),
-        ]));
+    fn test_message_format_json() {
+        for args in [
+            &["--message-format=json"][..],
+            &["--message-format", "json"],
+            &["--message-format=json-diagnostic-rendered-ansi"],
+            &["--message-format=json-render-diagnostics"],
+            &["--message-format", "json-diagnostic-rendered-ansi"],
+            &["--message-format=json-diagnostic-short"],
+            &["--release", "-p", "my-crate", "--message-format=json"],
+            &["--message-format=JSON"],
+            // Refinements after `json`, or on their own, in one value or several.
+            &["--message-format=json,json-diagnostic-short"],
+            &[
+                "--message-format=json",
+                "--message-format=json-render-diagnostics",
+            ],
+            &["--message-format=json-diagnostic-short,json-render-diagnostics"],
+            &["--message-format=json-diagnostic-short,json-diagnostic-short"],
+        ] {
+            assert_eq!(format_of(args), MessageFormat::Json, "{args:?}");
+        }
     }
 
     #[test]
-    fn test_json_format_rendered_ansi() {
-        assert!(has_json_message_format(&[
-            "--message-format=json-diagnostic-rendered-ansi".into()
-        ]));
+    fn test_message_format_short() {
+        for args in [
+            &["--message-format=short"][..],
+            &["--message-format", "short"],
+            &["--message-format=SHORT"],
+            &["--release", "--message-format=short", "-p", "my-crate"],
+            &["--message-format=short", "--", "-D", "warnings"],
+        ] {
+            assert_eq!(format_of(args), MessageFormat::Short, "{args:?}");
+        }
     }
 
     #[test]
-    fn test_json_format_render_diagnostics() {
-        assert!(has_json_message_format(&[
-            "--message-format=json-render-diagnostics".into()
-        ]));
+    fn test_message_format_human() {
+        for args in [
+            &[][..],
+            &["--release", "-p", "my-crate"],
+            &["--message-format=human"],
+            &["--message-format", "Human"],
+            // Past `--` the argument belongs to the test binary or to clippy-driver.
+            &["--", "--message-format=short"],
+            &["--", "--message-format=json"],
+        ] {
+            assert_eq!(format_of(args), MessageFormat::Human, "{args:?}");
+        }
     }
 
     #[test]
-    fn test_json_format_space_rendered() {
-        assert!(has_json_message_format(&[
-            "--message-format".into(),
-            "json-diagnostic-rendered-ansi".into(),
-        ]));
-    }
-
-    #[test]
-    fn test_non_json_format_not_detected() {
-        assert!(!has_json_message_format(&["--message-format=human".into()]));
-    }
-
-    #[test]
-    fn test_no_format_flag() {
-        assert!(!has_json_message_format(&[
-            "--release".into(),
-            "-p".into(),
-            "my-crate".into(),
-        ]));
-    }
-
-    #[test]
-    fn test_json_format_among_other_args() {
-        assert!(has_json_message_format(&[
-            "--release".into(),
-            "-p".into(),
-            "my-crate".into(),
-            "--message-format=json".into(),
-        ]));
-    }
-
-    #[test]
-    fn test_json_format_trailing_message_format_no_value() {
-        assert!(!has_json_message_format(&["--message-format".into()]));
-    }
-
-    #[test]
-    fn test_json_format_last_occurrence_wins() {
-        assert!(!has_json_message_format(&[
-            "--message-format=json".into(),
-            "--message-format=human".into(),
-        ]));
-        assert!(has_json_message_format(&[
-            "--message-format=human".into(),
-            "--message-format=json".into(),
-        ]));
+    fn test_message_format_rejected() {
+        for args in [
+            // Two formats, in either order, in one value or two: no occurrence wins.
+            &["--message-format=json", "--message-format=human"][..],
+            &["--message-format=human", "--message-format=json"],
+            &["--message-format=short", "--message-format=human"],
+            &["--message-format=human", "--message-format=short"],
+            &["--message-format=json", "--message-format=short"],
+            &["--message-format=short", "--message-format=json"],
+            &["--message-format=short,human"],
+            &["--message-format", "json,short"],
+            // The same format twice.
+            &["--message-format=short", "--message-format=short"],
+            &["--message-format=json,json"],
+            // `json` after a refinement already set a JSON format.
+            &["--message-format=json-diagnostic-short,json"],
+            // A refinement of a format that is not JSON.
+            &["--message-format=short,json-render-diagnostics"],
+            &["--message-format=json-render-diagnostics,human"],
+            // No value, an empty one, or one cargo does not know.
+            &["--message-format"],
+            &["--message-format", "--"],
+            &["--message-format="],
+            &["--message-format=short,"],
+            &["--message-format=short,ansi"],
+            &["--message-format=json, short"],
+        ] {
+            assert_eq!(format_of(args), MessageFormat::Rejected, "{args:?}");
+        }
     }
 
     #[test]
