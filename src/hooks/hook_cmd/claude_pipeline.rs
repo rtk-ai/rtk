@@ -219,7 +219,7 @@ fn swappable(
         return false;
     }
     match rewrite {
-        HookDecision::AllowRewrite(_) | HookDecision::AskRewrite(..) => true,
+        HookDecision::AllowRewrite(_) | HookDecision::AskRewrite(..) => !holds_compound_syntax(cmd),
         HookDecision::Deny => false,
         HookDecision::Defer => {
             matches!(
@@ -233,6 +233,41 @@ fn swappable(
                 && sh_can_run(cmd, program_exists)
         }
     }
+}
+
+/// Whether the line holds a subshell or a compound command.
+/// A swap runs a line in a child `sh`, which may read those otherwise or not at all,
+/// and the checks here read words, not that grammar: such a line takes the ordinary
+/// rewrite. `time`, `!` and braces do not count: the commands behind them read as usual.
+fn holds_compound_syntax(cmd: &str) -> bool {
+    let input = cmd.trim();
+    crate::discover::lexer::split_for_classify(input)
+        .iter()
+        .any(|segment| {
+            let first = segment.text.split_whitespace().next().unwrap_or_default();
+            matches!(
+                input[..segment.start].trim_end().bytes().last(),
+                Some(b'(' | b')')
+            ) || matches!(
+                first,
+                "[[" | "case"
+                    | "coproc"
+                    | "do"
+                    | "done"
+                    | "elif"
+                    | "else"
+                    | "esac"
+                    | "fi"
+                    | "for"
+                    | "function"
+                    | "if"
+                    | "in"
+                    | "select"
+                    | "then"
+                    | "until"
+                    | "while"
+            )
+        })
 }
 
 fn runs_rtk(cmd: &str) -> bool {
@@ -344,8 +379,56 @@ mod tests {
     }
 
     #[test]
-    fn a_cd_glued_to_its_subshell_stays_a_swap() {
-        assert!(!changes_directory("(cd sub && git log -3)"));
+    fn a_line_with_compound_syntax_is_not_swapped() {
+        for cmd in [
+            "(cd sub && git log -3)",
+            "(ls)",
+            "(ls)&cd sub",
+            "(ls) && mydeploy",
+            "ls; (cd sub)",
+            "time (ls)",
+            "if mydeploy; then ls; fi",
+            "if true;then ls;fi&cd sub",
+            "while mydeploy; do ls; done",
+            "for a in b; do git status&cd sub; done",
+            "case b in a)ls;;b)cd sub;;esac",
+            "select a in b; do ls; done",
+            "function f { ls; }",
+            "[[ \"$b\" =~ ^(a|b)$ ]] && git log -3",
+            "[[ -f f ]] && git status",
+            "(ls",
+            " (ls) && git status",
+            "time for a in b; do ls; done",
+            "! if a; then ls; fi",
+            "{ for a in b; do ls; done; }",
+            "git status; coproc ls",
+            "f() { ls; }",
+        ] {
+            assert!(holds_compound_syntax(cmd), "{cmd}");
+        }
+        for cmd in [
+            "git log -3",
+            "ls; mydeploy",
+            "time git log -3",
+            "! git status",
+            "{ git log -3; }",
+            "git log --format=\"(%h)\"",
+            "git log $(git rev-parse HEAD)",
+            "git log if",
+            "FOO=1 git status",
+            "MSG=\"a=(b)\" git commit -m x",
+            "PYTHONPATH=a+=b ls",
+            "./build+=x/run.sh && git log",
+            "make CFLAGS+=-O2",
+            "git commit -m \"fix\n\ncount+=1 overflow\"",
+            "RUSTFLAGS=\"-C a=b c+=d\" cargo build",
+        ] {
+            assert!(!holds_compound_syntax(cmd), "{cmd}");
+        }
+        for verdict in [PermissionVerdict::Allow, PermissionVerdict::Default] {
+            assert!(!decide("(ls) && git status", verdict, &[]));
+            assert!(decide("ls && git status", verdict, &[]));
+        }
     }
 
     #[test]
@@ -358,6 +441,10 @@ mod tests {
         for line in ["a & b", "(a) 2>&1", "a 'b;c'", "a \\; b", "x\ny"] {
             assert_eq!(split_on_operators(line), [line]);
         }
+        assert_eq!(
+            split_on_operators("a |& b ;; c ;& d ;;& e"),
+            ["a", "b", "c", "d", "e"]
+        );
         assert!(split_on_operators(" ; ").is_empty());
     }
 
