@@ -79,7 +79,7 @@ chrono = "0.4"
 tempfile = "3"
 sha2 = "0.11"
 base16ct = "1"
-ureq = "2"
+ureq = { version = "3", features = ["json"] }
 getrandom = "0.4"
 flate2 = "1.0"
 quick-xml = "0.42"
