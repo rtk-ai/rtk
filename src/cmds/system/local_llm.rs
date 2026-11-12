@@ -123,6 +123,8 @@ fn lang_display_name(lang: &Language) -> &'static str {
         Language::Java => "Java",
         Language::Ruby => "Ruby",
         Language::Shell => "Shell",
+        Language::CStyle => "Code",
+        Language::Css => "CSS",
         Language::Data => "Data",
         Language::Unknown => "Code",
     }
