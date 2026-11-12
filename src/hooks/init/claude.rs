@@ -1003,31 +1003,85 @@ pub fn hook_status() -> crate::hooks::hook_check::HookStatus {
     }
 }
 
-/// Check if the native binary command is registered in settings.json
+/// Check if the native binary command is registered in settings.json, or
+/// provided by an enabled Claude Code plugin.
 fn binary_hook_registered(claude_dir: &Path) -> bool {
-    let settings_path = claude_dir.join(SETTINGS_JSON);
-    let content = match fs::read_to_string(&settings_path) {
-        Ok(c) if !c.trim().is_empty() => c,
-        _ => return false,
+    let Some(root) = read_json(&claude_dir.join(SETTINGS_JSON)) else {
+        return false;
     };
-    let root: serde_json::Value = match from_json_str(&content) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    let pre_tool_use = match root
-        .get("hooks")
+    if pre_tool_use_commands(root.get("hooks")).any(crate::hooks::is_claude_hook_command) {
+        return true;
+    }
+    plugin_hook_registered(claude_dir, &root)
+}
+
+fn read_json(path: &Path) -> Option<serde_json::Value> {
+    let content = fs::read_to_string(path).ok()?;
+    if content.trim().is_empty() {
+        return None;
+    }
+    from_json_str(strip_leading_bom(&content)).ok()
+}
+
+/// Commands of every `PreToolUse` hook in a `{"PreToolUse": [...]}` object.
+fn pre_tool_use_commands(hooks: Option<&serde_json::Value>) -> impl Iterator<Item = &str> {
+    hooks
         .and_then(|h| h.get(PRE_TOOL_USE_KEY))
         .and_then(|p| p.as_array())
-    {
-        Some(arr) => arr,
-        None => return false,
-    };
-    pre_tool_use
-        .iter()
+        .into_iter()
+        .flatten()
         .filter_map(|entry| entry.get("hooks")?.as_array())
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
-        .any(crate::hooks::is_claude_hook_command)
+}
+
+/// True when a plugin enabled in `settings.json` ships a `PreToolUse` hook
+/// that runs `rtk hook claude` (in its `hooks/hooks.json`).
+fn plugin_hook_registered(claude_dir: &Path, settings: &serde_json::Value) -> bool {
+    let Some(enabled) = settings.get("enabledPlugins").and_then(|e| e.as_object()) else {
+        return false;
+    };
+    let Some(installed) = read_json(&claude_dir.join("plugins").join("installed_plugins.json"))
+    else {
+        return false;
+    };
+    let Some(plugins) = installed.get("plugins").and_then(|p| p.as_object()) else {
+        return false;
+    };
+    enabled
+        .iter()
+        .filter(|(_, on)| on.as_bool() == Some(true))
+        .filter_map(|(name, _)| plugins.get(name))
+        // v2 lists one install per scope; v1 stores a single object.
+        .flat_map(|entry| match entry {
+            serde_json::Value::Array(items) => items.iter().collect::<Vec<_>>(),
+            other => vec![other],
+        })
+        .filter_map(|install| install.get("installPath")?.as_str())
+        .any(|install_path| {
+            let Some(root) = read_json(&Path::new(install_path).join("hooks").join("hooks.json"))
+            else {
+                return false;
+            };
+            // Plugins wrap events in "hooks"; accept a bare event map too.
+            let hooks = root.get("hooks").filter(|h| h.is_object()).unwrap_or(&root);
+            pre_tool_use_commands(Some(hooks)).any(is_plugin_claude_hook_command)
+        })
+}
+
+/// Plugin hooks often run rtk through a wrapper script
+/// (`"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh" rtk hook claude`), so a command
+/// whose last three words are `rtk hook claude` counts as well.
+fn is_plugin_claude_hook_command(command: &str) -> bool {
+    if crate::hooks::is_claude_hook_command(command) {
+        return true;
+    }
+    let parts = crate::discover::lexer::shell_split(command);
+    matches!(
+        parts.as_slice(),
+        [.., binary, hook, target]
+            if crate::hooks::is_rtk_binary(binary) && hook == "hook" && target == "claude"
+    )
 }
 
 #[cfg(test)]
@@ -2171,6 +2225,131 @@ mod tests {
         .expect("write settings");
 
         assert!(binary_hook_registered(tmp.path()));
+    }
+
+    /// Writes a plugin install whose hooks/hooks.json runs `command`, and a
+    /// settings.json that enables it when `enabled` is true.
+    fn write_plugin_hook(claude_dir: &Path, command: &str, enabled: bool) {
+        let install = claude_dir.join("plugins/cache/mkt/rtk-plugin/1.0.0");
+        fs::create_dir_all(install.join("hooks")).expect("create plugin hooks dir");
+        fs::write(
+            install.join("hooks").join("hooks.json"),
+            serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{ "type": "command", "command": command }]
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .expect("write plugin hooks.json");
+        fs::write(
+            claude_dir.join("plugins").join("installed_plugins.json"),
+            serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "rtk-plugin@mkt": [{
+                        "scope": "user",
+                        "installPath": install.to_string_lossy(),
+                        "version": "1.0.0"
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .expect("write installed_plugins.json");
+        fs::write(
+            claude_dir.join(SETTINGS_JSON),
+            serde_json::json!({ "enabledPlugins": { "rtk-plugin@mkt": enabled } }).to_string(),
+        )
+        .expect("write settings");
+    }
+
+    #[test]
+    fn test_hook_status_enabled_plugin_hook_is_ok() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            write_plugin_hook(claude_dir, "rtk hook claude", true);
+            assert_eq!(
+                hook_status(),
+                crate::hooks::hook_check::HookStatus::Ok,
+                "an enabled plugin running `rtk hook claude` is an installed hook"
+            );
+        });
+    }
+
+    #[test]
+    fn test_hook_status_enabled_plugin_wrapped_hook_is_ok() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            write_plugin_hook(
+                claude_dir,
+                "\"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" rtk hook claude",
+                true,
+            );
+            assert_eq!(hook_status(), crate::hooks::hook_check::HookStatus::Ok);
+        });
+    }
+
+    #[test]
+    fn test_hook_status_disabled_plugin_hook_is_missing() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            write_plugin_hook(claude_dir, "rtk hook claude", false);
+            assert_eq!(
+                hook_status(),
+                crate::hooks::hook_check::HookStatus::Missing,
+                "a disabled plugin's hook does not run"
+            );
+        });
+    }
+
+    #[test]
+    fn test_hook_status_plugin_with_other_hook_is_missing() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            write_plugin_hook(claude_dir, "rtk hook cursor", true);
+            assert_eq!(hook_status(), crate::hooks::hook_check::HookStatus::Missing);
+        });
+    }
+
+    #[test]
+    fn test_plugin_hook_registered_reads_v1_install_entry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let install = tmp.path().join("plugin");
+        fs::create_dir_all(install.join("hooks")).expect("create hooks dir");
+        // Bare event map, without the "hooks" wrapper.
+        fs::write(
+            install.join("hooks").join("hooks.json"),
+            r#"{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]}"#,
+        )
+        .expect("write hooks.json");
+        fs::create_dir_all(tmp.path().join("plugins")).expect("create plugins dir");
+        fs::write(
+            tmp.path().join("plugins").join("installed_plugins.json"),
+            serde_json::json!({
+                "version": 1,
+                "plugins": { "p@m": { "installPath": install.to_string_lossy() } }
+            })
+            .to_string(),
+        )
+        .expect("write installed_plugins.json");
+        let settings = serde_json::json!({ "enabledPlugins": { "p@m": true } });
+
+        assert!(plugin_hook_registered(tmp.path(), &settings));
+    }
+
+    #[test]
+    fn test_plugin_claude_hook_command_matching() {
+        assert!(is_plugin_claude_hook_command("rtk hook claude"));
+        assert!(is_plugin_claude_hook_command(
+            "\"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" /usr/local/bin/rtk hook claude"
+        ));
+        assert!(!is_plugin_claude_hook_command("run.sh rtk hook cursor"));
+        assert!(!is_plugin_claude_hook_command("rtk hook claude --dry-run"));
+        assert!(!is_plugin_claude_hook_command("not-rtk hook claude"));
     }
 
     #[test]
