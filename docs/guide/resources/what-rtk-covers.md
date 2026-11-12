@@ -96,6 +96,12 @@ listing into `head`, `tail`, or `cat`.
 | `rubocop` | Offenses grouped by file |
 | `rake test` | Test task output, failures highlighted |
 
+## Elixir
+
+| Command | What changes |
+|---------|--------------|
+| `mix test` / `mix precommit` | Every failure kept; dependency compiles, progress and debug/info logs removed, dependency stack frames folded, a repeated error points at its first failure |
+
 ## .NET
 
 | Command | What changes |

@@ -603,6 +603,7 @@ const SUBCOMMAND_ROUTERS: &[&str] = &[
     "helm",
     "jest",
     "kubectl",
+    "mix",
     "mvn",
     "next",
     "ng",
