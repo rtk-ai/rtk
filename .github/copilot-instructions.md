@@ -4,7 +4,7 @@
 
 ## Using rtk in this session
 
-**Always prefix commands with `rtk` when running shell commands** — this reduces token consumption for every operation you perform.
+**Prefix external programs with `rtk` when running shell commands** (`rtk git status`, `rtk cargo test`) — this reduces token consumption. Leave shell builtins (`cd`, `export`, `source`, ...) and names that collide with an rtk subcommand (`test`, `log`, `trust`) unprefixed.
 
 ```bash
 # Instead of:              Use:
