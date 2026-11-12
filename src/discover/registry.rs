@@ -12,7 +12,7 @@ use super::lexer::{
     split_on_operators, tokenize, tokenize_with_newlines,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
-use super::shell_wrapper::parse_shell_wrapper;
+use super::shell_wrapper::{is_shell_wrapper_candidate, parse_shell_wrapper};
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
 
@@ -1743,6 +1743,12 @@ fn rewrite_shell_wrapper(
 #[cfg(feature = "engine")]
 pub(crate) fn chain_mentions_excluded(cmd: &str, excluded: &[String]) -> bool {
     let compiled = compile_exclude_patterns(excluded);
+    mentions_excluded(cmd, &compiled)
+}
+
+/// Whether any word of any segment of `cmd`, quotes and brackets ignored,
+/// starts a command matched by `excluded`.
+fn mentions_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
     split_on_operators(cmd, false).iter().any(|segment| {
         let segment = segment.trim();
         let words: String = segment
@@ -1752,14 +1758,14 @@ pub(crate) fn chain_mentions_excluded(cmd: &str, excluded: &[String]) -> bool {
                 other => other,
             })
             .collect();
-        is_excluded(segment, &compiled)
+        is_excluded(segment, excluded)
             || words
                 .char_indices()
                 .filter(|&(i, c)| {
                     !c.is_whitespace()
                         && (i == 0 || words[..i].ends_with(|p: char| p.is_whitespace() || p == '/'))
                 })
-                .any(|(i, _)| is_excluded(&words[i..], &compiled))
+                .any(|(i, _)| is_excluded(&words[i..], excluded))
     })
 }
 
@@ -1780,7 +1786,11 @@ fn shell_wrapper_script_opts_out(cmd: &str, excluded: &[ExcludePattern], depth: 
         return false;
     }
     let Some(wrapper) = parse_shell_wrapper(cmd) else {
-        return false;
+        // A shell in command-string mode that the strict parser does not read
+        // (`bash -lc '…'`): its script cannot be split, so an opt-out named
+        // anywhere in the line counts. Refs: #5062.
+        return is_shell_wrapper_candidate(cmd)
+            && (cmd.contains("RTK_DISABLED=") || mentions_excluded(cmd, excluded));
     };
     let Some(script) = wrapper.script(cmd) else {
         return false;
@@ -1798,6 +1808,34 @@ fn shell_wrapper_script_opts_out(cmd: &str, excluded: &[ExcludePattern], depth: 
             }
         }
     })
+}
+
+/// The tails of `rest`, the text after a routable wrapper, where the wrapped
+/// command may start: `rest` itself, the word after each leading option
+/// (`--frozen`, `--`), and one word further in case that option took a value
+/// (`--with x pytest`). Checking a tail too many only leaves the line as
+/// written, so the wrapper's value-taking options need not be known.
+/// Refs: #5062.
+fn routable_wrapper_command_candidates(rest: &str) -> Vec<&str> {
+    let mut candidates = vec![rest];
+    // 0: before any option, 1: right after an option, 2: after its possible value.
+    let mut state = 0;
+    let mut tail = rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    while let Some(word) = tail.split_ascii_whitespace().next() {
+        if word.starts_with('-') {
+            state = 1;
+        } else if state == 0 {
+            break;
+        } else {
+            candidates.push(tail);
+            if state == 2 {
+                break;
+            }
+            state = 2;
+        }
+        tail = tail[word.len()..].trim_start_matches(|c: char| c.is_ascii_whitespace());
+    }
+    candidates
 }
 
 /// Every position in `seg` where [`rewrite_segment_inner`] would try a quoted
@@ -1945,8 +1983,12 @@ fn rewrite_segment_inner(
             // The inner command may have been dropped because it is excluded.
             // Re-testing the wrapped form would route it through the wrapper's
             // own filter, defeating the exclusion.
-            if is_excluded(ENV_PREFIX.replace(rest, "").trim(), excluded)
-                || shell_wrapper_script_opts_out(rest, excluded, 0)
+            if routable_wrapper_command_candidates(rest)
+                .into_iter()
+                .any(|cmd| {
+                    is_excluded(ENV_PREFIX.replace(cmd, "").trim(), excluded)
+                        || shell_wrapper_script_opts_out(cmd, excluded, 0)
+                })
             {
                 return None;
             }
@@ -5037,6 +5079,48 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("uv run bash -c 'python script.py'", &excluded),
             Some("rtk uv run bash -c 'python script.py'".into())
+        );
+    }
+
+    #[test]
+    fn test_routable_wrapper_honours_opt_outs_behind_options_and_option_clusters() {
+        // #5062: an option after `uv run`, or a shell started with an option
+        // cluster such as `-lc`, must not hide an opt-out from the fall-through.
+        let excluded = vec!["pytest".to_string()];
+        for cmd in [
+            "uv run --frozen pytest",
+            "uv run -q pytest",
+            "uv run --with x pytest",
+            "uv run -- pytest",
+            "uv run --frozen bash -c 'pytest'",
+            "uv run --with x bash -c 'pytest'",
+            "uv run bash -lc 'pytest'",
+            "uv run --frozen sh -lc 'echo hi; pytest -q'",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &excluded), None, "{cmd}");
+        }
+        for cmd in [
+            "uv run --frozen bash -c 'RTK_DISABLED=1 git status'",
+            "uv run -q bash -c 'RTK_DISABLED=1 git status'",
+            "uv run --with x bash -c 'RTK_DISABLED=1 git status'",
+            "uv run -- bash -c 'RTK_DISABLED=1 git status'",
+            "uv run bash -lc 'RTK_DISABLED=1 git status'",
+            "uv run --frozen bash -lc 'RTK_DISABLED=1 git status'",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+        // Nothing opted out: the option forms still route through `rtk uv run`.
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run --frozen python script.py", &excluded),
+            Some("rtk uv run --frozen python script.py".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run --frozen bash -c 'git status'", &[]),
+            Some("rtk uv run --frozen bash -c 'git status'".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -lc 'python script.py'", &excluded),
+            Some("rtk uv run bash -lc 'python script.py'".into())
         );
     }
 
