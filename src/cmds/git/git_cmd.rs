@@ -766,9 +766,9 @@ fn run_show(
     // `-s`/`--no-patch`, whose whole point is that there is no body to print.
     let mut diff_cmd = show_cmd(global_args, args, &tokens, &["--pretty=format:"], false);
     let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git show (diff)")?;
-    let diff_text = diff_result.stdout.trim();
+    let diff_text = &diff_result.stdout;
 
-    if !diff_text.is_empty() {
+    if !diff_text.trim().is_empty() {
         if verbose > 0 {
             printed.push_str("\n\nChanges:");
         }
@@ -1365,7 +1365,8 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     let leading_context_cap = max_lines / 10;
     let mut was_truncated = false;
 
-    for line in diff.lines() {
+    // A trailing CR is file content; only LF separates lines in a git patch.
+    for line in diff.split_terminator('\n') {
         // Every diff section header (`--git`, `--cc`, `--combined`) opens a new
         // file and closes any open hunk, so the `---` / `+++` headers that
         // follow it are never read as hunk content.
