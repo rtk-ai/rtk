@@ -8,7 +8,7 @@ use crate::core::args_utils;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::quote_word;
 use crate::core::truncate::CAP_LIST;
-use crate::core::utils::{ok_confirmation, resolved_command, truncate};
+use crate::core::utils::{ok_confirmation, resolved_command, strip_ansi, truncate};
 use crate::git_cmd;
 use anyhow::Result;
 use regex::Regex;
@@ -24,6 +24,40 @@ static IMAGE_ONLY_LINE_RE: LazyLock<Regex> =
 static HORIZONTAL_RULE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^\s*(?:---+|\*\*\*+|___+)\s*$").unwrap());
 static MULTI_BLANK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+/// The prefix `gh run view --log` / `--log-failed` puts on every log line:
+/// `<job>\t<step>\t<timestamp> ` (the step is often `UNKNOWN STEP`; the first
+/// line of a job carries a BOM before the timestamp).
+static RUN_LOG_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^([^\t]*)\t([^\t]*)\t\x{feff}?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?")
+        .unwrap()
+});
+
+/// A workflow command in a job log: `##[group]Run cargo test`,
+/// `##[start-action display=Install rustup;id=...]`, `##[error]...`.
+static RUN_LOG_MARKER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^##\[([a-z-]+)([^\]]*)\](.*)$").unwrap());
+
+/// Groups a job log opens with that describe the runner machine, never the job's output.
+const RUN_LOG_RUNNER_GROUPS: &[&str] = &[
+    "Runner Image Provisioner",
+    "Operating System",
+    "Runner Image",
+    "GITHUB_TOKEN Permissions",
+];
+
+/// Lines the runner prints around the steps: its version, action downloads, cleanup.
+const RUN_LOG_RUNNER_LINES: &[&str] = &[
+    "Current runner version:",
+    "Secret source:",
+    "Prepare workflow directory",
+    "Prepare all required actions",
+    "Getting action download info",
+    "Download action repository",
+    "Download immutable action package",
+    "Complete job name:",
+    "Cleaning up orphan processes",
+    "Terminate orphan process:",
+];
 
 /// Filter markdown body to remove noise while preserving meaningful content.
 /// Removes HTML comments, badge lines, image-only lines, horizontal rules,
@@ -900,12 +934,20 @@ fn format_run_list(json: &Value) -> String {
 }
 
 /// Check if run view args should bypass filtering and pass through directly.
-/// Flags like --log-failed, --log, and --json produce output that the filter
-/// would incorrectly strip.
+/// `--json` produces output that the run summary filter would incorrectly strip.
 fn should_passthrough_run_view(extra_args: &[String]) -> bool {
-    extra_args
-        .iter()
-        .any(|a| a == "--log-failed" || a == "--log" || a == "--json")
+    extra_args.iter().any(|a| a == "--json")
+}
+
+/// `--log` or `--log-failed`: the job log, condensed by [`condense_run_log`].
+fn run_log_flag(extra_args: &[String]) -> Option<&'static str> {
+    if extra_args.iter().any(|a| a == "--log-failed") {
+        Some("--log-failed")
+    } else if extra_args.iter().any(|a| a == "--log") {
+        Some("--log")
+    } else {
+        None
+    }
 }
 
 fn view_run(args: &[String], _verbose: u8) -> Result<i32> {
@@ -930,6 +972,17 @@ fn view_run(args: &[String], _verbose: u8) -> Result<i32> {
         Some(id) => format!("run view {}", quote_word(id)),
         None => "run view".to_string(),
     };
+    if let Some(flag) = run_log_flag(&extra_args) {
+        return runner::run_filtered(
+            cmd,
+            "gh",
+            &format!("{} {}", label, flag),
+            condense_run_log,
+            RunOptions::stdout_only()
+                .early_exit_on_failure()
+                .no_trailing_newline(),
+        );
+    }
     let run_id_owned = run_id_opt.unwrap_or_default();
     runner::run_filtered(
         cmd,
@@ -967,6 +1020,88 @@ fn format_run_view(stdout: &str, run_id: &str) -> String {
         }
     }
     out
+}
+
+/// Condense a `gh run view --log` / `--log-failed` job log. Every line the steps
+/// printed is kept. Gone are the `<job>\t<step>\t<timestamp>` prefix repeated on
+/// each line (a header names the job when it changes), ANSI colour, blank lines,
+/// and the runner's own metadata. Group titles (`Run cargo test`, the step
+/// markers when the step is `UNKNOWN STEP`) and composite-action sub-steps
+/// become `> title`, `##[command]` lines `$ command`, and annotations such as
+/// `##[error]` and `##[warning]` become `error:` and `warning:`.
+fn condense_run_log(raw: &str) -> String {
+    let cleaned = strip_ansi(raw);
+    let mut out = String::with_capacity(cleaned.len() / 2);
+    let mut scope: Option<(String, String)> = None;
+    let mut in_runner_group = false;
+
+    for line in cleaned.lines() {
+        let text = match RUN_LOG_PREFIX_RE.captures(line) {
+            Some(caps) => {
+                let (job, step) = (&caps[1], &caps[2]);
+                if scope
+                    .as_ref()
+                    .is_none_or(|(j, s)| j.as_str() != job || s.as_str() != step)
+                {
+                    out.push_str("== ");
+                    out.push_str(job);
+                    if !step.is_empty() && step != "UNKNOWN STEP" {
+                        out.push_str(" / ");
+                        out.push_str(step);
+                    }
+                    out.push('\n');
+                    scope = Some((job.to_string(), step.to_string()));
+                    in_runner_group = false;
+                }
+                &line[caps.get(0).map_or(0, |m| m.end())..]
+            }
+            None => line,
+        };
+        let text = text.trim_end();
+
+        if let Some(caps) = RUN_LOG_MARKER_RE.captures(text) {
+            let (kind, attrs, rest) = (&caps[1], &caps[2], &caps[3]);
+            match kind {
+                "group" => {
+                    in_runner_group = RUN_LOG_RUNNER_GROUPS.contains(&rest.trim());
+                    if !in_runner_group {
+                        out.push_str(&format!("> {}\n", rest));
+                    }
+                }
+                "endgroup" => in_runner_group = false,
+                // A composite action's sub-step: its name, and how it ended unless it succeeded.
+                "start-action" => out.push_str(&format!("> {}\n", marker_attr(attrs, "display"))),
+                "end-action" if marker_attr(attrs, "outcome") == "success" => {}
+                "end-action" => out.push_str(&format!(
+                    "action {}: {}\n",
+                    marker_attr(attrs, "outcome"),
+                    marker_attr(attrs, "id")
+                )),
+                "command" => out.push_str(&format!("$ {}\n", rest)),
+                _ if in_runner_group => {}
+                _ => out.push_str(&format!("{}: {}\n", kind, rest)),
+            }
+            continue;
+        }
+        if in_runner_group
+            || text.trim().is_empty()
+            || RUN_LOG_RUNNER_LINES.iter().any(|p| text.starts_with(p))
+        {
+            continue;
+        }
+        out.push_str(text);
+        out.push('\n');
+    }
+    out
+}
+
+/// The value of `key=` in a workflow command's attributes (` display=X;id=Y`), or "".
+fn marker_attr<'a>(attrs: &'a str, key: &str) -> &'a str {
+    attrs
+        .trim()
+        .split(';')
+        .find_map(|pair| pair.strip_prefix(key)?.strip_prefix('='))
+        .unwrap_or("")
 }
 
 fn run_repo(args: &[String], _verbose: u8) -> Result<i32> {
@@ -1345,13 +1480,105 @@ mod tests {
     }
 
     #[test]
-    fn test_run_view_passthrough_log_failed() {
-        assert!(should_passthrough_run_view(&["--log-failed".into()]));
+    fn test_run_view_log_is_condensed_not_passed_through() {
+        assert!(!should_passthrough_run_view(&["--log-failed".into()]));
+        assert!(!should_passthrough_run_view(&["--log".into()]));
+        let failed: Vec<String> = vec!["--log-failed".into(), "--job".into(), "67890".into()];
+        assert_eq!(run_log_flag(&failed), Some("--log-failed"));
+        assert_eq!(run_log_flag(&["--log".into()]), Some("--log"));
+        assert_eq!(run_log_flag(&["--web".into()]), None);
     }
 
     #[test]
-    fn test_run_view_passthrough_log() {
-        assert!(should_passthrough_run_view(&["--log".into()]));
+    fn test_condense_run_log_keeps_the_steps_and_drops_the_prefix() {
+        let input = include_str!("../../../tests/fixtures/gh_run_view_log_failed_raw.txt");
+        let output = condense_run_log(input);
+        assert!(output.starts_with("== fmt\n"), "{}", &output[..80]);
+        assert_eq!(output.matches("== fmt").count(), 1);
+        assert!(output.contains("> Run cargo fmt --all -- --check\n"));
+        assert!(output.contains("Diff in /home/runner/work/rtk/rtk/src/cmds/go/go_cmd.rs:880:\n"));
+        assert!(output.contains("error: Process completed with exit code 1.\n"));
+        assert!(output.contains("> Run actions/checkout@v7\n"));
+        assert!(!output.contains("UNKNOWN STEP"));
+        assert!(!output.contains("2026-10-16T"));
+        assert!(!output.contains("##["));
+        assert!(!output.contains("Runner Image Provisioner"));
+        assert!(!output.contains("Hosted Compute Agent"));
+        assert!(!output.contains("Current runner version"));
+    }
+
+    #[test]
+    fn test_condense_run_log_token_savings() {
+        let input = include_str!("../../../tests/fixtures/gh_run_view_log_failed_raw.txt");
+        let output = condense_run_log(input);
+        let (before, after) = (
+            crate::core::utils::count_tokens(input),
+            crate::core::utils::count_tokens(&output),
+        );
+        let savings = 100.0 - (after as f64 / before as f64 * 100.0);
+        assert!(
+            savings >= 40.0,
+            "Expected >=40% savings, got {:.1}%",
+            savings
+        );
+    }
+
+    #[test]
+    fn test_condense_run_log_names_each_job_and_strips_ansi() {
+        // Lines from a real two-job `gh run view --log-failed` (rtk's own CI).
+        let input = concat!(
+            "test (windows-latest)\tUNKNOWN STEP\t2026-10-18T14:19:49.3049241Z \x1b[1m\x1b[91merror\x1b[0m: test failed, to rerun pass `-p rtk --test git_ls_tree_test`\n",
+            "test (windows-latest)\tUNKNOWN STEP\t2026-10-18T14:19:49.4243633Z ##[error]Process completed with exit code 1.\n",
+            "test (windows-latest)\tUNKNOWN STEP\t2026-10-18T14:19:49.4509231Z Post job cleanup.\n",
+            "test (windows-latest)\tUNKNOWN STEP\t2026-10-18T14:19:52.0558953Z Terminate orphan process: pid (9056) (vctip)\n",
+            "test (windows-latest, x86_64-pc-windows-gnu)\tUNKNOWN STEP\t\u{feff}2026-10-18T14:15:40.2467057Z Current runner version: '2.337.0'\n",
+            "test (windows-latest, x86_64-pc-windows-gnu)\tUNKNOWN STEP\t2026-10-18T14:15:40.2496969Z ##[group]Runner Image Provisioner\n",
+            "test (windows-latest, x86_64-pc-windows-gnu)\tUNKNOWN STEP\t2026-10-18T14:15:40.2498149Z Hosted Compute Agent\n",
+            "test (windows-latest, x86_64-pc-windows-gnu)\tUNKNOWN STEP\t2026-10-18T14:15:40.2503476Z ##[endgroup]\n",
+            "test (windows-latest, x86_64-pc-windows-gnu)\tUNKNOWN STEP\t2026-10-18T14:19:28.9801073Z \n",
+            "test (windows-latest, x86_64-pc-windows-gnu)\tUNKNOWN STEP\t2026-10-18T14:19:28.9809134Z \x1b[1m\x1b[91merror\x1b[0m: test failed, to rerun pass `-p rtk --test git_ls_tree_test`\n",
+            "test (windows-latest, x86_64-pc-windows-gnu)\tUNKNOWN STEP\t2026-10-18T14:19:29.0806448Z ##[error]Process completed with exit code 1.\n",
+        );
+        assert_eq!(
+            condense_run_log(input),
+            "== test (windows-latest)\n\
+             error: test failed, to rerun pass `-p rtk --test git_ls_tree_test`\n\
+             error: Process completed with exit code 1.\n\
+             Post job cleanup.\n\
+             == test (windows-latest, x86_64-pc-windows-gnu)\n\
+             error: test failed, to rerun pass `-p rtk --test git_ls_tree_test`\n\
+             error: Process completed with exit code 1.\n"
+        );
+    }
+
+    #[test]
+    fn test_condense_run_log_renders_workflow_commands() {
+        // Lines from rtk's own CI logs.
+        let line =
+            |text: &str| format!("fmt\tUNKNOWN STEP\t2026-10-16T22:33:09.6945912Z {}\n", text);
+        let input = [
+            "##[start-action display=Parse toolchain version;id=__dtolnay_rust-toolchain.parse]",
+            "##[end-action id=__dtolnay_rust-toolchain.parse;outcome=success;conclusion=success;duration_ms=40]",
+            "##[end-action id=__dtolnay_rust-toolchain.__run;outcome=failure;conclusion=failure;duration_ms=16]",
+            "##[command]/usr/bin/git version",
+            "##[warning]Node.js 20 actions are deprecated.",
+        ]
+        .map(line)
+        .concat();
+        assert_eq!(
+            condense_run_log(&input),
+            "== fmt\n\
+             > Parse toolchain version\n\
+             action failure: __dtolnay_rust-toolchain.__run\n\
+             $ /usr/bin/git version\n\
+             warning: Node.js 20 actions are deprecated.\n"
+        );
+    }
+
+    #[test]
+    fn test_condense_run_log_names_a_known_step() {
+        let input = "build\tRun tests\t2026-10-18T14:19:49.3049241Z ok\n";
+        assert_eq!(condense_run_log(input), "== build / Run tests\nok\n");
     }
 
     #[test]

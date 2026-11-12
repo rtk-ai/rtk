@@ -15,6 +15,7 @@
 - JSON handlers use the local `run_glab_json<F>()` helper wrapping `runner::run_filtered` + `RunOptions::stdout_only().early_exit_on_failure().no_trailing_newline()`; on JSON parse error, falls back to the raw stdout (glab sometimes emits plain text for empty results)
 - `ci status` uses text-keyword parsing (glab doesn't support `-F json` for this subcommand); when no English status keyword is recognized (non-English locale), returns raw verbatim
 - `ci trace` uses ANSI-stripping + GitLab section-marker filtering + runner/git/artifact boilerplate removal; kept as text-only filter, not JSON
+- **gh_cmd.rs** `run view --log` / `--log-failed` condenses the job log (`condense_run_log()`): drops the `<job>\t<step>\t<timestamp>` prefix gh repeats on every line (a `== job` header marks each job), ANSI, blank lines and runner metadata groups; workflow commands become `> group / sub-step`, `$ command`, `error:` / `warning:`. Step output is kept; `run view --json` still passes through
 - `release list` falls back to raw output when the glab 1.82+ format doesn't match the legacy tab-delimited parser
 - Pipeline / merge-status indicators use text tags (`[ok]`, `[fail]`, `[cancel]`, `[run]`, `[pend]`, `[skip]`, `[conflict]`) to match `gh_cmd.rs` and avoid multi-byte rendering quirks
 
