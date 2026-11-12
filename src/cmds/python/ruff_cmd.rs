@@ -8,7 +8,7 @@ use crate::core::config;
 use crate::core::runner;
 use crate::core::shell::display_args;
 use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::{resolved_command, truncate};
+use crate::core::utils::{PathLabels, compact_from_first_dir, resolved_command, truncate};
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -309,6 +309,10 @@ pub fn filter_ruff_check_json(output: &str) -> String {
     let mut file_counts: Vec<_> = by_file.iter().collect();
     file_counts.sort_by_key(|(file, count)| (std::cmp::Reverse(**count), **file));
 
+    // One label per file for the whole report: a file reads the same everywhere and
+    // two files never share a label.
+    let labels = PathLabels::new(by_file.keys().copied(), compact_path);
+
     // Build output
     let mut result = String::new();
     result.push_str(&format!(
@@ -347,7 +351,7 @@ pub fn filter_ruff_check_json(output: &str) -> String {
     // Show top files
     result.push_str("Top files:\n");
     for (file, count) in file_counts.iter().take(MAX_RUFF_FILES) {
-        let short_path = compact_path(file);
+        let short_path = labels.label(file);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
         // Show top 3 rules in this file
@@ -377,7 +381,7 @@ pub fn filter_ruff_check_json(output: &str) -> String {
         .map(|diag| {
             format!(
                 "  {}:{}:{} {} {}\n",
-                compact_path(&diag.filename),
+                labels.label(&diag.filename),
                 diag.location.row,
                 diag.location.column,
                 diag.code,
@@ -395,7 +399,7 @@ pub fn filter_ruff_check_json(output: &str) -> String {
         if described_rules.contains(diag.code.as_str()) {
             result.push_str(&format!(
                 "  {}:{}:{} {}\n",
-                compact_path(&diag.filename),
+                labels.label(&diag.filename),
                 diag.location.row,
                 diag.location.column,
                 diag.code,
@@ -489,12 +493,13 @@ pub fn filter_ruff_format(output: &str) -> String {
             ));
 
             const MAX_RUFF_FORMAT_FILES: usize = CAP_WARNINGS;
+            let labels = PathLabels::new(files_to_format.iter().map(String::as_str), compact_path);
             for (i, file) in files_to_format
                 .iter()
                 .take(MAX_RUFF_FORMAT_FILES)
                 .enumerate()
             {
-                result.push_str(&format!("{}. {}\n", i + 1, compact_path(file)));
+                result.push_str(&format!("{}. {}\n", i + 1, labels.label(file)));
             }
 
             if files_to_format.len() > MAX_RUFF_FORMAT_FILES {
@@ -518,21 +523,10 @@ pub fn filter_ruff_format(output: &str) -> String {
     result.trim().to_string()
 }
 
-/// Compact file path (remove common prefixes)
+/// Compact file path: from the first `src`, `lib` or `tests` directory, else the file name.
+/// Different files can share the result, so reports label paths through [`PathLabels`].
 fn compact_path(path: &str) -> String {
-    let path = path.replace('\\', "/");
-
-    if let Some(pos) = path.rfind("/src/") {
-        format!("src/{}", &path[pos + 5..])
-    } else if let Some(pos) = path.rfind("/lib/") {
-        format!("lib/{}", &path[pos + 5..])
-    } else if let Some(pos) = path.rfind("/tests/") {
-        format!("tests/{}", &path[pos + 7..])
-    } else if let Some(pos) = path.rfind('/') {
-        path[pos + 1..].to_string()
-    } else {
-        path
-    }
+    compact_from_first_dir(path, &["src", "lib", "tests"])
 }
 
 #[cfg(test)]
@@ -872,6 +866,76 @@ Would reformat: tests/test_utils.py
             savings >= 60.0,
             "token savings dropped below 60%: {savings:.1}%"
         );
+    }
+
+    fn unused_import(path: &str) -> serde_json::Value {
+        serde_json::json!({
+            "code": "F401", "message": "`concurrent.futures.process` imported but unused",
+            "location": {"row": 1, "column": 8}, "filename": path, "fix": null,
+        })
+    }
+
+    #[test]
+    fn same_named_files_in_different_directories_keep_distinct_labels() {
+        // Ruff prints absolute paths, so two `__init__.py` used to both print as `__init__.py`.
+        let cwd = crate::core::user_dirs::current_dir()
+            .expect("current dir")
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        let input = serde_json::to_string(&[
+            unused_import(&format!("{cwd}/pkg_a/__init__.py")),
+            unused_import(&format!("{cwd}/pkg_b/__init__.py")),
+        ])
+        .expect("fixture JSON");
+        let out = filter_ruff_check_json(&input);
+        for pkg in ["pkg_a", "pkg_b"] {
+            assert!(
+                out.contains(&format!("{pkg}/__init__.py (1 issues)")),
+                "{out}"
+            );
+            assert!(
+                out.contains(&format!("{pkg}/__init__.py:1:8 F401")),
+                "{out}"
+            );
+        }
+        assert!(!out.contains(&cwd), "label must be cwd-relative: {out}");
+    }
+
+    #[test]
+    fn colliding_paths_outside_the_cwd_keep_the_printed_path_and_unique_paths_stay_compact() {
+        let input = serde_json::to_string(&[
+            unused_import("/repo/pkg_a/__init__.py"),
+            unused_import("/repo/pkg_b/__init__.py"),
+            unused_import("/repo/src/main.py"),
+        ])
+        .expect("fixture JSON");
+        let out = filter_ruff_check_json(&input);
+        for label in [
+            "  /repo/pkg_a/__init__.py (1 issues)\n",
+            "  /repo/pkg_b/__init__.py (1 issues)\n",
+            "  /repo/pkg_a/__init__.py:1:8 F401\n",
+            "  /repo/pkg_b/__init__.py:1:8 F401\n",
+            "  src/main.py (1 issues)\n",
+            "  src/main.py:1:8 F401",
+        ] {
+            assert!(out.contains(label), "missing {label:?} in {out}");
+        }
+    }
+
+    #[test]
+    fn same_named_files_in_ruff_format_output_keep_distinct_labels() {
+        let out = filter_ruff_format(
+            "Would reformat: pkg_a/__init__.py\nWould reformat: pkg_b/__init__.py\n2 files would be reformatted, 3 files left unchanged",
+        );
+        assert!(out.contains("1. pkg_a/__init__.py\n"), "{out}");
+        assert!(out.contains("2. pkg_b/__init__.py\n"), "{out}");
+    }
+
+    #[test]
+    fn compact_path_keeps_the_first_well_known_directory() {
+        assert_eq!(compact_path("/repo/src/app/src/x.py"), "src/app/src/x.py");
+        assert_eq!(compact_path("/repo/lib/a/src/x.py"), "lib/a/src/x.py");
     }
 
     #[test]
