@@ -270,3 +270,39 @@ fn an_outdated_hook_is_reported_on_every_view() {
         );
     }
 }
+
+// #4893: rows exist but every one is above the headline cap — the report must show the zero
+// headline with the Excluded count, not the "No tracking data yet" empty state that sends the
+// user debugging a tracking problem that does not exist. The oversized row comes from a real
+// `rtk read` of a big file, the issue's repro (75,000 bytes ≈ 18,750 input tokens).
+#[test]
+fn gain_all_oversized_shows_the_zero_headline_not_the_empty_state() {
+    let tmp = missing_hook_home();
+    let home = tmp.path();
+    let project = common::scratch_dir().join("project");
+    std::fs::create_dir_all(&project).expect("project dir");
+    let big = project.join("big.txt");
+    std::fs::write(
+        &big,
+        "line 00000 lorem ipsum dolor sit amet consectetur\n".repeat(1500),
+    )
+    .expect("write big.txt");
+
+    let mut read = common::rtk_command();
+    read.args(["read", big.to_str().expect("utf8 path")])
+        .envs(isolating_env(home))
+        .env("LC_ALL", "C")
+        .output()
+        .expect("run rtk read");
+
+    let (out, _err) = gain_split(&["gain"], home);
+    assert!(
+        !out.contains("No tracking data yet."),
+        "the empty state must not show when rows exist but are all oversized:\n{out}"
+    );
+    assert!(out.contains("Commands tracked: 0"), "got:\n{out}");
+    assert!(
+        out.contains("1 oversized outputs"),
+        "the Excluded line must name the oversized rows:\n{out}"
+    );
+}

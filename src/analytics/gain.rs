@@ -696,6 +696,26 @@ pub fn run(
     // nothing to show. The JSON and CSV exports return earlier and stay clean.
     warn_hook_issues();
 
+    // Rows exist but every one is above the headline cap: not an empty database, and "run some
+    // rtk commands" would send the user debugging a tracking or hook problem that does not exist
+    // (#4893). Show the zero headline with the Excluded line instead of the empty state.
+    if summary.total_commands == 0 && summary.oversized_excluded > 0 && proxy_summary.is_none() {
+        println!("{}", styled("RTK Token Savings", true));
+        println!("{}", "═".repeat(60));
+        println!("Commands tracked: 0");
+        print_kpi(
+            "Excluded",
+            format!(
+                "{} oversized outputs (input past the ~30k-char agent cap)",
+                summary.oversized_excluded
+            ),
+        );
+        println!();
+        #[cfg(feature = "engine")]
+        print_efficiency_ledger(&tracker, crate::llm_proxy::read_gain_summary().as_ref());
+        return Ok(());
+    }
+
     if summary.total_commands == 0 && proxy_summary.is_none() {
         println!("No tracking data yet.");
         println!("Run some rtk commands to start tracking savings.");
