@@ -307,17 +307,19 @@ fn global_opencode_dir() -> Option<PathBuf> {
     Some(user_dirs::home()?.join(CONFIG_DIR).join(OPENCODE_SUBDIR))
 }
 
-/// Does the agent's markdown file declare permission rules?
+/// Does the agent's markdown file declare a permission rule that can decide a
+/// shell command?
 ///
 /// Agents can be markdown files with a YAML frontmatter rather than a config
 /// entry, and OpenCode reads the rules from both. rtk reads the configs but not
 /// the files, so an ask or a deny declared only in a file was invisible and the
-/// rewrite silenced it. The rules themselves are not parsed — only the presence
-/// of a `permission:` or `permissions:` key matters, and when one is there the
-/// answer is `{}`, which is the safe direction.
+/// rewrite silenced it. The rules themselves are not evaluated, only
+/// classified: a shell rule, an unknown key, or a value we cannot read answers
+/// `{}`, which is the safe direction. A rule for another tool, such as `edit`,
+/// cannot change a shell verdict, so that file keeps its rewrites.
 ///
-/// An agent file with no such key keeps its rewrites, since most of them carry
-/// only a prompt and a model.
+/// An agent file with no permission key keeps its rewrites too, since most of
+/// them carry only a prompt and a model.
 fn agent_markdown_declares_rules(agent: &str) -> bool {
     let name = format!("{agent}.md");
     if name.contains('/') || name.contains('\\') {
@@ -342,16 +344,41 @@ fn agent_markdown_declares_rules(agent: &str) -> bool {
         })
 }
 
-/// Could the active agent be carrying rules rtk cannot see?
+/// Could the active agent be carrying shell rules rtk cannot see?
 ///
-/// True when an agent markdown file exists and declares a `permission:` or
-/// `permissions:` key. The rules themselves are not parsed; the caller answers
-/// `{}`, which is the safe direction.
+/// True when an agent markdown file exists and declares a permission rule that
+/// can decide a shell command. The rules themselves are not evaluated; the
+/// caller answers `{}`, which is the safe direction.
 pub(crate) fn agent_rules_unreadable(agent: Option<&str>) -> bool {
     agent.is_some_and(agent_markdown_declares_rules)
 }
 
-/// Does this markdown frontmatter carry a `permission:` or `permissions:` key?
+/// Permission keys whose rules cannot change a shell command's verdict. An
+/// agent that declares only these keeps its rewrites; any other key, and any
+/// value we cannot read, stays on the safe side.
+const NON_SHELL_RULE_KEYS: [&str; 12] = [
+    "edit",
+    "read",
+    "write",
+    "patch",
+    "glob",
+    "grep",
+    "list",
+    "webfetch",
+    "websearch",
+    "task",
+    "todowrite",
+    "question",
+];
+
+/// Does this markdown frontmatter carry a permission rule that can decide a
+/// shell command's verdict?
+///
+/// The rules are not evaluated, only classified. A `permission:` scalar applies
+/// to every tool, so it counts. A map counts unless every key is a non-shell
+/// tool. A 2.x `permissions:` list counts unless every `action` is a non-shell
+/// tool. Anything unreadable counts, since a missed shell rule would silence an
+/// ask.
 fn frontmatter_declares_rules(body: &str) -> bool {
     let frontmatter = body
         .trim_start_matches('\u{feff}')
@@ -359,17 +386,140 @@ fn frontmatter_declares_rules(body: &str) -> bool {
         // An unclosed block still counts: a missed rule silences an ask.
         .map(|rest| rest.split_once("\n---").map_or(rest, |(yaml, _)| yaml))
         .unwrap_or_default();
-    frontmatter.lines().any(|line| {
-        let line = line.trim_end();
+    let lines: Vec<&str> = frontmatter.lines().collect();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let line = lines[index].trim_end();
+        index += 1;
         // Top-level only: an indented key belongs to some other block.
-        !line.starts_with([' ', '\t', '-'])
-            && line.split_once(':').is_some_and(|(key, _)| {
-                matches!(
-                    key.trim().trim_matches(['"', '\'']),
-                    "permission" | "permissions"
-                )
-            })
-    })
+        if line.starts_with([' ', '\t', '-']) {
+            continue;
+        }
+        let Some((key, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim().trim_matches(['"', '\'']);
+        if !matches!(key, "permission" | "permissions") {
+            continue;
+        }
+
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            return inline_rules_affect_shell(rest);
+        }
+
+        // A block value: indented lines, or a top-level `- ` list.
+        let mut block: Vec<&str> = Vec::new();
+        while index < lines.len() {
+            let next = lines[index].trim_end();
+            if next.is_empty() {
+                index += 1;
+                continue;
+            }
+            if next.starts_with([' ', '\t', '-']) {
+                block.push(next);
+                index += 1;
+            } else {
+                break;
+            }
+        }
+        return block_rules_affect_shell(&block);
+    }
+
+    false
+}
+
+/// A scalar permission value applies to every tool. Inline maps and lists are
+/// classified by their keys or `action` values.
+fn inline_rules_affect_shell(value: &str) -> bool {
+    if value.starts_with('[') {
+        let actions = action_values(value);
+        return actions.is_empty() || actions.iter().any(|action| !is_non_shell_rule(action));
+    }
+    if value.starts_with('{') {
+        // A list item written inline carries its tool as `action`, not as a key.
+        let actions = action_values(value);
+        if !actions.is_empty() {
+            return actions.iter().any(|action| !is_non_shell_rule(action));
+        }
+        let keys = map_keys(value);
+        return keys.is_empty() || keys.iter().any(|key| !is_non_shell_rule(key));
+    }
+    true
+}
+
+/// A block map is classified by its top-level keys. A block list is classified
+/// by its `action` values; `resource` and `effect` are ignored. An empty or
+/// unreadable block stays on the safe side.
+fn block_rules_affect_shell(block: &[&str]) -> bool {
+    let mut saw_rule = false;
+    for line in block {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let item = trimmed.strip_prefix("- ").unwrap_or(trimmed).trim();
+
+        if item.starts_with('{') || item.starts_with('[') {
+            if inline_rules_affect_shell(item) {
+                return true;
+            }
+            saw_rule = true;
+            continue;
+        }
+
+        let Some((key, value)) = item.split_once(':') else {
+            return true;
+        };
+        let key = normalize_rule_key(key);
+        if key == "resource" || key == "effect" {
+            continue;
+        }
+        if key == "action" {
+            saw_rule = true;
+            if !is_non_shell_rule(&normalize_rule_key(value)) {
+                return true;
+            }
+            continue;
+        }
+        saw_rule = true;
+        if !is_non_shell_rule(&key) {
+            return true;
+        }
+    }
+    !saw_rule
+}
+
+fn map_keys(value: &str) -> Vec<String> {
+    value
+        .split(['{', ','])
+        .filter_map(|part| part.split_once(':'))
+        .map(|(key, _)| normalize_rule_key(key))
+        .filter(|key| !key.is_empty())
+        .collect()
+}
+
+fn action_values(value: &str) -> Vec<String> {
+    value
+        .split(['[', '{', ','])
+        .filter_map(|part| {
+            let (key, action) = part.split_once(':')?;
+            (normalize_rule_key(key) == "action").then(|| normalize_rule_key(action))
+        })
+        .filter(|action| !action.is_empty())
+        .collect()
+}
+
+fn normalize_rule_key(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(['"', '\''])
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn is_non_shell_rule(key: &str) -> bool {
+    NON_SHELL_RULE_KEYS.contains(&key)
 }
 
 /// OpenCode loads agent files from both spellings of the directory.
@@ -808,6 +958,61 @@ mod tests {
             ),
             "the 2.x list exists only on 2.x, so it is not version dependent"
         );
+    }
+
+    #[test]
+    fn frontmatter_non_shell_rules_keep_rewrites() {
+        let declares =
+            |front: &str| frontmatter_declares_rules(&format!("---\n{front}\n---\nbody\n"));
+        assert!(!declares("permission:\n  edit: allow"));
+        assert!(!declares("permission: {edit: allow, webfetch: ask}"));
+        assert!(
+            !declares("permissions:\n  - action: edit\n    resource: \"*\"\n    effect: allow"),
+            "a 2.x list that only covers file edits"
+        );
+        assert!(!declares(
+            "permissions: [{action: read, resource: \"*\", effect: allow}]"
+        ));
+        assert!(!declares(
+            "permissions:\n  - { action: read, resource: \"*\", effect: allow }"
+        ));
+        assert!(declares("permissions:\n  - { action: shell }"));
+        assert!(
+            declares("permission:\n  edit: allow\n  bash: ask"),
+            "one shell key in the same map is enough"
+        );
+        assert!(declares("permission:\n  \"*\": allow"));
+        assert!(declares("permissions:\n  - action: shell"));
+        assert!(
+            declares("permission:\n  \"b*\": allow"),
+            "an unknown glob key stays on the safe side"
+        );
+        assert!(
+            declares("permission:\n  - just a string"),
+            "an unparseable block stays on the safe side"
+        );
+    }
+
+    #[test]
+    fn an_agent_markdown_with_only_file_rules_keeps_rewrites() {
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("project");
+        let dir = project.join(".opencode").join("agents");
+        std::fs::create_dir_all(&dir).expect("create agent dir");
+        std::fs::write(
+            dir.join("build.md"),
+            "---\npermission:\n  edit: allow\n---\nbody\n",
+        )
+        .expect("write agent file");
+
+        test_isolation::with_root(&home, || {
+            let _entered = test_isolation::enter(&project);
+            assert!(
+                !agent_rules_unreadable(Some("build")),
+                "a file rule that cannot decide a shell command must not disable rewrites"
+            );
+        });
     }
 
     #[test]
