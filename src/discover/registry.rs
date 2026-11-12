@@ -79,7 +79,9 @@ static ENV_WORD: LazyLock<Regex> =
 fn env_word() -> String {
     let double_quoted = r#""(?:[^"\\]|\\.)*""#;
     let single_quoted = r#"'(?:[^'\\]|\\.)*'"#;
-    let unquoted = r#"[^\s]*"#;
+    // A run of bare and quoted chunks, so `X="a"b` peels whole and
+    // `S="/a b/x"` does not peel as `S="/a ` (#3764).
+    let unquoted = r#"(?:[^\s"'\\]|\\.|"(?:[^"\\]|\\.)*"|'[^']*')*"#;
     let env_value = format!("(?:{}|{}|{})", double_quoted, single_quoted, unquoted);
     let env_assign = format!(r#"[A-Z_][A-Z0-9_]*={}"#, env_value);
     format!(r#"env\s+|{}\s+"#, env_assign)
@@ -575,14 +577,15 @@ fn split_token_spans(cmd: &str) -> Vec<(&str, usize)> {
 }
 
 /// Normalize absolute binary paths: `/usr/bin/grep -rn foo` → `grep -rn foo` (#485)
-/// Only strips if the first word contains a `/` (Unix path).
+/// Only strips if the first word contains a `/` (Unix path) and is not a shell
+/// assignment: `J=/tmp/jq` sets a variable, it does not run `jq` (#3764).
 fn strip_absolute_path(cmd: &str) -> String {
     let first_space = cmd.find(' ');
     let first_word = match first_space {
         Some(pos) => &cmd[..pos],
         None => cmd,
     };
-    if first_word.contains('/') {
+    if first_word.contains('/') && !is_shell_assignment(first_word) {
         // Extract basename
         let basename = first_word.rsplit('/').next().unwrap_or(first_word);
         if basename.is_empty() {
@@ -595,6 +598,16 @@ fn strip_absolute_path(cmd: &str) -> String {
     } else {
         cmd.to_string()
     }
+}
+
+/// `NAME=...` where NAME is a valid shell identifier.
+fn is_shell_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        name.chars()
+            .next()
+            .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+            && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+    })
 }
 
 pub fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {
@@ -8811,6 +8824,48 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("nohup /opt/tools/jj log", &[]),
             Some("nohup rtk /opt/tools/jj log".into()),
+        );
+    }
+
+    /// #3764: a bare `NAME=/path/<filter>` assignment is not a command; the
+    /// basename of the value must not be matched against TOML filters.
+    #[test]
+    fn test_toml_filter_skips_bare_assignment_with_path_value() {
+        for cmd in [
+            "J=/tmp/jq",
+            "K=~/x/jq",
+            "S=/tmp/a/task",
+            "S=/tmp/a/task.md",
+            "B=~/sessions/jira",
+            "lower_name=/tmp/jq",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("J=/tmp/jq; ls $J/f", &[]),
+            Some("J=/tmp/jq; rtk ls $J/f".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("J=/tmp/jq\nls -l $J/f", &[]),
+            Some("J=/tmp/jq\nrtk ls -l $J/f".into()),
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("echo x; S=/tmp/a/task; echo y", &[]),
+            None,
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"S="/tmp/a b/task"; echo hi"#, &[]),
+            None,
+        );
+        // Quoted chunks inside a bare value keep the assignment one word.
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"X=a"b" git status"#, &[]),
+            Some(r#"X=a"b" rtk git status"#.into()),
+        );
+        // The real tool behind an absolute path is still rewritten.
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/bin/jq .", &[]),
+            Some("rtk /usr/bin/jq .".into()),
         );
     }
 
