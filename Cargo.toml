@@ -65,6 +65,7 @@ oem_cp = "2"
 ignore = "0.4"
 walkdir = "2"
 regex = "1"
+regex-syntax = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 colored = "3"

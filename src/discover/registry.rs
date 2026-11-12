@@ -2,10 +2,11 @@
 
 use crate::cmds::system::search::{Engine, is_bare_file_list};
 use crate::core::utils::composer_bin_dirs;
-use regex::{Regex, RegexSet};
+use regex::Regex;
 use std::path::Path;
 use std::sync::LazyLock;
 
+use super::lazy_regex::LazyRegex;
 use super::lexer::{
     ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer, coalesce_words,
     contains_unattestable_construct_in, is_crlf_at, redirect_has_file_target, shell_split,
@@ -54,15 +55,24 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
     }
 }
 
-static REGEX_SET: LazyLock<RegexSet> = LazyLock::new(|| {
-    RegexSet::new(RULES.iter().map(|r| r.pattern)).expect("invalid regex patterns")
-});
-static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+/// Each rule's regex, compiled the first time a command could match it.
+static RULE_REGEXES: LazyLock<Vec<LazyRegex>> = LazyLock::new(|| {
     RULES
         .iter()
-        .map(|r| Regex::new(r.pattern).expect("invalid regex"))
+        .map(|r| LazyRegex::new(r.pattern).expect("invalid regex pattern"))
         .collect()
 });
+
+fn rule_regex(idx: usize) -> &'static Regex {
+    RULE_REGEXES[idx].compiled().expect("invalid regex pattern")
+}
+
+/// The last (most specific) rule matching `cmd`.
+fn last_matching_rule(cmd: &str) -> Option<usize> {
+    (0..RULES.len())
+        .rev()
+        .find(|&idx| RULE_REGEXES[idx].may_match(cmd) && rule_regex(idx).is_match(cmd))
+}
 static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
     // NOTE: `sudo` is intentionally NOT stripped here. Rewriting `sudo docker ps`
     // to `sudo rtk docker ps` breaks at runtime because `rtk` is not on root's
@@ -256,13 +266,11 @@ pub fn classify_command(cmd: &str) -> Classification {
         }
     }
 
-    // Fast check with RegexSet — take the last (most specific) match
-    let matches: Vec<usize> = REGEX_SET.matches(cmd_clean).into_iter().collect();
-    if let Some(&idx) = matches.last() {
+    if let Some(idx) = last_matching_rule(cmd_clean) {
         let rule = &RULES[idx];
 
         // Extract subcommand for savings override and status detection
-        let (savings, status) = if let Some(caps) = COMPILED[idx].captures(cmd_clean) {
+        let (savings, status) = if let Some(caps) = rule_regex(idx).captures(cmd_clean) {
             if let Some(sub) = caps.get(1) {
                 // Collapse internal whitespace so a two-word capture ("pm  ls")
                 // still matches its single-spaced key in the tables below.
@@ -482,11 +490,7 @@ fn strip_pnpm_global_opts(cmd: &str) -> String {
 /// tool rule would diverge from the rewrite, which matches the original
 /// flag-first text and never fires there. See #3275.
 fn matches_pnpm_rule(cmd: &str) -> bool {
-    REGEX_SET
-        .matches(cmd)
-        .into_iter()
-        .next_back()
-        .is_some_and(|idx| RULES[idx].rtk_cmd == "rtk pnpm")
+    last_matching_rule(cmd).is_some_and(|idx| RULES[idx].rtk_cmd == "rtk pnpm")
 }
 
 /// Strip golangci-lint global options before the `run` subcommand.
@@ -1644,8 +1648,37 @@ fn git_ls_tree_folds(cmd: &str) -> bool {
 }
 
 pub(crate) enum ExcludePattern {
-    Regex(Regex),
+    /// Compiled only once a command could match it: most commands rule out
+    /// every entry by its first word.
+    Regex {
+        entry: String,
+        regex: LazyRegex,
+    },
     Prefix(String),
+}
+
+impl ExcludePattern {
+    fn matches(&self, cmd: &str) -> bool {
+        match self {
+            Self::Regex { entry, regex } => {
+                if !regex.may_match(cmd) {
+                    return false;
+                }
+                match regex.compiled_or_report(|e| warn_invalid_exclude(entry, e)) {
+                    Ok(re) => re.is_match(cmd),
+                    Err(_) => cmd.starts_with(entry.trim()),
+                }
+            }
+            Self::Prefix(prefix) => cmd.starts_with(prefix.as_str()),
+        }
+    }
+}
+
+fn warn_invalid_exclude(entry: &str, error: &dyn std::fmt::Display) {
+    eprintln!(
+        "rtk: warning: invalid exclude_commands pattern '{}': {}",
+        entry, error
+    );
 }
 
 pub(crate) fn compile_exclude_patterns(patterns: &[String]) -> Vec<ExcludePattern> {
@@ -1665,13 +1698,13 @@ pub(crate) fn compile_exclude_patterns(patterns: &[String]) -> Vec<ExcludePatter
             } else {
                 format!(r"^{}($|\s)", regex::escape(trimmed))
             };
-            Some(match Regex::new(&anchored) {
-                Ok(re) => ExcludePattern::Regex(re),
+            Some(match LazyRegex::new(&anchored) {
+                Ok(regex) => ExcludePattern::Regex {
+                    entry: pattern.clone(),
+                    regex,
+                },
                 Err(e) => {
-                    eprintln!(
-                        "rtk: warning: invalid exclude_commands pattern '{}': {}",
-                        pattern, e
-                    );
+                    warn_invalid_exclude(pattern, &e);
                     ExcludePattern::Prefix(trimmed.to_string())
                 }
             })
@@ -1764,10 +1797,7 @@ pub(crate) fn chain_mentions_excluded(cmd: &str, excluded: &[String]) -> bool {
 }
 
 fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
-    excluded.iter().any(|pat| match pat {
-        ExcludePattern::Regex(re) => re.is_match(cmd),
-        ExcludePattern::Prefix(prefix) => cmd.starts_with(prefix.as_str()),
-    })
+    excluded.iter().any(|pat| pat.matches(cmd))
 }
 
 /// Whether `cmd` is a quoted shell wrapper whose script runs a command the
@@ -2451,6 +2481,58 @@ mod tests {
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
+    }
+
+    #[test]
+    fn last_matching_rule_agrees_with_a_regex_set_over_all_rules() {
+        let set = regex::RegexSet::new(RULES.iter().map(|r| r.pattern)).unwrap();
+        for cmd in [
+            "git status",
+            "git -C repo log --oneline",
+            "yadm diff",
+            "gh pr view 12",
+            "cargo test filter::",
+            "pnpm install",
+            "pnpm exec tsc --noEmit",
+            "npm run build",
+            "npx tsc",
+            "npx prettier --check .",
+            "npx vitest run",
+            "pnpm dlx playwright test",
+            "cat src/main.rs",
+            "head -5 file",
+            "rg -n needle src",
+            "grep -r foo .",
+            "ls -la",
+            "find . -name '*.rs'",
+            "docker compose logs web",
+            "kubectl get pods",
+            "python -m pytest -x",
+            "python3 -m mypy src",
+            "uv pip install x",
+            "uv run pytest",
+            "go test ./...",
+            "golangci-lint run",
+            "bundle exec rspec",
+            "bin/rails test",
+            "./vendor/bin/phpunit",
+            "./gradlew build",
+            "mvn -q verify",
+            "terraform plan",
+            "make -j4",
+            "wc -l file",
+            "ps aux",
+            "echo hello",
+            "cd /tmp",
+            "htop",
+            "",
+        ] {
+            assert_eq!(
+                last_matching_rule(cmd),
+                set.matches(cmd).into_iter().next_back(),
+                "{cmd:?}"
+            );
+        }
     }
 
     #[test]
