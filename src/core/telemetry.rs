@@ -5,8 +5,8 @@ use crate::core::tracking;
 use crate::core::user_dirs;
 use crate::hooks::constants::CLAUDE_DIR;
 use crate::hooks::init::resolve_claude_dir;
+use base16ct::HexDisplay;
 use sha2::{Digest, Sha256};
-use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -172,7 +172,7 @@ pub fn generate_device_hash() -> String {
     let salt = get_or_create_salt();
     let mut hasher = Sha256::new();
     hasher.update(salt.as_bytes());
-    crate::core::utils::hex_encode(&hasher.finalize())
+    format!("{:x}", HexDisplay(&hasher.finalize()))
 }
 
 fn get_or_create_salt() -> String {
@@ -211,12 +211,9 @@ fn random_salt() -> String {
         let fallback = format!("{:?}:{}", std::time::SystemTime::now(), std::process::id());
         let mut hasher = Sha256::new();
         hasher.update(fallback.as_bytes());
-        return crate::core::utils::hex_encode(&hasher.finalize());
+        return format!("{:x}", HexDisplay(&hasher.finalize()));
     }
-    buf.iter().fold(String::new(), |mut output, b| {
-        let _ = write!(output, "{b:02x}");
-        output
-    })
+    format!("{:x}", HexDisplay(&buf))
 }
 
 pub fn salt_file_path() -> PathBuf {

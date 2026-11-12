@@ -85,13 +85,13 @@ fn now_secs() -> i64 {
 }
 
 fn content_hash(command: &str, content: &[u8]) -> String {
+    use base16ct::HexDisplay;
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(command.as_bytes());
     hasher.update([0u8]);
     hasher.update(content);
-    let hex = crate::core::utils::hex_encode(&hasher.finalize());
-    hex[..HASH_HEX_LEN].to_string()
+    format!("{:x}", HexDisplay(&hasher.finalize()[..HASH_HEX_LEN / 2]))
 }
 
 fn count_lines(bytes: &[u8]) -> usize {

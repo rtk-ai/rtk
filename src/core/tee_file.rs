@@ -38,8 +38,9 @@ pub(crate) fn sanitize_slug(slug: &str) -> String {
 /// because a clash also requires the identical readable prefix *and* the same
 /// epoch second, which together scope tee writes exactly as before.
 fn short_hash(s: &str) -> String {
+    use base16ct::HexDisplay;
     use sha2::{Digest, Sha256};
-    crate::core::utils::hex_encode(&Sha256::digest(s.as_bytes()))[..6].to_string()
+    format!("{:x}", HexDisplay(&Sha256::digest(s.as_bytes())[..3]))
 }
 
 const LEGACY_ACTIVITY_WINDOW_SECS: u64 = 30 * 86_400;

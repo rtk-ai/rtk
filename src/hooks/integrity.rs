@@ -16,6 +16,7 @@ use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE};
 use super::init::resolve_claude_dir;
 use super::is_claude_hook_command;
 use anyhow::{Context, Result};
+use base16ct::HexDisplay;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -49,7 +50,7 @@ pub fn compute_hash(path: &Path) -> Result<String> {
 pub fn compute_hash_bytes(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
-    crate::core::utils::hex_encode(&hasher.finalize())
+    format!("{:x}", HexDisplay(&hasher.finalize()))
 }
 
 /// Derive the hash file path from the hook path
@@ -427,6 +428,19 @@ mod tests {
         assert_eq!(hash1, hash2);
         assert_eq!(hash1.len(), 64); // SHA-256 = 64 hex chars
         assert!(hash1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_compute_hash_bytes_is_lowercase_sha256sum_format() {
+        assert_eq!(
+            compute_hash_bytes(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        // Bytes below 0x10 (01, 03, 00) keep their leading zero.
+        assert_eq!(
+            compute_hash_bytes(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]
