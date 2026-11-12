@@ -1,0 +1,30 @@
+
+running 5 tests
+noise from should_panic test
+noise from failing test
+test tests::expected_panic - should panic ... passing test progress line 0
+passing test progress line 1
+passing test progress line 2
+okpassing test progress line 3
+
+passing test progress line 4
+passing test progress line 5
+test tests::fails ... FAILED
+second passing test progress line 0
+second passing test progress line 1
+second passing test progress line 2
+second passing test progress line 3
+second passing test progress line 4
+test tests::fails_plain ... second passing test progress line 5
+FAILED
+test tests::passes ... ok
+test tests::passes_too ... ok
+
+failures:
+
+failures:
+    tests::fails
+    tests::fails_plain
+
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

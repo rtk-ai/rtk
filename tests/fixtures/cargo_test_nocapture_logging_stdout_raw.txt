@@ -1,0 +1,12 @@
+
+running 2 tests
+test tests::rejects_bad_token ... FAILED
+test tests::serves_requests ... ok
+
+failures:
+
+failures:
+    tests::rejects_bad_token
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
