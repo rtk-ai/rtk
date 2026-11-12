@@ -57,7 +57,13 @@ fn sandbox(state: &str) -> tempfile::TempDir {
     if matches!(state, "verified" | "tampered") {
         std::fs::write(
             hooks.join(".rtk-hook.sha256"),
-            format!("{:x}  rtk-rewrite.sh\n", Sha256::digest(original)),
+            format!(
+                "{}  rtk-rewrite.sh\n",
+                Sha256::digest(original)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ),
         )
         .expect("write isolated fixture");
     }

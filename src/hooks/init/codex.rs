@@ -52,7 +52,7 @@ fn rtk_md_payload_digest(content: &str) -> String {
 
     let mut hasher = Sha256::new();
     hasher.update(content.replace('\r', "").as_bytes());
-    format!("{:x}", hasher.finalize())
+    crate::core::utils::hex_encode(&hasher.finalize())
 }
 
 /// Whether `content` is an RTK.md that RTK itself wrote.

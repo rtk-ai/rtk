@@ -49,7 +49,7 @@ pub fn compute_hash(path: &Path) -> Result<String> {
 pub fn compute_hash_bytes(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
-    format!("{:x}", hasher.finalize())
+    crate::core::utils::hex_encode(&hasher.finalize())
 }
 
 /// Derive the hash file path from the hook path

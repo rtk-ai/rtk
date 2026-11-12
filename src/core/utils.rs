@@ -45,6 +45,16 @@ pub fn sanitize_for_terminal(text: &str) -> String {
         .collect()
 }
 
+pub fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
 /// Strip one or more leading UTF-8 BOMs (`EF BB BF`, sometimes doubled),
 /// which serde_json refuses to parse. Windows editors (Notepad, PowerShell
 /// 5.1 `Out-File -Encoding utf8`) prepend one to hand-edited config files,
@@ -897,6 +907,12 @@ fn output_codepage() -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_hex_encode_lowercase_and_empty_input() {
+        assert_eq!(hex_encode(&[0x00, 0x0a, 0xab, 0xff]), "000aabff");
+        assert_eq!(hex_encode(&[]), "");
+    }
 
     #[test]
     fn sanitize_for_terminal_strips_escape_bytes_but_keeps_layout() {

@@ -172,7 +172,7 @@ pub fn generate_device_hash() -> String {
     let salt = get_or_create_salt();
     let mut hasher = Sha256::new();
     hasher.update(salt.as_bytes());
-    format!("{:x}", hasher.finalize())
+    crate::core::utils::hex_encode(&hasher.finalize())
 }
 
 fn get_or_create_salt() -> String {
@@ -211,7 +211,7 @@ fn random_salt() -> String {
         let fallback = format!("{:?}:{}", std::time::SystemTime::now(), std::process::id());
         let mut hasher = Sha256::new();
         hasher.update(fallback.as_bytes());
-        return format!("{:x}", hasher.finalize());
+        return crate::core::utils::hex_encode(&hasher.finalize());
     }
     buf.iter().fold(String::new(), |mut output, b| {
         let _ = write!(output, "{b:02x}");

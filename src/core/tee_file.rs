@@ -39,7 +39,7 @@ pub(crate) fn sanitize_slug(slug: &str) -> String {
 /// epoch second, which together scope tee writes exactly as before.
 fn short_hash(s: &str) -> String {
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(s.as_bytes()))[..6].to_string()
+    crate::core::utils::hex_encode(&Sha256::digest(s.as_bytes()))[..6].to_string()
 }
 
 const LEGACY_ACTIVITY_WINDOW_SECS: u64 = 30 * 86_400;

@@ -90,7 +90,7 @@ fn content_hash(command: &str, content: &[u8]) -> String {
     hasher.update(command.as_bytes());
     hasher.update([0u8]);
     hasher.update(content);
-    let hex = format!("{:x}", hasher.finalize());
+    let hex = crate::core::utils::hex_encode(&hasher.finalize());
     hex[..HASH_HEX_LEN].to_string()
 }
 
