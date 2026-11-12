@@ -644,6 +644,72 @@ mod hook_check {
             "stderr: {stderr}"
         );
     }
+
+    /// `rtk hook check --agent opencode` must apply the same post-rewrite
+    /// verdict-preservation and judgeability gates as `rtk hook opencode` (#4518).
+    #[test]
+    fn opencode_hook_check_matches_plugin_when_rewrite_would_change_verdict() {
+        let sb = Sandbox::bare();
+
+        // 1. Default-deny with a prefix allow: `git status` is allowed, `rtk git status`
+        // would be denied by `*`. Both `hook opencode` and `hook check --agent opencode`
+        // must step aside.
+        std::fs::write(
+            sb.project.join("opencode.json"),
+            r#"{"permission":{"bash":{"*":"deny","git status":"allow"}}}"#,
+        )
+        .expect("write opencode.json");
+        let (_, plugin_out, _) = sb.run(&["hook", "opencode", "git status"]);
+        assert_eq!(plugin_out.trim(), "{}");
+        let (code, stdout, stderr) = sb.run(&["hook", "check", "--agent", "opencode", "git status"]);
+        assert_eq!(
+            (code, stdout.trim()),
+            (1, ""),
+            "hook check must defer when rewrite flips Allow -> Deny: {stderr}"
+        );
+        assert!(
+            stderr.contains("No rewrite for: git status"),
+            "stderr: {stderr}"
+        );
+
+        // 2. Prefix ask rule: `git push origin main` prompts, `rtk git push origin main`
+        // matches no rule (Default). Both must step aside so the prompt is preserved.
+        std::fs::write(
+            sb.project.join("opencode.json"),
+            r#"{"permission":{"bash":{"git push *":"ask"}}}"#,
+        )
+        .expect("write opencode.json");
+        let (_, plugin_out, _) = sb.run(&["hook", "opencode", "git push origin main"]);
+        assert_eq!(plugin_out.trim(), "{}");
+        let (code, stdout, stderr) = sb.run(&[
+            "hook",
+            "check",
+            "--agent",
+            "opencode",
+            "git push origin main",
+        ]);
+        assert_eq!(
+            (code, stdout.trim()),
+            (1, ""),
+            "hook check must defer when rewrite flips Ask -> Default: {stderr}"
+        );
+
+        // 3. Legacy generation-dependent key (`shell: allow` alongside `bash` ask):
+        // unjudgeable across OpenCode 1.x vs 2.x, so both must defer.
+        std::fs::write(
+            sb.project.join("opencode.json"),
+            r#"{"permission":{"bash":{"ls *":"ask"},"shell":"allow"}}"#,
+        )
+        .expect("write opencode.json");
+        let (_, plugin_out, _) = sb.run(&["hook", "opencode", "ls -la"]);
+        assert_eq!(plugin_out.trim(), "{}");
+        let (code, stdout, stderr) = sb.run(&["hook", "check", "--agent", "opencode", "ls -la"]);
+        assert_eq!(
+            (code, stdout.trim()),
+            (1, ""),
+            "hook check must defer when OpenCode rules are not judgeable: {stderr}"
+        );
+    }
 }
 
 /// `RTK_REWRITE_HOST` — which delegate is asking, and what that may change.
