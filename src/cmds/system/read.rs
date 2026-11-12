@@ -2,6 +2,7 @@
 
 use crate::core::filter::{self, FilterLevel, Language};
 use crate::core::guard::never_worse;
+use crate::core::line_cap;
 use crate::core::shell::quote_word;
 use crate::core::tracking::{self, estimate_tokens};
 use anyhow::{Context, Result};
@@ -45,14 +46,21 @@ pub fn run(
         && let Some(head) = head_lines
     {
         let window = read_head_lines(file, head)?;
+        let label = cat_label(file);
+        let capped = line_cap::cap_long_line_bytes(&window, &label);
         io::stdout()
             .lock()
-            .write_all(&window)
+            .write_all(&capped)
             .context("Failed to write line window")?;
         // The user asked for these lines, so the baseline is the window itself
-        // (what `head -n N` would have printed), not the rest of the file.
-        let window = String::from_utf8_lossy(&window);
-        timer.track(&cat_label(file), "rtk read", &window, &window);
+        // (what `head -n N` would have printed), not the rest of the file. A
+        // long line cut by the cap is rtk's saving, so the baseline keeps it whole.
+        timer.track(
+            &label,
+            "rtk read",
+            &String::from_utf8_lossy(&window),
+            &String::from_utf8_lossy(&capped),
+        );
         return Ok(());
     }
 
@@ -67,13 +75,19 @@ pub fn run(
         tail_lines,
         line_numbers,
     ) {
+        let label = cat_label(file);
+        let capped = line_cap::cap_long_line_bytes(window, &label);
         io::stdout()
             .lock()
-            .write_all(window)
+            .write_all(&capped)
             .context("Failed to write raw bytes")?;
         // A plain or windowed raw read is the baseline too: see `tracking_baseline`.
-        let window = String::from_utf8_lossy(window);
-        timer.track(&cat_label(file), "rtk read", &window, &window);
+        timer.track(
+            &label,
+            "rtk read",
+            &String::from_utf8_lossy(window),
+            &String::from_utf8_lossy(&capped),
+        );
         return Ok(());
     }
     let content = String::from_utf8(bytes)
@@ -131,14 +145,16 @@ pub fn run(
         (content.clone(), filtered.clone())
     };
     let shown = never_worse(&raw, &rtk_output);
-    print!("{}", shown);
+    let label = cat_label(file);
+    let capped = line_cap::cap_long_lines(shown, &label);
+    print!("{}", capped);
     timer.track(
-        &cat_label(file),
+        &label,
         "rtk read",
         &tracking_baseline(&raw, shown, window_cut, || {
             windowed_raw(&content, max_lines, head_lines, tail_lines, line_numbers)
         }),
-        shown,
+        &capped,
     );
     Ok(())
 }
@@ -171,12 +187,17 @@ pub fn run_stdin(
         tail_lines,
         line_numbers,
     ) {
+        let capped = line_cap::cap_long_line_bytes(window, "cat - (stdin)");
         io::stdout()
             .lock()
-            .write_all(window)
+            .write_all(&capped)
             .context("Failed to write raw bytes")?;
-        let window = String::from_utf8_lossy(window);
-        timer.track("cat - (stdin)", "rtk read -", &window, &window);
+        timer.track(
+            "cat - (stdin)",
+            "rtk read -",
+            &String::from_utf8_lossy(window),
+            &String::from_utf8_lossy(&capped),
+        );
         return Ok(());
     }
     let content = String::from_utf8(bytes).context("Failed to decode stdin")?;
@@ -219,7 +240,8 @@ pub fn run_stdin(
         (content.clone(), filtered.clone())
     };
     let shown = never_worse(&raw, &rtk_output);
-    print!("{}", shown);
+    let capped = line_cap::cap_long_lines(shown, "cat - (stdin)");
+    print!("{}", capped);
 
     timer.track(
         "cat - (stdin)",
@@ -227,7 +249,7 @@ pub fn run_stdin(
         &tracking_baseline(&raw, shown, window_cut, || {
             windowed_raw(&content, max_lines, head_lines, tail_lines, line_numbers)
         }),
-        shown,
+        &capped,
     );
     Ok(())
 }

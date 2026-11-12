@@ -136,6 +136,8 @@ listing into `head`, `tail`, or `cat`.
 | `head <file>` | First 10 lines via `rtk read --head-lines 10` |
 | `tail -n <N> <file>` | Last N lines via `rtk read --tail-lines <N>` |
 
+In `grep`, `rg` and `rtk read` output, a line longer than 2,000 characters (a JSONL record, minified JavaScript) is cut there and says how to get the rest with `rtk recall` (`[limits] max_line_chars`).
+
 ## Cloud and Infrastructure
 
 | Command | What changes |
