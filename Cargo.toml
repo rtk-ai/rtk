@@ -86,8 +86,8 @@ which = "8"
 # `rtk gain --watch`: a live full-screen dashboard over the same two SQLite
 # sources the static view reads (core::tracking + the llm-proxy's own DB).
 # Opt-in, not on the hot startup path -- doesn't affect the <10ms budget.
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -97,6 +97,15 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Console",
     "Win32_Globalization",
 ] }
+
+# musl's built-in malloc makes ~1,700 mmap/munmap calls and ~8,000 extra page
+# faults per `rtk hook claude`, more than twice the CPU of a glibc build. Use
+# mimalloc on musl targets only; glibc, macOS and Windows builds are unchanged.
+# `no_thp` skips mimalloc's madvise(MADV_HUGEPAGE) on its arena: with transparent
+# huge pages set to `madvise` (the Ubuntu default) it makes the first page faults
+# stall in memory compaction, up to 100+ ms per call on a fragmented host.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", features = ["no_thp"] }
 
 [build-dependencies]
 toml = "0.8"

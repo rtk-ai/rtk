@@ -79,11 +79,12 @@ get_latest_version() {
 
 # Build target triple
 get_target() {
+    FALLBACK_TARGET=""
     case "$OS" in
         linux)
             case "$ARCH" in
                 x86_64)  TARGET="x86_64-unknown-linux-musl";;
-                aarch64) TARGET="aarch64-unknown-linux-gnu";;
+                aarch64) TARGET="aarch64-unknown-linux-musl"; FALLBACK_TARGET="aarch64-unknown-linux-gnu";;
             esac
             ;;
         darwin)
@@ -95,24 +96,29 @@ get_target() {
 # Download and install
 install() {
     info "Detected: $OS $ARCH"
-    info "Target: $TARGET"
     info "Version: $VERSION"
 
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ASSET_PREFIX}-${TARGET}.tar.gz"
     CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt"
     TEMP_DIR=$(mktemp -d)
     ARCHIVE="${TEMP_DIR}/${BINARY_NAME}.tar.gz"
     CHECKSUMS="${TEMP_DIR}/checksums.txt"
-    ASSET_NAME="${ASSET_PREFIX}-${TARGET}.tar.gz"
-
-    info "Downloading from: $DOWNLOAD_URL"
-    if ! curl -fsSL "$DOWNLOAD_URL" -o "$ARCHIVE"; then
-        error "Failed to download binary"
-    fi
 
     info "Downloading checksums..."
     if ! curl -fsSL "$CHECKSUMS_URL" -o "$CHECKSUMS"; then
         error "Failed to download checksums.txt — refusing to install unverified binary (set RTK_SKIP_CHECKSUM=1 to bypass at your own risk)"
+    fi
+
+    if [ -n "$FALLBACK_TARGET" ] && ! grep -q "[[:space:]]${ASSET_PREFIX}-${TARGET}.tar.gz\$" "$CHECKSUMS"; then
+        warn "${VERSION} has no ${ASSET_PREFIX}-${TARGET}.tar.gz, falling back to ${FALLBACK_TARGET}"
+        TARGET="$FALLBACK_TARGET"
+    fi
+    info "Target: $TARGET"
+    ASSET_NAME="${ASSET_PREFIX}-${TARGET}.tar.gz"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ASSET_NAME}"
+
+    info "Downloading from: $DOWNLOAD_URL"
+    if ! curl -fsSL "$DOWNLOAD_URL" -o "$ARCHIVE"; then
+        error "Failed to download binary"
     fi
 
     if [ "${RTK_SKIP_CHECKSUM:-0}" = "1" ]; then
@@ -162,6 +168,7 @@ install() {
 verify() {
     INSTALLED_BIN="${INSTALL_DIR}/${BINARY_NAME}"
     if [ -x "$INSTALLED_BIN" ]; then
+        "$INSTALLED_BIN" --version >/dev/null || error "${INSTALLED_BIN} was installed but does not run on this system (see the error above)"
         info "Verification: $("$INSTALLED_BIN" --version)"
     else
         error "Binary not found at expected location: $INSTALLED_BIN"

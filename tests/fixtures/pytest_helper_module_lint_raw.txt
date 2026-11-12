@@ -1,0 +1,10 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________________________ test_l ____________________________________
+test_hl.py:5: in test_l
+    check(["a.py"])
+mylib/lint.py:3: in check
+    assert problems == [], problems
+           ^^^^^^^^^^^^^^
+E   AssertionError: ['foo.py:3: E501 line too long']
+1 failed in 0.01s

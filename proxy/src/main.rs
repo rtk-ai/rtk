@@ -12,6 +12,10 @@
 //! they work no matter how `start` was launched (a terminal, `&`, a login
 //! service, or spawned by `rtk llm-proxy start`).
 
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use clap::{Args, Parser, Subcommand};
 use rtk_proxy::config::{Config, StartArgs};
 use rtk_proxy::settings::keys as setting_keys;

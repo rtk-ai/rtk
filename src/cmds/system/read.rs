@@ -3,8 +3,9 @@
 use crate::core::filter::{self, FilterLevel, Language};
 use crate::core::guard::never_worse;
 use crate::core::shell::quote_word;
-use crate::core::tracking;
+use crate::core::tracking::{self, estimate_tokens};
 use anyhow::{Context, Result};
+use std::borrow::Cow;
 use std::fs;
 use std::io::{self, Read as IoRead, Write};
 use std::path::Path;
@@ -48,36 +49,31 @@ pub fn run(
             .lock()
             .write_all(&window)
             .context("Failed to write line window")?;
-        timer.track_bytes(
-            &cat_label(file),
-            "rtk read",
-            // The bytes `cat` would have written. Unknowable without reading the file, which is
-            // the whole point of not doing that, so it is taken from the size on disk -- and
-            // for the unbounded sources above there is no size, only a 0 that would book the
-            // window as pure cost. Claim nothing there.
-            regular_file_len(file).unwrap_or(window.len()),
-            &String::from_utf8_lossy(&window),
-        );
+        // The user asked for these lines, so the baseline is the window itself
+        // (what `head -n N` would have printed), not the rest of the file.
+        let window = String::from_utf8_lossy(&window);
+        timer.track(&cat_label(file), "rtk read", &window, &window);
         return Ok(());
     }
 
     // Read file content
     let bytes =
         fs::read(file).with_context(|| format!("Failed to read file: {}", file.display()))?;
-    if level == FilterLevel::None
-        && !line_numbers
-        && let Some(window) = byte_line_window(&bytes, head_lines, tail_lines)
-    {
+    if let Some(window) = raw_byte_window(
+        &bytes,
+        level,
+        max_lines,
+        head_lines,
+        tail_lines,
+        line_numbers,
+    ) {
         io::stdout()
             .lock()
             .write_all(window)
-            .context("Failed to write line window")?;
-        timer.track(
-            &cat_label(file),
-            "rtk read",
-            &String::from_utf8_lossy(&bytes),
-            &String::from_utf8_lossy(window),
-        );
+            .context("Failed to write raw bytes")?;
+        // A plain or windowed raw read is the baseline too: see `tracking_baseline`.
+        let window = String::from_utf8_lossy(window);
+        timer.track(&cat_label(file), "rtk read", &window, &window);
         return Ok(());
     }
     let content = String::from_utf8(bytes)
@@ -122,7 +118,9 @@ pub fn run(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, head_lines, tail_lines);
+    let windowed = apply_line_window(&filtered, max_lines, head_lines, tail_lines);
+    let window_cut = windowed != filtered;
+    filtered = windowed;
 
     let (raw, rtk_output) = if line_numbers {
         (
@@ -134,7 +132,14 @@ pub fn run(
     };
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
-    timer.track(&cat_label(file), "rtk read", &raw, shown);
+    timer.track(
+        &cat_label(file),
+        "rtk read",
+        &tracking_baseline(&raw, shown, window_cut, || {
+            windowed_raw(&content, max_lines, head_lines, tail_lines, line_numbers)
+        }),
+        shown,
+    );
     Ok(())
 }
 
@@ -158,20 +163,20 @@ pub fn run_stdin(
         .lock()
         .read_to_end(&mut bytes)
         .context("Failed to read from stdin")?;
-    if level == FilterLevel::None
-        && !line_numbers
-        && let Some(window) = byte_line_window(&bytes, head_lines, tail_lines)
-    {
+    if let Some(window) = raw_byte_window(
+        &bytes,
+        level,
+        max_lines,
+        head_lines,
+        tail_lines,
+        line_numbers,
+    ) {
         io::stdout()
             .lock()
             .write_all(window)
-            .context("Failed to write line window")?;
-        timer.track(
-            "cat - (stdin)",
-            "rtk read -",
-            &String::from_utf8_lossy(&bytes),
-            &String::from_utf8_lossy(window),
-        );
+            .context("Failed to write raw bytes")?;
+        let window = String::from_utf8_lossy(window);
+        timer.track("cat - (stdin)", "rtk read -", &window, &window);
         return Ok(());
     }
     let content = String::from_utf8(bytes).context("Failed to decode stdin")?;
@@ -185,7 +190,7 @@ pub fn run_stdin(
 
     // Apply filter
     let filter = filter::get_filter(level);
-    let mut filtered = filter.filter(&content, &lang);
+    let filtered = filter.filter(&content, &lang);
 
     if verbose > 0 {
         let original_lines = content.lines().count();
@@ -201,7 +206,9 @@ pub fn run_stdin(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, head_lines, tail_lines);
+    let windowed = apply_line_window(&filtered, max_lines, head_lines, tail_lines);
+    let window_cut = windowed != filtered;
+    let filtered = windowed;
 
     let (raw, rtk_output) = if line_numbers {
         (
@@ -214,7 +221,14 @@ pub fn run_stdin(
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
 
-    timer.track("cat - (stdin)", "rtk read -", &raw, shown);
+    timer.track(
+        "cat - (stdin)",
+        "rtk read -",
+        &tracking_baseline(&raw, shown, window_cut, || {
+            windowed_raw(&content, max_lines, head_lines, tail_lines, line_numbers)
+        }),
+        shown,
+    );
     Ok(())
 }
 
@@ -228,9 +242,64 @@ fn format_with_line_numbers(content: &str) -> String {
     let width = lines.len().to_string().len();
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {
-        out.push_str(&format!("{:>width$} │ {}\n", i + 1, line, width = width));
+        out.push_str(&format!("{:>width$}\t{}\n", i + 1, line, width = width));
     }
     out
+}
+
+/// The raw side `timer.track` compares the shown output against.
+///
+/// `--max-lines`, `--head-lines` and `--tail-lines` are the user choosing to
+/// see less of the file, not rtk compressing it, so a window the output was
+/// cut to is applied to the baseline as well. Without this, one windowed read
+/// of a large file books the whole unshown remainder as a saving.
+///
+/// The baseline must describe the same span as what was printed, or the row
+/// books a saving that never happened (or a negative one). Three cases, in
+/// order:
+///
+/// 1. `shown` is `raw` itself (`never_worse` fell back to the unfiltered
+///    content): nothing was compressed, the baseline is what was shown.
+/// 2. The window removed nothing from the filtered content (`window_cut` is
+///    false, which covers the no-window read): the user would have read the
+///    whole file, so the baseline is `raw` and the saving is the filter's.
+/// 3. The window did cut: the baseline is the raw content cut to the same
+///    window (`windowed_raw`), never smaller than `shown`, so a row cannot go
+///    negative when the two sides truncate differently.
+///
+/// The windowed baseline is only ever recorded, never printed.
+fn tracking_baseline<'a>(
+    raw: &'a str,
+    shown: &'a str,
+    window_cut: bool,
+    windowed_raw: impl FnOnce() -> String,
+) -> Cow<'a, str> {
+    if shown == raw || !window_cut {
+        return Cow::Borrowed(raw);
+    }
+    let windowed = windowed_raw();
+    if estimate_tokens(&windowed) < estimate_tokens(shown) {
+        Cow::Borrowed(shown)
+    } else {
+        Cow::Owned(windowed)
+    }
+}
+
+/// The raw content cut to the window the output was cut to, formatted the
+/// way the output was: the baseline of case 3 in [`tracking_baseline`].
+fn windowed_raw(
+    content: &str,
+    max_lines: Option<usize>,
+    head_lines: Option<usize>,
+    tail_lines: Option<usize>,
+    line_numbers: bool,
+) -> String {
+    let windowed = apply_line_window(content, max_lines, head_lines, tail_lines);
+    if line_numbers {
+        format_with_line_numbers(&windowed)
+    } else {
+        windowed
+    }
 }
 
 fn apply_line_window(
@@ -294,13 +363,6 @@ fn read_head_lines(file: &Path, n: usize) -> Result<Vec<u8>> {
     Ok(window)
 }
 
-/// `file`'s size on disk, and `None` for anything whose size says nothing about how much it
-/// will produce -- a device node, a FIFO, a socket.
-fn regular_file_len(file: &Path) -> Option<usize> {
-    let meta = fs::metadata(file).ok()?;
-    meta.is_file().then_some(meta.len() as usize)
-}
-
 /// First `n` lines, sliced on byte offsets rather than round-tripped through
 /// `lines()`, so CRLF endings and an unterminated final line survive verbatim.
 /// `\n` is ASCII, so valid UTF-8 input also stays valid after slicing.
@@ -342,6 +404,26 @@ fn tail_window(content: &[u8], n: usize) -> &[u8] {
         }
     }
     content
+}
+
+/// The slice to write out verbatim, or `None` when a later step needs a `&str`:
+/// a filter level, line numbers, or `--max-lines` (counted on filtered text).
+/// Head and tail windows slice on byte offsets, so they stay here, and so does a
+/// plain read — that is what lets `rtk read` handle a file or a stdin stream that
+/// is not valid UTF-8.
+fn raw_byte_window(
+    content: &[u8],
+    level: FilterLevel,
+    max_lines: Option<usize>,
+    head_lines: Option<usize>,
+    tail_lines: Option<usize>,
+    line_numbers: bool,
+) -> Option<&[u8]> {
+    if level != FilterLevel::None || line_numbers {
+        return None;
+    }
+    byte_line_window(content, head_lines, tail_lines)
+        .or_else(|| max_lines.is_none().then_some(content))
 }
 
 fn byte_line_window(
@@ -456,19 +538,6 @@ mod tests {
         Ok(())
     }
 
-    /// A device node reports a size of 0, which would book the window as pure cost.
-    #[test]
-    fn test_regular_file_len_only_answers_for_a_regular_file() -> Result<()> {
-        let mut file = NamedTempFile::new()?;
-        file.write_all(b"hello\n")?;
-        file.flush()?;
-        assert_eq!(regular_file_len(file.path()), Some(6));
-        assert_eq!(regular_file_len(Path::new("/nonexistent-rtk-test")), None);
-        #[cfg(unix)]
-        assert_eq!(regular_file_len(Path::new("/dev/null")), None);
-        Ok(())
-    }
-
     #[test]
     fn test_read_rust_file() -> Result<()> {
         let mut file = NamedTempFile::with_suffix(".rs")?;
@@ -498,6 +567,83 @@ fn main() {{
         // Test that run_stdin has correct signature and compiles
         // We don't actually run it because it would hang waiting for stdin
         // Compile-time verification that the function exists with correct signature
+    }
+
+    // What a windowed read books as its raw side (#2805/#1045): the cases are
+    // documented on `tracking_baseline`.
+
+    #[test]
+    fn test_tracking_baseline_shown_raw_books_no_saving() {
+        let raw = "alpha\nbravo\n";
+        let baseline = tracking_baseline(raw, raw, true, || "alpha\n[1 more lines]\n".into());
+
+        assert!(matches!(baseline, Cow::Borrowed(_)));
+        assert_eq!(baseline, raw);
+    }
+
+    #[test]
+    fn test_tracking_baseline_window_that_cut_nothing_borrows_raw() {
+        let raw = "// comment\nalpha\nbravo\n";
+        let shown = "alpha\nbravo\n";
+        let baseline = tracking_baseline(raw, shown, false, || unreachable!("no window"));
+
+        assert!(matches!(baseline, Cow::Borrowed(_)));
+        assert_eq!(baseline, raw);
+    }
+
+    #[test]
+    fn test_tracking_baseline_without_a_window_borrows_raw() {
+        let raw = format_with_line_numbers("alpha\nbravo\n");
+        let shown = format_with_line_numbers("alpha\n");
+        let baseline = tracking_baseline(&raw, &shown, false, || unreachable!("no window"));
+
+        assert!(matches!(baseline, Cow::Borrowed(_)));
+        assert_eq!(baseline, raw);
+    }
+
+    #[test]
+    fn test_tracking_baseline_cut_window_is_the_windowed_raw() {
+        let raw = "alpha\nbravo\ncharlie\ndelta\n";
+        let shown = "charlie\ndelta\n";
+        let baseline = tracking_baseline(raw, shown, true, || {
+            windowed_raw(raw, None, None, Some(2), false)
+        });
+
+        assert_eq!(baseline, "charlie\ndelta\n");
+    }
+
+    #[test]
+    fn test_tracking_baseline_cut_window_never_goes_below_shown() {
+        let raw = "alpha\nbravo\ncharlie\ndelta\n";
+        let shown = "a much longer shown line than the window\nand another one\n";
+        let baseline = tracking_baseline(raw, shown, true, || "alpha\n".into());
+
+        assert_eq!(baseline, shown);
+    }
+
+    #[test]
+    fn test_windowed_raw_max_lines_windows_the_raw_side() {
+        let input = "alpha\nbravo\ncharlie\ndelta\n";
+        let baseline = windowed_raw(input, Some(2), None, None, false);
+
+        assert!(baseline.starts_with("alpha\n"));
+        assert!(baseline.contains("more lines"));
+        assert!(!baseline.contains("bravo"));
+        assert!(!baseline.contains("charlie"));
+    }
+
+    #[test]
+    fn test_windowed_raw_head_lines_windows_the_raw_side() {
+        let input = "alpha\nbravo\ncharlie\ndelta\n";
+        assert_eq!(windowed_raw(input, None, Some(1), None, false), "alpha\n");
+    }
+
+    #[test]
+    fn test_windowed_raw_with_line_numbers_numbers_the_window() {
+        let input = "alpha\nbravo\ncharlie\ndelta\n";
+        let baseline = windowed_raw(input, None, None, Some(2), true);
+
+        assert_eq!(baseline, format_with_line_numbers("charlie\ndelta\n"));
     }
 
     #[test]
@@ -646,6 +792,44 @@ fn main() {{
         let output = apply_line_window(input, Some(2), None, None);
         assert!(output.starts_with("a\n"));
         assert!(output.contains("more lines"));
+    }
+
+    #[test]
+    fn test_raw_byte_window_passes_a_plain_read_through() {
+        let input: &[u8] = b"alpha\nbravo\n";
+        assert_eq!(
+            raw_byte_window(input, FilterLevel::None, None, None, None, false),
+            Some(input)
+        );
+    }
+
+    #[test]
+    fn test_raw_byte_window_declines_when_decoding_is_needed() {
+        let input: &[u8] = b"alpha\nbravo\n";
+        for (level, max_lines, line_numbers) in [
+            (FilterLevel::Minimal, None, false),
+            (FilterLevel::Aggressive, None, false),
+            (FilterLevel::None, None, true),
+            (FilterLevel::None, Some(1), false),
+        ] {
+            assert_eq!(
+                raw_byte_window(input, level, max_lines, None, None, line_numbers),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn test_raw_byte_window_keeps_line_windows() {
+        let input: &[u8] = b"alpha\nbravo\ncharlie\n";
+        assert_eq!(
+            raw_byte_window(input, FilterLevel::None, None, Some(1), None, false),
+            Some(&b"alpha\n"[..])
+        );
+        assert_eq!(
+            raw_byte_window(input, FilterLevel::None, None, None, Some(1), false),
+            Some(&b"charlie\n"[..])
+        );
     }
 
     #[test]

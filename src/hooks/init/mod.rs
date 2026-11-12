@@ -46,6 +46,7 @@ use claude::{
     hook_already_present, hook_gaps, remove_settings_entries, run_claude_md_mode, run_default_mode,
     run_hook_only_mode,
 };
+pub use codex::UninstallCodexOutcome;
 use codex::{run_codex_mode, show_codex_config, uninstall_codex};
 use cursor::{
     cursor_hook_already_present, install_cursor_hooks, remove_cursor_hooks, resolve_cursor_dir,
@@ -286,7 +287,12 @@ pub(super) const RTK_INSTRUCTIONS: &str = r##"<!-- rtk-instructions v2 -->
 
 ## Golden Rule
 
-**Always prefix commands with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes through unchanged. This means RTK is always safe to use.
+**Prefix external programs with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes the program through unchanged. This is safe for programs you would run from `PATH`.
+
+Do not prefix shell builtins or keywords — `test`, `[`, `read`, `cd`, `echo`,
+`export`, `eval`, `source`, `printf`. Commands such as `test`, `read`, and
+`env` also have RTK subcommands with different meanings; invoke the native
+command directly when you need it.
 
 **Important**: Even in command chains with `&&`, use `rtk`:
 ```bash
@@ -474,34 +480,60 @@ pub fn run(
             anyhow::bail!("Windsurf support is global-only. Use: rtk init -g --agent windsurf");
         }
 
-        if install_windsurf {
-            run_windsurf_mode(ctx)?;
-        } else if install_cline {
-            run_cline_mode(ctx)?;
-        } else {
-            // Mode selection (Claude Code / OpenCode)
-            match (install_claude, install_opencode, claude_md, hook_only) {
-                (false, true, _, _) => run_opencode_only_mode(ctx)?,
-                (true, opencode, true, _) => run_claude_md_mode(global, opencode, ctx)?,
-                (true, opencode, false, true) => {
-                    run_hook_only_mode(global, patch_mode, opencode, ctx)?
-                }
-                (true, opencode, false, false) => {
-                    run_default_mode(global, patch_mode, opencode, ctx)?
-                }
-                (false, false, _, _) => {
-                    if !install_cursor {
-                        anyhow::bail!(
-                            "at least one of install_claude or install_opencode must be true"
-                        )
+        // The OpenCode plugin is an independent target: install it before any
+        // agent so a Claude/Cursor failure cannot leave it missing, and vice
+        // versa. Its error is reported after the agent's.
+        let opencode_result = install_opencode.then(|| run_opencode_only_mode(ctx));
+        let opencode_plugin = opencode_result
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .and_then(|path| path.as_deref());
+
+        let agent_result = (|| -> Result<()> {
+            if install_windsurf {
+                run_windsurf_mode(ctx)?;
+            } else if install_cline {
+                run_cline_mode(ctx)?;
+            } else {
+                // Mode selection (Claude Code / OpenCode)
+                match (install_claude, install_opencode, claude_md, hook_only) {
+                    // The plugin was installed above, independently.
+                    (false, true, _, _) => {}
+                    (true, _, true, _) => run_claude_md_mode(global, ctx)?,
+                    (true, _, false, true) => {
+                        run_hook_only_mode(global, patch_mode, opencode_plugin, ctx)?
+                    }
+                    (true, _, false, false) => {
+                        run_default_mode(global, patch_mode, opencode_plugin, ctx)?
+                    }
+                    (false, false, _, _) => {
+                        if !install_cursor {
+                            anyhow::bail!(
+                                "at least one of install_claude or install_opencode must be true"
+                            )
+                        }
                     }
                 }
-            }
 
-            // Cursor hooks: on their own, or next to the OpenCode plugin with --opencode
-            if install_cursor {
-                install_cursor_hooks(ctx)?;
+                // Cursor hooks: on their own, or next to the OpenCode plugin with --opencode
+                if install_cursor {
+                    install_cursor_hooks(ctx)?;
+                }
             }
+            Ok(())
+        })();
+
+        match (opencode_result, agent_result) {
+            (Some(Err(opencode_error)), Err(agent_error)) => {
+                return Err(anyhow::anyhow!(
+                    "OpenCode install failed: {opencode_error:#}\nAgent install failed: {agent_error:#}"
+                ));
+            }
+            (Some(Err(error)), Ok(())) => {
+                return Err(error.context("OpenCode install failed"));
+            }
+            (_, Err(error)) => return Err(error),
+            _ => {}
         }
     }
 
@@ -872,7 +904,7 @@ fn report_pipeline_health() {
 /// config channel (settings.json `env`); everyone else keeps the manual
 /// export line from `rtk llm-proxy start --env`.
 /// The base URL the global settings point Claude Code at, if any.
-fn proxy_env_target() -> Option<String> {
+pub(super) fn proxy_env_target() -> Option<String> {
     let dir = resolve_claude_dir().ok()?;
     let content = fs::read_to_string(dir.join(SETTINGS_JSON)).ok()?;
     let root: serde_json::Value = from_json_str(strip_leading_bom(&content)).ok()?;
@@ -1398,7 +1430,7 @@ pub fn uninstall(
     pi: bool,
     omp: bool,
     ctx: InitContext,
-) -> Result<()> {
+) -> Result<i32> {
     uninstall_with_patch_mode(global, gemini, codex, cursor, pi, omp, PatchMode::Ask, ctx)
 }
 
@@ -1414,16 +1446,20 @@ pub fn uninstall_with_patch_mode(
     omp: bool,
     patch_mode: PatchMode,
     ctx: InitContext,
-) -> Result<()> {
+) -> Result<i32> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
     if codex {
-        uninstall_codex(global, ctx)?;
+        let outcome = uninstall_codex(global, ctx)?;
         if dry_run {
             print_dry_run_footer();
         }
-        return Ok(());
+        let code = match outcome {
+            UninstallCodexOutcome::Clean => 0,
+            UninstallCodexOutcome::HookRefused => 2,
+        };
+        return Ok(code);
     }
 
     if cursor {
@@ -1450,17 +1486,17 @@ pub fn uninstall_with_patch_mode(
         if dry_run {
             print_dry_run_footer();
         }
-        return Ok(());
+        return Ok(0);
     }
 
     if pi {
         uninstall_pi_with_patch_mode(global, patch_mode, ctx)?;
-        return Ok(());
+        return Ok(0);
     }
 
     if omp {
         uninstall_omp_with_patch_mode(global, patch_mode, ctx)?;
-        return Ok(());
+        return Ok(0);
     }
 
     if !global {
@@ -1495,7 +1531,7 @@ pub fn uninstall_with_patch_mode(
         if dry_run {
             print_dry_run_footer();
         }
-        return Ok(());
+        return Ok(0);
     }
 
     // 1. Remove legacy hook file (if exists from old installation)
@@ -1648,7 +1684,7 @@ pub fn uninstall_with_patch_mode(
         print_dry_run_footer();
     }
 
-    Ok(())
+    Ok(0)
 }
 
 /// Clean up consecutive blank lines (collapse 3+ to 2)
@@ -2446,10 +2482,64 @@ level = "high"
 
     #[test]
     fn test_awareness_activation_rule_only_in_full() {
-        const ACTIVATION: &str = "Prefix every shell command with `rtk`";
+        const ACTIVATION: &str = "Prefix external programs with `rtk`";
         assert!(!RTK_AWARENESS_DEFAULT.contains(ACTIVATION));
         assert!(!RTK_AWARENESS_HIGH.contains(ACTIVATION));
         assert!(RTK_AWARENESS_FULL.contains(ACTIVATION));
+    }
+
+    /// The prefix rule every payload that teaches it must carry: scoped to external programs,
+    /// naming the same builtins and RTK-shadowed names, and without the old promise that the
+    /// prefix is safe on anything. Shared with the Copilot payload's test so the three stay in
+    /// sync.
+    pub(super) fn assert_prefix_rule_spares_builtins(name: &str, content: &str) {
+        assert!(
+            content.contains("Prefix external programs with `rtk`"),
+            "{name} must scope the prefix rule to external programs"
+        );
+        let start = content
+            .find("Do not prefix shell builtins or keywords")
+            .unwrap_or_else(|| panic!("{name} must exclude shell builtins from the prefix rule"));
+        let paragraph = &content[start..];
+        let paragraph = &paragraph[..paragraph.find("\n\n").unwrap_or_else(|| {
+            panic!("{name}: the exclusion paragraph must end with a blank line")
+        })];
+        // The list itself is the first sentence; `env` is named in it or in the next one.
+        let list = &paragraph[..paragraph.find('.').unwrap_or(paragraph.len())];
+        for builtin in [
+            "test", "[", "read", "cd", "echo", "export", "eval", "source", "printf",
+        ] {
+            assert!(
+                list.contains(&format!("`{builtin}`")),
+                "{name} must list `{builtin}` among the commands left unprefixed"
+            );
+        }
+        assert!(
+            paragraph.contains("`env`"),
+            "{name} must name `env` in the paragraph that leaves commands unprefixed"
+        );
+        let words = content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        for promise in [
+            "always prefix shell commands with `rtk`",
+            "always prefix commands with `rtk`",
+            "prefix every shell command with `rtk`",
+            "always safe",
+        ] {
+            assert!(
+                !words.contains(promise),
+                "{name} must not promise that every shell command is safe to prefix: {promise:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_guidance_excludes_shell_builtins_from_prefix_rule() {
+        assert_prefix_rule_spares_builtins("awareness-full", RTK_AWARENESS_FULL);
+        assert_prefix_rule_spares_builtins("legacy", RTK_INSTRUCTIONS);
     }
 
     #[test]
