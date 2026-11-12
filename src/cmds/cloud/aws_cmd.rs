@@ -54,6 +54,12 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
             .collect::<Vec<_>>(),
     );
 
+    // `--query` reshapes the response, so a specialized filter would read
+    // fields that are no longer there (`AWS: ? ?` for a queried identity).
+    if has_query(args) {
+        return run_generic(subcommand, args, verbose, &full_sub);
+    }
+
     // Route to specialized handlers
     match subcommand {
         "sts" if !args.is_empty() && args[0] == "get-caller-identity" => run_aws_filtered(
@@ -200,6 +206,12 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
     }
 }
 
+/// Whether the user passed a JMESPath `--query`, which reshapes the response.
+fn has_query(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg == "--query" || arg.starts_with("--query="))
+}
+
 /// Returns true for operations that return structured JSON (describe-*, list-*, get-*).
 /// Mutating/transfer operations (s3 cp, s3 sync, s3 mb, etc.) emit plain text progress
 /// and do not accept --output json, so we must not inject it for them.
@@ -226,7 +238,7 @@ fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -
 
     let mut has_output_flag = false;
     for arg in args {
-        if arg == "--output" {
+        if arg == "--output" || arg.starts_with("--output=") {
             has_output_flag = true;
         }
         cmd.arg(arg);
@@ -2789,5 +2801,50 @@ upload: file10.txt to s3://bucket/file10.txt
             output.contains("isMpaEnabled"),
             "object keys must be preserved, got:\n{output}"
         );
+    }
+
+    #[test]
+    fn query_flag_is_detected_in_both_spellings() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(has_query(&args(&[
+            "get-caller-identity",
+            "--query",
+            "Account"
+        ])));
+        assert!(has_query(&args(&[
+            "get-caller-identity",
+            "--query=[Account,Arn]"
+        ])));
+        assert!(!has_query(&args(&["get-caller-identity"])));
+        assert!(!has_query(&args(&["query", "--table-name", "t"])));
+        assert!(!has_query(&args(&[
+            "get-caller-identity",
+            "--query-string",
+            "x"
+        ])));
+    }
+
+    #[test]
+    fn queried_identity_keeps_its_values_on_the_generic_path() {
+        // `--query Account` / `--query '[Account,Arn]'` with JSON output: the
+        // generic path compacts without dropping values.
+        let account = "123456789012";
+        let arn = "arn:aws:iam::123456789012:user/x";
+        for (queried, values) in [
+            (format!("\"{account}\"\n"), vec![account]),
+            (
+                format!("[\n    \"{account}\",\n    \"{arn}\"\n]\n"),
+                vec![account, arn],
+            ),
+        ] {
+            let shown = json_cmd::filter_json_compact(&queried, JSON_COMPRESS_DEPTH)
+                .expect("a queried response is JSON");
+            for value in values {
+                assert!(shown.contains(value), "{value} missing from {shown}");
+            }
+        }
+        // `--output text` is not JSON, so the generic path prints it as is.
+        let text = format!("{account}\t{arn}\n");
+        assert!(json_cmd::filter_json_compact(&text, JSON_COMPRESS_DEPTH).is_err());
     }
 }
