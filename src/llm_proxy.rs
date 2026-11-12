@@ -151,6 +151,8 @@ pub struct ProxyGainSummary {
     pub saved_pixel_compress: i64,
     pub saved_ccr: i64,
     pub saved_normalize: i64,
+    pub saved_rules: i64,
+    pub by_rule: Vec<(String, i64)>,
     /// Provider prompt-cache totals. The proxy rewrites request bodies, so a
     /// replacement that is not byte-stable across turns invalidates the
     /// upstream prefix — which costs far more than compression saves and is
@@ -227,6 +229,7 @@ impl ProxyGainSummary {
             ("normalize", self.saved_normalize),
             ("ingest-filter", self.saved_ingest_filter),
             ("pixel-compress", self.saved_pixel_compress),
+            (RULES_METHOD, self.saved_rules),
         ]
         .into_iter()
         .filter(|(_, v)| *v > 0)
@@ -328,6 +331,8 @@ fn read_gain_summary_at(db: &std::path::Path) -> Option<ProxyGainSummary> {
                     cache_fractures: 0,
                     retrieve_calls: r.get(15)?,
                     saved_normalize: r.get(16)?,
+                    saved_rules: 0,
+                    by_rule: Vec::new(),
                     cost_actual_usd: 0.0,
                     cost_without_usd: 0.0,
                     trimmed_requests: 0,
@@ -373,7 +378,29 @@ fn read_gain_summary_at(db: &std::path::Path) -> Option<ProxyGainSummary> {
     ) {
         s.trimmed_requests = n;
     }
+    if let Ok(n) = conn.query_row(
+        "SELECT COALESCE(SUM(saved_engine_methods),0) FROM usage_records",
+        [],
+        |r| r.get::<_, i64>(0),
+    ) {
+        s.saved_rules = n;
+    }
+    s.by_rule = savings_by_rule(&conn);
     Some(s)
+}
+
+pub const RULES_METHOD: &str = "rules";
+
+fn savings_by_rule(conn: &rusqlite::Connection) -> Vec<(String, i64)> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT j.key, SUM(j.value) FROM usage_records, json_each(usage_records.saved_rules) AS j \
+         WHERE json_valid(usage_records.saved_rules) GROUP BY j.key ORDER BY 2 DESC, 1",
+    ) else {
+        return Vec::new();
+    };
+    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
 }
 
 /// Proxy-side savings grouped by the pipeline active when each request was
@@ -389,6 +416,7 @@ pub struct ProxyPipelineRow {
     pub saved_normalize: i64,
     pub saved_ingest_filter: i64,
     pub saved_pixel_compress: i64,
+    pub saved_rules: i64,
     pub cache_read: i64,
     pub cache_created: i64,
 }
@@ -412,6 +440,7 @@ pub fn read_gain_summary_as_pipeline() -> Option<ProxyPipelineRow> {
         saved_normalize: s.saved_normalize,
         saved_ingest_filter: s.saved_ingest_filter,
         saved_pixel_compress: s.saved_pixel_compress,
+        saved_rules: s.saved_rules,
         cache_read: s.cache_read,
         cache_created: s.cache_created,
     })
@@ -427,6 +456,7 @@ impl ProxyPipelineRow {
             ("normalize", self.saved_normalize),
             ("ingest-filter", self.saved_ingest_filter),
             ("pixel-compress", self.saved_pixel_compress),
+            (RULES_METHOD, self.saved_rules),
         ]
         .into_iter()
         .filter(|(_, v)| *v > 0)
@@ -449,35 +479,44 @@ fn savings_by_pipeline_at(db: &std::path::Path) -> Option<Vec<ProxyPipelineRow>>
         rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .ok()?;
     conn.busy_timeout(Duration::from_millis(500)).ok()?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT COALESCE(pipeline, ''), COUNT(*), COALESCE(SUM(tokens_in),0), \
-             COALESCE(SUM(tokens_saved),0), COALESCE(SUM(saved_ccr),0), \
-             COALESCE(SUM(saved_normalize),0), COALESCE(SUM(saved_ingest_filter),0), \
-             COALESCE(SUM(saved_pixel_compress),0), COALESCE(SUM(cache_read_tokens),0), \
-             COALESCE(SUM(cache_creation_tokens),0) FROM usage_records \
-             GROUP BY 1 ORDER BY 4 DESC",
-        )
-        .ok()?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok(ProxyPipelineRow {
-                name: r.get(0)?,
-                requests: r.get(1)?,
-                tokens_in: r.get(2)?,
-                tokens_saved: r.get(3)?,
-                saved_ccr: r.get(4)?,
-                saved_normalize: r.get(5)?,
-                saved_ingest_filter: r.get(6)?,
-                saved_pixel_compress: r.get(7)?,
-                cache_read: r.get(8)?,
-                cache_created: r.get(9)?,
+    let rows = |rules: bool| -> Option<Vec<ProxyPipelineRow>> {
+        let rules_col = if rules {
+            "COALESCE(SUM(saved_engine_methods),0)"
+        } else {
+            "0"
+        };
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT COALESCE(pipeline, ''), COUNT(*), COALESCE(SUM(tokens_in),0), \
+                 COALESCE(SUM(tokens_saved),0), COALESCE(SUM(saved_ccr),0), \
+                 COALESCE(SUM(saved_normalize),0), COALESCE(SUM(saved_ingest_filter),0), \
+                 COALESCE(SUM(saved_pixel_compress),0), COALESCE(SUM(cache_read_tokens),0), \
+                 COALESCE(SUM(cache_creation_tokens),0), {rules_col} FROM usage_records \
+                 GROUP BY 1 ORDER BY 4 DESC"
+            ))
+            .ok()?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(ProxyPipelineRow {
+                    name: r.get(0)?,
+                    requests: r.get(1)?,
+                    tokens_in: r.get(2)?,
+                    tokens_saved: r.get(3)?,
+                    saved_ccr: r.get(4)?,
+                    saved_normalize: r.get(5)?,
+                    saved_ingest_filter: r.get(6)?,
+                    saved_pixel_compress: r.get(7)?,
+                    cache_read: r.get(8)?,
+                    cache_created: r.get(9)?,
+                    saved_rules: r.get(10)?,
+                })
             })
-        })
-        .ok()?
-        .filter_map(|r| r.ok())
-        .collect();
-    Some(rows)
+            .ok()?
+            .filter_map(|r| r.ok())
+            .collect();
+        Some(rows)
+    };
+    rows(true).or_else(|| rows(false))
 }
 
 /// Candidate paths for the daemon binary, in preference order: next to the
@@ -1223,6 +1262,95 @@ mod tests {
             ..Default::default()
         };
         assert!((s.cache_hit_ratio().unwrap() - 0.97).abs() < 1e-9);
+    }
+
+    #[test]
+    fn proxy_rule_savings_are_summed_per_rule() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("p.db");
+        let conn = rusqlite::Connection::open(&db_path).expect("open");
+        conn.execute_batch(
+            "CREATE TABLE usage_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                tokens_in INTEGER NOT NULL DEFAULT 0,
+                tokens_out INTEGER NOT NULL DEFAULT 0,
+                tokens_saved INTEGER NOT NULL DEFAULT 0,
+                cost_usd REAL NOT NULL DEFAULT 0,
+                status INTEGER NOT NULL DEFAULT 0,
+                session TEXT,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                ccr_retrieve_calls INTEGER NOT NULL DEFAULT 0,
+                ctx_total INTEGER NOT NULL DEFAULT 0,
+                ctx_tool_result INTEGER NOT NULL DEFAULT 0,
+                ctx_tool_use INTEGER NOT NULL DEFAULT 0,
+                ctx_duplicate INTEGER NOT NULL DEFAULT 0,
+                ctx_image INTEGER NOT NULL DEFAULT 0,
+                saved_ingest_filter INTEGER NOT NULL DEFAULT 0,
+                saved_pixel_compress INTEGER NOT NULL DEFAULT 0,
+                saved_ccr INTEGER NOT NULL DEFAULT 0,
+                saved_normalize INTEGER NOT NULL DEFAULT 0,
+                pipeline TEXT,
+                saved_engine_methods INTEGER NOT NULL DEFAULT 0,
+                saved_rules TEXT
+            );
+            INSERT INTO usage_records
+                (ts, status, tokens_saved, saved_engine_methods, saved_rules, pipeline)
+            VALUES ('2026-01-01T00:00:00Z', 200, 1720, 1720, '{\"web-pages\":1720}', 'team'),
+                   ('2026-01-01T00:00:30Z', 200, 900, 900, '{\"web-pages\":400,\"lockfiles\":500}', 'team'),
+                   ('2026-01-01T00:01:00Z', 200, 0, 0, NULL, 'team');",
+        )
+        .expect("seed db");
+        drop(conn);
+
+        let s = read_gain_summary_at(&db_path).expect("summary");
+        assert_eq!(s.saved_rules, 2620);
+        assert_eq!(
+            s.by_rule,
+            vec![
+                ("web-pages".to_string(), 2120),
+                ("lockfiles".to_string(), 500)
+            ]
+        );
+        assert_eq!(s.savings_by_method(), vec![(RULES_METHOD, 2620)]);
+        let rows = savings_by_pipeline_at(&db_path).expect("rows");
+        assert_eq!(rows[0].saved_rules, 2620);
+        assert_eq!(rows[0].savings_by_method(), vec![(RULES_METHOD, 2620)]);
+    }
+
+    #[test]
+    fn a_db_without_rule_columns_reports_no_rules() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("p.db");
+        let conn = rusqlite::Connection::open(&db_path).expect("open");
+        conn.execute_batch(
+            "CREATE TABLE usage_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                tokens_in INTEGER NOT NULL DEFAULT 0,
+                tokens_out INTEGER NOT NULL DEFAULT 0,
+                tokens_saved INTEGER NOT NULL DEFAULT 0,
+                status INTEGER NOT NULL DEFAULT 0,
+                ctx_total INTEGER NOT NULL DEFAULT 0,
+                ctx_tool_result INTEGER NOT NULL DEFAULT 0,
+                ctx_tool_use INTEGER NOT NULL DEFAULT 0,
+                ctx_duplicate INTEGER NOT NULL DEFAULT 0,
+                ctx_image INTEGER NOT NULL DEFAULT 0,
+                saved_ingest_filter INTEGER NOT NULL DEFAULT 0,
+                saved_pixel_compress INTEGER NOT NULL DEFAULT 0,
+                saved_ccr INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO usage_records (ts, status, tokens_saved, saved_ccr)
+            VALUES ('2026-01-01T00:00:00Z', 200, 90, 90);",
+        )
+        .expect("seed db");
+        drop(conn);
+
+        let s = read_gain_summary_at(&db_path).expect("summary");
+        assert_eq!(s.saved_rules, 0);
+        assert!(s.by_rule.is_empty());
+        assert_eq!(s.savings_by_method(), vec![("ccr", 90)]);
     }
 }
 
