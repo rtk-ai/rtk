@@ -1,0 +1,8 @@
+[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`test` profile [unoptimized + debuginfo]]8;;\ target(s) in 0.00s
+────────────
+[32;1m Nextest run[0m ID [1m5468985e-1fdf-40aa-a01e-4759652d1b15[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m2[0m tests across [1m1[0m binary ([1m1[0m test [33;1mskipped[0m)
+[32;1m        PASS[0m [   0.003s] (1/2) [35;1mokc[0m [36mtests[0m[36m::[0m[34;1ma[0m
+[32;1m        PASS[0m [   0.004s] (2/2) [35;1mokc[0m [36mtests[0m[36m::[0m[34;1mb[0m
+────────────
+[32;1m     Summary[0m [   0.004s] [1m2[0m tests run: [1m2[0m [32;1mpassed[0m, [1m1[0m [33;1mskipped[0m

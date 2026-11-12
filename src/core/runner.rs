@@ -328,6 +328,18 @@ where
         raw
     };
     let filtered = filter_fn(text_to_filter, exit_code);
+    // A filter that hands back the text it was given has nothing to say about it. That text is
+    // stdout and stderr joined, so printing it would move stderr onto stdout (breaking
+    // `rtk cargo nextest list --message-format json | jq` on the `Finished` line) and would
+    // store a recovery entry for output that is already shown whole. Each stream goes back to
+    // its own, exactly as captured. A stdout-only filter is given stdout alone, so its output is
+    // never compared with the joined text.
+    if !opts.filter_stdout_only && filtered == *raw {
+        print!("{}", result.raw_stdout);
+        eprint!("{}", result.raw_stderr);
+        timer.track(cmd_label, &format!("rtk {}", cmd_label), raw, raw);
+        return Ok(exit_code);
+    }
 
     let raw_for_tracking = if opts.filter_stdout_only {
         raw_stdout
@@ -2535,5 +2547,98 @@ mod err_test_runner_tests {
         assert!(!is_bun_count_line("6 passing"));
         assert!(!is_bun_count_line("x fail"));
         assert!(!is_bun_count_line("10 expect() calls"));
+    }
+}
+
+/// The stream split itself is checked end to end, through the real binary, in
+/// `tests/cargo_nextest_output_test.rs`.
+#[cfg(all(test, unix))]
+mod handed_back_output_tests {
+    use super::*;
+    use crate::core::test_isolation::tempdir;
+    use crate::core::user_env::with_path;
+
+    /// Larger than the recovery store's floor, so a run that reaches it stores an entry.
+    const STDERR_BYTES: usize = 2 * crate::core::tee::MIN_TEE_SIZE;
+
+    fn failing_command(stream: &str) -> Command {
+        // nosemgrep: interpreter-execution
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "head -c {STDERR_BYTES} /dev/zero | tr '\\0' x {stream}; exit 3"
+        ));
+        cmd
+    }
+
+    fn stored_entries(db: &std::path::Path) -> i64 {
+        if !db.exists() {
+            return 0;
+        }
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .and_then(|conn| conn.query_row("SELECT COUNT(*) FROM recall", [], |row| row.get(0)))
+            .expect("count the stored entries")
+    }
+
+    /// Runs `cmd` through the runner with the recall store in a directory of its own and
+    /// returns the exit code and how many entries the store holds afterwards.
+    fn run_and_count(
+        cmd: Command,
+        filter: impl Fn(&str) -> String,
+        opts: RunOptions<'_>,
+    ) -> (i32, i64) {
+        let dir = tempdir();
+        let db = dir.path().join("recall.db");
+        let code = with_path("RTK_RECALL_DB", Some(&db), || {
+            run_filtered(cmd, "sh", "-c script", filter, opts).expect("run the command")
+        });
+        (code, stored_entries(&db))
+    }
+
+    /// A failed run whose output the filter shrinks keeps the full output for `rtk recall`.
+    /// It is the control for the tests below: it shows the store is reachable from here.
+    #[test]
+    fn a_filtered_failed_run_stores_its_output() {
+        let (code, entries) = run_and_count(
+            failing_command(">&2"),
+            |_| "condensed\n".to_string(),
+            RunOptions::with_tee("sh"),
+        );
+        assert_eq!((code, entries), (3, 1));
+    }
+
+    /// A failed run whose output the filter hands back is printed in full, so there is
+    /// nothing to recover and nothing is stored.
+    #[test]
+    fn a_failed_run_handed_back_stores_nothing() {
+        let (code, entries) = run_and_count(
+            failing_command(">&2"),
+            str::to_string,
+            RunOptions::with_tee("sh"),
+        );
+        assert_eq!((code, entries), (3, 0));
+    }
+
+    /// A stdout-only filter is not compared with the joined text, so a run it leaves as it
+    /// was still gets the recovery entry its tee label asks for.
+    #[test]
+    fn a_stdout_only_filter_keeping_its_input_still_stores() {
+        let (code, entries) = run_and_count(
+            failing_command(""),
+            str::to_string,
+            RunOptions::stdout_only().tee("sh"),
+        );
+        assert_eq!((code, entries), (3, 1));
+    }
+
+    /// Only the very text the filter was given counts as handed back: one that differs by a
+    /// trailing newline is the filter's own output, with its recovery entry.
+    #[test]
+    fn a_filter_output_differing_by_a_newline_is_not_handed_back() {
+        let (code, entries) = run_and_count(
+            failing_command(">&2"),
+            |text: &str| format!("{text}\n"),
+            RunOptions::with_tee("sh"),
+        );
+        assert_eq!((code, entries), (3, 1));
     }
 }

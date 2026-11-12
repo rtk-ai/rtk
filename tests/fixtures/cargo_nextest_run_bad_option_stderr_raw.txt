@@ -1,0 +1,7 @@
+error: unexpected argument '--bogus' found
+
+  tip: to pass '--bogus' as a value, use '-- --bogus'
+
+Usage: cargo nextest run [OPTIONS] [FILTERS]... [-- <FILTERS_AND_ARGS>...]
+
+For more information, try '--help'.
