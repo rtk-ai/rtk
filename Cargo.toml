@@ -77,11 +77,12 @@ toml = "0.8"
 toml_edit = "0.22"
 chrono = "0.4"
 tempfile = "3"
-sha2 = "0.10"
+sha2 = "0.11"
+base16ct = "1"
 ureq = { version = "3", features = ["json"] }
 getrandom = "0.4"
 flate2 = "1.0"
-quick-xml = "0.37"
+quick-xml = "0.42"
 which = "8"
 # `rtk gain --watch`: a live full-screen dashboard over the same two SQLite
 # sources the static view reads (core::tracking + the llm-proxy's own DB).
