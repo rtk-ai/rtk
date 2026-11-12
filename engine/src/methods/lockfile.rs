@@ -84,33 +84,85 @@ fn render(kind: &str, mut packages: Vec<String>) -> String {
 }
 
 fn summarize_npm(input: &str) -> Option<String> {
-    let root: serde_json::Value = serde_json::from_str(input).ok()?;
-    let mut packages = Vec::new();
-
-    // v2/v3: "packages" map keyed by "node_modules/<name>".
-    if let Some(map) = root.get("packages").and_then(|p| p.as_object()) {
-        for (key, entry) in map {
-            if key.is_empty() {
-                continue; // root project entry
+    let packages = match serde_json::from_str::<serde_json::Value>(input) {
+        Ok(root) => {
+            let mut packages = Vec::new();
+            // v2/v3: "packages" map keyed by "node_modules/<name>".
+            if let Some(map) = root.get("packages").and_then(|p| p.as_object()) {
+                for (key, entry) in map {
+                    if key.is_empty() {
+                        continue; // root project entry
+                    }
+                    let name = key.rsplit("node_modules/").next().unwrap_or(key);
+                    if let Some(version) = entry.get("version").and_then(|v| v.as_str()) {
+                        packages.push(format!("{name}@{version}"));
+                    }
+                }
+            } else if let Some(map) = root.get("dependencies").and_then(|p| p.as_object()) {
+                // v1 top-level fallback.
+                for (name, entry) in map {
+                    if let Some(version) = entry.get("version").and_then(|v| v.as_str()) {
+                        packages.push(format!("{name}@{version}"));
+                    }
+                }
             }
-            let name = key.rsplit("node_modules/").next().unwrap_or(key);
-            if let Some(version) = entry.get("version").and_then(|v| v.as_str()) {
-                packages.push(format!("{name}@{version}"));
-            }
+            packages
         }
-    } else if let Some(map) = root.get("dependencies").and_then(|p| p.as_object()) {
-        // v1 top-level fallback.
-        for (name, entry) in map {
-            if let Some(version) = entry.get("version").and_then(|v| v.as_str()) {
-                packages.push(format!("{name}@{version}"));
-            }
-        }
-    }
+        Err(_) => parse_npm_partial(input),
+    };
 
     if packages.is_empty() {
         return None;
     }
     Some(render("package-lock.json", packages))
+}
+
+fn extract_json_string_field<'a>(s: &'a str, field: &str) -> Option<&'a str> {
+    let needle = format!("\"{field}\"");
+    let after = s
+        .split_once(&needle)?
+        .1
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start()
+        .strip_prefix('"')?;
+    let (val, _) = after.split_once('"')?;
+    Some(val)
+}
+
+fn parse_npm_partial(input: &str) -> Vec<String> {
+    let mut packages = Vec::new();
+    let mut current_name: Option<&str> = None;
+
+    for line in input.lines() {
+        let trimmed = line.trim_start();
+        if let Some((key, after_key)) = trimmed
+            .strip_prefix('"')
+            .and_then(|rest| rest.split_once("\":"))
+        {
+            if key.contains("node_modules/") && after_key.trim_start().starts_with('{') {
+                let name = key.rsplit("node_modules/").next().unwrap_or(key);
+                if let Some(version) = extract_json_string_field(after_key, "version") {
+                    packages.push(format!("{name}@{version}"));
+                    current_name = None;
+                } else {
+                    current_name = Some(name);
+                }
+                continue;
+            }
+        }
+
+        if let Some(name) = current_name {
+            if trimmed.starts_with('}') {
+                current_name = None;
+            } else if let Some(version) = extract_json_string_field(trimmed, "version") {
+                packages.push(format!("{name}@{version}"));
+                current_name = None;
+            }
+        }
+    }
+
+    packages
 }
 
 fn parse_cargo(input: &str) -> Vec<String> {
@@ -269,6 +321,29 @@ mod tests {
         assert!(out.contains("@scope/pkg@2.0.0"));
         assert!(out.contains("b@0.1.0"), "nested name resolved: {out}");
         assert!(!out.contains("integrity"), "hashes dropped");
+    }
+
+    #[test]
+    fn test_npm_v3_truncated_partial_read_summarized() {
+        let input = r#"{
+  "name": "app",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {
+      "name": "app",
+      "version": "1.0.0"
+    },
+    "node_modules/lodash": {
+      "version": "4.17.21",
+      "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"
+    },
+    "node_modules/@scope/pkg": {
+      "version": "2.0.0",
+      "integrity": "sha512-truncated"#;
+        let out = apply(input);
+        assert!(out.starts_with("package-lock.json: 2 packages"), "{out}");
+        assert!(out.contains("lodash@4.17.21"), "{out}");
+        assert!(out.contains("@scope/pkg@2.0.0"), "{out}");
     }
 
     #[test]

@@ -883,6 +883,13 @@ fn extract(
                 // rule matches it, so the default behaviour is passthrough.
                 ContentFormat::Term
             };
+            if format == ContentFormat::Lockfile
+                && is_unranged_partial_read(event)
+                && let Ok(full) = std::fs::read_to_string(source)
+                && !full.is_empty()
+            {
+                return Some((full, Some(format)));
+            }
             Some((content.to_string(), Some(format)))
         }
         "Grep" => {
@@ -939,6 +946,22 @@ fn is_lockfile_name(basename: &str) -> bool {
         basename,
         "package-lock.json" | "Cargo.lock" | "yarn.lock" | "pnpm-lock.yaml"
     )
+}
+
+/// True when `Read` was invoked without an explicit `offset`/`limit` range
+/// and the host truncated the returned file content (`numLines < totalLines`).
+fn is_unranged_partial_read(event: &Value) -> bool {
+    if event.pointer("/tool_input/offset").is_some() || event.pointer("/tool_input/limit").is_some()
+    {
+        return false;
+    }
+    let num = event
+        .pointer("/tool_response/file/numLines")
+        .and_then(Value::as_u64);
+    let total = event
+        .pointer("/tool_response/file/totalLines")
+        .and_then(Value::as_u64);
+    matches!((num, total), (Some(n), Some(t)) if n < t)
 }
 
 /// Re-wrap the filtered text in the same output shape the tool produced.
@@ -1777,5 +1800,81 @@ mod tests {
         assert_eq!(extension_of("https://docs.rs/toon"), "");
         assert_eq!(basename_of("/a/b/data.json"), "data.json");
         assert_eq!(basename_of("https://docs.rs/toon-format"), "docs.rs");
+    }
+
+    #[test]
+    fn test_read_partial_lockfile_summarized_from_disk_and_chunk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock_path = dir.path().join("package-lock.json");
+        let mut full_entries = Vec::new();
+        for i in 0..40 {
+            full_entries.push(format!(
+                "    \"node_modules/pkg-{i}\": {{\n      \"version\": \"1.0.{i}\",\n      \"integrity\": \"sha512-{}\"\n    }}",
+                "x".repeat(80)
+            ));
+        }
+        let full_lock = format!(
+            "{{\n  \"name\": \"app\",\n  \"lockfileVersion\": 3,\n  \"packages\": {{\n    \"\": {{ \"name\": \"app\", \"version\": \"1.0.0\" }},\n{}\n  }}\n}}\n",
+            full_entries.join(",\n")
+        );
+        std::fs::write(&lock_path, &full_lock).expect("write lockfile");
+
+        let total_lines = full_lock.lines().count();
+        let partial_lines = total_lines / 2;
+        let partial_content: String = full_lock
+            .lines()
+            .take(partial_lines)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Unranged partial Read with the full file on disk summarizes all 40 packages.
+        let event = serde_json::json!({
+            "tool_name": "Read",
+            "tool_input": {"file_path": lock_path.to_str().unwrap()},
+            "tool_response": {"type": "text", "file": {
+                "filePath": lock_path.to_str().unwrap(),
+                "content": partial_content,
+                "numLines": partial_lines,
+                "startLine": 1,
+                "totalLines": total_lines
+            }}
+        });
+        let out = run_posthook(&event).expect("lockfiles rule should fire on partial Read");
+        let parsed: Value = serde_json::from_str(&out).expect("valid json");
+        let content = parsed
+            .pointer("/hookSpecificOutput/updatedToolOutput/file/content")
+            .and_then(Value::as_str)
+            .expect("replacement content");
+        assert!(
+            content.starts_with("package-lock.json: 40 packages"),
+            "expected full 40-package summary, got: {content}"
+        );
+        assert!(content.contains("pkg-39@1.0.39"));
+
+        // When the file path is not on disk (or when offset/limit is set), the truncated
+        // JSON chunk itself is still summarized instead of passing through raw.
+        let missing_event = serde_json::json!({
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/nonexistent/path/package-lock.json"},
+            "tool_response": {"type": "text", "file": {
+                "filePath": "/nonexistent/path/package-lock.json",
+                "content": partial_content,
+                "numLines": partial_lines,
+                "startLine": 1,
+                "totalLines": total_lines
+            }}
+        });
+        let chunk_out =
+            run_posthook(&missing_event).expect("partial chunk should still summarize");
+        let chunk_parsed: Value = serde_json::from_str(&chunk_out).expect("valid json");
+        let chunk_content = chunk_parsed
+            .pointer("/hookSpecificOutput/updatedToolOutput/file/content")
+            .and_then(Value::as_str)
+            .expect("replacement content");
+        assert!(
+            chunk_content.starts_with("package-lock.json: "),
+            "expected lockfile summary header, got: {chunk_content}"
+        );
+        assert!(chunk_content.contains("pkg-0@1.0.0"));
     }
 }
