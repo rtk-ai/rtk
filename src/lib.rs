@@ -1410,8 +1410,8 @@ enum PnpmCommands {
     /// List installed packages (ultra-dense)
     List {
         /// Depth level (default: 0)
-        #[arg(short, long, default_value = "0")]
-        depth: usize,
+        #[arg(short, long, allow_negative_numbers = true)]
+        depth: Option<i64>,
         /// Additional pnpm arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -2814,7 +2814,12 @@ fn run_cli() -> Result<i32> {
             match command {
                 PnpmCommands::List { depth, args } => pnpm_cmd::run(
                     pnpm_cmd::PnpmCommand::List { depth },
-                    &merge_pnpm_args(&filter, recursive, workspace_root, &args),
+                    &merge_pnpm_args(
+                        &filter,
+                        recursive,
+                        workspace_root,
+                        &core::args_utils::restore_double_dash(&args),
+                    ),
                     cli.verbose,
                 )?,
                 PnpmCommands::Outdated { args } => pnpm_cmd::run(
@@ -5618,7 +5623,7 @@ mod tests {
                 command: PnpmCommands::List { depth, args },
                 ..
             } => {
-                assert_eq!(depth, 0);
+                assert_eq!(depth, None);
                 assert_eq!(filter, vec!["@app1", "@app2"]);
                 assert_eq!(
                     args,
