@@ -28,7 +28,7 @@ use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
     ast_grep_cmd, ctest_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls,
-    pipe_cmd, read, search, summary, tree, wc_cmd,
+    nix_cmd, pipe_cmd, read, search, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -665,6 +665,13 @@ enum Commands {
     /// Next.js build with compact output
     Next {
         /// Next.js build arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Nix search with compact output. Every other nix command passes through.
+    Nix {
+        /// Arguments passed to nix
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -3168,6 +3175,8 @@ fn run_cli() -> Result<i32> {
             }
         }
 
+        Commands::Nix { args } => nix_cmd::run(&args, cli.verbose)?,
+
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
         Commands::Gain(gain_args) => {
@@ -4105,6 +4114,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Prisma { .. }
             | Commands::Tsc { .. }
             | Commands::Next { .. }
+            | Commands::Nix { .. }
             | Commands::Ng { .. }
             | Commands::Lint { .. }
             | Commands::Prettier { .. }
@@ -4709,6 +4719,7 @@ mod tests {
             "prisma",
             "tsc",
             "next",
+            "nix",
             "ng",
             "lint",
             "prettier",
