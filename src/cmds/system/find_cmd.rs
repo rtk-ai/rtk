@@ -320,7 +320,7 @@ fn run_compress(
             files,
             max_results,
             max_explicit,
-            &[],
+            &Disclosure::default(),
             track_cmd,
             &raw_output,
             &timer,
@@ -329,11 +329,40 @@ fn run_compress(
     Ok(exit_code)
 }
 
+/// `rtk find`'s own usage: the text `rtk help find` prints.
+///
+/// `find` takes its arguments verbatim (`trailing_var_arg`), so clap hands
+/// `--help`/`-h` to [`run_from_args`] instead of answering it. Answering it here
+/// keeps the #4198 rule intact — a lone `--help` must not be read as find's
+/// legacy name pattern — without forwarding a flag the OS `find` does not have
+/// (`/usr/bin/find: illegal option -- -`, exit 1).
+///
+/// Rendered through the same parse path as `rtk help find`, because a hand-built
+/// subtree misses what clap propagates into it: the global args (`--skip-env`)
+/// and the resolved `rtk find` bin name.
+fn find_help_text() -> Result<String> {
+    match crate::try_parse_cli_from(["rtk", "help", "find"]) {
+        Err(err) if err.kind() == clap::error::ErrorKind::DisplayHelp => Ok(err.to_string()),
+        Err(err) => Err(anyhow::anyhow!("`rtk help find` printed no usage: {err}")),
+        Ok(_) => Err(anyhow::anyhow!("`rtk help find` parsed as a command")),
+    }
+}
+
+fn print_find_help() -> Result<i32> {
+    let help = find_help_text()?;
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(help.as_bytes())?;
+    stdout.flush()?;
+    Ok(0)
+}
+
 /// Entry point from main.rs — dispatches on find's grammar then delegates.
 pub fn run_from_args(args: &[String], verbose: u8) -> Result<i32> {
-    // dispatch() would read a lone `--help` as find's legacy name pattern (#4198).
+    // dispatch() would read a lone `--help` as find's legacy name pattern
+    // (#4198). Answer the flag ourselves: the OS find has no --help/-h, so
+    // forwarding it exits 1 with `illegal option`.
     if crate::core::runner::requests_help_args("find", args) {
-        return run_verbatim(args, verbose);
+        return print_find_help();
     }
     match dispatch(args)? {
         Dispatch::Native { parsed, label } => run(
@@ -444,7 +473,7 @@ pub fn run(
         return Ok(1);
     }
 
-    let (files, filtered) = native_walk(
+    let walk = native_walk(
         path,
         effective_pattern,
         max_depth,
@@ -452,6 +481,7 @@ pub fn run(
         case_insensitive,
         true,
     );
+    let files = walk.files;
 
     let raw_output = {
         let mut sorted = files.clone();
@@ -462,7 +492,7 @@ pub fn run(
         files,
         max_results,
         max_explicit,
-        &filtered,
+        &walk.disclosure,
         label,
         &raw_output,
         &timer,
@@ -473,6 +503,14 @@ pub fn run(
 
 const DISCLOSURE_ENTRY_CAP: usize = 20_000;
 
+/// What one walk produced.
+struct WalkResult {
+    /// Matches the walker kept.
+    files: Vec<String>,
+    /// What the walker skipped, and what disclosure could still name.
+    disclosure: Disclosure,
+}
+
 fn native_walk(
     path: &str,
     pattern: &str,
@@ -480,7 +518,7 @@ fn native_walk(
     want_dirs: bool,
     case_insensitive: bool,
     ambient_ignores: bool,
-) -> (Vec<String>, Vec<String>) {
+) -> WalkResult {
     // When the pattern targets dotfiles (e.g. -name ".claude.json"), we must walk hidden
     // entries; otherwise skip them to keep results tidy (#1101).
     let search_hidden = pattern.starts_with('.');
@@ -526,20 +564,18 @@ fn native_walk(
         }
     }
 
-    let filtered = if disclose {
-        disclose_filtered(
-            path,
-            pattern,
-            max_depth,
-            want_dirs,
-            case_insensitive,
-            &visited_dirs,
-            &visited,
-        )
-    } else {
-        Vec::new()
+    let query = Query {
+        pattern,
+        max_depth,
+        want_dirs,
+        case_insensitive,
     };
-    (files, filtered)
+    let disclosure = if disclose {
+        disclose_filtered(path, &query, &visited_dirs, &visited)
+    } else {
+        Disclosure::default()
+    };
+    WalkResult { files, disclosure }
 }
 
 fn entry_display(
@@ -586,16 +622,36 @@ fn relative_display(entry_path: &Path, root: &str) -> String {
 const FILTERED_CAP: usize = 1000;
 const UNREPORTED_DIR: &str = ".git";
 
-fn disclose_filtered(
-    root: &str,
-    pattern: &str,
+/// What disclosure found: entries it can name, and matches inside the
+/// directories it deliberately does not list.
+#[derive(Default)]
+struct Disclosure {
+    filtered: Vec<String>,
+    unreported: Vec<String>,
+}
+
+/// The question a walk answers; disclosure re-asks it of the entries the
+/// walker refused to visit.
+struct Query<'a> {
+    pattern: &'a str,
     max_depth: Option<usize>,
     want_dirs: bool,
     case_insensitive: bool,
+}
+
+fn disclose_filtered(
+    root: &str,
+    query: &Query<'_>,
     visited_dirs: &[(std::path::PathBuf, usize)],
     visited: &HashSet<std::path::PathBuf>,
-) -> Vec<String> {
-    let mut out = Vec::new();
+) -> Disclosure {
+    let Query {
+        pattern,
+        max_depth,
+        want_dirs,
+        case_insensitive,
+    } = *query;
+    let mut out = Disclosure::default();
     for (dir, depth) in visited_dirs {
         if max_depth.is_some_and(|max| *depth >= max) {
             continue;
@@ -613,20 +669,69 @@ fn disclose_filtered(
             let display = relative_display(&child_path, root);
             if is_dir {
                 if name == UNREPORTED_DIR {
+                    // The directory itself stays unlisted, but its matches are
+                    // collected: a skipped match must never read as "no match".
+                    // Children of `dir` sit at `depth + 2`.
+                    collect_unreported(&child_path, root, query, *depth + 2, &mut out.unreported);
+                    if out.unreported.len() >= FILTERED_CAP {
+                        break;
+                    }
                     continue;
                 }
-                out.push(format!("{}/", display));
+                out.filtered.push(format!("{}/", display));
             } else if !want_dirs && name_matches(pattern, &name, case_insensitive) {
-                out.push(display);
+                out.filtered.push(display);
             }
-            if out.len() >= FILTERED_CAP {
-                out.sort();
-                return out;
+            if out.filtered.len() >= FILTERED_CAP {
+                break;
             }
         }
     }
-    out.sort();
+    out.filtered.sort();
+    out.unreported.sort();
     out
+}
+
+/// Collects matches inside a directory disclosure refuses to list, so the
+/// caller can say they were skipped. Bounded by the caller's `-maxdepth`, by
+/// [`FILTERED_CAP`], and by not following symlinks.
+fn collect_unreported(
+    dir: &Path,
+    root: &str,
+    query: &Query<'_>,
+    entry_depth: usize,
+    out: &mut Vec<String>,
+) {
+    let Query {
+        pattern,
+        max_depth,
+        want_dirs,
+        case_insensitive,
+    } = *query;
+    if max_depth.is_some_and(|max| entry_depth > max) {
+        return;
+    }
+    let Ok(children) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for child in children.flatten() {
+        if out.len() >= FILTERED_CAP {
+            return;
+        }
+        let Ok(file_type) = child.file_type() else {
+            continue;
+        };
+        let name = child.file_name().to_string_lossy().into_owned();
+        let child_path = child.path();
+        if file_type.is_dir() {
+            if want_dirs && name_matches(pattern, &name, case_insensitive) {
+                out.push(format!("{}/", relative_display(&child_path, root)));
+            }
+            collect_unreported(&child_path, root, query, entry_depth + 1, out);
+        } else if !want_dirs && name_matches(pattern, &name, case_insensitive) {
+            out.push(relative_display(&child_path, root));
+        }
+    }
 }
 
 fn filtered_hint(filtered: &[String]) -> Option<String> {
@@ -648,17 +753,53 @@ fn filtered_hint(filtered: &[String]) -> Option<String> {
     }
 }
 
+/// The note for matches the walker skipped inside [`UNREPORTED_DIR`]. Silence
+/// here is indistinguishable from "no matches", which is the worse lie.
+fn unreported_hint(unreported: &[String]) -> Option<String> {
+    if unreported.is_empty() {
+        return None;
+    }
+    let count = if unreported.len() >= FILTERED_CAP {
+        format!("{}+", FILTERED_CAP)
+    } else {
+        unreported.len().to_string()
+    };
+    let noun = if unreported.len() == 1 {
+        "match"
+    } else {
+        "matches"
+    };
+    let note = format!(
+        "... ({count} {noun} inside {UNREPORTED_DIR}/ skipped; hidden dirs are not walked unless the pattern targets dotfiles)"
+    );
+    let mut sorted = unreported.to_vec();
+    sorted.sort();
+    let listing = format!("{}\n", sorted.join("\n"));
+    match crate::core::tee::force_tee_tail_hint(&listing, "find-hidden", 1) {
+        Some(tee_hint) => Some(format!("{}\n{}", note, tee_hint)),
+        None => Some(note),
+    }
+}
+
 fn render(
     mut files: Vec<String>,
     max_results: usize,
     max_explicit: bool,
-    filtered: &[String],
+    disclosure: &Disclosure,
     track_cmd: &str,
     raw_output: &str,
     timer: &tracking::TimedExecution,
 ) -> String {
     files.sort();
-    let note = filtered_hint(filtered);
+    let note = match (
+        filtered_hint(&disclosure.filtered),
+        unreported_hint(&disclosure.unreported),
+    ) {
+        (Some(filtered_note), Some(unreported_note)) => {
+            Some(format!("{}\n{}", filtered_note, unreported_note))
+        }
+        (filtered_note, unreported_note) => filtered_note.or(unreported_note),
+    };
     let rtk_cmd = format!("rtk {track_cmd}");
 
     if files.is_empty() {
@@ -1445,7 +1586,7 @@ mod tests {
                 match dispatch(&given).expect("dispatch") {
                     Dispatch::Native { parsed, .. } => {
                         assert!(*native, "{words:?} went native");
-                        let (files, _) = native_walk(
+                        let walk = native_walk(
                             &parsed.path,
                             &parsed.pattern,
                             parsed.max_depth,
@@ -1453,7 +1594,7 @@ mod tests {
                             parsed.case_insensitive,
                             true,
                         );
-                        assert!(!files.is_empty(), "{words:?} matches no entry");
+                        assert!(!walk.files.is_empty(), "{words:?} matches no entry");
                     }
                     Dispatch::Compress { .. } => assert!(!*native, "{words:?} went to compress"),
                     Dispatch::Verbatim(_) => panic!("{words:?} went verbatim"),
@@ -1555,23 +1696,32 @@ mod tests {
         std::fs::write(root.join("build").join("out.txt"), "w").unwrap();
         let root_s = root.to_string_lossy().into_owned();
 
-        let (files, filtered) = native_walk(&root_s, "*.txt", None, false, false, false);
-        assert_eq!(files, vec!["visible.txt".to_string()]);
+        let walk = native_walk(&root_s, "*.txt", None, false, false, false);
+        assert_eq!(walk.files, vec!["visible.txt".to_string()]);
         assert_eq!(
-            filtered,
+            walk.disclosure.filtered,
             vec![
                 ".hidden/".to_string(),
                 "build/".to_string(),
                 "secret.txt".to_string()
             ]
         );
+        assert!(
+            walk.disclosure.unreported.is_empty(),
+            "no `*.txt` match lives under .git: {:?}",
+            walk.disclosure.unreported
+        );
 
-        let (_, filtered) = native_walk(&root_s, "*.txt", Some(0), false, false, false);
-        assert!(filtered.is_empty(), "{filtered:?}");
+        let walk = native_walk(&root_s, "*.txt", Some(0), false, false, false);
+        assert!(
+            walk.disclosure.filtered.is_empty(),
+            "{:?}",
+            walk.disclosure.filtered
+        );
 
-        let (files, filtered) = native_walk(&root_s, ".gitignore", None, false, false, false);
-        assert_eq!(files, vec![".gitignore".to_string()]);
-        assert_eq!(filtered, vec!["build/".to_string()]);
+        let walk = native_walk(&root_s, ".gitignore", None, false, false, false);
+        assert_eq!(walk.files, vec![".gitignore".to_string()]);
+        assert_eq!(walk.disclosure.filtered, vec!["build/".to_string()]);
     }
 
     #[test]
@@ -1579,11 +1729,15 @@ mod tests {
         let tee = test_isolation::tempdir();
         user_env::with_path("RTK_TEE_DIR", Some(tee.path()), || {
             let timer = tracking::TimedExecution::start();
+            let disclosure = Disclosure {
+                filtered: vec!["secret.txt".to_string()],
+                unreported: Vec::new(),
+            };
             let shown = render(
                 vec!["visible.txt".to_string()],
                 50,
                 false,
-                &["secret.txt".to_string()],
+                &disclosure,
                 "find . -name '*.txt'",
                 "visible.txt",
                 &timer,
@@ -1593,7 +1747,7 @@ mod tests {
                 vec![],
                 50,
                 false,
-                &["secret.txt".to_string()],
+                &disclosure,
                 "find . -name secret.txt",
                 "",
                 &timer,
@@ -1612,9 +1766,53 @@ mod tests {
         std::fs::write(root.join("sub").join(".hidden").join("h.txt"), "h").unwrap();
         std::os::unix::fs::symlink(root.join("sub"), root.join("link")).unwrap();
         let link = root.join("link").to_string_lossy().into_owned();
-        let (files, filtered) = native_walk(&link, "*.txt", None, false, false, false);
-        assert_eq!(files, vec!["a.txt".to_string()]);
-        assert_eq!(filtered, vec![".hidden/".to_string()]);
+        let walk = native_walk(&link, "*.txt", None, false, false, false);
+        assert_eq!(walk.files, vec!["a.txt".to_string()]);
+        assert_eq!(walk.disclosure.filtered, vec![".hidden/".to_string()]);
+    }
+
+    #[test]
+    fn matches_inside_git_are_collected_as_unreported() {
+        let tmp = test_isolation::tempdir();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".git").join("objects")).unwrap();
+        std::fs::write(root.join(".git").join("objects").join("grill-me.md"), "x").unwrap();
+        std::fs::write(root.join(".git").join("HEAD"), "ref: refs/heads/main").unwrap();
+        let root_s = root.to_string_lossy().into_owned();
+
+        let walk = native_walk(&root_s, "*grill*", None, false, false, false);
+        assert!(walk.files.is_empty(), "{:?}", walk.files);
+        assert!(
+            walk.disclosure.filtered.is_empty(),
+            "{:?}",
+            walk.disclosure.filtered
+        );
+        assert_eq!(
+            walk.disclosure.unreported,
+            vec![".git/objects/grill-me.md".to_string()]
+        );
+
+        // `-maxdepth 1` stops above `.git`'s children, so nothing is claimed.
+        let walk = native_walk(&root_s, "*grill*", Some(1), false, false, false);
+        assert!(
+            walk.disclosure.unreported.is_empty(),
+            "{:?}",
+            walk.disclosure.unreported
+        );
+    }
+
+    #[test]
+    fn unreported_hint_counts_matches_not_directories() {
+        assert!(unreported_hint(&[]).is_none());
+        let hint = unreported_hint(&[
+            ".git/objects/grill-me.md".to_string(),
+            ".git/objects/grill-you.md".to_string(),
+        ])
+        .unwrap();
+        assert!(
+            hint.starts_with("... (2 matches inside .git/ skipped"),
+            "{hint}"
+        );
     }
 
     #[test]
