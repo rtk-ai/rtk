@@ -542,12 +542,19 @@ pub fn is_rtk_proxy_at(addr: &str, timeout: Duration) -> bool {
 }
 
 fn health_check_with_timeout(bind: &str, timeout: Duration) -> bool {
-    ureq::get(&format!("http://{bind}/health"))
-        .timeout(timeout)
-        .call()
-        .ok()
-        .and_then(|resp| resp.into_string().ok())
-        .is_some_and(|body| is_rtk_proxy_health(&body))
+    let url = format!("http://{bind}/health");
+    // ureq 2.12.1 buffers short response bodies with `LimitedRead::read_exact(...).expect(...)`
+    // (`response.rs:401-403`), which panics on macOS when a peer replies and closes the socket
+    // before reading the request (`set_read_timeout(None)` fails with `EINVAL` on a reset stream).
+    std::panic::catch_unwind(move || {
+        ureq::get(&url)
+            .timeout(timeout)
+            .call()
+            .ok()
+            .and_then(|resp| resp.into_string().ok())
+            .is_some_and(|body| is_rtk_proxy_health(&body))
+    })
+    .unwrap_or(false)
 }
 
 /// Whether a `/health` body identifies the rtk daemon. Anything else on the

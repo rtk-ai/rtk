@@ -466,8 +466,10 @@ mod probe_identity {
         let addr = listener.local_addr().expect("addr").to_string();
         std::thread::spawn(move || {
             for mut s in listener.incoming().flatten() {
-                // Answer like a generic dev server: 200 OK, not rtk-proxy.
-                use std::io::Write;
+                // Drain the request before replying so this test checks the
+                // body identity rather than socket-close races.
+                use std::io::{Read, Write};
+                let _ = s.read(&mut [0; 1024]);
                 let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
             }
         });
@@ -475,5 +477,23 @@ mod probe_identity {
             !probe(&addr, Duration::from_millis(300)),
             "a non-rtk server answering on the port must not count as the proxy"
         );
+    }
+
+    #[test]
+    fn probe_survives_peer_closing_without_reading_request() {
+        for _ in 0..8 {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().expect("addr").to_string();
+            std::thread::spawn(move || {
+                if let Ok((mut s, _)) = listener.accept() {
+                    use std::io::Write;
+                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+                }
+            });
+            assert!(
+                !probe(&addr, Duration::from_millis(300)),
+                "probe must return false rather than panicking when the peer drops the socket early"
+            );
+        }
     }
 }
