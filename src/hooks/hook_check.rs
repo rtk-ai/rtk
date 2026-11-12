@@ -47,6 +47,12 @@ pub fn status() -> HookStatus {
     super::init::claude::hook_status()
 }
 
+/// Extra line printed under the "Hook outdated" warning, if any.
+/// See [`super::init::claude::untagged_script_hint`].
+pub fn outdated_hint() -> Option<String> {
+    super::init::claude::untagged_script_hint()
+}
+
 /// Check if the installed hook is missing or outdated, warn once per day.
 pub fn maybe_warn() {
     // Don't block startup — fail silently on any error
@@ -88,6 +94,11 @@ fn check_and_warn() -> Option<()> {
     }
 
     eprintln!("{}", warning);
+    if status == HookStatus::Outdated
+        && let Some(hint) = outdated_hint()
+    {
+        eprintln!("{}", hint);
+    }
 
     // Touch marker after warning is printed
     let _ = crate::core::utils::create_private_dir(marker.parent()?);
