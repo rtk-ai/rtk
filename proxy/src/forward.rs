@@ -311,14 +311,19 @@ pub async fn relay(
     let retries = state.config.upstream_retries;
     let timeout = state.config.upstream_timeout_secs;
     let started = Instant::now();
+    let deadline = (timeout > 0).then(|| started + std::time::Duration::from_secs(timeout));
+    let buffered_deadline = deadline.filter(|_| !stream);
+    let client = if buffered_deadline.is_some() {
+        &state.http_buffered
+    } else {
+        &state.http
+    };
 
     let mut attempt: u32 = 0;
     loop {
-        let mut req = state.http.post(&url).body(body.clone());
-        // A total request timeout is safe only for buffered calls; a streamed SSE
-        // response is long-lived and must never be cut mid-stream.
-        if !stream && timeout > 0 {
-            req = req.timeout(std::time::Duration::from_secs(timeout));
+        let mut req = client.post(&url).body(body.clone());
+        if let Some(deadline) = buffered_deadline {
+            req = req.timeout(deadline.saturating_duration_since(Instant::now()));
         }
         for (k, v) in headers.iter() {
             if forwardable_to_upstream(k.as_str()) {
@@ -352,11 +357,11 @@ pub async fn relay(
                 return if stream && status.is_success() {
                     stream_relay(resp, provider, started)
                 } else {
-                    buffered_relay(resp, provider, started).await
+                    buffered_relay(resp, provider, started, deadline).await
                 };
             }
             Err(e) => {
-                if (e.is_timeout() || e.is_connect()) && attempt < retries {
+                if e.is_connect() && attempt < retries {
                     attempt += 1;
                     tracing::warn!(error = %e, url, attempt, "transient upstream error; retrying");
                     backoff(attempt).await;
@@ -415,11 +420,22 @@ async fn buffered_relay(
     resp: reqwest::Response,
     provider: Provider,
     started: Instant,
+    deadline: Option<Instant>,
 ) -> Forwarded {
     let status = resp.status();
     let status_u16 = status.as_u16();
     let headers = resp.headers().clone();
-    let bytes = match resp.bytes().await {
+    let read = async { resp.bytes().await.map_err(|e| e.to_string()) };
+    let body = match deadline {
+        Some(deadline) => {
+            let left = deadline.saturating_duration_since(Instant::now());
+            tokio::time::timeout(left, read)
+                .await
+                .unwrap_or_else(|_| Err("upstream body timed out".to_string()))
+        }
+        None => read.await,
+    };
+    let bytes = match body {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!(error = %e, "reading upstream body failed");
@@ -433,7 +449,7 @@ async fn buffered_relay(
                 ..Default::default()
             };
             return Forwarded::Buffered {
-                response: crate::error::AppError::Upstream(e.to_string()).into_response(),
+                response: crate::error::AppError::Upstream(e).into_response(),
                 outcome,
             };
         }
@@ -900,6 +916,146 @@ mod tests {
             ]
         });
         Bytes::from(serde_json::to_vec(&body).unwrap())
+    }
+
+    #[derive(Clone, Copy)]
+    enum Upstream {
+        Silent,
+        AnswersAfter(u64),
+        ErrorThenTrickle,
+    }
+
+    async fn upstream(mode: Upstream) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut conn, _)) = listener.accept().await {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = conn.read(&mut buf).await;
+                    match mode {
+                        Upstream::Silent => {
+                            tokio::time::sleep(std::time::Duration::from_secs(60)).await
+                        }
+                        Upstream::AnswersAfter(ms) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                            let _ = conn
+                                .write_all(
+                                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}",
+                                )
+                                .await;
+                        }
+                        Upstream::ErrorThenTrickle => {
+                            let _ = conn
+                                .write_all(
+                                    b"HTTP/1.1 400 Bad Request\r\ntransfer-encoding: chunked\r\n\r\n",
+                                )
+                                .await;
+                            while conn.write_all(b"1\r\n \r\n").await.is_ok() {
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        (base, hits)
+    }
+
+    async fn relay_status(st: &AppState, base: &str, stream: bool) -> (u16, std::time::Duration) {
+        let started = Instant::now();
+        let forwarded = relay(
+            st,
+            base,
+            "/v1/messages",
+            HeaderMap::new(),
+            Bytes::from_static(b"{}"),
+            Provider::Anthropic,
+            stream,
+        )
+        .await;
+        let status = match forwarded {
+            Forwarded::Buffered { response, .. } | Forwarded::Streaming { response, .. } => {
+                response.status().as_u16()
+            }
+        };
+        (status, started.elapsed())
+    }
+
+    fn bounded(timeout_secs: u64, retries: u32) -> AppState {
+        let mut config = cfg(false);
+        config.upstream_timeout_secs = timeout_secs;
+        config.upstream_retries = retries;
+        AppState::new(config)
+    }
+
+    #[tokio::test]
+    async fn the_timeout_bounds_the_whole_request_and_a_silent_upstream_is_not_resent() {
+        let (base, hits) = upstream(Upstream::Silent).await;
+        let st = bounded(1, 2);
+        let (status, took) = relay_status(&st, &base, false).await;
+        assert_eq!(status, 502);
+        assert!(
+            took < std::time::Duration::from_millis(2500),
+            "a 1s timeout with 2 retries must not wait 3s, waited {took:?}"
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_silent_upstream_is_not_resent_for_a_streaming_request() {
+        let (base, hits) = upstream(Upstream::Silent).await;
+        let mut st = bounded(0, 2);
+        st.http = crate::http_client_with(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(200),
+        );
+        let (status, took) = relay_status(&st, &base, true).await;
+        assert_eq!(status, 502);
+        assert!(took < std::time::Duration::from_secs(2), "waited {took:?}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_slow_buffered_answer_outlives_the_silence_bound() {
+        let (base, hits) = upstream(Upstream::AnswersAfter(600)).await;
+        let mut st = bounded(5, 2);
+        st.http = crate::http_client_with(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(200),
+        );
+        let (status, _) = relay_status(&st, &base, false).await;
+        assert_eq!(status, 200);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn an_error_body_that_never_ends_is_cut_for_a_streaming_request() {
+        let (base, _) = upstream(Upstream::ErrorThenTrickle).await;
+        let st = bounded(1, 0);
+        let (status, took) = relay_status(&st, &base, true).await;
+        assert_eq!(status, 502);
+        assert!(took < std::time::Duration::from_secs(3), "waited {took:?}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_is_still_retried() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        drop(listener);
+        let st = bounded(5, 2);
+        let (status, took) = relay_status(&st, &base, false).await;
+        assert_eq!(status, 502);
+        assert!(
+            took >= std::time::Duration::from_millis(500),
+            "two backoffs (200ms + 400ms) must have run, took {took:?}"
+        );
     }
 
     #[tokio::test]
