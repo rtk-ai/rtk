@@ -17,6 +17,7 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "go-build" => Some(crate::cmds::go::go_cmd::filter_go_build),
         "ctest" => Some(crate::cmds::system::ctest_cmd::filter_ctest_output),
         "tsc" => Some(crate::cmds::js::tsc_cmd::filter_tsc_output),
+        "pnpm-install" => Some(crate::cmds::js::pnpm_cmd::filter_pnpm_install),
         "vitest" => Some(vitest_wrapper),
         "grep" | "rg" => Some(grep_wrapper),
         "find" | "fd" => Some(find_wrapper),
@@ -275,7 +276,7 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
         Some(name) => resolve_filter(name).ok_or_else(|| {
             anyhow::anyhow!(
                 "Unknown filter '{}'. Available: cargo-test, pytest, go-test, go-build, \
-                 ctest, tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
+                 ctest, tsc, pnpm-install, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
                  log, mypy, ruff-check, ruff-format, sqlfluff-lint, prettier, phpunit, pest, \
                  paratest, php-test, ecs, phpstan, pint",
                 name
@@ -408,6 +409,16 @@ mod tests {
     #[test]
     fn test_resolve_filter_tsc() {
         assert!(resolve_filter("tsc").is_some());
+    }
+
+    #[test]
+    fn test_resolve_filter_pnpm_install() {
+        let f = resolve_filter("pnpm-install").expect("pnpm-install filter must exist");
+        let input = "Progress: resolved 412, reused 401, downloaded 11, added 412, done\n\ndependencies:\n+ react 18.3.1\n\nDone in 3.2s using pnpm v9.12.0\n ERR_PNPM_PEER_DEP_ISSUES  Unmet peer dependencies\n";
+        let out = f(input);
+        assert!(!out.contains("Progress:"), "out={}", out);
+        assert!(out.contains("+ react 18.3.1"), "out={}", out);
+        assert!(out.contains("ERR_PNPM_PEER_DEP_ISSUES"), "out={}", out);
     }
 
     #[test]
