@@ -1049,7 +1049,7 @@ pub fn parse_restore_issues_from_text(text: &str) -> (Vec<BinlogIssue>, Vec<Binl
 }
 
 fn count_projects(text: &str) -> usize {
-    // Count test projects, not lines that mention one: restore warnings name a project's .csproj
+    // Count projects, not lines that mention one: restore warnings name a project's .csproj
     // once per warning, and a fresh restore names it again in a `Restored <csproj>` line. Each
     // test assembly the run executes prints one `Test run for <dll>` line with its full path, so
     // those lines are counted when present. Output without them falls back to the DISTINCT lines
@@ -1066,8 +1066,8 @@ fn count_projects(text: &str) -> usize {
     }
     let mut csprojs: HashSet<&str> = HashSet::new();
     for captures in PROJECT_PATH_RE.captures_iter(text) {
-        // The path is the last whitespace-separated token of the match: the line's leading
-        // `Restored ` / leading whitespace stay behind the token.
+        // The key is the last whitespace-separated token of the match, which is the whole path
+        // when the path has no spaces; a leading `Restored ` stays out of it.
         if let Some(path) = captures
             .get(0)
             .and_then(|m| m.as_str().split_whitespace().last())
@@ -1666,6 +1666,20 @@ Restore failed with 1 error(s) in 1.0s
         assert_eq!(summary.errors.len(), 1);
         assert_eq!(summary.errors[0].code, "CS1525");
         assert_eq!(summary.duration_text.as_deref(), Some("00:00:00.76"));
+    }
+
+    #[test]
+    fn test_parse_build_from_text_counts_each_restored_project_once() {
+        // `dotnet build -bl:<path>` (.NET 10.0.400) after a fresh restore of a library and two test
+        // projects, all three with NuGet audit warnings: each project is named by one
+        // `Restored <csproj>` line and by its warning lines, and counts once.
+        let input = include_str!(
+            "../../../tests/fixtures/dotnet/build_fresh_restore_all_projects_warn.txt"
+        );
+
+        let summary = parse_build_from_text(input);
+
+        assert_eq!(summary.project_count, 3);
     }
 
     #[test]
