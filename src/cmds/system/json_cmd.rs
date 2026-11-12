@@ -96,9 +96,9 @@ fn render_json<'a>(content: &'a str, max_depth: usize, schema_only: bool) -> Res
         // answer, so there is no pair for never_worse to compare: the schema
         // is the answer, and in compact form it is also smaller than the input
         // in practice. Bypassing the guard is therefore the only correct path.
-        return Ok(Cow::Owned(filter_json_string(content, max_depth)?));
+        return Ok(Cow::Owned(filter_schema(content, max_depth)?));
     }
-    let output = filter_json_compact(content, max_depth)?;
+    let output = filter_compact(content, max_depth)?;
     let shown = never_worse(content, &output);
     // never_worse hands back one of its two inputs (no allocation); compare
     // the `&str` fat pointers to tell which, instead of re-deriving the
@@ -114,7 +114,7 @@ fn render_json<'a>(content: &'a str, max_depth: usize, schema_only: bool) -> Res
 
 /// Parse a JSON string and return compact representation with values preserved.
 /// Long strings are truncated, arrays are summarized.
-pub fn filter_json_compact(json_str: &str, max_depth: usize) -> Result<String> {
+pub fn filter_compact(json_str: &str, max_depth: usize) -> Result<String> {
     let value: Value = from_json_str(json_str).context("Failed to parse JSON")?;
     Ok(compact_json(&value, 0, max_depth))
 }
@@ -205,7 +205,7 @@ fn compact_json(value: &Value, depth: usize, max_depth: usize) -> String {
 
 /// Parse a JSON string and return its schema representation (types only, no values).
 /// Useful for piping JSON from other commands (e.g., `gh api`, `curl`).
-pub fn filter_json_string(json_str: &str, max_depth: usize) -> Result<String> {
+pub fn filter_schema(json_str: &str, max_depth: usize) -> Result<String> {
     let value: Value = from_json_str(json_str).context("Failed to parse JSON")?;
     Ok(extract_schema(&value, 0, max_depth))
 }
@@ -356,8 +356,7 @@ mod tests {
 
     fn assert_value_truncated(payload: &str) {
         let json = format!(r#"{{"key": "{}"}}"#, payload);
-        let output = filter_json_compact(&json, 5)
-            .expect("filter_json_compact must not error on valid JSON");
+        let output = filter_compact(&json, 5).expect("filter_compact must not error on valid JSON");
 
         assert!(output.contains("key"));
         assert!(
@@ -379,20 +378,20 @@ mod tests {
     #[test]
     fn test_compact_parses_bom_prefixed_json() {
         let json = "\u{feff}{\"name\": \"test\", \"count\": 42}";
-        let output = filter_json_compact(json, 5).expect("BOM-prefixed JSON must parse");
+        let output = filter_compact(json, 5).expect("BOM-prefixed JSON must parse");
         assert!(output.contains("name"));
         assert!(output.contains("42"));
         // Same input without BOM produces identical output.
-        assert_eq!(output, filter_json_compact(&json[3..], 5).unwrap());
+        assert_eq!(output, filter_compact(&json[3..], 5).unwrap());
     }
 
     #[test]
     fn test_schema_parses_bom_prefixed_json() {
         let json = "\u{feff}{\"name\": \"test\", \"count\": 42}";
-        let output = filter_json_string(json, 5).expect("BOM-prefixed JSON must parse");
+        let output = filter_schema(json, 5).expect("BOM-prefixed JSON must parse");
         assert!(output.contains("string"));
         assert!(output.contains("int"));
-        assert_eq!(output, filter_json_string(&json[3..], 5).unwrap());
+        assert_eq!(output, filter_schema(&json[3..], 5).unwrap());
     }
 
     #[test]
@@ -535,14 +534,14 @@ mod tests {
             )
         };
 
-        let sixteen = filter_json_string(&make(16), 5).expect("16-key object must parse");
+        let sixteen = filter_schema(&make(16), 5).expect("16-key object must parse");
         assert_eq!(sixteen.matches(":int").count(), 16, "{sixteen:?}");
         assert!(
             !sixteen.contains("+0"),
             "16-key object reported an empty cap: {sixteen:?}"
         );
 
-        let seventeen = filter_json_string(&make(17), 5).expect("17-key object must parse");
+        let seventeen = filter_schema(&make(17), 5).expect("17-key object must parse");
         assert_eq!(seventeen.matches(":int").count(), 16, "{seventeen:?}");
         assert!(
             seventeen.contains("...+1"),
@@ -569,7 +568,7 @@ mod tests {
             (r#"{"say \"hi\"":1}"#, r#"{"say \"hi\"":int}"#),
             (r#"{"https://x.io:443":1}"#, r#"{"https://x.io:443":int}"#),
         ] {
-            let shown = filter_json_string(raw, 5).expect("must parse");
+            let shown = filter_schema(raw, 5).expect("must parse");
             assert_eq!(shown, expected, "for {raw}");
         }
     }
