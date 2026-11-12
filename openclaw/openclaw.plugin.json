@@ -18,11 +18,16 @@
         "type": "boolean",
         "default": false,
         "description": "Log rewrite decisions to console for debugging"
+      },
+      "rtkPath": {
+        "type": "string",
+        "description": "Optional absolute path to a trusted RTK executable"
       }
     }
   },
   "uiHints": {
     "enabled": { "label": "Enable RTK rewriting" },
-    "verbose": { "label": "Verbose logging" }
+    "verbose": { "label": "Verbose logging" },
+    "rtkPath": { "label": "RTK executable path" }
   }
 }
