@@ -390,6 +390,38 @@ pub fn record_tee_elision(cfg: &RetrieverConfig, slug: &str) {
     }
 }
 
+/// Remove a stored recall entry whose hint was dropped by the token guard before
+/// reaching the caller, rolling back its elision counter so `rtk recall --list`
+/// and `rtk gain --recalls` only reflect hints that were actually emitted.
+pub fn discard(cfg: &RetrieverConfig, hash: &str) {
+    let Ok(Some(conn)) = open_existing(cfg) else {
+        return;
+    };
+    let command: Option<String> = conn
+        .query_row(
+            "SELECT command FROM recall WHERE hash = ?1",
+            params![hash],
+            |r| r.get(0),
+        )
+        .ok();
+    let deleted = conn
+        .execute("DELETE FROM recall WHERE hash = ?1", params![hash])
+        .unwrap_or(0);
+    if deleted > 0
+        && let Some(cmd) = command
+    {
+        let slug = stat_key(&cmd);
+        let _ = conn.execute(
+            "UPDATE recall_stats SET elisions = MAX(0, elisions - 1) WHERE slug = ?1 AND mode = 'sqlite'",
+            params![slug],
+        );
+        let _ = conn.execute(
+            "DELETE FROM recall_stats WHERE slug = ?1 AND mode = 'sqlite' AND elisions <= 0 AND recalls <= 0",
+            params![slug],
+        );
+    }
+}
+
 fn mark_recalled(conn: &Connection, hash: &str, command: &str) {
     let changed = conn
         .execute(
