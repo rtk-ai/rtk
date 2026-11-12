@@ -1,9 +1,149 @@
+use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec};
 use crate::core::guard::never_worse;
 use crate::core::shell::quote_word;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
+
+/// wget's value-taking short flags, from `wget --help` (GNU Wget 1.25).
+const SHORT_VALUE_FLAGS: &[&str] = &[
+    "e", "o", "a", "i", "B", "t", "O", "T", "w", "Q", "P", "U", "l", "A", "R", "D", "I", "X",
+];
+
+/// wget's value-taking long flags, from `wget --help` (GNU Wget 1.25).
+const LONG_VALUE_FLAGS: &[&str] = &[
+    "execute",
+    "output-file",
+    "append-output",
+    "input-file",
+    "base",
+    "tries",
+    "output-document",
+    "timeout",
+    "wait",
+    "quota",
+    "directory-prefix",
+    "user-agent",
+    "level",
+    "accept",
+    "reject",
+    "domains",
+    "include-directories",
+    "exclude-directories",
+    "report-speed",
+    "config",
+    "rejected-log",
+    "retry-on-http-error",
+    "start-pos",
+    "progress",
+    "dns-timeout",
+    "connect-timeout",
+    "read-timeout",
+    "waitretry",
+    "bind-address",
+    "limit-rate",
+    "restrict-file-names",
+    "prefer-family",
+    "user",
+    "password",
+    "use-askpass",
+    "local-encoding",
+    "remote-encoding",
+    "cut-dirs",
+    "http-user",
+    "http-password",
+    "default-page",
+    "header",
+    "compression",
+    "proxy-user",
+    "proxy-password",
+    "referer",
+    "load-cookies",
+    "save-cookies",
+    "post-data",
+    "post-file",
+    "method",
+    "body-data",
+    "body-file",
+    "secure-protocol",
+    "certificate",
+    "certificate-type",
+    "private-key",
+    "private-key-type",
+    "ca-certificate",
+    "ca-directory",
+    "crl-file",
+    "pinnedpubkey",
+    "random-file",
+    "ciphers",
+    "ftp-user",
+    "ftp-password",
+    "warc-file",
+    "warc-header",
+    "warc-max-size",
+    "warc-dedup",
+    "warc-tempdir",
+    "backups",
+    "accept-regex",
+    "reject-regex",
+    "regex-type",
+    "exclude-domains",
+    "follow-tags",
+    "ignore-tags",
+];
+
+fn wget_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    let takes = match kind {
+        TokenKind::Short => SHORT_VALUE_FLAGS.contains(&name),
+        TokenKind::Long => LONG_VALUE_FLAGS.contains(&name),
+        _ => false,
+    };
+    takes.then(ValueSpec::value)
+}
+
+fn tokenize(args: &[String]) -> Vec<Token<'_>> {
+    arg_tokenizer::tokenize_grammar(args, &wget_takes_value, Dialect::Posix)
+}
+
+/// `-O -` in any spelling: `-O -`, `-O-`, `-qO-`, `--output-document -`, `--output-document=-`.
+fn is_stdout_output(token: &Token<'_>, tokens: &[Token<'_>]) -> bool {
+    let is_output = match token.kind {
+        TokenKind::Short => token.text == "O",
+        TokenKind::Long => token.text == "output-document",
+        _ => false,
+    };
+    is_output && token.value(tokens) == Some("-")
+}
+
+/// Check whether trailing args ask wget to write the document to stdout
+/// (Clap's trailing_var_arg absorbs `-O -` when another flag precedes it).
+pub fn has_stdout_output_flag(args: &[String]) -> bool {
+    let tokens = tokenize(args);
+    tokens.iter().any(|t| is_stdout_output(t, &tokens))
+}
+
+/// Remove the stdout `-O -` from args, returning the remaining arguments to pass
+/// through to wget. Other flags clustered with it survive: `-qO-` becomes `-q`.
+pub fn strip_output_flag(args: &[String]) -> Vec<String> {
+    let tokens = tokenize(args);
+    let mut kept: Vec<Option<String>> = args.iter().cloned().map(Some).collect();
+    for token in tokens.iter().filter(|t| is_stdout_output(t, &tokens)) {
+        if let Some(value) = token.linked.and_then(|i| tokens.get(i)) {
+            kept[value.source_index] = None;
+        }
+        // A Short `O` can only follow boolean flags in its cluster: a value-taking
+        // flag before it would have consumed the rest of the arg as its value.
+        let flags_before = match token.kind {
+            TokenKind::Short => args[token.source_index][1..]
+                .split_once('O')
+                .map_or("", |(before, _)| before),
+            _ => "",
+        };
+        kept[token.source_index] = (!flags_before.is_empty()).then(|| format!("-{flags_before}"));
+    }
+    kept.into_iter().flatten().collect()
+}
 
 /// Compact wget - strips progress bars, shows only result
 pub fn run(url: &str, args: &[String], verbose: u8) -> Result<i32> {
@@ -280,6 +420,132 @@ fn truncate_line(line: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    // --- has_stdout_output_flag ---
+
+    #[test]
+    fn detect_dash_o_dash_separated() {
+        assert!(has_stdout_output_flag(&s(&["-O", "-"])));
+    }
+
+    #[test]
+    fn detect_dash_o_dash_combined() {
+        assert!(has_stdout_output_flag(&s(&["-O-"])));
+    }
+
+    #[test]
+    fn detect_long_form_separated() {
+        assert!(has_stdout_output_flag(&s(&["--output-document", "-"])));
+    }
+
+    #[test]
+    fn detect_long_form_equals() {
+        assert!(has_stdout_output_flag(&s(&["--output-document=-"])));
+    }
+
+    #[test]
+    fn detect_stdout_after_other_flags() {
+        assert!(has_stdout_output_flag(&s(&[
+            "--no-check-certificate",
+            "-q",
+            "-O",
+            "-"
+        ])));
+    }
+
+    #[test]
+    fn no_detect_output_to_file() {
+        assert!(!has_stdout_output_flag(&s(&["-O", "file.html"])));
+    }
+
+    #[test]
+    fn no_detect_no_output_flag() {
+        assert!(!has_stdout_output_flag(&s(&[
+            "-q",
+            "--no-check-certificate"
+        ])));
+    }
+
+    #[test]
+    fn no_detect_empty_args() {
+        assert!(!has_stdout_output_flag(&s(&[])));
+    }
+
+    #[test]
+    fn no_detect_dash_o_at_end_without_value() {
+        assert!(!has_stdout_output_flag(&s(&["-O"])));
+    }
+
+    // --- strip_output_flag ---
+
+    #[test]
+    fn strip_dash_o_dash_separated() {
+        assert_eq!(strip_output_flag(&s(&["-q", "-O", "-"])), s(&["-q"]));
+    }
+
+    #[test]
+    fn strip_dash_o_dash_combined() {
+        assert_eq!(
+            strip_output_flag(&s(&["--no-check-certificate", "-O-"])),
+            s(&["--no-check-certificate"])
+        );
+    }
+
+    #[test]
+    fn strip_long_form_equals() {
+        assert_eq!(
+            strip_output_flag(&s(&["-q", "--output-document=-"])),
+            s(&["-q"])
+        );
+    }
+
+    #[test]
+    fn strip_preserves_output_to_file() {
+        let args = s(&["-O", "file.html", "-q"]);
+        assert_eq!(strip_output_flag(&args), args);
+    }
+
+    #[test]
+    fn strip_preserves_no_output_flag() {
+        let args = s(&["-q", "--no-check-certificate"]);
+        assert_eq!(strip_output_flag(&args), args);
+    }
+
+    #[test]
+    fn detect_and_strip_clustered_short_flags() {
+        // `wget URL -qO-`: the common combined spelling, after the URL
+        assert!(has_stdout_output_flag(&s(&["-qO-"])));
+        assert_eq!(strip_output_flag(&s(&["-qO-"])), s(&["-q"]));
+        assert!(has_stdout_output_flag(&s(&["-qO", "-"])));
+        assert_eq!(strip_output_flag(&s(&["-qO", "-", "-v"])), s(&["-q", "-v"]));
+    }
+
+    #[test]
+    fn strip_long_form_separated() {
+        assert_eq!(
+            strip_output_flag(&s(&["--output-document", "-", "-q"])),
+            s(&["-q"])
+        );
+    }
+
+    #[test]
+    fn no_detect_dash_as_value_of_another_flag() {
+        // `-` is the value of --header / -U here, not of -O
+        assert!(!has_stdout_output_flag(&s(&["--header", "-", "-O", "out"])));
+        assert!(!has_stdout_output_flag(&s(&["-U", "-O-"])));
+        assert!(!has_stdout_output_flag(&s(&["-tO-"])));
+    }
+
+    #[test]
+    fn no_detect_after_dashdash() {
+        assert!(!has_stdout_output_flag(&s(&["--", "-O", "-"])));
+    }
+
+    // --- compact_url ---
+
     #[test]
     fn test_compact_url_strips_protocol() {
         assert_eq!(
@@ -309,6 +575,8 @@ mod tests {
         assert_eq!(compact_url(short), "x.com/f");
     }
 
+    // --- format_size ---
+
     #[test]
     fn test_format_size_zero() {
         assert_eq!(format_size(0), "?");
@@ -330,6 +598,8 @@ mod tests {
         let result = format_size(2 * 1024 * 1024);
         assert!(result.ends_with("MB"), "Expected MB, got {}", result);
     }
+
+    // --- parse_error ---
 
     #[test]
     fn test_parse_error_404() {
@@ -357,6 +627,8 @@ mod tests {
         assert_eq!(parse_error("", ""), "Unknown error");
     }
 
+    // --- truncate_line ---
+
     #[test]
     fn test_truncate_line_short() {
         assert_eq!(truncate_line("hello", 10), "hello");
@@ -373,6 +645,8 @@ mod tests {
         assert!(result.ends_with("..."));
         assert!(result.len() <= 10);
     }
+
+    // --- extract_filename_from_output ---
 
     #[test]
     fn test_extract_filename_from_output_flag() {
