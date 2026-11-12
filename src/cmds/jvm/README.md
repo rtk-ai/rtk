@@ -45,3 +45,5 @@ Token-savings tests run inline as part of `cargo test --all`. The `mvn` fixtures
 ## Gradle (`gradlew_cmd.rs`)
 
 See module docs and the gradle PR (`feat/gradlew-android-support`) for rationale. Streaming filter chosen because Gradle output is task-line-based, not block-based — unlike Maven Surefire.
+
+Task detection goes through `arg_tokenizer` under `Dialect::Posix` with `gradlew_takes_value`, so a flag's value (`test --tests com.example.Foo`, `assembleDebug -p ../other`) is never read as the task name. Gradle's `--` is a third semantics neither `Dialect` models: it ends *built-in* option parsing but keeps parsing tasks and their options, so `task_names` re-tokenizes the region past the boundary with the same grammar rather than treating it as bare positionals.
