@@ -79,9 +79,11 @@ pub(crate) fn read(tokens: &[Token<'_>]) -> Reading {
                 "`" => reading.bash_only = true,
                 _ => {}
             },
-            // `<<`, `<<-` and `<<<` all lex with a `<<` prefix, and fish has
-            // none of them.
-            TokenKind::Redirect if token.value.starts_with("<<") => reading.bash_only = true,
+            // Heredocs and herestrings, with or without an fd number in front,
+            // are not fish.
+            TokenKind::Redirect if super::lexer::is_heredoc_operator(token.value) => {
+                reading.bash_only = true
+            }
             TokenKind::Arg => {
                 if token.value == "[[" {
                     reading.bash_only = true;
@@ -164,6 +166,7 @@ mod tests {
             "echo `date`",
             "cat <<EOF",
             "cat <<< x",
+            "cat 0<<EOF",
         ] {
             assert!(reading(cmd).bash_only, "{cmd:?}");
         }
