@@ -16,6 +16,7 @@ use super::constants::{HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE};
 use super::init::resolve_claude_dir;
 use super::is_claude_hook_command;
 use anyhow::{Context, Result};
+use base16ct::HexDisplay;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -49,7 +50,7 @@ pub fn compute_hash(path: &Path) -> Result<String> {
 pub fn compute_hash_bytes(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
-    format!("{:x}", hasher.finalize())
+    format!("{:x}", HexDisplay(&hasher.finalize()))
 }
 
 /// Derive the hash file path from the hook path
@@ -306,9 +307,10 @@ fn report_data_dir_privacy() {
 #[cfg(not(unix))]
 fn report_data_dir_privacy() {}
 
-/// Runtime integrity gate. Called at startup for operational commands.
+/// Runtime integrity gate for typed operational commands and fallback dispatch.
 ///
 /// Behavior:
+/// - No resolvable Claude directory: silent, continue (no hook to locate)
 /// - `Verified` / `NotInstalled` / `NoBaseline`: silent, continue
 /// - `Tampered`: print warning to stderr, exit 1
 /// - `OrphanedHash`: warn to stderr, continue
@@ -319,7 +321,16 @@ fn report_data_dir_privacy() {}
 /// No env-var bypass is provided — if the hook is legitimately modified,
 /// re-run `rtk init -g --auto-patch` to re-establish the baseline.
 pub fn runtime_check() -> Result<()> {
-    let hook_path = resolve_hook_path()?;
+    runtime_check_in(resolve_hook_path())
+}
+
+fn runtime_check_in(hook_path: Result<PathBuf>) -> Result<()> {
+    // Directory resolution only fails when neither an explicit Claude directory
+    // nor a home directory is available. There is no legacy hook to locate then.
+    // Keep verification/read errors below this point fatal.
+    let Ok(hook_path) = hook_path else {
+        return Ok(());
+    };
 
     // If the legacy script doesn't exist, skip integrity check entirely.
     // In the new binary command model, there is no script file to verify.
@@ -385,6 +396,27 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn runtime_check_without_resolvable_directory_continues() {
+        let unresolved = super::super::init::resolve_claude_dir_from(None, None);
+        assert!(unresolved.is_err());
+        assert!(runtime_check_in(unresolved).is_ok());
+    }
+
+    #[test]
+    fn runtime_check_explicit_directory_without_home_preserves_errors() {
+        let temp = TempDir::new().unwrap();
+        let hooks = temp.path().join(HOOKS_SUBDIR);
+        fs::create_dir(&hooks).unwrap();
+        fs::write(hooks.join(REWRITE_HOOK_FILE), "#!/bin/sh\n").unwrap();
+        fs::write(hooks.join(HASH_FILENAME), "not a hash").unwrap();
+        let explicit =
+            super::super::init::resolve_claude_dir_from(Some(temp.path().to_path_buf()), None);
+        let hook_path = explicit.map(|dir| dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE));
+        let err = runtime_check_in(hook_path).unwrap_err();
+        assert!(err.to_string().contains("Invalid hash format"));
+    }
+
+    #[test]
     fn test_compute_hash_deterministic() {
         let temp = TempDir::new().unwrap();
         let file = temp.path().join("test.sh");
@@ -396,6 +428,19 @@ mod tests {
         assert_eq!(hash1, hash2);
         assert_eq!(hash1.len(), 64); // SHA-256 = 64 hex chars
         assert!(hash1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_compute_hash_bytes_is_lowercase_sha256sum_format() {
+        assert_eq!(
+            compute_hash_bytes(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        // Bytes below 0x10 (01, 03, 00) keep their leading zero.
+        assert_eq!(
+            compute_hash_bytes(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]

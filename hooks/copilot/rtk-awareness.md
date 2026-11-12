@@ -7,7 +7,7 @@
 The `.github/copilot-instructions.md` file is loaded at session start by both Copilot CLI and VS Code Copilot Chat.
 It instructs Copilot to prefix commands with `rtk` automatically.
 
-The `.github/hooks/rtk-rewrite.json` hook adds a `PreToolUse` safety net via `rtk hook` —
+The `.github/hooks/rtk-rewrite.json` hook adds a `PreToolUse` safety net via `rtk hook copilot` —
 a cross-platform Rust binary that intercepts raw bash tool calls and rewrites them.
 No shell scripts, no `jq` dependency, works on Windows natively.
 

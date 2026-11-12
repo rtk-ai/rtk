@@ -48,11 +48,12 @@ const RTK_MD_UNMARKED_PAYLOAD_DIGESTS: [&str; 3] = [
 /// dropped first: a checkout or an editor may have rewritten the line endings of a file RTK
 /// wrote, which does not make it the user's.
 fn rtk_md_payload_digest(content: &str) -> String {
+    use base16ct::HexDisplay;
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
     hasher.update(content.replace('\r', "").as_bytes());
-    format!("{:x}", hasher.finalize())
+    format!("{:x}", HexDisplay(&hasher.finalize()))
 }
 
 /// Whether `content` is an RTK.md that RTK itself wrote.

@@ -235,7 +235,7 @@ Once the rewritten command reaches RTK:
 4. **Integrity check**: `integrity::runtime_check()` verifies the hook's SHA-256 hash for operational commands
 5. **Routing**: A `match cli.command` dispatches to the specialized filter module
 
-If Clap parsing fails (command not in the enum), the fallback path runs instead.
+If Clap parsing fails (unknown command or native arguments Clap rejects), the fallback path runs instead. After root/meta diagnostics, it checks hook integrity before task, agent, TOML filter or raw-tool dispatch. No resolvable Claude directory means no legacy hook can be located, so both typed and fallback runtime checks continue; an explicitly configured hook is still verified.
 
 ### 3.4 Filter Execution
 
@@ -260,15 +260,20 @@ Each filter module follows the same pattern:
 When Clap parsing fails (unknown command):
 
 1. Guard: check if the command is an RTK meta-command (`gain`, `init`, etc.) -- if so, show Clap error
-2. Look up TOML DSL filters via `toml_filter::find_matching_filter()`
-3. If TOML match: capture stdout, apply filter pipeline, track savings
-4. If no match: pure passthrough with `Stdio::inherit`, track as 0% output reduction
+2. Check hook integrity via `integrity::runtime_check()` -- exit 1 if the legacy hook no longer matches its baseline
+3. Run a pipeline task when the name resolves to one that is not reserved and no TOML filter matches, otherwise launch a proxied agent when the name resolves to one
+4. Look up TOML DSL filters via `toml_filter::find_matching_filter()`
+5. If TOML match: capture stdout, apply filter pipeline, track savings
+6. If no match: pure passthrough with `Stdio::inherit`, track as 0% output reduction
 
 ```
 Command received
   -> Clap parse succeeds?
      -> Yes: Route to Rust filter module
      -> No:  run_fallback()
+              -> Meta-command? Show Clap error
+              -> Hook integrity check
+              -> Task no TOML filter claims, or agent? Run it
               -> TOML filter match?
                  -> Yes: Capture stdout, apply filter, track savings
                  -> No:  Passthrough (inherit stdio, track 0% reduction)

@@ -1,0 +1,32 @@
+/fx/three/B.Tests/B.Tests.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data. [/fx/three/Two.sln]
+/fx/three/Lib/Lib.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data. [/fx/three/Two.sln]
+/fx/three/A.Tests/A.Tests.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data. [/fx/three/Two.sln]
+/fx/three/A.Tests/A.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json. [/fx/three/Two.sln]
+/fx/three/B.Tests/B.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json. [/fx/three/Two.sln]
+/fx/three/Lib/Lib.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json. [/fx/three/Two.sln]
+/fx/three/A.Tests/A.Tests.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data. [/fx/three/Two.sln]
+/fx/three/A.Tests/A.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json. [/fx/three/Two.sln]
+/fx/three/Lib/Lib.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data. [/fx/three/Two.sln]
+/fx/three/Lib/Lib.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json. [/fx/three/Two.sln]
+/fx/three/B.Tests/B.Tests.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data. [/fx/three/Two.sln]
+/fx/three/B.Tests/B.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json. [/fx/three/Two.sln]
+/fx/three/A.Tests/A.Tests.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data.
+/fx/three/B.Tests/B.Tests.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data.
+/fx/three/B.Tests/B.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json.
+/fx/three/A.Tests/A.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json.
+/fx/three/B.Tests/B.Tests.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data.
+/fx/three/B.Tests/B.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json.
+/fx/three/A.Tests/A.Tests.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data.
+/fx/three/A.Tests/A.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json.
+/fx/three/Lib/Lib.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data.
+/fx/three/Lib/Lib.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json.
+/fx/three/Lib/Lib.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data.
+/fx/three/Lib/Lib.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json.
+Test run for /fx/three/B.Tests/bin/Debug/net10.0/B.Tests.dll (.NETCoreApp,Version=v10.0)
+A total of 1 test files matched the specified pattern.
+Test run for /fx/three/A.Tests/bin/Debug/net10.0/A.Tests.dll (.NETCoreApp,Version=v10.0)
+A total of 1 test files matched the specified pattern.
+
+Passed!  - Failed:     0, Passed:     2, Skipped:     0, Total:     2, Duration: 10 ms - B.Tests.dll (net10.0)
+
+Passed!  - Failed:     0, Passed:     1, Skipped:     0, Total:     1, Duration: 5 ms - A.Tests.dll (net10.0)

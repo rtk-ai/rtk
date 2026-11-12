@@ -1,12 +1,13 @@
 //! Optional usage ping so we know which commands people run most.
 
 use crate::core::config;
+use crate::core::http;
 use crate::core::tracking;
 use crate::core::user_dirs;
 use crate::hooks::constants::CLAUDE_DIR;
 use crate::hooks::init::resolve_claude_dir;
+use base16ct::HexDisplay;
 use sha2::{Digest, Sha256};
-use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -155,15 +156,14 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
         ),
     });
 
-    let mut req = ureq::post(url).set("Content-Type", "application/json");
+    let mut req = ureq::post(url);
 
     if let Some(token) = TELEMETRY_TOKEN {
-        req = req.set("X-RTK-Token", token);
+        req = req.header("X-RTK-Token", token);
     }
 
     // 2 second timeout — if server is down, we move on
-    req.timeout(std::time::Duration::from_secs(2))
-        .send_string(&payload.to_string())?;
+    http::global_timeout(req, std::time::Duration::from_secs(2)).send_json(&payload)?;
 
     Ok(())
 }
@@ -172,7 +172,7 @@ pub fn generate_device_hash() -> String {
     let salt = get_or_create_salt();
     let mut hasher = Sha256::new();
     hasher.update(salt.as_bytes());
-    format!("{:x}", hasher.finalize())
+    format!("{:x}", HexDisplay(&hasher.finalize()))
 }
 
 fn get_or_create_salt() -> String {
@@ -211,12 +211,9 @@ fn random_salt() -> String {
         let fallback = format!("{:?}:{}", std::time::SystemTime::now(), std::process::id());
         let mut hasher = Sha256::new();
         hasher.update(fallback.as_bytes());
-        return format!("{:x}", hasher.finalize());
+        return format!("{:x}", HexDisplay(&hasher.finalize()));
     }
-    buf.iter().fold(String::new(), |mut output, b| {
-        let _ = write!(output, "{b:02x}");
-        output
-    })
+    format!("{:x}", HexDisplay(&buf))
 }
 
 pub fn salt_file_path() -> PathBuf {

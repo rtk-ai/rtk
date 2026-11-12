@@ -88,6 +88,9 @@ static TEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("valid regex")
 });
+static TEST_RUN_FOR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s*Test run for\s+(?P<dll>[^\r\n(]*\.dll)").expect("valid regex")
+});
 static FAILED_TEST_HEAD_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^\s*Failed\s+(?P<name>[^\r\n\[]+)\s+\[[^\]\r\n]+\]\s*$").expect("valid regex")
 });
@@ -1046,7 +1049,33 @@ pub fn parse_restore_issues_from_text(text: &str) -> (Vec<BinlogIssue>, Vec<Binl
 }
 
 fn count_projects(text: &str) -> usize {
-    PROJECT_PATH_RE.captures_iter(text).count()
+    // Count projects, not lines that mention one: restore warnings name a project's .csproj
+    // once per warning, and a fresh restore names it again in a `Restored <csproj>` line. Each
+    // test assembly the run executes prints one `Test run for <dll>` line with its full path, so
+    // those lines are counted when present. Output without them falls back to the DISTINCT lines
+    // naming a .csproj, keyed by the path token — `Restored <path> (in 1.2 sec).` and
+    // `<path> : warning NU1900: …` name the same project once (#4844; the keying #4846 uses).
+    let mut projects: HashSet<&str> = HashSet::new();
+    for captures in TEST_RUN_FOR_RE.captures_iter(text) {
+        if let Some(dll) = captures.name("dll") {
+            projects.insert(dll.as_str());
+        }
+    }
+    if !projects.is_empty() {
+        return projects.len();
+    }
+    let mut csprojs: HashSet<&str> = HashSet::new();
+    for captures in PROJECT_PATH_RE.captures_iter(text) {
+        // The key is the last whitespace-separated token of the match, which is the whole path
+        // when the path has no spaces; a leading `Restored ` stays out of it.
+        if let Some(path) = captures
+            .get(0)
+            .and_then(|m| m.as_str().split_whitespace().last())
+        {
+            csprojs.insert(path);
+        }
+    }
+    csprojs.len()
 }
 
 fn extract_duration(text: &str) -> Option<String> {
@@ -1347,6 +1376,80 @@ Time Elapsed 00:00:12.34
     }
 
     #[test]
+    fn test_parse_test_from_text_counts_distinct_projects_despite_warnings() {
+        // Hand-written after the `dotnet test` shape (.NET 10): two test projects, each named by
+        // two restore warnings (NU1900). The warnings name the .csproj, but each project is ONE project
+        // (#4844) — the count must not grow with every line that mentions the path.
+        let input = r#"
+/work/A.Tests.csproj : warning NU1900: Unable to find package 'Coverlet.Collector'. No sets of versions.
+/work/A.Tests.csproj : warning NU1900: Unable to find package 'Microsoft.NET.Test.Sdk'. No sets of versions.
+  Test run for /work/A.Tests/bin/Debug/A.Tests.dll (.NETCoreApp,Version=v10.0)
+  Passed A.Tests.Tests.SaysHello [1 ms]
+/work/B.Tests.csproj : warning NU1900: Unable to find package 'Coverlet.Collector'. No sets of versions.
+/work/B.Tests.csproj : warning NU1900: Unable to find package 'Microsoft.NET.Test.Sdk'. No sets of versions.
+  Test run for /work/B.Tests/bin/Debug/B.Tests.dll (.NETCoreApp,Version=v10.0)
+  Passed B.Tests.Tests.SaysBye [2 ms]
+Passed! - Failed:     0, Passed:     2, Skipped:     0, Total:     2, Duration: 1 ms - A.Tests.dll
+Passed! - Failed:     0, Passed:     1, Skipped:     0, Total:     1, Duration: 1 ms - B.Tests.dll
+"#;
+
+        let summary = parse_test_from_text(input);
+
+        assert_eq!(summary.passed, 3);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(
+            summary.project_count, 2,
+            "a warning naming a project must not inflate the project count"
+        );
+    }
+
+    #[test]
+    fn test_parse_test_from_text_counts_test_projects_not_referenced_libraries() {
+        // `dotnet test -v q` (.NET 10.0.400) on a solution with two test projects and a library
+        // they reference: restore warnings name all three .csproj files, but only the two test
+        // projects run, so the count comes from the `Test run for` lines.
+        let input =
+            include_str!("../../../tests/fixtures/dotnet/test_library_restore_warnings.txt");
+
+        let summary = parse_test_from_text(input);
+
+        assert_eq!(summary.passed, 3);
+        assert_eq!(
+            summary.project_count, 2,
+            "a referenced library named by restore warnings is not a test project"
+        );
+    }
+
+    #[test]
+    fn test_parse_test_from_text_counts_distinct_projects_across_restore_and_warning_lines() {
+        // Real `dotnet build` output on a fresh restore of a 3-project solution with NU1900 audit
+        // warnings: every project is named by a `Restored <csproj>` line AND by warning lines. The
+        // fallback counts DISTINCT project paths (#4844; the keying #4846 uses).
+        let input =
+            include_str!("../../../tests/fixtures/dotnet/fresh_restore_nu1900_warnings.txt");
+        let summary = parse_test_from_text(input);
+        assert_eq!(summary.project_count, 3);
+    }
+
+    #[test]
+    fn test_parse_test_from_text_counts_distinct_csprojs_without_run_lines() {
+        // Output without `Test run for` lines counts the distinct lines naming a .csproj, so a
+        // project named twice is one project.
+        let input = r#"
+/work/A.Tests.csproj : warning NU1900: Unable to find package 'Coverlet.Collector'. No sets of versions.
+/work/A.Tests.csproj : warning NU1900: Unable to find package 'Microsoft.NET.Test.Sdk'. No sets of versions.
+/work/B.Tests.csproj : warning NU1900: Unable to find package 'Coverlet.Collector'. No sets of versions.
+"#;
+
+        let summary = parse_test_from_text(input);
+
+        assert_eq!(
+            summary.project_count, 2,
+            "repeat mentions of one project must not inflate the count"
+        );
+    }
+
+    #[test]
     fn test_parse_test_from_text_prefers_test_summary_duration_and_counts() {
         let input = r#"
 Failed!  - Failed:     1, Passed:   940, Skipped:     7, Total:   948, Duration: 1 s
@@ -1563,6 +1666,20 @@ Restore failed with 1 error(s) in 1.0s
         assert_eq!(summary.errors.len(), 1);
         assert_eq!(summary.errors[0].code, "CS1525");
         assert_eq!(summary.duration_text.as_deref(), Some("00:00:00.76"));
+    }
+
+    #[test]
+    fn test_parse_build_from_text_counts_each_restored_project_once() {
+        // `dotnet build -bl:<path>` (.NET 10.0.400) after a fresh restore of a library and two test
+        // projects, all three with NuGet audit warnings: each project is named by one
+        // `Restored <csproj>` line and by its warning lines, and counts once.
+        let input = include_str!(
+            "../../../tests/fixtures/dotnet/build_fresh_restore_all_projects_warn.txt"
+        );
+
+        let summary = parse_build_from_text(input);
+
+        assert_eq!(summary.project_count, 3);
     }
 
     #[test]
