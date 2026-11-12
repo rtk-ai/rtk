@@ -194,9 +194,16 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                 }
             }
             ParseState::Summary => {
-                // FAILED test lines
-                if trimmed.starts_with("FAILED") || trimmed.starts_with("ERROR") {
-                    failures.push(trimmed.to_string());
+                // FAILED test lines, unless a FAILURES/ERRORS block already covers the test
+                if let Some((is_error, name)) = summary_key(trimmed) {
+                    let covered = failures.iter().any(|failure| {
+                        failure.lines().next().is_some_and(|first| {
+                            is_block_header(first) && block_key(first) == (is_error, name.as_str())
+                        })
+                    });
+                    if !covered {
+                        failures.push(trimmed.to_string());
+                    }
                 } else if trimmed.starts_with("XFAIL") || trimmed.starts_with("XPASS") {
                     xfail_lines.push(trimmed.to_string());
                 }
@@ -415,6 +422,35 @@ fn is_block_header(line: &str) -> bool {
         .strip_prefix(' ')
         .and_then(|rest| rest.trim_end_matches('_').strip_suffix(' '))
         .is_some_and(|title| title.chars().any(|c| c != '_' && !c.is_whitespace()))
+}
+
+/// The test a short-summary `FAILED`/`ERROR` line names, spelled as its block header
+/// spells it: `FAILED a.py::TestX::test_y - msg` → `TestX.test_y`, `ERROR a.py` → `a.py`.
+fn summary_key(line: &str) -> Option<(bool, String)> {
+    let (is_error, rest) = match line.strip_prefix("FAILED") {
+        Some(rest) => (false, rest),
+        None => (true, line.strip_prefix("ERROR")?),
+    };
+    let node_id = rest.split(" - ").next().unwrap_or_default().trim();
+    let name = match node_id.split_once("::") {
+        Some((_, name)) => name.replace("::", "."),
+        None => node_id.to_string(),
+    };
+    Some((is_error, name))
+}
+
+fn block_key(header: &str) -> (bool, &str) {
+    let title = header.trim_matches('_').trim();
+    match title.strip_prefix("ERROR ") {
+        Some(what) => {
+            let name = ["at setup of ", "at teardown of ", "collecting "]
+                .iter()
+                .find_map(|prefix| what.strip_prefix(prefix))
+                .unwrap_or(what);
+            (true, name)
+        }
+        None => (false, title),
+    }
 }
 
 fn frame_file(line: &str) -> Option<&str> {
@@ -1024,6 +1060,31 @@ Failures:
 2. [ERROR] test_tbno.py::test_db
      ConnectionError: db down"#
         );
+    }
+
+    #[test]
+    fn test_filter_pytest_short_summary_does_not_repeat_blocks() {
+        // Real pytest 9.2.0 output with its default `-rfE` (#4897).
+        let output =
+            include_str!("../../../tests/fixtures/pytest_short_summary_repeats_blocks_raw.txt");
+
+        let result = filter_pytest_output(output);
+        assert!(
+            result.starts_with("Pytest: 2 passed, 4 failed, 2 errors in"),
+            "got: {result}"
+        );
+        for entry in [
+            "[ERROR] at setup of test_query",
+            "[ERROR] at teardown of test_cleanup",
+            "[FAIL] test_bad",
+            "[FAIL] TestCart.test_total",
+            "[FAIL] test_even[1]",
+            "[FAIL] test_cleanup",
+        ] {
+            assert_eq!(result.matches(entry).count(), 1, "{entry} in: {result}");
+        }
+        assert!(!result.contains("test_dup.py::"), "got: {result}");
+        assert!(!result.contains("\n7. "), "got: {result}");
     }
 
     #[test]
