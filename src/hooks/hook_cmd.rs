@@ -678,6 +678,14 @@ enum PayloadAction {
     Ignore,
 }
 
+/// The `permissionDecisionReason` for a plain rewrite RTK auto-applies.
+const RTK_AUTO_REWRITE_REASON: &str = "RTK auto-rewrite";
+
+/// The `permissionDecisionReason` for an ask the hook owns instead of leaving the
+/// verdict to the host's own rules. It names no command.
+const HOOK_ASK_REASON: &str =
+    "RTK can't confirm this command is allowed under the host's rules, so it needs your review.";
+
 fn pre_tool_use_rewrite_output(
     v: &Value,
     rewritten: &str,
@@ -690,7 +698,7 @@ fn pre_tool_use_rewrite_output(
 
     let mut hook_output = json!({
         "hookEventName": PRE_TOOL_USE_KEY,
-        "permissionDecisionReason": "RTK auto-rewrite",
+        "permissionDecisionReason": RTK_AUTO_REWRITE_REASON,
         "updatedInput": updated_input
     });
     if let Some(decision) = permission_decision {
@@ -741,8 +749,18 @@ fn process_claude_payload_from_decision(
         HookDecision::AllowRewrite(r) => (r, Some("allow"), HookOutcome::Allow),
         HookDecision::AskRewrite(r, AskOwner::Host) => (r, None, HookOutcome::Ask),
         // The host would judge the command RTK built, not the parts inside it
-        // (a fish wrap is one `rtk run` command), so the hook asks itself.
-        HookDecision::AskRewrite(r, AskOwner::Hook) => (r, Some("ask"), HookOutcome::Ask),
+        // (a fish wrap is one `rtk run` command), so the hook asks itself, with
+        // the review reason.
+        HookDecision::AskRewrite(r, AskOwner::Hook) => {
+            let mut output = pre_tool_use_rewrite_output(v, &r, Some("ask"));
+            output["hookSpecificOutput"]["permissionDecisionReason"] = json!(HOOK_ASK_REASON);
+            return PayloadAction::Rewrite {
+                cmd: cmd.to_string(),
+                rewritten: r,
+                decision: HookOutcome::Ask,
+                output,
+            };
+        }
     };
 
     PayloadAction::Rewrite {
@@ -1931,6 +1949,39 @@ mod tests {
 
         let allow = pre_tool_use_rewrite_output(&input, "rtk git status", Some("allow"));
         assert_eq!(allow["hookSpecificOutput"]["permissionDecision"], "allow");
+    }
+
+    /// A hook-owned ask renders on Claude as `permissionDecision: "ask"` with the
+    /// review reason; a host-owned ask and a plain allow keep the plain-rewrite
+    /// reason. Built from the `HookDecision` directly, so it needs no real `fish`.
+    #[test]
+    fn test_claude_hook_owned_ask_carries_the_review_reason() {
+        let input = json!({ "tool_input": { "command": "test -d src; and git status" } });
+        let rewrite_output =
+            |decision| match process_claude_payload_from_decision(&input, "x", decision) {
+                PayloadAction::Rewrite { output, .. } => output,
+                other => panic!("expected Rewrite, got {other:?}"),
+            };
+
+        let wrap = "rtk run --shell fish -c 'test -d src; and git status'".to_string();
+        let hook = rewrite_output(HookDecision::AskRewrite(wrap.clone(), AskOwner::Hook));
+        let ho = &hook["hookSpecificOutput"];
+        assert_eq!(ho["permissionDecision"], "ask");
+        assert_eq!(ho["permissionDecisionReason"], HOOK_ASK_REASON);
+        assert_eq!(ho["updatedInput"]["command"], wrap);
+
+        let host = rewrite_output(HookDecision::AskRewrite(
+            "rtk git status".to_string(),
+            AskOwner::Host,
+        ));
+        let ho = &host["hookSpecificOutput"];
+        assert!(ho.get("permissionDecision").is_none());
+        assert_eq!(ho["permissionDecisionReason"], RTK_AUTO_REWRITE_REASON);
+
+        let allow = rewrite_output(HookDecision::AllowRewrite("rtk git status".to_string()));
+        let ho = &allow["hookSpecificOutput"];
+        assert_eq!(ho["permissionDecision"], "allow");
+        assert_eq!(ho["permissionDecisionReason"], RTK_AUTO_REWRITE_REASON);
     }
 
     // --- Claude handler ---
