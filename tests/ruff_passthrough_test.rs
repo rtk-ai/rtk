@@ -88,3 +88,31 @@ fn other_passthrough_subcommands_keep_the_cap() {
         context(&out)
     );
 }
+
+#[test]
+fn analyze_graph_global_options_preserve_argv_and_json() {
+    for args in [
+        vec!["--isolated", "analyze", "graph", "big"],
+        vec!["--color", "never", "analyze", "graph", "big"],
+        vec!["--config", "ruff.toml", "analyze", "graph", "big"],
+        vec!["--config=ruff.toml", "analyze", "graph", "big"],
+        vec!["-q", "analyze", "graph", "big"],
+        vec!["analyze", "-v", "graph", "big"],
+        vec!["analyze", "--isolated", "graph", "big"],
+        vec!["analyze", "--config", "ruff.toml", "graph", "big"],
+        vec![
+            "--config", "analyze", "analyze", "--config", "graph", "graph", "big",
+        ],
+    ] {
+        let dir = common::tempdir();
+        fake_ruff(dir.path(), &args, GRAPH);
+        let out = rtk_ruff(dir.path(), &args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {}", context(&out));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            GRAPH.trim(),
+            "{args:?}"
+        );
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).expect("complete graph JSON");
+    }
+}
