@@ -34,6 +34,18 @@ pub fn run(command: &[String], shell: Option<&str>, verbose: u8) -> Result<i32> 
     let result = match crate::core::shell::command_from_args(command, shell)
         .context("Failed to prepare summary command")?
     {
+        // A usage page is not output to summarize (#4548).
+        crate::core::shell::Launch::Ready(cmd)
+            if crate::core::runner::requests_help_of_named_command(&cmd) =>
+        {
+            return crate::core::runner::run(
+                cmd,
+                "summary",
+                &command_display,
+                crate::core::runner::RunMode::Passthrough,
+                crate::core::runner::RunOptions::default().caller_named_command(),
+            );
+        }
         crate::core::shell::Launch::Ready(mut cmd) => match exec_capture_unguarded(&mut cmd) {
             Ok(result) => result,
             Err(error) => {
