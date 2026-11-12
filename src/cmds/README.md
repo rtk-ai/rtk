@@ -83,7 +83,7 @@ All execution goes through `core::stream::run_streaming()` with one of four `Fil
 ### Phases
 
 1. **Spawn** — `run_streaming()` starts the child process with piped stdout/stderr (or inherited TTY for Passthrough)
-2. **Filter** — stdout is processed per the FilterMode; stderr is forwarded to the terminal in real time via a dedicated reader thread
+2. **Filter** — stdout is processed per the FilterMode; a dedicated reader thread takes stderr, to the terminal in real time for Streaming and into a buffer the runner forwards after the child exits for CaptureOnly/Buffered
 3. **Print** — filtered output is written to stdout (live for Streaming, post-hoc for CaptureOnly/Buffered); if tee enabled, appends recovery hint on failure
 4. **Track** — `timer.track()` records raw vs filtered for token savings
 5. **Exit code** — returns `Ok(exit_code)` to caller; `main.rs` calls `process::exit(code)` once
@@ -94,8 +94,8 @@ All execution goes through `core::stream::run_streaming()` with one of four `Fil
 |-------------|----------|
 | `RunOptions::default()` | Combined stdout+stderr to filter, no tee |
 | `RunOptions::with_tee("label")` | Combined filtering + tee recovery |
-| `RunOptions::stdout_only()` | Stdout-only to filter, stderr passthrough, no tee |
-| `RunOptions::stdout_only().tee("label")` | Stdout-only + tee recovery |
+| `RunOptions::stdout_only()` | Stdout-only to filter, no tee on that output; stderr forwarded whole when it is the report, and capped behind a recovery entry of its own when a clean run buries it in chatter |
+| `RunOptions::stdout_only().tee("label")` | Same stderr handling, plus tee recovery for the filtered output |
 
 **Example — filtered command (recommended):**
 
