@@ -7,7 +7,7 @@
 //! # Architecture
 //!
 //! - Storage: SQLite database (~/.local/share/rtk/tracking.db)
-//! - Retention: 90-day automatic cleanup
+//! - Retention: automatic cleanup after `tracking.history_days` (default 90)
 //! - Metrics: Input/output tokens, savings %, execution time
 //!
 //! # Quick Start
@@ -1936,10 +1936,11 @@ fn db_sidecars(db_path: &std::path::Path) -> Vec<PathBuf> {
 
 /// Retention window for `cleanup_old`, from `tracking.history_days`.
 ///
-/// Falls back to the default on any config problem, including a `[tracking]` section
-/// that omits `history_days` (the field has no serde default, so a partial section
-/// fails the whole parse). A non-positive value also falls back rather than being
-/// honored: a typo'd `0` would otherwise delete the entire history on the next write.
+/// A config that fails to load, including a `[tracking]` section that omits
+/// `history_days` (the field has no serde default, so a partial section fails the
+/// whole parse), reaches here as `cached_config`'s default, 90 days. A non-positive
+/// value falls back to the default rather than being honored: a typo'd `0` would
+/// otherwise delete the entire history on the next write.
 fn configured_history_days() -> i64 {
     resolve_history_days(Some(
         crate::core::config::cached_config().tracking.history_days,
@@ -3145,9 +3146,15 @@ mod tests {
     /// with an explicit retention window.
     #[cfg(test)]
     fn tracker_with_10_day_old_rows(history_days: i64) -> Tracker {
+        tracker_with_rows_aged(history_days, 10)
+    }
+
+    /// Backdated tracker: one row per retained history table `age_days` old,
+    /// with an explicit retention window.
+    fn tracker_with_rows_aged(history_days: i64, age_days: i64) -> Tracker {
         let mut t = Tracker::new_in_memory().expect("in-memory tracker");
         t.history_days = history_days;
-        let old = Utc::now() - chrono::Duration::days(10);
+        let old = Utc::now() - chrono::Duration::days(age_days);
         let old_day = old.format("%Y-%m-%d").to_string();
         let old = old.to_rfc3339();
         t.conn
@@ -3287,10 +3294,12 @@ mod tests {
         }
     }
 
+    // The rows are older than DEFAULT_HISTORY_DAYS, so falling back to the default
+    // window would prune them: an unrepresentable cutoff keeps everything.
     #[test]
     fn test_cleanup_old_retains_with_unrepresentable_cutoff() {
         for history_days in [99_999_999, i64::from(u32::MAX)] {
-            let t = tracker_with_10_day_old_rows(history_days);
+            let t = tracker_with_rows_aged(history_days, 400);
             t.record("git status", "rtk git status fresh", 100, 20, 5)
                 .expect("record with an unrepresentable cutoff");
 
@@ -3312,7 +3321,7 @@ mod tests {
     #[test]
     fn test_cleanup_hook_decisions_retains_with_unrepresentable_cutoff() {
         for history_days in [99_999_999, i64::from(u32::MAX)] {
-            let t = tracker_with_10_day_old_rows(history_days);
+            let t = tracker_with_rows_aged(history_days, 400);
             t.cleanup_hook_decisions()
                 .expect("hook cleanup with an unrepresentable cutoff");
             assert_eq!(
@@ -3320,7 +3329,7 @@ mod tests {
                     .expect("query hook decisions")
                     .len(),
                 1,
-                "10-day-old hook decision at {history_days}-day retention"
+                "400-day-old hook decision at {history_days}-day retention"
             );
         }
     }
