@@ -573,6 +573,13 @@ enum Commands {
     },
 
     #[cfg(feature = "engine")]
+    /// Run the resolved compression pipeline over a local file and report before/after tokens
+    Bench {
+        /// File to run through the pipeline
+        file: std::path::PathBuf,
+    },
+
+    #[cfg(feature = "engine")]
     /// List registered compression methods and their contracts
     Methods {
         #[command(subcommand)]
@@ -3315,6 +3322,9 @@ fn run_cli() -> Result<i32> {
                 }
             },
         },
+
+        #[cfg(feature = "engine")]
+        Commands::Bench { file } => core::pipeline_cmd::run_bench(&file)?,
 
         #[cfg(feature = "engine")]
         Commands::Tasks { command } => match *command {
@@ -6070,5 +6080,31 @@ mod tests {
             } => assert_eq!(args, vec!["main.ts"]),
             _ => panic!("Expected Deno Compile command"),
         }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_top_level_bench_parses_and_handles_help_or_missing_file() {
+        let cli = try_parse_cli_from(["rtk", "bench", "AGENTS.md"]).unwrap();
+        match cli.command {
+            Commands::Bench { file } => {
+                assert_eq!(file, std::path::PathBuf::from("AGENTS.md"));
+            }
+            other => panic!("Expected Commands::Bench, got {other:?}"),
+        }
+
+        let help_err = try_parse_cli_from(["rtk", "bench", "--help"])
+            .err()
+            .expect("rtk bench --help must return DisplayHelp");
+        assert_eq!(help_err.kind(), ErrorKind::DisplayHelp);
+
+        let missing_err = try_parse_cli_from(["rtk", "bench"])
+            .err()
+            .expect("rtk bench without file must return MissingRequiredArgument");
+        assert_eq!(missing_err.kind(), ErrorKind::MissingRequiredArgument);
+        assert!(
+            core::constants::RTK_META_COMMANDS.contains(&"bench"),
+            "bench must be in RTK_META_COMMANDS so invalid args fail closed instead of falling back to raw exec"
+        );
     }
 }

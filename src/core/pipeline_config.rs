@@ -52,6 +52,7 @@ pub const RESERVED_COMMAND_NAMES: &[&str] = &[
     "proxy",
     "llm-proxy",
     "pipeline",
+    "bench",
     "methods",
     "tasks",
     "telemetry",
