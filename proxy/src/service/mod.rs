@@ -25,6 +25,8 @@ mod macos;
 mod unsupported;
 #[cfg(target_os = "windows")]
 mod windows;
+#[cfg(any(target_os = "windows", test))]
+mod windows_task;
 
 #[cfg(target_os = "linux")]
 use linux as platform;
