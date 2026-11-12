@@ -4,7 +4,7 @@
 use super::*;
 use crate::core::user_dirs;
 use crate::hooks::constants::{
-    CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CURSOR_DIR, HOOKS_SUBDIR, POST_TOOL_USE_KEY, PRE_TOOL_USE_KEY,
+    CLAUDE_HOOK_COMMAND, CURSOR_DIR, HOOKS_SUBDIR, POST_TOOL_USE_KEY, PRE_TOOL_USE_KEY,
     REWRITE_HOOK_FILE, SESSION_START_KEY, SETTINGS_JSON,
 };
 
@@ -764,18 +764,19 @@ pub(super) fn run_default_mode(
 }
 
 /// Migrate old hook script to new binary command.
-/// Deletes `~/.claude/hooks/rtk-rewrite.sh` and `.rtk-hook.sha256` if present,
+/// Deletes `<claude-dir>/hooks/rtk-rewrite.sh` and `.rtk-hook.sha256` if present,
 /// and removes the stale settings.json entry so the new `rtk hook claude` entry
-/// can be registered.
+/// can be registered. The Claude directory resolves through `$CLAUDE_CONFIG_DIR`,
+/// the same directory `hook_check::status()` reads.
 fn migrate_old_hook_script(ctx: InitContext) {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
-    if let Some(home) = user_dirs::home() {
-        let old_hook = home
-            .join(CLAUDE_DIR)
-            .join(HOOKS_SUBDIR)
-            .join(REWRITE_HOOK_FILE);
+    // Look in the same directory `hook_check::status()` reads, which honours
+    // `$CLAUDE_CONFIG_DIR`; a leftover script there is what keeps the
+    // `Hook outdated` warning up after `rtk init -g` (#4757).
+    if let Ok(claude_dir) = resolve_claude_dir() {
+        let old_hook = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
         if old_hook.exists() {
             if dry_run {
                 println!(
@@ -800,10 +801,7 @@ fn migrate_old_hook_script(ctx: InitContext) {
             }
         }
         // Remove legacy hash file
-        let hash_file = home
-            .join(CLAUDE_DIR)
-            .join(HOOKS_SUBDIR)
-            .join(".rtk-hook.sha256");
+        let hash_file = claude_dir.join(HOOKS_SUBDIR).join(".rtk-hook.sha256");
         if hash_file.exists() {
             if dry_run {
                 println!(
@@ -815,7 +813,9 @@ fn migrate_old_hook_script(ctx: InitContext) {
                 let _ = std::fs::remove_file(&hash_file);
             }
         }
-        // Remove Cursor legacy hook
+    }
+    // Remove Cursor legacy hook
+    if let Some(home) = user_dirs::home() {
         let cursor_hook = home.join(CURSOR_DIR).join("hooks").join(REWRITE_HOOK_FILE);
         if cursor_hook.exists() {
             if dry_run {
@@ -1034,6 +1034,8 @@ fn binary_hook_registered(claude_dir: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::core::test_isolation;
+    use crate::core::user_env;
+    use crate::hooks::constants::CLAUDE_DIR;
 
     #[test]
     fn test_hook_already_present_exact_match() {
@@ -2226,6 +2228,93 @@ mod tests {
                 crate::hooks::hook_check::HookStatus::Outdated,
                 "a leftover legacy script next to the binary hook means migration is unfinished"
             );
+        });
+    }
+
+    // #4757: `hook_status()` reads through `resolve_claude_dir()`, which
+    // honours `$CLAUDE_CONFIG_DIR`; the migration must look in the same
+    // directory, or a leftover script there keeps the Outdated warning up
+    // after `rtk init -g`.
+    #[test]
+    fn test_migrate_removes_leftover_script_from_claude_config_dir() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let hooks_dir = claude_dir.join(HOOKS_SUBDIR);
+            fs::create_dir_all(&hooks_dir).expect("create hooks dir");
+            fs::write(
+                hooks_dir.join(REWRITE_HOOK_FILE),
+                "#!/usr/bin/env bash\n# rtk-hook-version: 4\n",
+            )
+            .expect("write leftover script");
+            fs::write(
+                claude_dir.join(SETTINGS_JSON),
+                r#"{
+                    "hooks": {
+                        "PreToolUse": [{
+                            "matcher": "Bash",
+                            "hooks": [
+                                { "type": "command", "command": "~/.claude/hooks/rtk-rewrite.sh" },
+                                { "type": "command", "command": "rtk hook claude" }
+                            ]
+                        }]
+                    }
+                }"#,
+            )
+            .expect("write settings");
+
+            migrate_old_hook_script(InitContext::default());
+
+            assert!(
+                !hooks_dir.join(REWRITE_HOOK_FILE).exists(),
+                "the legacy script under $CLAUDE_CONFIG_DIR must be removed"
+            );
+            let root: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap())
+                    .unwrap();
+            let commands: Vec<&str> = root["hooks"]["PreToolUse"][0]["hooks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|hook| hook["command"].as_str())
+                .collect();
+            assert!(
+                !commands
+                    .iter()
+                    .any(|command| command.contains(REWRITE_HOOK_FILE)),
+                "the legacy settings entry must be removed: {commands:?}"
+            );
+            assert!(
+                commands.contains(&CLAUDE_HOOK_COMMAND),
+                "the binary hook entry must survive the migration: {commands:?}"
+            );
+            assert_eq!(
+                hook_status(),
+                crate::hooks::hook_check::HookStatus::Ok,
+                "after the migration `rtk gain` must stop warning about an outdated hook"
+            );
+        });
+    }
+
+    #[test]
+    fn test_migrate_removes_leftover_script_from_default_home_claude_dir() {
+        let tmp = test_isolation::tempdir();
+        test_isolation::with_root(tmp.path(), || {
+            user_env::with_vars(&[("CLAUDE_CONFIG_DIR", None)], || {
+                let hooks_dir = tmp.path().join(CLAUDE_DIR).join(HOOKS_SUBDIR);
+                fs::create_dir_all(&hooks_dir).expect("create hooks dir");
+                fs::write(
+                    hooks_dir.join(REWRITE_HOOK_FILE),
+                    "#!/usr/bin/env bash\n# rtk-hook-version: 4\n",
+                )
+                .expect("write leftover script");
+
+                migrate_old_hook_script(InitContext::default());
+
+                assert!(
+                    !hooks_dir.join(REWRITE_HOOK_FILE).exists(),
+                    "the legacy script under ~/.claude must still be removed"
+                );
+            });
         });
     }
 
