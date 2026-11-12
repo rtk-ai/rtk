@@ -1,5 +1,6 @@
 pub mod bun_cmd;
 pub mod deno_cmd;
+pub mod fnm_cmd;
 pub mod lint_cmd;
 pub mod next_cmd;
 pub mod ng_cmd;

@@ -15,8 +15,8 @@ use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git_cmd, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
-    bun_cmd, deno_cmd, lint_cmd, next_cmd, ng_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
-    prisma_cmd, tsc_cmd, vitest_cmd,
+    bun_cmd, deno_cmd, fnm_cmd, lint_cmd, next_cmd, ng_cmd, npm_cmd, playwright_cmd, pnpm_cmd,
+    prettier_cmd, prisma_cmd, tsc_cmd, vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{
@@ -726,6 +726,13 @@ enum Commands {
     /// bunx with passthrough + auto-filter
     Bunx {
         /// bunx arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// fnm (Fast Node Manager) commands; `fnm env` output is preserved verbatim
+    Fnm {
+        /// fnm subcommand and arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -3473,6 +3480,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Bunx { args } => run_bunx_tool(&args, cli.verbose, cli.skip_env)?,
 
+        Commands::Fnm { args } => fnm_cmd::run(&args, cli.verbose)?,
+
         Commands::Deno { command } => match command {
             DenoCommands::Test { args } => deno_cmd::run_test(&args, cli.verbose)?,
             DenoCommands::Check { args } => deno_cmd::run_check(&args, cli.verbose)?,
@@ -4139,6 +4148,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Gt { .. }
             | Commands::Bun { .. }
             | Commands::Bunx { .. }
+            | Commands::Fnm { .. }
             | Commands::Deno { .. }
     )
 }
@@ -4743,6 +4753,7 @@ mod tests {
             "uv",
             "bun",
             "bunx",
+            "fnm",
             "deno",
         ];
 
