@@ -103,7 +103,8 @@ static RESTORE_DIAGNOSTIC_RE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("valid regex")
 });
 static PROJECT_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^\s*([A-Za-z]:)?[^\r\n]*\.csproj(?:\s|$)").expect("valid regex")
+    Regex::new(r"(?m)^\s*(?:\d+(?::\d+)?>\s*)?(?:Restored\s+)?(?P<path>[^\r\n]*\.csproj)(?:\s|$)")
+        .expect("valid regex")
 });
 static PRINTABLE_RUN_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\x20-\x7E]{5,}").expect("valid regex"));
@@ -1049,12 +1050,8 @@ pub fn parse_restore_issues_from_text(text: &str) -> (Vec<BinlogIssue>, Vec<Binl
 }
 
 fn count_projects(text: &str) -> usize {
-    // Count projects, not lines that mention one: restore warnings name a project's .csproj
-    // once per warning, and a fresh restore names it again in a `Restored <csproj>` line. Each
-    // test assembly the run executes prints one `Test run for <dll>` line with its full path, so
-    // those lines are counted when present. Output without them falls back to the DISTINCT lines
-    // naming a .csproj, keyed by the path token — `Restored <path> (in 1.2 sec).` and
-    // `<path> : warning NU1900: …` name the same project once (#4844; the keying #4846 uses).
+    // Test assemblies are authoritative when present. Otherwise deduplicate full project
+    // paths, keeping spaces but excluding restore labels and MSBuild node prefixes.
     let mut projects: HashSet<&str> = HashSet::new();
     for captures in TEST_RUN_FOR_RE.captures_iter(text) {
         if let Some(dll) = captures.name("dll") {
@@ -1066,13 +1063,8 @@ fn count_projects(text: &str) -> usize {
     }
     let mut csprojs: HashSet<&str> = HashSet::new();
     for captures in PROJECT_PATH_RE.captures_iter(text) {
-        // The key is the last whitespace-separated token of the match, which is the whole path
-        // when the path has no spaces; a leading `Restored ` stays out of it.
-        if let Some(path) = captures
-            .get(0)
-            .and_then(|m| m.as_str().split_whitespace().last())
-        {
-            csprojs.insert(path);
+        if let Some(path) = captures.name("path") {
+            csprojs.insert(path.as_str());
         }
     }
     csprojs.len()
@@ -1680,6 +1672,29 @@ Restore failed with 1 error(s) in 1.0s
         let summary = parse_build_from_text(input);
 
         assert_eq!(summary.project_count, 3);
+    }
+
+    #[test]
+    fn test_parse_build_counts_full_project_paths() {
+        // .NET 10.0.404: build --force --no-incremental -bl:build.binlog, at minimal
+        // and normal verbosity. Project-bearing excerpts, with paths redacted; two
+        // projects share the Tests name.
+        let inputs = [
+            include_str!("../../../tests/fixtures/dotnet/build_spaced_projects.txt"),
+            include_str!("../../../tests/fixtures/dotnet/build_spaced_projects_verbose.txt"),
+            include_str!("../../../tests/fixtures/dotnet/build_verbose_projects.txt"),
+        ];
+        let counts: Vec<_> = inputs
+            .iter()
+            .map(|input| {
+                (
+                    parse_build_from_text(input).project_count,
+                    parse_test_from_text(input).project_count,
+                )
+            })
+            .collect();
+
+        assert_eq!(counts, vec![(2, 2), (2, 2), (3, 3)]);
     }
 
     #[test]

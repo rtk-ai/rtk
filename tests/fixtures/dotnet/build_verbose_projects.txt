@@ -1,0 +1,30 @@
+     1>Project "/fx/verbose/Two.sln" (1) is building "/fx/verbose/Lib/Lib.csproj" (2:5) on node 1 (_GenerateProjectRestoreGraph target(s)).
+     1>Project "/fx/verbose/Two.sln" (1) is building "/fx/verbose/A.Tests/A.Tests.csproj" (3:5) on node 2 (_GenerateProjectRestoreGraph target(s)).
+     1>Project "/fx/verbose/Two.sln" (1) is building "/fx/verbose/B.Tests/B.Tests.csproj" (4:5) on node 3 (_GenerateProjectRestoreGraph target(s)).
+     2>Done Building Project "/fx/verbose/Lib/Lib.csproj" (_GenerateProjectRestoreGraph target(s)).
+     3>Done Building Project "/fx/verbose/A.Tests/A.Tests.csproj" (_GenerateProjectRestoreGraph target(s)).
+     4>Done Building Project "/fx/verbose/B.Tests/B.Tests.csproj" (_GenerateProjectRestoreGraph target(s)).
+         Restoring packages for /fx/verbose/B.Tests/B.Tests.csproj...
+         Restoring packages for /fx/verbose/Lib/Lib.csproj...
+         Restoring packages for /fx/verbose/A.Tests/A.Tests.csproj...
+         Restored /fx/verbose/B.Tests/B.Tests.csproj (in 30 ms).
+         Restored /fx/verbose/Lib/Lib.csproj (in 30 ms).
+         Restored /fx/verbose/A.Tests/A.Tests.csproj (in 30 ms).
+   1:2>Project "/fx/verbose/Two.sln" (1:2) is building "/fx/verbose/A.Tests/A.Tests.csproj" (3:6) on node 2 (Rebuild target(s)).
+         Deleting file "/fx/verbose/A.Tests/obj/Debug/net10.0/A.Tests.csproj.CoreCompileInputs.cache".
+     3>/fx/verbose/A.Tests/A.Tests.csproj : warning RTK0001: Project count fixture
+   1:2>Project "/fx/verbose/Two.sln" (1:2) is building "/fx/verbose/B.Tests/B.Tests.csproj" (4:6) on node 3 (Rebuild target(s)).
+         Deleting file "/fx/verbose/B.Tests/obj/Debug/net10.0/B.Tests.csproj.CoreCompileInputs.cache".
+     4>/fx/verbose/B.Tests/B.Tests.csproj : warning RTK0001: Project count fixture
+   1:2>Project "/fx/verbose/Two.sln" (1:2) is building "/fx/verbose/Lib/Lib.csproj" (2:6) on node 1 (Rebuild target(s)).
+         Deleting file "/fx/verbose/Lib/obj/Debug/net10.0/Lib.csproj.CoreCompileInputs.cache".
+     2>/fx/verbose/Lib/Lib.csproj : warning RTK0001: Project count fixture
+     3>Done Building Project "/fx/verbose/A.Tests/A.Tests.csproj" (Rebuild target(s)).
+     4>Done Building Project "/fx/verbose/B.Tests/B.Tests.csproj" (Rebuild target(s)).
+     2>Done Building Project "/fx/verbose/Lib/Lib.csproj" (Rebuild target(s)).
+       "/fx/verbose/A.Tests/A.Tests.csproj" (Rebuild target) (3:6) ->
+         /fx/verbose/A.Tests/A.Tests.csproj : warning RTK0001: Project count fixture
+       "/fx/verbose/B.Tests/B.Tests.csproj" (Rebuild target) (4:6) ->
+         /fx/verbose/B.Tests/B.Tests.csproj : warning RTK0001: Project count fixture
+       "/fx/verbose/Lib/Lib.csproj" (Rebuild target) (2:6) ->
+         /fx/verbose/Lib/Lib.csproj : warning RTK0001: Project count fixture

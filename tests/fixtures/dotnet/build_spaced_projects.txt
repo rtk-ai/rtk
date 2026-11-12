@@ -1,0 +1,6 @@
+  Restored /fx/spaced/Order Api/Tests/Tests.csproj (in 26 ms).
+  Restored /fx/spaced/Billing Api/Tests/Tests.csproj (in 26 ms).
+/fx/spaced/Billing Api/Tests/Tests.csproj : warning RTK0001: Project count fixture
+/fx/spaced/Order Api/Tests/Tests.csproj : warning RTK0001: Project count fixture
+/fx/spaced/Billing Api/Tests/Tests.csproj : warning RTK0001: Project count fixture
+/fx/spaced/Order Api/Tests/Tests.csproj : warning RTK0001: Project count fixture
