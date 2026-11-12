@@ -1302,7 +1302,7 @@ fn rewrite_compound(
     let mut any_changed = false;
     let mut seg_start: usize = 0;
 
-    for tok in &tokens {
+    for (i, tok) in tokens.iter().enumerate() {
         if tok.offset < seg_start {
             continue;
         }
@@ -1376,7 +1376,17 @@ fn rewrite_compound(
                     transparent_prefixes,
                     shell_wrapper_depth,
                 );
-                seg_start = tok.offset + tok.value.len();
+                let op_end = tok.offset + tok.value.len();
+                seg_start = match tokens.get(i + 1) {
+                    Some(bang)
+                        if bang.kind == TokenKind::Shellism
+                            && bang.value == "!"
+                            && bang.offset == op_end =>
+                    {
+                        bang.offset + bang.value.len()
+                    }
+                    _ => op_end,
+                };
                 result.push_str(&cmd[tok.offset..seg_start]);
             }
             _ => {}
@@ -8999,6 +9009,22 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("bash -c 'git status && bash -c \"cargo test\"'", &[]),
             Some("bash -c 'rtk git status && bash -c \"cargo test\"'".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_zsh_disown_bang_operator() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git status &!git log", &[]),
+            Some("rtk git status &!rtk git log".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git status &! git log", &[]),
+            Some("rtk git status &! rtk git log".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git status &!", &[]),
+            Some("rtk git status &!".into())
         );
     }
 }
