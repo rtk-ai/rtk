@@ -311,8 +311,8 @@ pub async fn relay(
     let retries = state.config.upstream_retries;
     let timeout = state.config.upstream_timeout_secs;
     let started = Instant::now();
-    let deadline = (timeout > 0).then(|| started + std::time::Duration::from_secs(timeout));
-    let buffered_deadline = deadline.filter(|_| !stream);
+    let total = (timeout > 0).then(|| std::time::Duration::from_secs(timeout));
+    let buffered_deadline = total.filter(|_| !stream).map(|t| started + t);
     let client = if buffered_deadline.is_some() {
         &state.http_buffered
     } else {
@@ -357,7 +357,9 @@ pub async fn relay(
                 return if stream && status.is_success() {
                     stream_relay(resp, provider, started)
                 } else {
-                    buffered_relay(resp, provider, started, deadline).await
+                    let body_deadline =
+                        buffered_deadline.or_else(|| total.map(|t| Instant::now() + t));
+                    buffered_relay(resp, provider, started, body_deadline).await
                 };
             }
             Err(e) => {
@@ -923,6 +925,7 @@ mod tests {
         Silent,
         AnswersAfter(u64),
         ErrorThenTrickle,
+        ErrorAfter(u64),
     }
 
     async fn upstream(mode: Upstream) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
@@ -950,6 +953,14 @@ mod tests {
                                     b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}",
                                 )
                                 .await;
+                        }
+                        Upstream::ErrorAfter(ms) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                            let _ = conn
+                                .write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 4\r\n\r\n")
+                                .await;
+                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                            let _ = conn.write_all(b"nope").await;
                         }
                         Upstream::ErrorThenTrickle => {
                             let _ = conn
@@ -1042,6 +1053,14 @@ mod tests {
         let (status, took) = relay_status(&st, &base, true).await;
         assert_eq!(status, 502);
         assert!(took < std::time::Duration::from_secs(3), "waited {took:?}");
+    }
+
+    #[tokio::test]
+    async fn a_late_error_to_a_streaming_request_keeps_its_status() {
+        let (base, _) = upstream(Upstream::ErrorAfter(1500)).await;
+        let st = bounded(1, 0);
+        let (status, _) = relay_status(&st, &base, true).await;
+        assert_eq!(status, 400);
     }
 
     #[tokio::test]
