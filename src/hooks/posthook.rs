@@ -1055,6 +1055,235 @@ fn track(
     }
 }
 
+/// Entry point for Copilot CLI `PostToolUse` / `postToolUse` events routed
+/// through `rtk hook copilot`.
+pub fn run_copilot(event: &Value) {
+    let outcome =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| process_copilot(event)));
+    if let Ok(Some((output, loaded))) = outcome {
+        let _ = writeln!(io::stdout(), "{output}");
+        pipeline_config::write_status(&loaded);
+        pipeline_log::flush();
+    } else if let Ok(None) = outcome {
+        pipeline_log::flush();
+    }
+}
+
+fn process_copilot(event: &Value) -> Option<(String, LoadedPipeline)> {
+    if crate::core::user_env::var("RTK_DISABLED").as_deref() == Some("1")
+        || crate::core::user_env::var("RTK_POSTHOOK").as_deref() == Some("0")
+    {
+        return None;
+    }
+    let config = Config::load().unwrap_or_default();
+    let loaded = pipeline_config::load();
+    let out = process_copilot_with_config(event, &config, &loaded.resolved)?;
+    Some((out, loaded))
+}
+
+pub(crate) fn process_copilot_with_config(
+    event: &Value,
+    config: &Config,
+    pipeline: &Resolved,
+) -> Option<String> {
+    let tool_name = event
+        .get("tool_name")
+        .or_else(|| event.get("toolName"))
+        .and_then(Value::as_str)?;
+    let result_obj = event
+        .get("tool_result")
+        .or_else(|| event.get("toolResult"))?;
+    let result_type = result_obj
+        .get("result_type")
+        .or_else(|| result_obj.get("resultType"))
+        .and_then(Value::as_str);
+    if result_type != Some("success") {
+        return None;
+    }
+    let raw = result_obj
+        .get("text_result_for_llm")
+        .or_else(|| result_obj.get("textResultForLlm"))
+        .and_then(Value::as_str)?;
+    let tool_input = event.get("tool_input").cloned().or_else(|| {
+        event
+            .get("toolArgs")
+            .and_then(Value::as_str)
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+    });
+
+    let lower_tool = tool_name.to_lowercase();
+    let mut subject = subject_of_for("copilot-cli", &lower_tool);
+    if subject == Subject::Any {
+        subject = subject_of_for("claude-code", tool_name);
+    }
+    let duration_ms = event
+        .get("duration_ms")
+        .or_else(|| event.get("durationMs"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
+    if subject == Subject::Shell {
+        let command = tool_input
+            .as_ref()
+            .and_then(|ti| ti.get("command"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let is_rtk_command = RTK_IN_COMMAND.is_match(command);
+        if command.contains("tee/posthook")
+            || RTK_RECALL_COMMAND.is_match(command)
+            || tee::posthook_recall_dir(config)
+                .is_some_and(|d| command.contains(&d.display().to_string()))
+        {
+            record_recovery(command);
+            return None;
+        }
+        if raw.len() < pipeline.guards.min_size {
+            return None;
+        }
+
+        let first_word = command.split_whitespace().next().unwrap_or("");
+        let applied = run_selected(
+            pipeline,
+            Subject::Shell,
+            "Bash",
+            ContentFormat::Term,
+            command,
+            raw,
+            duration_ms,
+            Some(is_rtk_command),
+        );
+        let shadow = applied.as_ref().map(|a| a.shadow).unwrap_or(false);
+        let filtered = applied
+            .as_ref()
+            .map(|a| a.text.clone())
+            .unwrap_or_else(|| raw.to_string());
+        if filtered == raw || shadow {
+            if shadow && let Some(applied_ref) = &applied {
+                attribute(applied_ref, raw, &filtered);
+                queue_log(
+                    Subject::Shell,
+                    Some(command),
+                    "",
+                    applied_ref,
+                    estimate_tokens(raw),
+                    estimate_tokens(&filtered),
+                );
+            }
+            track("Bash", "term", first_word, raw, raw, duration_ms);
+            return None;
+        }
+
+        let slug = format!("bash_{first_word}");
+        let hint = tee::posthook_tee_hint(config, raw, &slug);
+        let composed = match hint {
+            Some(h) => format!("{filtered}\n{h}"),
+            None => filtered,
+        };
+        if estimate_tokens(&composed) > estimate_tokens(raw) {
+            track("Bash", "term", first_word, raw, raw, duration_ms);
+            return None;
+        }
+        if let Some(applied_ref) = &applied {
+            attribute(applied_ref, raw, &composed);
+            queue_log(
+                Subject::Shell,
+                Some(command),
+                "",
+                applied_ref,
+                estimate_tokens(raw),
+                estimate_tokens(&composed),
+            );
+        }
+        track("Bash", "term", first_word, raw, &composed, duration_ms);
+        return Some(
+            json!({
+                "modifiedResult": {
+                    "resultType": "success",
+                    "textResultForLlm": composed,
+                }
+            })
+            .to_string(),
+        );
+    }
+
+    if raw.len() < pipeline.guards.min_size {
+        return None;
+    }
+
+    let source = tool_input
+        .as_ref()
+        .and_then(|ti| {
+            ti.get("path")
+                .or_else(|| ti.get("file_path"))
+                .or_else(|| ti.get("url"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or_default()
+        .to_string();
+
+    let format = match subject {
+        Subject::Read => {
+            if is_lockfile_name(&basename_of(&source)) {
+                Some(ContentFormat::Lockfile)
+            } else if extension_of(&source) == "json" {
+                Some(ContentFormat::Json)
+            } else {
+                Some(ContentFormat::Term)
+            }
+        }
+        Subject::Search => {
+            if lower_tool == "glob" {
+                None
+            } else {
+                Some(ContentFormat::Matches)
+            }
+        }
+        Subject::Web => Some(ContentFormat::Web),
+        Subject::Write | Subject::Edit => None,
+        Subject::Shell => unreachable!(),
+        _ => {
+            if serde_json::from_str::<Value>(raw.trim()).is_ok() {
+                Some(ContentFormat::Json)
+            } else {
+                Some(ContentFormat::Term)
+            }
+        }
+    };
+
+    let Some(format) = format else {
+        track(tool_name, "passthrough", &source, raw, raw, duration_ms);
+        return None;
+    };
+
+    let composed = filter_and_compose(
+        config,
+        pipeline,
+        subject,
+        tool_name,
+        &source,
+        raw,
+        format,
+        duration_ms,
+    )?;
+    track(
+        tool_name,
+        format.as_str(),
+        &source,
+        raw,
+        &composed,
+        duration_ms,
+    );
+    Some(
+        json!({
+            "modifiedResult": {
+                "resultType": "success",
+                "textResultForLlm": composed,
+            }
+        })
+        .to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1777,5 +2006,78 @@ mod tests {
         assert_eq!(extension_of("https://docs.rs/toon"), "");
         assert_eq!(basename_of("/a/b/data.json"), "data.json");
         assert_eq!(basename_of("https://docs.rs/toon-format"), "docs.rs");
+    }
+
+    #[test]
+    fn test_copilot_posthook_rewrites_bash_output_snake_and_camel() {
+        let pipeline = pipeline_from("[pipeline]\nextends = \"rtk:posthook\"\n");
+        let raw = "\x1b[32mcompiling module ok\x1b[0m\n".repeat(200);
+
+        let snake = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo check"},
+            "tool_result": {
+                "result_type": "success",
+                "text_result_for_llm": raw
+            }
+        });
+        let out_snake = process_copilot_with_config(&snake, &test_config(), &pipeline)
+            .expect("snake_case PostToolUse should be filtered");
+        let parsed_snake: Value = serde_json::from_str(&out_snake).unwrap();
+        assert_eq!(
+            parsed_snake.pointer("/modifiedResult/resultType"),
+            Some(&json!("success"))
+        );
+        let text_snake = parsed_snake
+            .pointer("/modifiedResult/textResultForLlm")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(!text_snake.contains("\x1b[32m"));
+
+        let camel = serde_json::json!({
+            "hookEventName": "postToolUse",
+            "toolName": "bash",
+            "toolArgs": "{\"command\":\"cargo check\"}",
+            "toolResult": {
+                "resultType": "success",
+                "textResultForLlm": raw
+            }
+        });
+        let out_camel = process_copilot_with_config(&camel, &test_config(), &pipeline)
+            .expect("camelCase postToolUse should be filtered");
+        let parsed_camel: Value = serde_json::from_str(&out_camel).unwrap();
+        assert_eq!(
+            parsed_camel.pointer("/modifiedResult/resultType"),
+            Some(&json!("success"))
+        );
+    }
+
+    #[test]
+    fn test_copilot_posthook_skips_non_success_and_rtk_commands() {
+        let pipeline = pipeline_from("[pipeline]\nextends = \"rtk:posthook\"\n");
+        let raw = "\x1b[31merror output\x1b[0m\n".repeat(200);
+
+        let failed = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo check"},
+            "tool_result": {
+                "result_type": "failure",
+                "text_result_for_llm": raw
+            }
+        });
+        assert!(process_copilot_with_config(&failed, &test_config(), &pipeline).is_none());
+
+        let already_rtk = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "rtk cargo check"},
+            "tool_result": {
+                "result_type": "success",
+                "text_result_for_llm": raw
+            }
+        });
+        assert!(process_copilot_with_config(&already_rtk, &test_config(), &pipeline).is_none());
     }
 }

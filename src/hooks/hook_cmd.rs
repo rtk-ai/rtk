@@ -60,11 +60,13 @@ enum HookFormat {
     /// JetBrains Copilot IDE: only top-level deny decisions are honored, so
     /// rewrites must be returned as deny-with-suggestion responses.
     CopilotIde { command: String },
+    /// Copilot CLI PostToolUse / postToolUse event (`tool_result` / `toolResult`).
+    CopilotPostToolUse,
     /// Non-bash tool, already uses rtk, or unknown format — pass through silently.
     PassThrough,
 }
 
-/// Run the Copilot preToolUse hook.
+/// Run the Copilot PreToolUse / PostToolUse hook.
 /// Auto-detects VS Code Copilot Chat vs Copilot CLI format.
 pub fn run_copilot() -> Result<()> {
     let input = read_stdin_limited()?;
@@ -93,11 +95,26 @@ pub fn run_copilot() -> Result<()> {
             handle_copilot_cli(&command, &args)
         }
         HookFormat::CopilotIde { command } => handle_copilot_ide(&command),
+        HookFormat::CopilotPostToolUse => {
+            #[cfg(feature = "engine")]
+            super::posthook::run_copilot(&v);
+            Ok(())
+        }
         HookFormat::PassThrough => Ok(()),
     }
 }
 
 fn detect_format(v: &Value) -> HookFormat {
+    if matches!(
+        v.get("hook_event_name")
+            .or_else(|| v.get("hookEventName"))
+            .and_then(Value::as_str),
+        Some("PostToolUse" | "postToolUse")
+    ) || v.get("tool_result").is_some()
+        || v.get("toolResult").is_some()
+    {
+        return HookFormat::CopilotPostToolUse;
+    }
     // VS Code Copilot Chat / Claude Code: snake_case keys.
     // "run_in_terminal" is VS Code Copilot Chat's actual terminal tool name
     // (confirmed via live payload capture) — without it, detect_format falls
