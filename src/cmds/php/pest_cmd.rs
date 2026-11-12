@@ -2,14 +2,22 @@
 
 use super::test_output::filter_test_runner_output;
 use super::utils::php_tool_command;
+use crate::core::arg_tokenizer::{self, TokenKind};
 use crate::core::runner;
 use crate::core::shell::display_args;
 use anyhow::Result;
 
+fn has_no_progress_flag(args: &[String]) -> bool {
+    let tokens = arg_tokenizer::tokenize(args);
+    arg_tokenizer::before_dashdash(&tokens)
+        .iter()
+        .any(|t| t.kind == TokenKind::Long && t.text == "no-progress" && t.attached.is_none())
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = php_tool_command("pest");
 
-    let has_no_progress = args.iter().any(|a| a == "--no-progress");
+    let has_no_progress = has_no_progress_flag(args);
     if !has_no_progress {
         cmd.arg("--no-progress");
     }
@@ -42,5 +50,23 @@ mod tests {
         assert!(!filtered.contains("Pest 5.0.0"));
         assert!(!filtered.contains("....."));
         assert!(filtered.contains("PASS  Tests\\Unit\\ExampleTest"));
+    }
+
+    #[test]
+    fn test_has_no_progress_flag_stops_at_double_dash() {
+        let args = |items: &[&str]| -> Vec<String> { items.iter().map(|s| s.to_string()).collect() };
+        assert!(!has_no_progress_flag(&args(&[])));
+        assert!(has_no_progress_flag(&args(&["--no-progress"])));
+        assert!(has_no_progress_flag(&args(&[
+            "--no-progress",
+            "--",
+            "tests/Unit"
+        ])));
+        assert!(!has_no_progress_flag(&args(&["--", "--no-progress"])));
+        assert!(!has_no_progress_flag(&args(&[
+            "tests/Unit",
+            "--",
+            "--no-progress"
+        ])));
     }
 }
