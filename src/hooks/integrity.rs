@@ -331,13 +331,16 @@ fn runtime_check_in(hook_path: Result<PathBuf>) -> Result<()> {
         return Ok(());
     };
 
-    // If the legacy script doesn't exist, skip integrity check entirely.
-    // In the new binary command model, there is no script file to verify.
-    if !hook_path.exists() {
-        return Ok(());
-    }
+    // No early return when the legacy script is missing: verification still
+    // resolves `NotInstalled` (silent) or `OrphanedHash` (the warning documented
+    // above). The binary command model lands in `NotInstalled`.
+    let status = verify_hook_at(&hook_path).map_err(|err| {
+        // A damaged baseline stops the command with the error alone. Name the
+        // command that rewrites it, the way the `Tampered` arm below does.
+        anyhow::anyhow!("{err:#}\n  To restore: rtk init -g --auto-patch")
+    })?;
 
-    match verify_hook_at(&hook_path)? {
+    match status {
         IntegrityStatus::Verified | IntegrityStatus::NotInstalled => {
             // All good, proceed
         }
@@ -356,7 +359,7 @@ fn runtime_check_in(hook_path: Result<PathBuf>) -> Result<()> {
                 actual.get(..16).unwrap_or(&actual)
             );
             eprintln!();
-            eprintln!("  The hook at ~/.claude/hooks/rtk-rewrite.sh has been modified.");
+            eprintln!("  The hook at {} has been modified.", hook_path.display());
             eprintln!("  This may indicate tampering. RTK will not execute.");
             eprintln!();
             eprintln!("  To restore:  rtk init -g --auto-patch");
@@ -413,6 +416,35 @@ mod tests {
         let hook_path = explicit.map(|dir| dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE));
         let err = runtime_check_in(hook_path).unwrap_err();
         assert!(err.to_string().contains("Invalid hash format"));
+    }
+
+    #[test]
+    fn runtime_check_bad_baseline_error_names_restore_command() {
+        let temp = TempDir::new().unwrap();
+        let hooks = temp.path().join(HOOKS_SUBDIR);
+        fs::create_dir(&hooks).unwrap();
+        fs::write(hooks.join(REWRITE_HOOK_FILE), "#!/bin/sh\n").unwrap();
+        fs::write(hooks.join(HASH_FILENAME), "not a hash").unwrap();
+        let explicit =
+            super::super::init::resolve_claude_dir_from(Some(temp.path().to_path_buf()), None);
+        let hook_path = explicit.map(|dir| dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE));
+        let err = runtime_check_in(hook_path).unwrap_err();
+        assert!(err.to_string().contains("Invalid hash format"));
+        assert!(err.to_string().contains("rtk init -g --auto-patch"));
+    }
+
+    #[test]
+    fn runtime_check_orphaned_baseline_continues() {
+        let temp = TempDir::new().unwrap();
+        let hooks = temp.path().join(HOOKS_SUBDIR);
+        fs::create_dir(&hooks).unwrap();
+        let baseline = format!("{}  {}\n", "0".repeat(64), REWRITE_HOOK_FILE);
+        fs::write(hooks.join(HASH_FILENAME), baseline).unwrap();
+        let explicit =
+            super::super::init::resolve_claude_dir_from(Some(temp.path().to_path_buf()), None);
+        let hook_path = explicit.map(|dir| dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE));
+        // Baseline without a hook: the documented warning, never a hard stop.
+        assert!(runtime_check_in(hook_path).is_ok());
     }
 
     #[test]

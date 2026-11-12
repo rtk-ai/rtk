@@ -46,7 +46,7 @@ fn sandbox(state: &str) -> tempfile::TempDir {
     let hooks = root.join(".claude/hooks");
     std::fs::create_dir_all(&hooks).expect("write isolated fixture");
     let original = b"#!/bin/sh\n# original fixture\n";
-    if state != "missing" {
+    if !matches!(state, "missing" | "orphaned") {
         let contents: &[u8] = if state == "tampered" {
             b"#!/bin/sh\n# modified fixture\n"
         } else {
@@ -54,7 +54,7 @@ fn sandbox(state: &str) -> tempfile::TempDir {
         };
         std::fs::write(hooks.join("rtk-rewrite.sh"), contents).expect("write isolated fixture");
     }
-    if matches!(state, "verified" | "tampered") {
+    if matches!(state, "verified" | "tampered" | "orphaned") {
         std::fs::write(
             hooks.join(".rtk-hook.sha256"),
             format!("{:x}  rtk-rewrite.sh\n", Sha256::digest(original)),
@@ -125,6 +125,22 @@ fn fallback_propagates_invalid_baseline_errors() {
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("Invalid hash format"));
     assert!(!dir.path().join("called").exists());
+}
+
+#[test]
+fn fallback_warns_on_orphaned_baseline_without_blocking() {
+    // Baseline present, hook gone: the warning must reach stderr and the
+    // command must still run (issue #5039).
+    let dir = sandbox("orphaned");
+    let out = run(dir.path(), &["make", "all"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(7), "{stderr}");
+    assert!(
+        stderr.contains("hash file exists but hook is missing"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("hook integrity check FAILED"), "{stderr}");
+    assert!(dir.path().join("called").exists());
 }
 
 #[test]
