@@ -1,6 +1,6 @@
 [filters.xcodebuild]
 description = "Compact xcodebuild output — strip build phases, keep errors/warnings/summary"
-match_command = "^xcodebuild\\b"
+match_command = "^xcodebuild(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

@@ -1,6 +1,6 @@
 [filters.tofu-plan]
 description = "Compact OpenTofu plan output"
-match_command = "^tofu\\s+plan(\\s|$)"
+match_command = "^tofu[ \\t\\n]+plan([ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^Refreshing state",

@@ -1,6 +1,6 @@
 [filters.ps]
 description = "Compact ps output — truncate wide lines, limit rows"
-match_command = "^ps(\\s|$)"
+match_command = "^ps([ \\t\\n]|$)"
 strip_ansi = true
 truncate_lines_at = 120
 max_lines = 30

@@ -1,6 +1,6 @@
 [filters.systemctl-status]
 description = "Compact systemctl status output — strip blank lines, limit to 20 lines"
-match_command = "^systemctl\\s+status\\b"
+match_command = "^systemctl[ \\t\\n]+status(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

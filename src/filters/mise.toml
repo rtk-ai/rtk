@@ -1,6 +1,6 @@
 [filters.mise]
 description = "Compact mise task runner output — strip status lines, keep task results"
-match_command = "^mise\\s+(run|exec|install|upgrade)\\b"
+match_command = "^mise[ \\t\\n]+(run|exec|install|upgrade)(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

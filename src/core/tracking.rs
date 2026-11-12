@@ -29,11 +29,10 @@
 //!
 //! See [docs/tracking.md](../docs/tracking.md) for full documentation.
 
+use crate::core::cmdline::lexer::shell_split;
 use crate::core::shell::{quote_program, quote_word};
 use crate::core::user_dirs;
 use crate::core::user_env;
-// The shared shell lexer lives in `discover`.
-use crate::core::cmdline::lexer::shell_split;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
