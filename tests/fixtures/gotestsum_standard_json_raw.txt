@@ -1,0 +1,113 @@
+{"Time":"2026-10-10T01:56:17.138537436+04:00","Action":"start","Package":"example.com/s/a"}
+{"Time":"2026-10-10T01:56:17.138704367+04:00","Action":"start","Package":"example.com/s/b"}
+{"Time":"2026-10-10T01:56:17.13878076+04:00","Action":"start","Package":"example.com/s/c"}
+{"Time":"2026-10-10T01:56:17.140367936+04:00","Action":"run","Package":"example.com/s/a","Test":"TestOK"}
+{"Time":"2026-10-10T01:56:17.140486104+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK","Output":"=== RUN   TestOK\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140508149+04:00","Action":"run","Package":"example.com/s/a","Test":"TestOK/sub"}
+{"Time":"2026-10-10T01:56:17.14051037+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK/sub","Output":"=== RUN   TestOK/sub\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140513237+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK/sub","Output":"    a_test.go:3: noise line\n"}
+{"Time":"2026-10-10T01:56:17.140518136+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK/sub","Output":"--- PASS: TestOK/sub (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140369359+04:00","Action":"run","Package":"example.com/s/b","Test":"TestFail"}
+{"Time":"2026-10-10T01:56:17.140512159+04:00","Action":"run","Package":"example.com/s/c","Test":"TestC"}
+{"Time":"2026-10-10T01:56:17.140540299+04:00","Action":"output","Package":"example.com/s/c","Test":"TestC","Output":"=== RUN   TestC\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140538601+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"=== RUN   TestFail\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.1405478+04:00","Action":"output","Package":"example.com/s/c","Test":"TestC","Output":"--- PASS: TestC (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140539325+04:00","Action":"pass","Package":"example.com/s/a","Test":"TestOK/sub","Elapsed":0}
+{"Time":"2026-10-10T01:56:17.140550967+04:00","Action":"pass","Package":"example.com/s/c","Test":"TestC","Elapsed":0}
+{"Time":"2026-10-10T01:56:17.140550192+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 0\n"}
+{"Time":"2026-10-10T01:56:17.14055443+04:00","Action":"output","Package":"example.com/s/c","Output":"PASS\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140554184+04:00","Action":"run","Package":"example.com/s/a","Test":"TestOK/sub#01"}
+{"Time":"2026-10-10T01:56:17.140557172+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 1\n"}
+{"Time":"2026-10-10T01:56:17.140560251+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK/sub#01","Output":"=== RUN   TestOK/sub#01\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140562126+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 2\n"}
+{"Time":"2026-10-10T01:56:17.140564869+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 3\n"}
+{"Time":"2026-10-10T01:56:17.14056417+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK/sub#01","Output":"    a_test.go:3: noise line\n"}
+{"Time":"2026-10-10T01:56:17.140567978+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 4\n"}
+{"Time":"2026-10-10T01:56:17.140570761+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 5\n"}
+{"Time":"2026-10-10T01:56:17.140572177+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK/sub#01","Output":"--- PASS: TestOK/sub#01 (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140573628+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 6\n"}
+{"Time":"2026-10-10T01:56:17.140578043+04:00","Action":"pass","Package":"example.com/s/a","Test":"TestOK/sub#01","Elapsed":0}
+{"Time":"2026-10-10T01:56:17.140580241+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 7\n"}
+{"Time":"2026-10-10T01:56:17.140581445+04:00","Action":"run","Package":"example.com/s/a","Test":"TestOK/sub#02"}
+{"Time":"2026-10-10T01:56:17.140583043+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 8\n"}
+{"Time":"2026-10-10T01:56:17.140585581+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 9\n"}
+{"Time":"2026-10-10T01:56:17.140588135+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 10\n"}
+{"Time":"2026-10-10T01:56:17.140584434+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK/sub#02","Output":"=== RUN   TestOK/sub#02\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140591883+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 11\n"}
+{"Time":"2026-10-10T01:56:17.140592702+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK/sub#02","Output":"    a_test.go:3: noise line\n"}
+{"Time":"2026-10-10T01:56:17.140595295+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 12\n"}
+{"Time":"2026-10-10T01:56:17.140597194+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK/sub#02","Output":"--- PASS: TestOK/sub#02 (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140597953+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 13\n"}
+{"Time":"2026-10-10T01:56:17.140600472+04:00","Action":"pass","Package":"example.com/s/a","Test":"TestOK/sub#02","Elapsed":0}
+{"Time":"2026-10-10T01:56:17.140603374+04:00","Action":"run","Package":"example.com/s/a","Test":"TestOK/sub#03"}
+{"Time":"2026-10-10T01:56:17.140601593+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 14\n"}
+{"Time":"2026-10-10T01:56:17.140606847+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 15\n"}
+{"Time":"2026-10-10T01:56:17.140609489+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 16\n"}
+{"Time":"2026-10-10T01:56:17.140612186+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 17\n"}
+{"Time":"2026-10-10T01:56:17.140614612+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 18\n"}
+{"Time":"2026-10-10T01:56:17.140617171+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"debug output line 19\n"}
+{"Time":"2026-10-10T01:56:17.140620048+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"    b_test.go:3: want 1, got 2\n","OutputType":"error"}
+{"Time":"2026-10-10T01:56:17.140608493+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK/sub#03","Output":"=== RUN   TestOK/sub#03\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140627144+04:00","Action":"output","Package":"example.com/s/b","Test":"TestFail","Output":"--- FAIL: TestFail (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140633189+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK/sub#03","Output":"    a_test.go:3: noise line\n"}
+{"Time":"2026-10-10T01:56:17.140633969+04:00","Action":"fail","Package":"example.com/s/b","Test":"TestFail","Elapsed":0}
+{"Time":"2026-10-10T01:56:17.140641123+04:00","Action":"run","Package":"example.com/s/b","Test":"TestPass"}
+{"Time":"2026-10-10T01:56:17.140643552+04:00","Action":"output","Package":"example.com/s/b","Test":"TestPass","Output":"=== RUN   TestPass\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140643004+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK/sub#03","Output":"--- PASS: TestOK/sub#03 (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140647565+04:00","Action":"output","Package":"example.com/s/b","Test":"TestPass","Output":"--- PASS: TestPass (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140648472+04:00","Action":"pass","Package":"example.com/s/a","Test":"TestOK/sub#03","Elapsed":0}
+{"Time":"2026-10-10T01:56:17.140650806+04:00","Action":"pass","Package":"example.com/s/b","Test":"TestPass","Elapsed":0}
+{"Time":"2026-10-10T01:56:17.140653875+04:00","Action":"run","Package":"example.com/s/b","Test":"TestSkip"}
+{"Time":"2026-10-10T01:56:17.140653523+04:00","Action":"run","Package":"example.com/s/a","Test":"TestOK/sub#04"}
+{"Time":"2026-10-10T01:56:17.140658744+04:00","Action":"output","Package":"example.com/s/b","Test":"TestSkip","Output":"=== RUN   TestSkip\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140660035+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK/sub#04","Output":"=== RUN   TestOK/sub#04\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140662066+04:00","Action":"output","Package":"example.com/s/b","Test":"TestSkip","Output":"    b_test.go:5: not ready\n"}
+{"Time":"2026-10-10T01:56:17.140666789+04:00","Action":"output","Package":"example.com/s/b","Test":"TestSkip","Output":"--- SKIP: TestSkip (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140672933+04:00","Action":"skip","Package":"example.com/s/b","Test":"TestSkip","Elapsed":0}
+{"Time":"2026-10-10T01:56:17.140663358+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK/sub#04","Output":"    a_test.go:3: noise line\n"}
+{"Time":"2026-10-10T01:56:17.140675787+04:00","Action":"output","Package":"example.com/s/b","Output":"FAIL\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140686738+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK/sub#04","Output":"--- PASS: TestOK/sub#04 (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140695349+04:00","Action":"pass","Package":"example.com/s/a","Test":"TestOK/sub#04","Elapsed":0}
+{"Time":"2026-10-10T01:56:17.140699446+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK","Output":"--- PASS: TestOK (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140704944+04:00","Action":"pass","Package":"example.com/s/a","Test":"TestOK","Elapsed":0}
+{"Time":"2026-10-10T01:56:17.140706981+04:00","Action":"run","Package":"example.com/s/a","Test":"TestOK2"}
+{"Time":"2026-10-10T01:56:17.140709294+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK2","Output":"=== RUN   TestOK2\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140711963+04:00","Action":"output","Package":"example.com/s/a","Test":"TestOK2","Output":"--- PASS: TestOK2 (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.1407169+04:00","Action":"pass","Package":"example.com/s/a","Test":"TestOK2","Elapsed":0}
+{"Time":"2026-10-10T01:56:17.140718252+04:00","Action":"output","Package":"example.com/s/a","Output":"PASS\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.14072735+04:00","Action":"output","Package":"example.com/s/c","Output":"ok  \texample.com/s/c\t0.002s\n"}
+{"Time":"2026-10-10T01:56:17.140752904+04:00","Action":"pass","Package":"example.com/s/c","Elapsed":0.002}
+{"Time":"2026-10-10T01:56:17.140867061+04:00","Action":"output","Package":"example.com/s/b","Output":"FAIL\texample.com/s/b\t0.002s\n","OutputType":"frame"}
+{"Time":"2026-10-10T01:56:17.140872371+04:00","Action":"fail","Package":"example.com/s/b","Elapsed":0.002}
+{"Time":"2026-10-10T01:56:17.140874256+04:00","Action":"output","Package":"example.com/s/a","Output":"ok  \texample.com/s/a\t0.002s\n"}
+{"Time":"2026-10-10T01:56:17.140887628+04:00","Action":"pass","Package":"example.com/s/a","Elapsed":0.002}
+
+=== Skipped
+=== SKIP: b TestSkip (0.00s)
+    b_test.go:5: not ready
+
+=== Failed
+=== FAIL: b TestFail (0.00s)
+debug output line 0
+debug output line 1
+debug output line 2
+debug output line 3
+debug output line 4
+debug output line 5
+debug output line 6
+debug output line 7
+debug output line 8
+debug output line 9
+debug output line 10
+debug output line 11
+debug output line 12
+debug output line 13
+debug output line 14
+debug output line 15
+debug output line 16
+debug output line 17
+debug output line 18
+debug output line 19
+    b_test.go:3: want 1, got 2
+
+DONE 11 tests, 1 skipped, 1 failure in 0.002s
