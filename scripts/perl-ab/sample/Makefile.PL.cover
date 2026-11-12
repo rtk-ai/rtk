@@ -1,0 +1,9 @@
+use strict;
+use warnings;
+use ExtUtils::MakeMaker;
+
+WriteMakefile(
+    NAME         => 'Acme::RtkSample',
+    VERSION_FROM => 'lib/Acme/RtkSample.pm',
+    test         => { TESTS => 't-pass/*.t t/02-fail-more.t' },
+);

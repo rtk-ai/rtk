@@ -1,0 +1,23 @@
+# Profile for the perlcritic scenario. It makes the run the same on every machine:
+# `only = 1` loads just the policies named here, all from the Perl::Critic distribution,
+# so add-on policy distributions installed on the machine do not run. Passing this file
+# with --profile also means ~/.perlcriticrc is not read.
+# CodeLayout::RequireTidyCode is left out on purpose, because it reads ~/.perltidyrc.
+only = 1
+severity = 1
+
+[BuiltinFunctions::ProhibitStringyEval]
+[ErrorHandling::RequireCarping]
+[InputOutput::ProhibitBarewordFileHandles]
+[InputOutput::ProhibitTwoArgOpen]
+[InputOutput::RequireBriefOpen]
+[InputOutput::RequireCheckedClose]
+[InputOutput::RequireCheckedSyscalls]
+[Modules::RequireVersionVar]
+[RegularExpressions::RequireDotMatchAnything]
+[RegularExpressions::RequireExtendedFormatting]
+[RegularExpressions::RequireLineBoundaryMatching]
+[Subroutines::ProhibitReturnSort]
+[Subroutines::RequireArgUnpacking]
+[ValuesAndExpressions::ProhibitInterpolationOfLiterals]
+[ValuesAndExpressions::ProhibitMagicNumbers]

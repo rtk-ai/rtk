@@ -1,0 +1,11 @@
+t-pass/00-load.t ....... ok
+t-pass/01-basic.t ...... ok
+t-pass/06-todo-skip.t .. ok
+All tests successful.
+
+Test Summary Report
+-------------------
+t-pass/06-todo-skip.t (Wstat: 0 Tests: 4 Failed: 0)
+  TODO passed:   1
+Files=3, Tests=9,  0 wallclock secs ( 0.01 usr  0.00 sys +  0.04 cusr  0.00 csys =  0.05 CPU)
+Result: PASS

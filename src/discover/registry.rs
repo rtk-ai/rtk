@@ -1436,7 +1436,10 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
 
 /// Transparent wrappers that RULES can also match as a whole string, so an
 /// unfiltered inner command falls through instead of dropping the rewrite.
-const ROUTABLE_WRAPPER_PREFIXES: &[&str] = &["uv run"];
+/// `carton exec` must stay in front of the rewrite rather than be dropped: it is
+/// what puts the project's `local/lib/perl5` on `PERL5LIB`. The `--` spelling is
+/// listed first so it is peeled whole.
+const ROUTABLE_WRAPPER_PREFIXES: &[&str] = &["uv run", "carton exec --", "carton exec"];
 
 /// Shell keywords that wrap a command without changing which one runs. They are
 /// not spawnable, so they must never fall through: `rtk exec foo` cannot run.
@@ -3060,10 +3063,12 @@ mod tests {
                 "rtk bundle",
                 "rtk cargo",
                 "rtk composer",
+                "rtk cover",
                 "rtk df",
                 "rtk diff",
                 "rtk dotnet",
                 "rtk du",
+                "rtk dzil",
                 "rtk ecs",
                 "rtk find",
                 "rtk git",
@@ -3082,6 +3087,8 @@ mod tests {
                 "rtk mypy",
                 "rtk next",
                 "rtk paratest",
+                "rtk perlcritic",
+                "rtk perldoc",
                 "rtk pest",
                 "rtk phpstan",
                 "rtk phpunit",
@@ -3091,6 +3098,7 @@ mod tests {
                 "rtk poetry",
                 "rtk pre-commit",
                 "rtk prettier",
+                "rtk prove",
                 "rtk ps",
                 "rtk pytest",
                 "rtk quarto",
@@ -3109,6 +3117,7 @@ mod tests {
                 "rtk trunk",
                 "rtk wc",
                 "rtk yamllint",
+                "rtk yath",
             ]
         );
     }
@@ -5993,6 +6002,31 @@ mod tests {
             rewrite_command_no_prefixes("python -m pytest -x tests/", &[]),
             Some("rtk pytest -x tests/".into())
         );
+    }
+
+    #[test]
+    fn test_rewrite_carton_exec_keeps_the_wrapper() {
+        assert_eq!(
+            rewrite_command_no_prefixes("carton exec prove -lr t", &[]),
+            Some("carton exec rtk prove -lr t".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("carton exec -- yath test", &[]),
+            Some("carton exec -- rtk yath test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("PERL5OPT=-MCarp=verbose carton exec perlcritic lib", &[]),
+            Some("PERL5OPT=-MCarp=verbose carton exec rtk perlcritic lib".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_carton_exec_unfiltered_inner_command_passes() {
+        assert_eq!(
+            rewrite_command_no_prefixes("carton exec plackup app.psgi", &[]),
+            None
+        );
+        assert_eq!(rewrite_command_no_prefixes("carton install", &[]), None);
     }
 
     #[test]
