@@ -336,10 +336,12 @@ pub fn format_json(report: &DiscoverReport) -> String {
 }
 
 fn format_tokens(tokens: usize) -> String {
-    if tokens >= 1_000_000 {
+    let thousands = format!("{:.1}", tokens as f64 / 1_000.0);
+    // 999_950 and up round to "1000.0" thousands: show them as millions instead.
+    if tokens >= 1_000_000 || thousands == "1000.0" {
         format!("{:.1}M tokens", tokens as f64 / 1_000_000.0)
     } else if tokens >= 1_000 {
-        format!("{:.1}K tokens", tokens as f64 / 1_000.0)
+        format!("{thousands}K tokens")
     } else {
         format!("{} tokens", tokens)
     }
@@ -362,6 +364,14 @@ fn truncate_str(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_tokens_moves_to_next_unit_when_rounding_reaches_it() {
+        assert_eq!(format_tokens(999_949), "999.9K tokens");
+        assert_eq!(format_tokens(999_950), "1.0M tokens");
+        assert_eq!(format_tokens(1_500), "1.5K tokens");
+        assert_eq!(format_tokens(12), "12 tokens");
+    }
 
     fn make_report(total_commands: usize, already_rtk: usize) -> DiscoverReport {
         DiscoverReport {
