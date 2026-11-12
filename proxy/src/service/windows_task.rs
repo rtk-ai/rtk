@@ -1,6 +1,7 @@
 use std::path::Path;
 
 const RELAUNCH_INTERVAL: &str = "PT1M";
+const RELAUNCH_SINCE: &str = "2020-01-01T00:00:00";
 
 fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
@@ -34,7 +35,7 @@ pub fn definition(bin: &Path, config_path: &Path, log_path: &Path, user: Option<
         <Interval>{RELAUNCH_INTERVAL}</Interval>
         <StopAtDurationEnd>false</StopAtDurationEnd>
       </Repetition>
-      <StartBoundary>2020-01-01T00:00:00</StartBoundary>
+      <StartBoundary>{RELAUNCH_SINCE}</StartBoundary>
       <Enabled>true</Enabled>
     </TimeTrigger>
   </Triggers>

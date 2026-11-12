@@ -38,6 +38,8 @@ pub fn install(bin: &Path, config_path: &Path, log_path: &Path) -> Result<PathBu
     if !status.success() {
         bail!("schtasks /Create failed ({status})");
     }
+    // schtasks has no on-disk definition file the caller can inspect directly;
+    // report the task name in its place for the CLI message.
     Ok(PathBuf::from(TASK_NAME))
 }
 
