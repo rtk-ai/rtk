@@ -359,12 +359,13 @@ fn run_diff(
             cmd.arg(arg);
         }
 
-        let result = exec_capture(&mut cmd).context("Failed to run git diff")?;
+        let (bytes, result) = capture_verbatim(&mut cmd).context("Failed to run git diff")?;
 
         // A non-zero exit does not mean there was nothing to say: `git diff --check` reports
         // every whitespace error on stdout and *then* exits 2. Printed verbatim, since the
-        // report's payload *is* trailing whitespace and `--stat` has a leading column space.
-        print!("{}", result.stdout);
+        // report's payload *is* trailing whitespace and `--stat` has a leading column space,
+        // and as bytes, since a Latin-1 line decoded to text is no longer the file's (#4815).
+        write_verbatim(&bytes)?;
 
         if !result.success() {
             if !result.stderr.trim().is_empty() {
@@ -404,7 +405,8 @@ fn run_diff(
         diff_cmd.arg(arg);
     }
 
-    let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git diff")?;
+    let (diff_bytes, diff_result) =
+        capture_verbatim(&mut diff_cmd).context("Failed to run git diff")?;
 
     if !diff_result.success() {
         if !diff_result.stderr.trim().is_empty() {
@@ -417,6 +419,18 @@ fn run_diff(
             &diff_result.stdout,
         );
         return Ok(diff_result.exit_code);
+    }
+
+    // Compacting works on text, and text is not what git wrote when a line is not UTF-8: each
+    // invalid byte became U+FFFD (#4815). Correctness over savings: git's own bytes, whole.
+    if std::str::from_utf8(&diff_bytes).is_err() {
+        return emit_raw_bytes_passthrough(
+            &diff_bytes,
+            &tracked,
+            &format!("rtk {tracked}"),
+            &timer,
+            0,
+        );
     }
 
     // `--no-patch --stat` forces the header to be stat-only whatever the user asked for --
@@ -693,7 +707,8 @@ fn run_show(
     for arg in args {
         raw_cmd.arg(arg);
     }
-    let raw_result = exec_capture(&mut raw_cmd).context("Failed to run git show")?;
+    let (raw_bytes, raw_result) =
+        capture_verbatim(&mut raw_cmd).context("Failed to run git show")?;
     // git's verdict on the command as the user typed it, before the steps below run it again
     // with RTK's own flags -- the stat step strips the patch-shape flags, so it succeeds where
     // git refused (`git show -pq HEAD` exits 128 raw) and the compaction looked like success.
@@ -708,6 +723,17 @@ fn run_show(
             &raw_result.stdout,
         );
         return Ok(raw_result.exit_code);
+    }
+    // A patch with a non-UTF-8 line cannot be compacted without replacing its bytes with
+    // U+FFFD (#4815), so it passes through as git wrote it, as the blob path above does.
+    if std::str::from_utf8(&raw_bytes).is_err() {
+        return emit_raw_bytes_passthrough(
+            &raw_bytes,
+            &tracked,
+            &format!("rtk {tracked}"),
+            &timer,
+            0,
+        );
     }
     let raw_output = raw_result.stdout;
 
@@ -1064,6 +1090,31 @@ fn emit_raw_bytes_passthrough(
         .context("Failed to write blob to stdout")?;
     timer.track_passthrough(label, rtk_label);
     Ok(exit_code)
+}
+
+/// git's output as raw bytes, plus the same run decoded the way [`exec_capture`] decodes it.
+///
+/// For a handler that prints git's stdout verbatim or not at all. Decoding replaces every byte
+/// of a non-UTF-8 line (a Latin-1 file in a diff) with U+FFFD, so the decoded text is fine for
+/// tracking and for deciding what to do, but printing it shows the agent a line that exists
+/// nowhere on disk, and an edit built from that line fails to match (#4815).
+fn capture_verbatim(cmd: &mut Command) -> Result<(Vec<u8>, CaptureResult)> {
+    let raw = stream::exec_capture_bytes(cmd)?;
+    let decoded = CaptureResult {
+        stdout: crate::core::utils::decode_process_output(&raw.stdout),
+        stderr: crate::core::utils::decode_process_output(&raw.stderr),
+        exit_code: raw.exit_code,
+    };
+    Ok((raw.stdout, decoded))
+}
+
+/// Write git's bytes to stdout as git wrote them.
+fn write_verbatim(bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    std::io::stdout()
+        .lock()
+        .write_all(bytes)
+        .context("Failed to write git output to stdout")
 }
 
 /// Path named by a diff section header.
@@ -2415,8 +2466,10 @@ fn run_log(
         let timer = tracking::TimedExecution::start();
         let mut cmd = git_cmd(global_args);
         cmd.args(&passthrough_args);
-        let result = exec_capture(&mut cmd).context("Failed to run git log")?;
-        print!("{}", result.stdout);
+        let (bytes, result) = capture_verbatim(&mut cmd).context("Failed to run git log")?;
+        // As bytes: `-p` prints file content, and a Latin-1 line decoded to text is no longer
+        // the file's (#4815).
+        write_verbatim(&bytes)?;
         if !result.stderr.trim().is_empty() {
             eprint!("{}", result.stderr);
         }
