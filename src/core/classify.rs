@@ -15,6 +15,7 @@
 //! - **Memoized.** Answers are cached by (classifier config, content head)
 //!   in the tracking DB, so repeated outputs classify once.
 
+use crate::core::http;
 use crate::core::tracking::Tracker;
 use rtk_engine::pipeline::{ClassifierDef, Fact, Facts, Position, Resolved, UpstreamDef};
 use std::collections::BTreeMap;
@@ -127,7 +128,7 @@ fn classify_batch(
     questions: &[(&str, &ClassifierDef)],
 ) -> Option<(BTreeMap<String, Answer>, (i64, i64))> {
     let env = upstream.api_key_env.as_deref()?;
-    let _key = std::env::var(env).ok()?;
+    let key = std::env::var(env).ok()?;
     let url = upstream.base_url.as_deref()?;
     let head = questions
         .iter()
@@ -141,18 +142,11 @@ fn classify_batch(
     };
     let body = build_request(upstream, content, questions);
     let timeout = Duration::from_secs(upstream.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .build()
-        .new_agent();
-    let mut response = agent
-        .post(url)
-        .header("authorization", "******")
-        .header("content-type", "application/json")
-        .send(body.to_string())
+    let request = ureq::post(url).header("authorization", format!("Bearer {key}"));
+    let mut response = http::global_timeout(request, timeout)
+        .send_json(&body)
         .ok()?;
-    let body = response.body_mut().read_to_string().ok()?;
-    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let json = http::read_json(&mut response).ok()?;
     Some((parse_answers(&json), usage_of(&json)))
 }
 
@@ -426,6 +420,42 @@ mod tests {
             }
         );
         assert_eq!(answers["is_error"], Answer::Noul { value: 0.97 });
+    }
+
+    #[test]
+    fn batch_request_carries_the_bearer_key_and_parses_the_reply() {
+        let (port, server) = crate::core::http::test_server::serve_once(
+            r#"{"answers":{"intent":{"type":"choice","choice":"build_log","confidence":0.9}},"usage":{"input_tokens":7,"output_tokens":2}}"#,
+        );
+        let upstream = UpstreamDef {
+            model: "judge-v1".to_string(),
+            base_url: Some(format!("http://127.0.0.1:{port}/classify")),
+            api_key_env: Some("RTK_TEST_CLASSIFIER_KEY".to_string()),
+            ..UpstreamDef::default()
+        };
+        let def = intent();
+        let result = temp_env::with_var("RTK_TEST_CLASSIFIER_KEY", Some("sk-test"), || {
+            classify_batch(&upstream, "output", false, &[("intent", &def)])
+        });
+        let (answers, usage) = result.expect("a parsed reply");
+        let request = server.join().expect("server");
+        assert_eq!(
+            answers["intent"],
+            Answer::Choice {
+                label: "build_log".to_string(),
+                confidence: 0.9
+            }
+        );
+        assert_eq!(usage, (7, 2));
+        let headers = request.to_ascii_lowercase();
+        assert!(
+            headers.contains("\r\nauthorization: bearer sk-test\r\n"),
+            "{request}"
+        );
+        assert!(
+            headers.contains("\r\ncontent-type: application/json"),
+            "{request}"
+        );
     }
 
     #[test]

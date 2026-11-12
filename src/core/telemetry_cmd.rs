@@ -1,3 +1,4 @@
+use crate::core::http;
 use crate::core::user_env;
 use anyhow::{Context, Result};
 use clap::Subcommand;
@@ -255,17 +256,13 @@ fn send_erasure_request(device_hash: &str) -> Result<()> {
         "action": "erasure",
     });
 
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(5)))
-        .build()
-        .new_agent();
-    let mut req = agent.post(&url).header("Content-Type", "application/json");
+    let mut req = ureq::post(&url);
 
     if let Some(token) = option_env!("RTK_TELEMETRY_TOKEN") {
         req = req.header("X-RTK-Token", token);
     }
 
-    req.send(payload.to_string())?;
+    http::global_timeout(req, std::time::Duration::from_secs(5)).send_json(&payload)?;
 
     Ok(())
 }

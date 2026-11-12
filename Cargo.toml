@@ -78,7 +78,7 @@ toml_edit = "0.22"
 chrono = "0.4"
 tempfile = "3"
 sha2 = "0.10"
-ureq = "3"
+ureq = { version = "3", features = ["json"] }
 getrandom = "0.4"
 flate2 = "1.0"
 quick-xml = "0.37"

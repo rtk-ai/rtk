@@ -1,6 +1,7 @@
 //! Optional usage ping so we know which commands people run most.
 
 use crate::core::config;
+use crate::core::http;
 use crate::core::tracking;
 use crate::core::user_dirs;
 use crate::hooks::constants::CLAUDE_DIR;
@@ -155,18 +156,14 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
         ),
     });
 
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(2)))
-        .build()
-        .new_agent();
-    let mut req = agent.post(url).header("Content-Type", "application/json");
+    let mut req = ureq::post(url);
 
     if let Some(token) = TELEMETRY_TOKEN {
         req = req.header("X-RTK-Token", token);
     }
 
     // 2 second timeout — if server is down, we move on
-    req.send(payload.to_string())?;
+    http::global_timeout(req, std::time::Duration::from_secs(2)).send_json(&payload)?;
 
     Ok(())
 }

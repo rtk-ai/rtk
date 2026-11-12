@@ -4,6 +4,7 @@
 //! nothing, reviews nothing, and never holds a token — everything goes
 //! through the user's own `gh`.
 
+use crate::core::http;
 use crate::core::pipeline_config;
 use anyhow::{Context, Result};
 use rtk_engine::pipeline::has_errors;
@@ -131,14 +132,8 @@ fn resolve_sha(src: &GithubSource) -> Option<String> {
 
 fn http_get(url: &str) -> Result<String> {
     // GET of a public GitHub endpoint the user asked for; inbound content only.
-    // nosemgrep: ureq-outside-telemetry
-    let mut response = ureq::get(url)
-        .call()
-        .with_context(|| format!("GET {url}"))?;
-    response
-        .body_mut()
-        .read_to_string()
-        .context("read response")
+    let mut response = http::get(url)?;
+    http::read_text_lossy(&mut response, http::MAX_BODY).context("read response")
 }
 
 pub struct InstallOrigin {

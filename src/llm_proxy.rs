@@ -19,6 +19,7 @@
 //! [`read_gain_summary`], for `rtk gain`. Read-only and best-effort: `rtk
 //! gain` must never fail or block because the proxy is mid-write.
 
+use crate::core::http;
 use crate::core::utils::tool_exists;
 use anyhow::{Context, Result};
 use clap::Subcommand;
@@ -541,16 +542,15 @@ pub fn is_rtk_proxy_at(addr: &str, timeout: Duration) -> bool {
     health_check_with_timeout(addr, timeout)
 }
 
+/// The daemon's `/health` reply is a few hundred bytes of JSON.
+const HEALTH_BODY_LIMIT: u64 = 64 * 1024;
+
 fn health_check_with_timeout(bind: &str, timeout: Duration) -> bool {
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .build()
-        .new_agent();
-    agent
-        .get(&format!("http://{bind}/health"))
+    let request = ureq::get(&format!("http://{bind}/health"));
+    http::direct_global_timeout(request, timeout)
         .call()
         .ok()
-        .and_then(|mut response| response.body_mut().read_to_string().ok())
+        .and_then(|mut response| http::read_text_lossy(&mut response, HEALTH_BODY_LIMIT).ok())
         .is_some_and(|body| is_rtk_proxy_health(&body))
 }
 
@@ -896,6 +896,50 @@ mod tests {
         assert!(!is_rtk_proxy_health(r#"{"status":"ok"}"#));
         assert!(!is_rtk_proxy_health("<html>It works!</html>"));
         assert!(!is_rtk_proxy_health(""));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn health_check_reaches_a_daemon_on_any_address_despite_a_proxy() {
+        use crate::core::http::test_server::{refused_port, serve_once};
+
+        let (port, server) = serve_once(r#"{"status":"ok","service":"rtk-proxy"}"#);
+        let proxy = format!("http://127.0.0.1:{}", refused_port());
+        // `0x7f.1` is 127.0.0.1 in the inet_aton shorthand glibc and musl resolve,
+        // standing in for a daemon bound to this machine's LAN address.
+        let healthy = temp_env::with_vars(
+            [
+                ("ALL_PROXY", Some(proxy.as_str())),
+                ("NO_PROXY", None),
+                ("no_proxy", None),
+            ],
+            || health_check_with_timeout(&format!("0x7f.1:{port}"), Duration::from_secs(5)),
+        );
+        assert!(healthy, "the health check went through the proxy");
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn health_check_reads_a_bounded_body() {
+        use crate::core::http::test_server::serve_once;
+
+        let reply = |padding: u64| {
+            let pad = "x".repeat(usize::try_from(padding).expect("fits"));
+            format!(r#"{{"service":"rtk-proxy","pad":"{pad}"}}"#)
+        };
+        let (port, server) = serve_once(reply(1024));
+        assert!(health_check_with_timeout(
+            &format!("127.0.0.1:{port}"),
+            Duration::from_secs(5)
+        ));
+        server.join().expect("server");
+
+        let (port, server) = serve_once(reply(HEALTH_BODY_LIMIT));
+        assert!(!health_check_with_timeout(
+            &format!("127.0.0.1:{port}"),
+            Duration::from_secs(5)
+        ));
+        server.join().expect("server");
     }
 
     #[test]
