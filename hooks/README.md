@@ -4,7 +4,7 @@
 
 **Deployed hook artifacts** — the files and agent-specific configuration installed on user machines by `rtk init`. External scripts and plugins are thin delegates to `rtk rewrite`; native processors such as Codex call the same Rust rewrite registry directly. Zero filtering logic is duplicated in this directory.
 
-Contains per-agent hook scripts and configuration files for the supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Oh My Pi, Mistral Vibe, Trae, Google Antigravity). `rtk init` installs them.
+Contains per-agent hook scripts and configuration files for the supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Oh My Pi, Mistral Vibe, Trae, Google Antigravity, Gemini CLI, Kilo Code, Kimi, Factory Droid). `rtk init` installs them.
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init/`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
@@ -49,6 +49,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
 - **[`vibe/`](vibe/README.md)** — Rust binary hook (`rtk hook vibe`), `pre_tool` entry in `~/.vibe/hooks.toml`, `hook_specific_output.tool_input` rewrite plus `system_message` for UI visibility
 - **[`antigravity/`](antigravity/README.md)** — Rust binary hook (`rtk hook antigravity`), `PreToolUse` plugin entry in `.agents/plugins/rtk/hooks.json` or `~/.gemini/config/plugins/rtk/hooks.json`, transparent rewrite via `overwrite.CommandLine`
+- **[`kilocode/`](kilocode/README.md)** — Prompt-level guidance (rules file), installs `rtk-awareness-full.md` to `.kilocode/rules/rtk-rules.md`
 
 ## Supported Agents
 
@@ -69,6 +70,9 @@ Each agent subdirectory has its own README with hook-specific details:
 | Oh My Pi (OMP) | TypeScript extension (`tool_call` event, shared with Pi) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
 | Mistral Vibe | Rust binary (`rtk hook vibe`) | Transparent rewrite | Yes (`hook_specific_output.tool_input`) |
+| Kilo Code | Custom instructions (rules file, `.kilocode/rules/rtk-rules.md`) | Prompt-level guidance | N/A |
+| Kimi | Rust binary (`rtk hook kimi` / `rtk init --agent kimi`) | Transparent rewrite | Yes |
+| Factory Droid | Rust binary (`rtk hook droid`) | Transparent rewrite | Yes |
 
 ## JSON Formats by Agent
 
