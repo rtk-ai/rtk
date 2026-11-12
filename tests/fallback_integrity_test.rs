@@ -2,6 +2,7 @@
 //! The fallback dispatcher must enforce the same legacy-hook gate as typed commands.
 mod common;
 
+use base16ct::HexDisplay;
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -57,7 +58,10 @@ fn sandbox(state: &str) -> tempfile::TempDir {
     if matches!(state, "verified" | "tampered") {
         std::fs::write(
             hooks.join(".rtk-hook.sha256"),
-            format!("{:x}  rtk-rewrite.sh\n", Sha256::digest(original)),
+            format!(
+                "{:x}  rtk-rewrite.sh\n",
+                HexDisplay(&Sha256::digest(original))
+            ),
         )
         .expect("write isolated fixture");
     }
