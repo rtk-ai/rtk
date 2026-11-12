@@ -1,0 +1,743 @@
+{
+  "config": {
+    "protocol_version": "v1.0.0",
+    "scanner_name": "govulncheck",
+    "scanner_version": "v1.8.0",
+    "db": "https://vuln.go.dev",
+    "db_last_modified": "2026-10-08T22:31:09Z",
+    "go_version": "go1.27.1",
+    "scan_level": "symbol",
+    "scan_mode": "source"
+  }
+}
+{
+  "progress": {
+    "message": "Fetching vulnerabilities from the database..."
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6599",
+    "summary": "Reset context tracking on consecutive template expressions in html/template",
+    "details": "When a JavaScript template literal contains consecutive expressions, the context tracking state was not properly reset upon entering a new expression.\n\nWe now ensure that template-literal expression entries correctly reset context variables so all subsequent regular expression literals are accurately recognized and escaped.",
+    "aliases": [
+      "CVE-2026-94448"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6600",
+    "summary": "Recognize yield as regexp preceder keyword in html/template",
+    "details": "A trusted template author may have previously written a valid template wherein the use of the 'yield' keyword would not be correctly escaped.\n\nWe now ensure that valid keyword uses are escaped and non-keyword uses are not escaped.",
+    "aliases": [
+      "CVE-2026-97030"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6603",
+    "summary": "HTTP/2 server memory exhaustion due to Trailer headers in net/http",
+    "details": "When \"Trailer\" headers are sent by a client, the HTTP server internally uses the header values to populate the Request.Trailer map passed to the server handler. Because Request.Trailer is a map, each entry incurs memory overhead. For HTTP/2 servers, a malicious client can exploit this by sending a \"Trailer\" header that declares a large number of fields, causing the server to allocate a disproportionate amount of memory while bypassing Server.MaxHeaderValueCount and Server.MaxHeaderBytes limits. This exploit is not applicable for HTTP/1 servers, which do not support multiplexing a large number of requests over one TCP connection, and whose Server.MaxHeaderBytes are calculated differently.",
+    "aliases": [
+      "CVE-2026-78659"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6603",
+    "summary": "HTTP/2 server memory exhaustion due to Trailer headers in net/http",
+    "details": "When \"Trailer\" headers are sent by a client, the HTTP server internally uses the header values to populate the Request.Trailer map passed to the server handler. Because Request.Trailer is a map, each entry incurs memory overhead. For HTTP/2 servers, a malicious client can exploit this by sending a \"Trailer\" header that declares a large number of fields, causing the server to allocate a disproportionate amount of memory while bypassing Server.MaxHeaderValueCount and Server.MaxHeaderBytes limits. This exploit is not applicable for HTTP/1 servers, which do not support multiplexing a large number of requests over one TCP connection, and whose Server.MaxHeaderBytes are calculated differently.",
+    "aliases": [
+      "CVE-2026-78659"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6604",
+    "summary": "Root.Mkdir(All) can follow junctions out of the root on Windows in os",
+    "details": "On Windows, when the target of Root.Mkdir or Root.MkdirAll is a junction pointing to an empty location, the operation can create a directory at the junction target even when that target is located outside the root. This only applies to operations where the last path component is a junction (path/to/junction, but not path/junction/target).",
+    "aliases": [
+      "CVE-2026-56857"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6605",
+    "summary": "HTTP/1 client connection desynchronization after CONNECT rejection in net/http",
+    "details": "When http.Transport sends an HTTP/1 CONNECT request with a non-empty Request.Body, it writes the body directly to the connection without framing after the request headers. If the server rejects the CONNECT request with a non-2xx keep-alive response, Transport returns the connection to the idle pool. Because CONNECT requests do not have a request body, the server may interpret the trailing body bytes as a subsequent pipelined HTTP/1.1 request on the connection, leaving the pooled connection desynchronized and causing the next caller that reuses it to read the response to the injected request. In reverse proxies (including httputil.ReverseProxy) that forward CONNECT requests through a shared Transport, this can lead to cross-user response poisoning.",
+    "aliases": [
+      "CVE-2026-56866"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6607",
+    "summary": "Reject malformed ECH outer extension references in crypto/tls",
+    "details": "Multiple ECH outer extension references are not permitted under RFC 9849; previously, a client could send a well-crafted packet that could trigger memory exhaustion in the server process by specifying multiple references.\n\nWe now reject these as malformed and curb the memory amplification vector as a result.",
+    "aliases": [
+      "CVE-2026-97031"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6608",
+    "summary": "Memory limit bypass when parsing MIME headers in net/textproto, mime/multipart",
+    "details": "Parsing a multipart form can bypass memory limits and read an arbitrarily long line into memory when the remaining limit at the start of a part is less than 400 bytes.",
+    "aliases": [
+      "CVE-2026-94440"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6609",
+    "summary": "Lack of limit on size of parsed Range headers in net/http",
+    "details": "When parsing a Range header containing a large number of small ranges, FileServer(FS), ServeContent, and ServeFile(FS) can consume an excessive amount of CPU.",
+    "aliases": [
+      "CVE-2026-78667"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6610",
+    "summary": "HTTP/2 transport accepts malformed framing-related headers in net/http",
+    "details": "Historically, we have been rather lax about malformed framing-related headers in our HTTP/2 implementation, as they cannot interfere with HTTP/2 framing. However, this makes it possible for our HTTP/2 implementation to forward responses containing such headers to an HTTP/1 client when acting as a reverse proxy. If the HTTP/1 client also does not behave strictly enough, this can result in response smuggling.",
+    "aliases": [
+      "CVE-2026-78660"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6610",
+    "summary": "HTTP/2 transport accepts malformed framing-related headers in net/http",
+    "details": "Historically, we have been rather lax about malformed framing-related headers in our HTTP/2 implementation, as they cannot interfere with HTTP/2 framing. However, this makes it possible for our HTTP/2 implementation to forward responses containing such headers to an HTTP/1 client when acting as a reverse proxy. If the HTTP/1 client also does not behave strictly enough, this can result in response smuggling.",
+    "aliases": [
+      "CVE-2026-78660"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6611",
+    "summary": "Excessive CPU consumption from repeated initial window changes in net/http",
+    "details": "A malicious HTTP/2 peer can cause excessive CPU consumption in the client or server by opening a large number of streams and then sending many small SETTINGS frames containing SETTINGS_INITIAL_WINDOW_SIZE values.",
+    "aliases": [
+      "CVE-2026-78669"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6611",
+    "summary": "Excessive CPU consumption from repeated initial window changes in net/http",
+    "details": "A malicious HTTP/2 peer can cause excessive CPU consumption in the client or server by opening a large number of streams and then sending many small SETTINGS frames containing SETTINGS_INITIAL_WINDOW_SIZE values.",
+    "aliases": [
+      "CVE-2026-78669"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6612",
+    "summary": "Double flow control refund on HTTP/2 server streams in net/http",
+    "details": "The HTTP/2 server can refund connection-level flow control twice for the same data: Once when a client resets a stream (refunding data for any sent-but-unread portion of the stream), and again when a request handler reads the buffered data. A malicious client can exploit this to bypass the configured connection-level flow control limit (MaxReceiveBufferPerConnection). Total buffered data is still limited by the concurrent stream limit and stream-level flow control.",
+    "aliases": [
+      "CVE-2026-78663"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6612",
+    "summary": "Double flow control refund on HTTP/2 server streams in net/http",
+    "details": "The HTTP/2 server can refund connection-level flow control twice for the same data: Once when a client resets a stream (refunding data for any sent-but-unread portion of the stream), and again when a request handler reads the buffered data. A malicious client can exploit this to bypass the configured connection-level flow control limit (MaxReceiveBufferPerConnection). Total buffered data is still limited by the concurrent stream limit and stream-level flow control.",
+    "aliases": [
+      "CVE-2026-78663"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6613",
+    "summary": "HTTP/1 server connection desynchronization after 2xx CONNECT response in net/http",
+    "details": "When an HTTP server handler sends a 2xx response to an HTTP/1 CONNECT request and returns without hijacking the connection, the server improperly continues to read and serve requests from the connection. Since a 2xx response to an HTTP/1 CONNECT converts the connection into a tunnel, the server should not treat the connection as continuing to contain HTTP.\n\nThe impact of this misbehavior is mostly limited to potential request smuggling, where an intermediate proxy considers the data on the connection to be tunneled and the server considers it to be HTTP.",
+    "aliases": [
+      "CVE-2026-94439"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6617",
+    "summary": "HTTP/2 server crash due to HPACK encoder race in net/http",
+    "details": "HTTP/2 servers could end up crashing due to inadvertently modifying its HPACK encoder concurrently. This happens because the server modifies the HPACK encoder from two goroutines without synchronization: one uses the encoder to encode a HEADERS frame as part of a response sent to a client and the other modifies the encoder's table size when handling a SETTINGS frame containing SETTINGS_HEADER_TABLE_SIZE that a client sends. A malicious client can repeatedly send a request while changing the header table size to crash the server.",
+    "aliases": [
+      "CVE-2026-97032"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6617",
+    "summary": "HTTP/2 server crash due to HPACK encoder race in net/http",
+    "details": "HTTP/2 servers could end up crashing due to inadvertently modifying its HPACK encoder concurrently. This happens because the server modifies the HPACK encoder from two goroutines without synchronization: one uses the encoder to encode a HEADERS frame as part of a response sent to a client and the other modifies the encoder's table size when handling a SETTINGS frame containing SETTINGS_HEADER_TABLE_SIZE that a client sends. A malicious client can repeatedly send a request while changing the header table size to crash the server.",
+    "aliases": [
+      "CVE-2026-97032"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2020-0036",
+    "summary": "Excessive resource consumption in YAML parsing in gopkg.in/yaml.v2",
+    "details": "Due to unbounded aliasing, a crafted YAML file can cause consumption of significant system resources. If parsing user supplied input, this may be used as a denial of service vector.",
+    "aliases": [
+      "CVE-2019-11254",
+      "GHSA-wxc4-f4m6-wwqv"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2021-0061",
+    "summary": "Denial of service in gopkg.in/yaml.v2",
+    "details": "Due to unbounded alias chasing, a maliciously crafted YAML file can cause the system to consume significant system resources. If parsing user input, this may be used as a denial of service vector.",
+    "aliases": [
+      "CVE-2021-4235",
+      "GHSA-r88r-gmrh-7j83"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2022-0956",
+    "summary": "Excessive resource consumption in gopkg.in/yaml.v2",
+    "details": "Parsing malicious or large YAML documents can consume excessive amounts of CPU or memory.",
+    "aliases": [
+      "CVE-2022-3064",
+      "GHSA-6q6q-88xp-6f2r"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2022-1059",
+    "summary": "Denial of service via crafted Accept-Language header in golang.org/x/text/language",
+    "details": "An attacker may cause a denial of service by crafting an Accept-Language header which ParseAcceptLanguage will take significant time to parse.",
+    "aliases": [
+      "CVE-2022-32149",
+      "GHSA-69ch-w2m2-3vjp"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-5970",
+    "summary": "Infinite loop on invalid input in golang.org/x/text",
+    "details": "A norm.Iter can enter an infinite loop when handling input containing invalid UTF-8 bytes.",
+    "aliases": [
+      "CVE-2026-56852"
+    ]
+  }
+}
+{
+  "osv": {
+    "id": "GO-2026-6629",
+    "summary": "Panic parsing crafted input in x/text/secure/precis in golang.org/x/text",
+    "details": "The Nickname profile can panic with an out-of-bounds slice error when transforming crafted input into a short destination buffer.",
+    "aliases": [
+      "CVE-2026-56851"
+    ]
+  }
+}
+{
+  "progress": {
+    "message": "Checking the code against the vulnerabilities..."
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6599",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6600",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6603",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6603",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6604",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6605",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6607",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6608",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6609",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6610",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6610",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6611",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6611",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6612",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6612",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6613",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6617",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6617",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2020-0036",
+    "fixed_version": "v2.2.8",
+    "trace": [
+      {
+        "module": "gopkg.in/yaml.v2",
+        "version": "v2.2.2"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2021-0061",
+    "fixed_version": "v2.2.3",
+    "trace": [
+      {
+        "module": "gopkg.in/yaml.v2",
+        "version": "v2.2.2"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2022-0956",
+    "fixed_version": "v2.2.4",
+    "trace": [
+      {
+        "module": "gopkg.in/yaml.v2",
+        "version": "v2.2.2"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2022-1059",
+    "fixed_version": "v0.3.8",
+    "trace": [
+      {
+        "module": "golang.org/x/text",
+        "version": "v0.3.7"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-5970",
+    "fixed_version": "v0.39.0",
+    "trace": [
+      {
+        "module": "golang.org/x/text",
+        "version": "v0.3.7"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6629",
+    "fixed_version": "v0.41.0",
+    "trace": [
+      {
+        "module": "golang.org/x/text",
+        "version": "v0.3.7"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2020-0036",
+    "fixed_version": "v2.2.8",
+    "trace": [
+      {
+        "module": "gopkg.in/yaml.v2",
+        "version": "v2.2.2",
+        "package": "gopkg.in/yaml.v2"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2021-0061",
+    "fixed_version": "v2.2.3",
+    "trace": [
+      {
+        "module": "gopkg.in/yaml.v2",
+        "version": "v2.2.2",
+        "package": "gopkg.in/yaml.v2"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2022-0956",
+    "fixed_version": "v2.2.4",
+    "trace": [
+      {
+        "module": "gopkg.in/yaml.v2",
+        "version": "v2.2.2",
+        "package": "gopkg.in/yaml.v2"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2026-6604",
+    "fixed_version": "v1.27.2",
+    "trace": [
+      {
+        "module": "stdlib",
+        "version": "v1.27.1",
+        "package": "os"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2022-1059",
+    "fixed_version": "v0.3.8",
+    "trace": [
+      {
+        "module": "golang.org/x/text",
+        "version": "v0.3.7",
+        "package": "golang.org/x/text/language"
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2020-0036",
+    "fixed_version": "v2.2.8",
+    "trace": [
+      {
+        "module": "gopkg.in/yaml.v2",
+        "version": "v2.2.2",
+        "package": "gopkg.in/yaml.v2",
+        "function": "Unmarshal",
+        "position": {
+          "filename": "yaml.go",
+          "offset": 2757,
+          "line": 80,
+          "column": 6
+        }
+      },
+      {
+        "module": "example.com/vulnsample",
+        "package": "example.com/vulnsample",
+        "function": "main",
+        "position": {
+          "filename": "main.go",
+          "offset": 201,
+          "line": 13,
+          "column": 20
+        }
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2021-0061",
+    "fixed_version": "v2.2.3",
+    "trace": [
+      {
+        "module": "gopkg.in/yaml.v2",
+        "version": "v2.2.2",
+        "package": "gopkg.in/yaml.v2",
+        "function": "Unmarshal",
+        "position": {
+          "filename": "yaml.go",
+          "offset": 2757,
+          "line": 80,
+          "column": 6
+        }
+      },
+      {
+        "module": "example.com/vulnsample",
+        "package": "example.com/vulnsample",
+        "function": "main",
+        "position": {
+          "filename": "main.go",
+          "offset": 201,
+          "line": 13,
+          "column": 20
+        }
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2022-0956",
+    "fixed_version": "v2.2.4",
+    "trace": [
+      {
+        "module": "gopkg.in/yaml.v2",
+        "version": "v2.2.2",
+        "package": "gopkg.in/yaml.v2",
+        "function": "Unmarshal",
+        "position": {
+          "filename": "yaml.go",
+          "offset": 2757,
+          "line": 80,
+          "column": 6
+        }
+      },
+      {
+        "module": "example.com/vulnsample",
+        "package": "example.com/vulnsample",
+        "function": "main",
+        "position": {
+          "filename": "main.go",
+          "offset": 201,
+          "line": 13,
+          "column": 20
+        }
+      }
+    ]
+  }
+}
+{
+  "finding": {
+    "osv": "GO-2022-1059",
+    "fixed_version": "v0.3.8",
+    "trace": [
+      {
+        "module": "golang.org/x/text",
+        "version": "v0.3.7",
+        "package": "golang.org/x/text/language",
+        "function": "ParseAcceptLanguage",
+        "position": {
+          "filename": "language/parse.go",
+          "offset": 5495,
+          "line": 158,
+          "column": 6
+        }
+      },
+      {
+        "module": "example.com/vulnsample",
+        "package": "example.com/vulnsample",
+        "function": "main",
+        "position": {
+          "filename": "main.go",
+          "offset": 141,
+          "line": 11,
+          "column": 44
+        }
+      }
+    ]
+  }
+}

@@ -7,3 +7,4 @@
 - `go_cmd.rs` uses `GoCommands` sub-enum in main.rs (same pattern as git/cargo)
 - `go test` outputs NDJSON (`-json` flag injected by RTK) -- parsed line-by-line as streaming events
 - `golangci_cmd.rs` forces `--out-format=json` for structured parsing
+- `govulncheck_cmd.rs` forces `-format json` and keeps only symbol-level findings (vulnerable code that is actually called), grouped by module with the highest fixed version; exits 3 like text mode when the code is affected
