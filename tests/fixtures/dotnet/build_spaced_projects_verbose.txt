@@ -1,0 +1,20 @@
+     1>Project "/fx/spaced/Two.sln" (1) is building "/fx/spaced/Order Api/Tests/Tests.csproj" (2:5) on node 1 (_GenerateProjectRestoreGraph target(s)).
+     1>Project "/fx/spaced/Two.sln" (1) is building "/fx/spaced/Billing Api/Tests/Tests.csproj" (3:5) on node 2 (_GenerateProjectRestoreGraph target(s)).
+     2>Done Building Project "/fx/spaced/Order Api/Tests/Tests.csproj" (_GenerateProjectRestoreGraph target(s)).
+     3>Done Building Project "/fx/spaced/Billing Api/Tests/Tests.csproj" (_GenerateProjectRestoreGraph target(s)).
+         Restoring packages for /fx/spaced/Billing Api/Tests/Tests.csproj...
+         Restoring packages for /fx/spaced/Order Api/Tests/Tests.csproj...
+         Restored /fx/spaced/Order Api/Tests/Tests.csproj (in 26 ms).
+         Restored /fx/spaced/Billing Api/Tests/Tests.csproj (in 26 ms).
+   1:2>Project "/fx/spaced/Two.sln" (1:2) is building "/fx/spaced/Billing Api/Tests/Tests.csproj" (3:6) on node 2 (Rebuild target(s)).
+         Deleting file "/fx/spaced/Billing Api/Tests/obj/Debug/net10.0/Tests.csproj.CoreCompileInputs.cache".
+     3>/fx/spaced/Billing Api/Tests/Tests.csproj : warning RTK0001: Project count fixture
+   1:2>Project "/fx/spaced/Two.sln" (1:2) is building "/fx/spaced/Order Api/Tests/Tests.csproj" (2:6) on node 1 (Rebuild target(s)).
+         Deleting file "/fx/spaced/Order Api/Tests/obj/Debug/net10.0/Tests.csproj.CoreCompileInputs.cache".
+     2>/fx/spaced/Order Api/Tests/Tests.csproj : warning RTK0001: Project count fixture
+     3>Done Building Project "/fx/spaced/Billing Api/Tests/Tests.csproj" (Rebuild target(s)).
+     2>Done Building Project "/fx/spaced/Order Api/Tests/Tests.csproj" (Rebuild target(s)).
+       "/fx/spaced/Billing Api/Tests/Tests.csproj" (Rebuild target) (3:6) ->
+         /fx/spaced/Billing Api/Tests/Tests.csproj : warning RTK0001: Project count fixture
+       "/fx/spaced/Order Api/Tests/Tests.csproj" (Rebuild target) (2:6) ->
+         /fx/spaced/Order Api/Tests/Tests.csproj : warning RTK0001: Project count fixture
