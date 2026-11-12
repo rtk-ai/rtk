@@ -203,6 +203,12 @@ pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
         return go_test_wrapper;
     }
 
+    // Plain-text `go test` output has no dedicated filter. Leave it untouched
+    // rather than let the grep/find heuristics below rewrite it and drop FAIL lines.
+    if looks_like_plain_go_test(first_1k) {
+        return identity_filter;
+    }
+
     if first_1k.contains(": error:") && first_1k.contains(".py:") {
         return crate::cmds::python::mypy_cmd::filter_mypy_output;
     }
@@ -240,6 +246,18 @@ pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
     }
 
     identity_filter
+}
+
+/// Plain `go test` summary lines: `ok  \tpkg\t0.1s`, `FAIL\tpkg [build failed]`,
+/// `?   \tpkg\t[no test files]`, `--- FAIL: TestX`.
+fn looks_like_plain_go_test(s: &str) -> bool {
+    s.lines().any(|l| {
+        l.starts_with("ok  \t")
+            || l.starts_with("FAIL\t")
+            || l.starts_with("?   \t")
+            || l.starts_with("--- FAIL: ")
+            || l.starts_with("--- PASS: ")
+    })
 }
 
 fn identity_filter(input: &str) -> String {
@@ -472,6 +490,20 @@ mod tests {
         let f = auto_detect_filter(input);
         let out = f(input);
         assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn test_auto_detect_plain_go_test_failure_is_not_rewritten() {
+        let input = "ok  \texample.com/a\t0.003s\nok  \texample.com/b\t0.002s\n--- FAIL: TestX (0.00s)\n    z_test.go:5: expected 1, got 2\nFAIL\nFAIL\texample.com/z\t0.004s\nFAIL\texample.com/broken [build failed]\n";
+        let out = auto_detect_filter(input)(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn test_auto_detect_plain_go_test_green_is_not_rewritten() {
+        let input = "ok  \texample.com/a/b\t0.003s\nok  \texample.com/a/c\t0.002s\nok  \texample.com/a/d\t0.002s\n";
+        let out = auto_detect_filter(input)(input);
+        assert_eq!(out, input);
     }
 
     #[test]
