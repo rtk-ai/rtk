@@ -192,9 +192,25 @@ pub(super) struct SettingsRemoval {
 /// settings.json, reporting each separately so uninstall can say which.
 /// Backs up before modification.
 pub(super) fn remove_settings_entries(ctx: InitContext) -> Result<SettingsRemoval> {
-    let InitContext { verbose, .. } = ctx;
     let claude_dir = resolve_claude_dir()?;
-    let settings_path = claude_dir.join(SETTINGS_JSON);
+    let paths = [
+        claude_dir.join(SETTINGS_JSON),
+        claude_dir.join(SETTINGS_LOCAL_JSON),
+    ];
+    for path in &paths {
+        read_json_file(path)?;
+    }
+    let mut removed = SettingsRemoval::default();
+    for path in paths {
+        let item = remove_settings_file(ctx, path)?;
+        removed.hook |= item.hook;
+        removed.proxy_base_url |= item.proxy_base_url;
+    }
+    Ok(removed)
+}
+
+fn remove_settings_file(ctx: InitContext, settings_path: PathBuf) -> Result<SettingsRemoval> {
+    let InitContext { verbose, .. } = ctx;
 
     let Some(mut root) = read_json_file(&settings_path)? else {
         if verbose > 0 {
@@ -236,16 +252,50 @@ fn patch_settings_json_command(
     ctx: InitContext,
     scope: HookInstallScope,
 ) -> Result<PatchResult> {
+    let base = match scope {
+        HookInstallScope::UserGlobal => resolve_claude_dir()?,
+        HookInstallScope::ProjectExtra => crate::core::user_dirs::in_working_dir(".claude"),
+    };
+    let mut paths = vec![base.join(SETTINGS_JSON)];
+    if scope == HookInstallScope::UserGlobal {
+        paths.push(base.join(SETTINGS_LOCAL_JSON));
+    }
+    // Validate both inputs before either file is written.
+    for path in &paths {
+        read_json_file(path)?;
+    }
+    let mut result = PatchResult::AlreadyPresent;
+    let mut next_mode = mode;
+    for settings_path in paths {
+        let current = patch_settings_json_file(
+            hook_command,
+            next_mode,
+            include_opencode,
+            ctx,
+            scope,
+            settings_path,
+        )?;
+        if matches!(current, PatchResult::Patched | PatchResult::WouldPatch) {
+            result = current;
+            next_mode = PatchMode::Auto;
+        } else if matches!(current, PatchResult::Declined | PatchResult::Skipped) {
+            return Ok(current);
+        }
+    }
+    Ok(result)
+}
+
+fn patch_settings_json_file(
+    hook_command: &str,
+    mode: PatchMode,
+    include_opencode: bool,
+    ctx: InitContext,
+    scope: HookInstallScope,
+    settings_path: PathBuf,
+) -> Result<PatchResult> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
-    let settings_path = match scope {
-        HookInstallScope::UserGlobal => resolve_claude_dir()?.join(SETTINGS_JSON),
-        HookInstallScope::ProjectExtra => {
-            crate::core::user_dirs::in_working_dir(".claude").join(SETTINGS_JSON)
-        }
-    };
-
     // Read or create settings.json
     let mut root = if settings_path.exists() {
         let content = fs::read_to_string(&settings_path)
@@ -286,13 +336,30 @@ fn patch_settings_json_command(
     let events = events;
     let missing: Vec<(&'static str, String)> = events
         .iter()
-        .filter(|(event_key, _)| !hook_already_present(&root, event_key, hook_command))
+        .filter(|(event_key, matcher)| {
+            !hook_already_present(&root, event_key, hook_command)
+                || (cfg!(windows)
+                    && *event_key == PRE_TOOL_USE_KEY
+                    && matcher == crate::hooks::constants::CLAUDE_PRE_MATCHER
+                    && !hook_matchers_present(&root, hook_command))
+        })
         .cloned()
         .collect();
     let wants_post = events.iter().any(|(k, _)| *k == POST_TOOL_USE_KEY);
     let mut refreshed: Vec<(&'static str, String)> = Vec::new();
     for (event_key, matcher) in &events {
         if missing.iter().any(|(k, _)| k == event_key) {
+            continue;
+        }
+        if cfg!(windows)
+            && *event_key == PRE_TOOL_USE_KEY
+            && matcher == crate::hooks::constants::CLAUDE_PRE_MATCHER
+        {
+            let original = root.clone();
+            reconcile_native_hook_entry(&mut root, hook_command)?;
+            if root != original {
+                refreshed.push((event_key, matcher.clone()));
+            }
             continue;
         }
         if refresh_hook_matcher(&mut root, event_key, matcher) {
@@ -369,7 +436,14 @@ fn patch_settings_json_command(
     }
 
     for (event_key, matcher) in &missing {
-        insert_hook_entry(&mut root, event_key, matcher, hook_command)?;
+        if cfg!(windows)
+            && *event_key == PRE_TOOL_USE_KEY
+            && matcher == crate::hooks::constants::CLAUDE_PRE_MATCHER
+        {
+            reconcile_native_hook_entry(&mut root, hook_command)?;
+        } else {
+            insert_hook_entry(&mut root, event_key, matcher, hook_command)?;
+        }
     }
 
     let serialized =
@@ -971,38 +1045,8 @@ pub fn hook_status() -> crate::hooks::hook_check::HookStatus {
     let Ok(claude_dir) = resolve_claude_dir() else {
         return crate::hooks::hook_check::HookStatus::Ok;
     };
-    if !claude_dir.exists() {
-        return crate::hooks::hook_check::HookStatus::Ok;
-    }
-
-    // Check for new binary command in settings.json first
-    if binary_hook_registered(&claude_dir) {
-        // If old script file still exists alongside new command, report Outdated
-        // (migration not complete — user should run `rtk init -g` to clean up)
-        let old_hook = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
-        if old_hook.exists() {
-            return crate::hooks::hook_check::HookStatus::Outdated;
-        }
-        return crate::hooks::hook_check::HookStatus::Ok;
-    }
-
-    // Fall back to legacy script file check
-    let hook_path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
-    if !hook_path.exists() {
-        return crate::hooks::hook_check::HookStatus::Missing;
-    }
-    let Ok(content) = fs::read_to_string(&hook_path) else {
-        return crate::hooks::hook_check::HookStatus::Outdated; // exists but unreadable — treat as needs-update
-    };
-    if crate::hooks::hook_check::parse_hook_version(&content)
-        >= crate::hooks::hook_check::CURRENT_HOOK_VERSION
-    {
-        crate::hooks::hook_check::HookStatus::Ok
-    } else {
-        crate::hooks::hook_check::HookStatus::Outdated
-    }
+    crate::hooks::hook_check::status_for_claude_dir(&claude_dir)
 }
-
 /// Check if the native binary command is registered in settings.json
 fn binary_hook_registered(claude_dir: &Path) -> bool {
     let settings_path = claude_dir.join(SETTINGS_JSON);
@@ -1221,6 +1265,30 @@ mod tests {
         assert_eq!(pre_tool_use.len(), 1);
         assert_eq!(
             pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap(),
+            "/some/other/hook.sh"
+        );
+    }
+
+    #[test]
+    fn test_remove_hook_from_json_preserves_other_hooks_in_same_matcher() {
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [
+                        {"type": "command", "command": CLAUDE_HOOK_COMMAND},
+                        {"type": "command", "command": "/some/other/hook.sh"}
+                    ]
+                }]
+            }
+        });
+
+        assert!(remove_hook_from_json(&mut json_content));
+        let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 1);
+        assert_eq!(pre_tool_use[0]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            pre_tool_use[0]["hooks"][0]["command"],
             "/some/other/hook.sh"
         );
     }
@@ -1819,10 +1887,10 @@ mod tests {
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
-                fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap_or_default();
+                fs::read_to_string(claude_dir.join(SETTINGS_LOCAL_JSON)).unwrap_or_default();
             assert!(
                 !settings_content.contains(CLAUDE_HOOK_COMMAND),
-                "hook entry must be removed from settings.json"
+                "hook entry must be removed from settings.local.json"
             );
         });
     }
@@ -1845,8 +1913,9 @@ mod tests {
                     let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
                     let count = settings.matches(CLAUDE_HOOK_COMMAND).count();
                     assert_eq!(
-                        count, 1,
-                        "rtk:default registers PreToolUse only — exactly one hook entry"
+                        count,
+                        if cfg!(windows) { 3 } else { 1 },
+                        "rtk:default registers PreToolUse with one entry per native tool matcher"
                     );
                 });
             },
@@ -1930,8 +1999,8 @@ mod tests {
                 "dry-run must not create CLAUDE.md"
             );
             assert!(
-                !claude_dir.join(SETTINGS_JSON).exists(),
-                "dry-run must not create settings.json"
+                !claude_dir.join(SETTINGS_LOCAL_JSON).exists(),
+                "dry-run must not create settings.local.json"
             );
         });
     }
@@ -1978,8 +2047,8 @@ mod tests {
                 "dry-run uninstall must not remove RTK.md"
             );
             assert!(
-                claude_dir.join(SETTINGS_JSON).exists(),
-                "dry-run uninstall must not remove settings.json"
+                claude_dir.join(SETTINGS_LOCAL_JSON).exists(),
+                "dry-run uninstall must not remove settings.local.json"
             );
             assert_eq!(
                 fs::read_to_string(claude_dir.join(RTK_MD)).unwrap(),
@@ -1987,9 +2056,9 @@ mod tests {
                 "dry-run uninstall must not modify RTK.md"
             );
             assert_eq!(
-                fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap(),
+                fs::read_to_string(claude_dir.join(SETTINGS_LOCAL_JSON)).unwrap(),
                 settings_before,
-                "dry-run uninstall must not modify settings.json"
+                "dry-run uninstall must not modify settings.local.json"
             );
         });
     }
@@ -2344,5 +2413,122 @@ mod tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn test_global_default_mode_patches_settings_json_and_settings_local_json() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let settings_json = claude_dir.join(SETTINGS_JSON);
+            let settings_local_json = claude_dir.join(SETTINGS_LOCAL_JSON);
+            fs::write(
+                &settings_json,
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "theme": "dark",
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "omc hook claude"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                &settings_local_json,
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "permissions": {
+                        "allow": ["Bash(git status)"]
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+            run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
+            run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
+
+            let global_content = fs::read_to_string(&settings_json).unwrap();
+            let local_content = fs::read_to_string(&settings_local_json).unwrap();
+
+            for (name, content) in [
+                (SETTINGS_JSON, global_content.as_str()),
+                (SETTINGS_LOCAL_JSON, local_content.as_str()),
+            ] {
+                assert_eq!(
+                    content.matches(CLAUDE_HOOK_COMMAND).count(),
+                    3,
+                    "{name} must contain one RTK hook for Bash, Shell, and PowerShell"
+                );
+                assert!(
+                    content.contains("\"matcher\": \"Bash\"")
+                        && content.contains("\"matcher\": \"Shell\"")
+                        && content.contains("\"matcher\": \"PowerShell\""),
+                    "{name} must contain all Claude tool matchers"
+                );
+            }
+
+            assert!(
+                global_content.contains("omc hook claude"),
+                "existing Claude hook must be preserved"
+            );
+            assert!(
+                global_content.contains("\"theme\": \"dark\""),
+                "settings.json unrelated keys must be preserved"
+            );
+            assert!(
+                local_content.contains("Bash(git status)"),
+                "settings.local.json unrelated permissions must be preserved"
+            );
+        });
+    }
+
+    #[test]
+    fn test_hook_not_present_when_new_command_missing_matchers() {
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": CLAUDE_HOOK_COMMAND
+                    }]
+                }]
+            }
+        });
+
+        assert!(!hook_matchers_present(&json_content, CLAUDE_HOOK_COMMAND));
+    }
+
+    #[test]
+    fn test_patch_settings_json_command_dry_run_does_not_create_claude_dir() {
+        let temp = TempDir::new().unwrap();
+        let claude_dir = temp.path().join("not-created");
+        let result =
+            crate::core::user_env::with_path("CLAUDE_CONFIG_DIR", Some(&claude_dir), || {
+                patch_settings_json_command(
+                    CLAUDE_HOOK_COMMAND,
+                    PatchMode::Auto,
+                    false,
+                    InitContext {
+                        dry_run: true,
+                        ..Default::default()
+                    },
+                    HookInstallScope::UserGlobal,
+                )
+            });
+        result.unwrap();
+        assert!(
+            !claude_dir.exists(),
+            "dry-run must not create CLAUDE_CONFIG_DIR"
+        );
     }
 }

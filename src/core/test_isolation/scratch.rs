@@ -84,6 +84,10 @@ fn isolate_environment_in(cmd: &mut Command, root: &Path) {
     cmd.env("RTK_DB_PATH", root.join("rtk").join("history.db"))
         .env("RTK_TEE_DIR", root.join("rtk").join("tee"))
         .env("RTK_RECALL_DB", root.join("rtk").join("recall.db"))
+        // Windows known folders can ignore HOME/USERPROFILE. Agent lookups
+        // must use explicit overrides instead of reading the real profile.
+        .env("CLAUDE_CONFIG_DIR", root.join(".claude"))
+        .env("CODEX_HOME", root.join(".codex"))
         .env("XDG_DATA_HOME", root)
         // Set although the environment starts empty: on Windows the child
         // still reads the developer's real config directory, and a consent

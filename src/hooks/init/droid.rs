@@ -78,10 +78,9 @@ fn droid_events(root: &serde_json::Value, layout: DroidLayout) -> &serde_json::V
 }
 
 fn droid_has_pre_tool_use(root: &serde_json::Value, layout: DroidLayout) -> bool {
-    droid_events(root, layout)
-        .get(PRE_TOOL_USE_KEY)
-        .and_then(|p| p.as_array())
-        .is_some_and(|arr| !arr.is_empty())
+    // Droid merges hook files per event key, so even an empty PreToolUse array
+    // in hooks.json shadows settings.json's populated array.
+    droid_events(root, layout).get(PRE_TOOL_USE_KEY).is_some()
 }
 
 /// Pick the file whose `PreToolUse` hooks Droid will actually run.
@@ -238,6 +237,9 @@ fn droid_hook_already_present(root: &serde_json::Value, layout: DroidLayout) -> 
     };
 
     pre.iter().any(|matcher_entry| {
+        if matcher_entry.get("matcher").and_then(|m| m.as_str()) != Some(DROID_EXECUTE_MATCHER) {
+            return false;
+        }
         let hooks = matcher_entry
             .get("hooks")
             .and_then(|h| h.as_array())
@@ -246,7 +248,7 @@ fn droid_hook_already_present(root: &serde_json::Value, layout: DroidLayout) -> 
         hooks.iter().any(|hook| {
             hook.get("command")
                 .and_then(|c| c.as_str())
-                .is_some_and(|cmd| cmd == DROID_HOOK_COMMAND)
+                .is_some_and(|cmd| hook_command_equivalent(cmd, DROID_HOOK_COMMAND))
         })
     })
 }
@@ -413,7 +415,7 @@ fn remove_droid_hook_from_json(root: &mut serde_json::Value, layout: DroidLayout
             hook_arr.retain(|hook| {
                 hook.get("command")
                     .and_then(|c| c.as_str())
-                    .is_none_or(|cmd| cmd != DROID_HOOK_COMMAND)
+                    .is_none_or(|cmd| !hook_command_equivalent(cmd, DROID_HOOK_COMMAND))
             });
             if hook_arr.len() < original {
                 modified = true;
@@ -569,6 +571,35 @@ mod tests {
     }
 
     #[test]
+    fn test_droid_hook_already_present_requires_execute_matcher() {
+        let root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Read",
+                    "hooks": [{ "type": "command", "command": DROID_HOOK_COMMAND }]
+                }]
+            }
+        });
+        assert!(!droid_hook_already_present(&root, DroidLayout::Nested));
+    }
+
+    #[test]
+    fn test_droid_hook_already_present_accepts_windows_absolute_rtk_exe() {
+        let root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Execute",
+                    "hooks": [{
+                        "type": "command",
+                        "command": r#""C:\Program Files\RTK\rtk.exe" hook droid"#
+                    }]
+                }]
+            }
+        });
+        assert!(droid_hook_already_present(&root, DroidLayout::Nested));
+    }
+
+    #[test]
     fn test_remove_droid_hook_keeps_other_hooks() {
         let mut root = serde_json::json!({
             "hooks": {
@@ -585,6 +616,23 @@ mod tests {
         let hooks = root["hooks"]["PreToolUse"][0]["hooks"].as_array().unwrap();
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0]["command"], "echo user-hook");
+    }
+
+    #[test]
+    fn test_remove_droid_hook_removes_windows_absolute_rtk_exe() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Execute",
+                    "hooks": [{
+                        "type": "command",
+                        "command": r#""C:\Program Files\RTK\rtk.exe" hook droid"#
+                    }]
+                }]
+            }
+        });
+        assert!(remove_droid_hook_from_json(&mut root, DroidLayout::Nested));
+        assert!(root["hooks"].get(PRE_TOOL_USE_KEY).is_none());
     }
 
     #[test]
@@ -653,6 +701,23 @@ mod tests {
         .unwrap();
         let target = resolve_droid_install_target(&droid_dir).unwrap();
         assert_eq!(target.path, droid_dir.join("hooks.json"));
+    }
+
+    #[test]
+    fn test_droid_target_treats_empty_hooks_json_pre_tool_use_as_shadowing() {
+        let temp = TempDir::new().unwrap();
+        let droid_dir = temp.path().join(".factory");
+        fs::create_dir_all(&droid_dir).unwrap();
+        fs::write(droid_dir.join("hooks.json"), r#"{"PreToolUse":[]}"#).unwrap();
+        fs::write(
+            droid_dir.join("settings.json"),
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Execute","hooks":[{"type":"command","command":"echo shadowed"}]}]}}"#,
+        )
+        .unwrap();
+
+        let target = resolve_droid_install_target(&droid_dir).unwrap();
+        assert_eq!(target.path, droid_dir.join("hooks.json"));
+        assert!(target.layout == DroidLayout::Root);
     }
 
     #[test]

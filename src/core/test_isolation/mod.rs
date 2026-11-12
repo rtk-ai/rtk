@@ -431,7 +431,7 @@ fn call_text<'a>(code: &'a str, head: regex::Match<'_>) -> (&'a str, &'a str) {
 
 /// The environment reads that stay direct, as written, each with its reason.
 /// Each covers one read: a second identical call in the same file is refused.
-const DIRECT_READS: [(&str, &str); 10] = [
+const DIRECT_READS: [(&str, &str); 9] = [
     // Builds the `PATH` a Windows test hands a child, extending the one it runs
     // under so the child still finds its tools.
     ("src/core/utils.rs", r#"var_os("PATH")"#),
@@ -443,10 +443,6 @@ const DIRECT_READS: [(&str, &str); 10] = [
     // the process environment is the only place it arrives: `user_env` holds
     // what the calling thread set, and nothing more, in a test build.
     ("src/core/task_cmd.rs", "var_os(WRAPPER_DIR)"),
-    // Only `rtk hook audit` reaches it, and no test runs that in-process.
-    // `user_dirs::home` would move it to the Windows profile folder, which is
-    // #1681's question, not this scan's.
-    ("src/hooks/hook_audit_cmd.rs", r#"var("HOME")"#),
     // `rtk env` shows the environment it runs in; that is its output.
     ("src/cmds/system/env_cmd.rs", "vars()"),
     // Reads the developer's values of the variables a child keeps, and finds
@@ -763,4 +759,19 @@ fn entered_restores_after_a_panic() {
         before,
         "a panic must not leave the thread in the test directory"
     );
+}
+
+#[test]
+fn child_agent_directories_are_isolated() {
+    let tmp = tempdir();
+    let mut cmd = Command::new("unused-child-fixture");
+    isolate_rtk_in(&mut cmd, tmp.path());
+    for (name, subdir) in [("CLAUDE_CONFIG_DIR", ".claude"), ("CODEX_HOME", ".codex")] {
+        let actual = cmd
+            .get_envs()
+            .find(|(key, _)| *key == name)
+            .and_then(|(_, value)| value)
+            .map(PathBuf::from);
+        assert_eq!(actual, Some(tmp.path().join(subdir)), "{name}");
+    }
 }

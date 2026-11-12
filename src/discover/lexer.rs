@@ -512,7 +512,7 @@ pub fn contains_unattestable_construct(cmd: &str) -> bool {
 /// drop the rewrite for every ordinary `(cd dir && cmd)` and every line that
 /// merely contains an `if … fi` block.
 pub(crate) fn contains_unattestable_construct_in(cmd: &str, dialect: ShellDialect) -> bool {
-    if contains_substitution(cmd) {
+    if contains_substitution(cmd) || contains_powershell_control_syntax(cmd) {
         return true;
     }
     // Segments are not evidence about what will run once quoting diverges.
@@ -608,6 +608,27 @@ fn disown_pair(tokens: &[ParsedToken]) -> bool {
         };
     }
     false
+}
+
+/// PowerShell assignments and its call operator are not shell-compatible with
+/// RTK's Bash-oriented lexer. Rewriting either can change the command's meaning
+/// (for example, `$env:FOO='4'` was interpreted as an RTK argument), so defer the
+/// entire payload to the host instead of rewriting or auto-allowing it.
+fn contains_powershell_control_syntax(cmd: &str) -> bool {
+    cmd.split(['\n', '\r', ';']).any(|statement| {
+        let statement = statement.trim_start();
+        let is_env_assignment = statement
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("$env:"));
+        let is_call_operator = statement.strip_prefix('&').is_some_and(|rest| {
+            matches!(
+                rest.chars().next(),
+                Some(c) if c.is_ascii_whitespace()
+                    || matches!(c, '\'' | '"' | '$' | '(' | '{')
+            )
+        });
+        is_env_assignment || is_call_operator
+    })
 }
 
 /// Quote-aware: bash runs backtick/`$(...)` unquoted and inside double quotes,
@@ -1974,6 +1995,23 @@ mod tests {
         assert!(!contains_unattestable_construct("git log | head"));
         assert!(!contains_unattestable_construct("sleep 1 &"));
         assert!(!contains_unattestable_construct("git status\ncargo build"));
+    }
+
+    #[test]
+    fn test_unattestable_powershell_env_assignment_and_call_operator() {
+        assert!(contains_unattestable_construct(
+            "$env:CARGO_BUILD_JOBS='4'\n& cargo test hooks::"
+        ));
+        assert!(contains_unattestable_construct(
+            "Write-Host ready; $ENV:MODE='test'"
+        ));
+        assert!(contains_unattestable_construct(
+            "&'C:\\Program Files\\tool.exe'"
+        ));
+        assert!(!contains_unattestable_construct("sleep 1 &"));
+        assert!(!contains_unattestable_construct(
+            "cargo test && cargo check"
+        ));
     }
 
     #[test]

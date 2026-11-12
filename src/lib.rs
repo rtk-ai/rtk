@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 mod analytics;
 mod cmds;
 mod core;
@@ -148,8 +149,11 @@ struct GainArgs {
     #[arg(long)]
     reset: bool,
     /// Skip confirmation prompt when resetting
-    #[arg(long, requires = "reset")]
+    #[arg(long)]
     yes: bool,
+    /// Compatibility alias: `rtk gain reset`
+    #[arg(value_name = "ACTION", value_parser = ["reset"], hide = true)]
+    action: Option<String>,
     /// Live full-screen dashboard (command-filtering + LLM-proxy savings)
     #[arg(long, conflicts_with = "text")]
     watch: bool,
@@ -488,15 +492,15 @@ enum Commands {
         global: bool,
 
         /// Install OpenCode plugin (in addition to Claude Code)
-        #[arg(long)]
+        #[arg(long, group = "integration_target")]
         opencode: bool,
 
         /// Initialize for Gemini CLI instead of Claude Code
-        #[arg(long)]
+        #[arg(long, group = "integration_target")]
         gemini: bool,
 
         /// Target agent to install hooks for (default: claude)
-        #[arg(long, value_enum)]
+        #[arg(long, value_enum, group = "integration_target")]
         agent: Option<AgentTarget>,
 
         /// Show current configuration
@@ -531,12 +535,12 @@ enum Commands {
         #[arg(long)]
         uninstall: bool,
 
-        /// Target Codex CLI (uses PreToolUse hook + AGENTS.md + RTK.md)
-        #[arg(long)]
+        /// Target Codex CLI (PreToolUse hook plus AGENTS.md / RTK.md)
+        #[arg(long, group = "integration_target")]
         codex: bool,
 
         /// Install GitHub Copilot integration (VS Code + CLI)
-        #[arg(long)]
+        #[arg(long, group = "integration_target")]
         copilot: bool,
         /// Preview changes without writing any files (combine with -v to show content)
         #[arg(long = "dry-run", conflicts_with = "show")]
@@ -1272,6 +1276,7 @@ enum TasksCommands {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(dead_code)]
 enum HookCommands {
     /// Process Claude Code PreToolUse hook (reads JSON from stdin)
     Claude,
@@ -3186,6 +3191,7 @@ fn run_cli() -> Result<i32> {
                 recalls,
                 reset,
                 yes,
+                action,
                 watch,
                 text,
                 by_method,
@@ -3195,6 +3201,7 @@ fn run_cli() -> Result<i32> {
                 pipeline,
                 shadow,
             } = *gain_args;
+            let reset = reset || action.as_deref() == Some("reset");
             // The attribution arms must not drop flags the user passed:
             // `--reset --yes --by-method` must reset, and `--format json`
             // must print JSON, not styled text.
@@ -4646,6 +4653,21 @@ mod tests {
     }
 
     #[test]
+    fn test_gain_reset_subcommand_alias_parses() {
+        let result = Cli::try_parse_from(["rtk", "gain", "reset", "--yes"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Gain(gain) => {
+                    assert_eq!(gain.action.as_deref(), Some("reset"));
+                    assert!(gain.yes);
+                }
+                _ => panic!("Expected Gain command"),
+            }
+        }
+    }
+
+    #[test]
     fn test_meta_commands_reject_bad_flags() {
         // RTK meta-commands should produce parse errors (not fall through to raw execution).
         // Skip "bypass" because it uses trailing_var_arg (accepts any args by design).
@@ -6069,6 +6091,150 @@ mod tests {
                 command: DenoCommands::Compile { args },
             } => assert_eq!(args, vec!["main.ts"]),
             _ => panic!("Expected Deno Compile command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_cli_accepts_dashdash_and_multiple_paths() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "grep",
+            "-n",
+            "--",
+            "Codex|Prompt-level",
+            "hooks",
+            "docs/contributing/TECHNICAL.md",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Grep { extra_args, .. } => {
+                assert_eq!(
+                    extra_args,
+                    vec![
+                        "-n",
+                        "--",
+                        "Codex|Prompt-level",
+                        "hooks",
+                        "docs/contributing/TECHNICAL.md"
+                    ]
+                );
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_cli_accepts_leading_grep_flags() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "grep",
+            "-a",
+            "-n",
+            "NamedPipeRequest|NamedPipeResponse",
+            r"D:\bazhuayuRPA\Studio",
+            "-g",
+            "*.dll",
+            "-g",
+            "*.exe",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Grep { extra_args, .. } => {
+                assert_eq!(
+                    extra_args,
+                    vec![
+                        "-a",
+                        "-n",
+                        "NamedPipeRequest|NamedPipeResponse",
+                        r"D:\bazhuayuRPA\Studio",
+                        "-g",
+                        "*.dll",
+                        "-g",
+                        "*.exe"
+                    ]
+                );
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_cli_accepts_rg_smart_case() {
+        let cli = Cli::try_parse_from(["rtk", "grep", "-S", "RTK_DISABLED", "src"]).unwrap();
+        match cli.command {
+            Commands::Grep { extra_args, .. } => {
+                assert_eq!(extra_args, vec!["-S", "RTK_DISABLED", "src"]);
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_cli_parses_rtk_limits_without_stealing_grep_flags() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "grep",
+            "--max",
+            "2",
+            "--max-len=40",
+            "fn",
+            "src",
+            "-i",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Grep {
+                max,
+                max_len,
+                extra_args,
+                ..
+            } => {
+                assert_eq!(max, 2);
+                assert_eq!(max_len, 40);
+                assert_eq!(extra_args, vec!["fn", "src", "-i"]);
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_cli_treats_unknown_dash_token_as_pattern() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "grep",
+            "-n",
+            "--reason|FAST_QUOTE_RETRY_REASON|pending",
+            r".\server\scripts\fast-quote-benchmark-retry-samples.cjs",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Grep { extra_args, .. } => {
+                assert_eq!(
+                    extra_args,
+                    vec![
+                        "-n",
+                        "--reason|FAST_QUOTE_RETRY_REASON|pending",
+                        r".\server\scripts\fast-quote-benchmark-retry-samples.cjs"
+                    ]
+                );
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    #[test]
+    fn test_init_rejects_multiple_integration_targets() {
+        for args in [
+            vec!["rtk", "init", "--agent", "droid", "--codex"],
+            vec!["rtk", "init", "--agent", "droid", "--gemini"],
+            vec!["rtk", "init", "--agent", "droid", "--copilot"],
+            vec!["rtk", "init", "--agent", "droid", "--opencode"],
+            vec!["rtk", "init", "--gemini", "--codex"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&args).is_err(),
+                "ambiguous integration targets must be rejected: {args:?}"
+            );
         }
     }
 }

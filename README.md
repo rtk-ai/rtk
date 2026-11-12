@@ -98,7 +98,7 @@ Restart your agent. That's it: when it runs `git status`, RTK runs `rtk git stat
 >
 > Cargo, pre-built binaries, native Windows, WSL and uninstall: **[Installation guide](https://www.rtk-ai.app/docs/getting-started/installation/)** · per-agent setup and `--dry-run`: **[Quick Start](https://www.rtk-ai.app/docs/getting-started/quick-start/)**
 
-<br>
+> **Windows users**: Extract the zip and place `rtk.exe` somewhere in your PATH (e.g. `C:\Users\<you>\.local\bin`). Run RTK from **Command Prompt**, **PowerShell**, or **Windows Terminal** — do not double-click the `.exe` (it will flash and close). The hook system works natively on Windows, including Claude Code (`rtk hook claude`) and Codex (`rtk hook codex`); WSL remains supported but is not required for those hooks. See the [installation guide](https://www.rtk-ai.app/docs/getting-started/installation/) for details.
 
 ## Measure it: `rtk gain`
 

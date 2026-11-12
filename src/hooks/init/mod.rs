@@ -4,7 +4,7 @@
 //! submodule, and the helpers shared between them stay here.
 use crate::hooks::constants::{
     CLAUDE_DIR, CLAUDE_HOOK_COMMAND, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
-    SETTINGS_JSON,
+    SETTINGS_JSON, SETTINGS_LOCAL_JSON,
 };
 use anyhow::{Context, Result};
 use std::ffi::OsString;
@@ -137,7 +137,7 @@ pub enum FilterTrust {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PatchResult {
     Patched,        // Hook was added successfully
-    AlreadyPresent, // Hook was already in settings.json
+    AlreadyPresent, // Hook was already in Claude settings
     Declined,       // User declined when prompted
     Skipped,        // --no-patch flag used
     WouldPatch,     // Dry-run: hook would have been added
@@ -448,22 +448,19 @@ pub fn run(
     let InitContext { dry_run, .. } = ctx;
     // Validation: Codex mode conflicts
     if codex {
-        if install_opencode {
-            anyhow::bail!("--codex cannot be combined with --opencode");
-        }
         if claude_md {
             anyhow::bail!("--codex cannot be combined with --claude-md");
         }
         if hook_only {
             anyhow::bail!("--codex cannot be combined with --hook-only");
         }
-        if matches!(patch_mode, PatchMode::Auto) {
-            anyhow::bail!("--codex cannot be combined with --auto-patch");
-        }
         if matches!(patch_mode, PatchMode::Skip) {
             anyhow::bail!("--codex cannot be combined with --no-patch");
         }
         run_codex_mode(global, ctx)?;
+        if install_opencode {
+            run_opencode_only_mode(ctx)?;
+        }
     } else {
         // Validation: Global-only features
         if install_opencode && !global {
@@ -1866,6 +1863,294 @@ pub(super) fn insert_hook_entry(
     Ok(())
 }
 
+fn reconcile_native_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result<()> {
+    let root_obj = match root.as_object_mut() {
+        Some(obj) => obj,
+        None => {
+            *root = serde_json::json!({});
+            root.as_object_mut().expect("just-created json object")
+        }
+    };
+
+    let hooks = root_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("hooks value is not an object")?;
+
+    let pre_tool_use = hooks
+        .entry(PRE_TOOL_USE_KEY)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("PreToolUse value is not an array")?;
+
+    // Normalize every equivalent RTK entry, including legacy matcher names
+    // that are no longer installed. Leaving one unbounded would retain
+    // Codex's 600-second default even after a successful upgrade.
+    for entry in pre_tool_use.iter_mut() {
+        let Some(hooks_arr) = entry
+            .get_mut("hooks")
+            .and_then(|value| value.as_array_mut())
+        else {
+            continue;
+        };
+        for hook in hooks_arr.iter_mut() {
+            let is_rtk = hook
+                .get("command")
+                .and_then(|cmd| cmd.as_str())
+                .is_some_and(|cmd| hook_command_equivalent(cmd, hook_command));
+            if is_rtk && let Some(obj) = hook.as_object_mut() {
+                obj.insert("type".to_string(), serde_json::json!("command"));
+                obj.insert("timeout".to_string(), serde_json::json!(10));
+            }
+        }
+    }
+
+    for matcher in ["Bash", "Shell", "PowerShell"] {
+        let mut found_matcher = false;
+        for entry in pre_tool_use.iter_mut() {
+            let matches = entry
+                .get("matcher")
+                .and_then(|m| m.as_str())
+                .is_some_and(|m| m.eq_ignore_ascii_case(matcher));
+            if !matches {
+                continue;
+            }
+
+            found_matcher = true;
+            let hooks_arr = entry
+                .as_object_mut()
+                .context("PreToolUse entry is not an object")?
+                .entry("hooks")
+                .or_insert_with(|| serde_json::json!([]))
+                .as_array_mut()
+                .context("hooks value is not an array")?;
+
+            let mut found_command = false;
+            for hook in hooks_arr.iter_mut() {
+                let is_rtk = hook
+                    .get("command")
+                    .and_then(|cmd| cmd.as_str())
+                    .is_some_and(|cmd| hook_command_equivalent(cmd, hook_command));
+                if is_rtk {
+                    found_command = true;
+                    if let Some(obj) = hook.as_object_mut() {
+                        obj.insert("type".to_string(), serde_json::json!("command"));
+                        obj.insert("timeout".to_string(), serde_json::json!(10));
+                    }
+                }
+            }
+
+            if !found_command {
+                hooks_arr.push(serde_json::json!({
+                    "type": "command",
+                    "command": hook_command,
+                    "timeout": 10
+                }));
+            }
+        }
+
+        if !found_matcher {
+            pre_tool_use.push(serde_json::json!({
+                "matcher": matcher,
+                "hooks": [{
+                    "type": "command",
+                    "command": hook_command,
+                    "timeout": 10
+                }]
+            }));
+        }
+    }
+    Ok(())
+}
+
+fn hook_matchers_present(root: &serde_json::Value, hook_command: &str) -> bool {
+    missing_hook_matchers(root, hook_command).is_empty()
+}
+
+fn missing_hook_matchers(root: &serde_json::Value, hook_command: &str) -> Vec<&'static str> {
+    ["Bash", "Shell", "PowerShell"]
+        .into_iter()
+        .filter(|matcher| !hook_matcher_present(root, hook_command, matcher))
+        .collect()
+}
+
+fn hook_matchers_needing_repair(root: &serde_json::Value, hook_command: &str) -> Vec<&'static str> {
+    let Some(pre_tool_use) = root
+        .get("hooks")
+        .and_then(|hooks| hooks.get(PRE_TOOL_USE_KEY))
+        .and_then(|value| value.as_array())
+    else {
+        return vec!["Bash", "Shell", "PowerShell"];
+    };
+
+    ["Bash", "Shell", "PowerShell"]
+        .into_iter()
+        .filter(|matcher| {
+            !pre_tool_use.iter().any(|entry| {
+                entry
+                    .get("matcher")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|value| value.eq_ignore_ascii_case(matcher))
+                    && entry
+                        .get("hooks")
+                        .and_then(|value| value.as_array())
+                        .into_iter()
+                        .flatten()
+                        .any(|hook| {
+                            hook.get("command")
+                                .and_then(|value| value.as_str())
+                                .is_some_and(|value| hook_command_equivalent(value, hook_command))
+                                && hook.get("type").and_then(|value| value.as_str())
+                                    == Some("command")
+                                && hook.get("timeout").and_then(|value| value.as_u64()) == Some(10)
+                        })
+            })
+        })
+        .collect()
+}
+
+fn hook_entries_need_repair(root: &serde_json::Value, hook_command: &str) -> bool {
+    root.get("hooks")
+        .and_then(|hooks| hooks.get(PRE_TOOL_USE_KEY))
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .any(|hook| {
+            hook.get("command")
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| hook_command_equivalent(value, hook_command))
+                && (hook.get("type").and_then(|value| value.as_str()) != Some("command")
+                    || hook.get("timeout").and_then(|value| value.as_u64()) != Some(10))
+        })
+}
+
+fn hook_command_program(hook_command: &str) -> Option<&str> {
+    hook_command
+        .split_whitespace()
+        .next()
+        .filter(|program| !program.is_empty())
+}
+
+fn split_hook_command(command: &str) -> Option<(&str, &str)> {
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+
+    let bytes = command.as_bytes();
+    if matches!(bytes.first(), Some(b'"' | b'\'')) {
+        let quote = bytes[0];
+        let end = bytes
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find_map(|(idx, byte)| (*byte == quote).then_some(idx))?;
+        let program = &command[1..end];
+        let rest = command[end + 1..].trim();
+        return Some((program, rest));
+    }
+
+    let split_at = command.find(char::is_whitespace).unwrap_or(command.len());
+    let program = &command[..split_at];
+    let rest = command[split_at..].trim();
+    Some((program, rest))
+}
+
+fn hook_program_is_rtk(program: &str) -> bool {
+    let file_name = program
+        .trim_matches(|c| c == '"' || c == '\'')
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+
+    matches!(file_name.as_str(), "rtk" | "rtk.exe")
+}
+
+fn hook_command_equivalent(actual: &str, expected: &str) -> bool {
+    if actual == expected {
+        return true;
+    }
+
+    let Some((expected_program, expected_args)) = split_hook_command(expected) else {
+        return false;
+    };
+    if !hook_program_is_rtk(expected_program) {
+        return false;
+    }
+
+    let Some((actual_program, actual_args)) = split_hook_command(actual) else {
+        return false;
+    };
+    hook_program_is_rtk(actual_program) && actual_args.eq_ignore_ascii_case(expected_args)
+}
+
+fn resolve_hook_command_program(hook_command: &str) -> Result<PathBuf, String> {
+    let program = hook_command_program(hook_command).ok_or_else(|| {
+        format!("hook command `{hook_command}` does not include an executable program")
+    })?;
+    which::which(program)
+        .map_err(|err| format!("hook command program `{program}` is not on PATH ({err})"))
+}
+
+fn hook_matcher_present(root: &serde_json::Value, hook_command: &str, matcher: &str) -> bool {
+    root.get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+        .into_iter()
+        .flatten()
+        .any(|entry| {
+            entry
+                .get("matcher")
+                .and_then(|m| m.as_str())
+                .is_some_and(|m| m.eq_ignore_ascii_case(matcher))
+                && entry
+                    .get("hooks")
+                    .and_then(|hooks| hooks.as_array())
+                    .into_iter()
+                    .flatten()
+                    .any(|hook| {
+                        hook.get("command")
+                            .and_then(|c| c.as_str())
+                            .is_some_and(|cmd| hook_command_equivalent(cmd, hook_command))
+                    })
+        })
+}
+
+fn remove_hook_command_entry(root: &mut serde_json::Value, hook_command: &str) -> bool {
+    let Some(pre_tool_use) = root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array_mut())
+    else {
+        return false;
+    };
+
+    let mut removed = false;
+    for entry in pre_tool_use.iter_mut() {
+        if let Some(hooks) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+            let before_hooks = hooks.len();
+            hooks.retain(|hook| {
+                hook.get("command")
+                    .and_then(|c| c.as_str())
+                    .is_none_or(|cmd| !hook_command_equivalent(cmd, hook_command))
+            });
+            removed |= hooks.len() != before_hooks;
+        }
+    }
+    pre_tool_use.retain(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .is_none_or(|hooks| !hooks.is_empty())
+    });
+
+    removed
+}
+
 /// Generate .rtk/filters.toml template in the current directory if not present.
 pub(super) fn generate_project_filters_template(ctx: InitContext) -> Result<()> {
     let InitContext {
@@ -2738,13 +3023,7 @@ level = "high"
         let mut json_content = serde_json::json!({});
         let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
 
-        insert_hook_entry(
-            &mut json_content,
-            PRE_TOOL_USE_KEY,
-            CLAUDE_PRE_MATCHER,
-            hook_command,
-        )
-        .unwrap();
+        reconcile_native_hook_entry(&mut json_content, hook_command).unwrap();
 
         // Should create full structure
         assert!(json_content.get("hooks").is_some());
@@ -2757,10 +3036,23 @@ level = "high"
         );
 
         let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre_tool_use.len(), 1);
+        // insert_hook_entry adds Bash, Shell, and PowerShell matchers
+        assert_eq!(pre_tool_use.len(), 3);
 
-        let command = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
-        assert_eq!(command, hook_command);
+        // Verify Bash matcher
+        assert_eq!(pre_tool_use[0]["matcher"], "Bash");
+        let bash_cmd = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(bash_cmd, hook_command);
+
+        // Verify Shell matcher
+        assert_eq!(pre_tool_use[1]["matcher"], "Shell");
+        let shell_cmd = pre_tool_use[1]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(shell_cmd, hook_command);
+
+        // Verify PowerShell matcher
+        assert_eq!(pre_tool_use[2]["matcher"], "PowerShell");
+        let ps_cmd = pre_tool_use[2]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(ps_cmd, hook_command);
     }
 
     #[test]
@@ -2822,6 +3114,46 @@ level = "high"
 
         // And add hooks
         assert!(json_content.get("hooks").is_some());
+    }
+
+    #[test]
+    fn test_remove_hook_command_entry_removes_absolute_rtk_exe_codex_command() {
+        let absolute_command = r"C:\Users\Administrator\.local\bin\rtk.exe hook codex";
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {"type": "command", "command": absolute_command},
+                            {"type": "command", "command": "powershell.exe -File guard.ps1"}
+                        ]
+                    },
+                    {
+                        "matcher": "Shell",
+                        "hooks": [{"type": "command", "command": absolute_command}]
+                    },
+                    {
+                        "matcher": "PowerShell",
+                        "hooks": [{"type": "command", "command": absolute_command}]
+                    }
+                ]
+            }
+        });
+
+        assert!(remove_hook_command_entry(
+            &mut json_content,
+            CODEX_HOOK_COMMAND
+        ));
+
+        let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 1);
+        let bash_hooks = pre_tool_use[0]["hooks"].as_array().unwrap();
+        assert_eq!(bash_hooks.len(), 1);
+        assert_eq!(
+            bash_hooks[0]["command"].as_str(),
+            Some("powershell.exe -File guard.ps1")
+        );
     }
 
     // Tests for atomic_write()
@@ -3282,5 +3614,95 @@ level = "high"
 
         assert!(format!("{err:#}").contains("backup"));
         assert_eq!(fs::read_to_string(path).unwrap(), "old");
+    }
+
+    #[test]
+    fn test_hook_command_equivalent_accepts_quoted_absolute_rtk_exe() {
+        assert!(hook_command_equivalent(
+            r#""C:\Program Files\rtk\rtk.exe" hook codex"#,
+            CODEX_HOOK_COMMAND
+        ));
+        assert!(hook_command_equivalent(
+            "/usr/local/bin/rtk hook claude",
+            CLAUDE_HOOK_COMMAND
+        ));
+        assert!(!hook_command_equivalent(
+            r"C:\Users\Administrator\.codex\hooks\omx-native-hook-windows-shim.ps1",
+            CODEX_HOOK_COMMAND
+        ));
+    }
+
+    #[test]
+    fn test_hook_command_program_extracts_rtk() {
+        assert_eq!(hook_command_program(CODEX_HOOK_COMMAND), Some("rtk"));
+        assert_eq!(hook_command_program("  rtk hook claude"), Some("rtk"));
+        assert_eq!(hook_command_program(""), None);
+    }
+
+    #[test]
+    fn test_hook_matchers_needing_repair_requires_bounded_command_hooks() {
+        let absolute_command = r"C:\Users\Administrator\.local\bin\rtk.exe hook codex";
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"command": absolute_command}]},
+                    {"matcher": "Shell", "hooks": [{"type": "command", "command": absolute_command}]},
+                    {"matcher": "PowerShell", "hooks": [{"type": "command", "command": absolute_command, "timeout": 600}]},
+                    {"matcher": "exec_command", "hooks": [{"type": "command", "command": absolute_command}]}
+                ]
+            }
+        });
+
+        assert_eq!(
+            hook_matchers_needing_repair(&json_content, CODEX_HOOK_COMMAND),
+            vec!["Bash", "Shell", "PowerShell"]
+        );
+        assert!(hook_entries_need_repair(&json_content, CODEX_HOOK_COMMAND));
+
+        reconcile_native_hook_entry(&mut json_content, CODEX_HOOK_COMMAND).unwrap();
+        assert!(hook_matchers_needing_repair(&json_content, CODEX_HOOK_COMMAND).is_empty());
+        assert!(!hook_entries_need_repair(&json_content, CODEX_HOOK_COMMAND));
+    }
+
+    #[test]
+    fn test_native_hook_entry_preserves_existing() {
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/some/other/hook.sh"
+                    }]
+                }]
+            }
+        });
+
+        let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
+        reconcile_native_hook_entry(&mut json_content, hook_command).unwrap();
+
+        let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
+        // Existing Bash hook should be preserved and RTK added alongside Shell + PowerShell.
+        assert_eq!(pre_tool_use.len(), 3);
+
+        // Existing Bash entry should keep the pre-existing hook and add RTK.
+        assert_eq!(pre_tool_use[0]["matcher"], "Bash");
+        let bash_hooks = pre_tool_use[0]["hooks"].as_array().unwrap();
+        assert!(
+            bash_hooks
+                .iter()
+                .any(|hook| hook["command"].as_str() == Some("/some/other/hook.sh"))
+        );
+        assert!(
+            bash_hooks
+                .iter()
+                .any(|hook| hook["command"].as_str() == Some(hook_command))
+        );
+
+        // Shell and PowerShell entries should be added.
+        assert_eq!(pre_tool_use[1]["matcher"], "Shell");
+        assert_eq!(pre_tool_use[2]["matcher"], "PowerShell");
+        let ps_cmd = pre_tool_use[2]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(ps_cmd, hook_command);
     }
 }

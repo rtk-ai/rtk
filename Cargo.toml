@@ -47,6 +47,7 @@ doctest = false
 default = ["engine"]
 engine = ["dep:rtk-engine"]
 example-plugins = ["engine", "dep:rtk-plugin"]
+telemetry = []
 
 [dependencies]
 rtk-engine = { path = "engine", optional = true }

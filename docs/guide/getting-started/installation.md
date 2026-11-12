@@ -67,7 +67,7 @@ Download from [GitHub releases](https://github.com/rtk-ai/rtk/releases):
 - Linux: `rtk-x86_64-unknown-linux-musl.tar.gz` / `rtk-aarch64-unknown-linux-musl.tar.gz`
 - Windows: `rtk-x86_64-pc-windows-msvc.zip`
 
-**Windows users**: Extract the zip and place `rtk.exe` in a directory on your PATH. Run RTK from Command Prompt, PowerShell, or Windows Terminal — do not double-click the `.exe` (it prints usage and exits immediately). See [Windows](#windows) below — the hook system works natively, no WSL required.
+**Windows users**: Extract the zip and place `rtk.exe` in a directory on your PATH. Run RTK from Command Prompt, PowerShell, or Windows Terminal — do not double-click the `.exe` (it prints usage and exits immediately). Native Windows hooks are supported for Claude Code and Codex CLI when installed globally with `rtk init -g` or `rtk init -g --codex`; WSL is optional.
 
 ## Apache-2.0 edition
 
@@ -85,7 +85,7 @@ See [Editions and Licensing](../resources/editions.md) for what the edition omit
 
 ## Windows
 
-RTK works fully on native Windows. Since **v0.37.2** the auto-rewrite hook runs as a native binary command (`rtk hook claude`) — no Unix shell, bash, or jq required — so commands are rewritten transparently in Command Prompt, PowerShell, and Windows Terminal, exactly as on Linux and macOS.
+RTK works fully on native Windows. Since **v0.37.2**, Claude Code and Codex use native binary entrypoints (`rtk hook claude` and `rtk hook codex`) to rewrite commands transparently in Command Prompt, PowerShell, and Windows Terminal. No Unix shell, bash, or jq is required.
 
 ### Native Windows (manual install)
 
@@ -96,6 +96,8 @@ Prefer [winget](#winget-windows) if you can — it handles PATH for you.
 # 2. Add rtk.exe to your PATH (e.g. C:\Users\<you>\.local\bin)
 # 3. Initialize - installs the native binary hook
 rtk init -g
+# Initialize Codex when used
+rtk init -g --codex
 ```
 
 **Upgrading from an older install?** If you set RTK up before v0.37.2 you may still have the legacy `rtk-rewrite.sh` shell hook, which does need a Unix shell. Re-run `rtk init -g` to migrate to the native binary hook.

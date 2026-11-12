@@ -349,16 +349,7 @@ pub struct MonthStats {
     pub timed_commands: usize,
 }
 
-/// Type alias for command statistics tuple: (command, count, saved_tokens, weighted_savings_rate, avg_time_ms)
-///
-/// # Warning
-/// The 4th field is a **weighted** savings rate: `SUM(saved_tokens) / SUM(input_tokens) * 100.0`,
-/// guarded so that a group whose every row has zero input reports 0.0 rather than NULL.
-/// Do NOT aggregate this column with `AVG()` — that would produce an unweighted mean that
-/// under-weights high-volume commands. Always recompute it as
-/// `CASE WHEN SUM(input_tokens) > 0 THEN SUM(saved_tokens) / SUM(input_tokens) * 100.0 ELSE 0.0 END`
-/// instead. `saved_tokens` is signed, so the rate can be negative where the 3rd field, being
-/// unsigned, is clamped to 0.
+/// Type alias for command statistics tuple: (command, count, saved_tokens, weighted_savings_pct, avg_time_ms)
 type CommandStats = (String, usize, usize, f64, u64);
 
 /// Whether a stored row's elapsed time belongs to a filtered command run or to the lifetime of
@@ -1313,7 +1304,6 @@ impl Tracker {
         )?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
-            // added: params
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)? as usize,
@@ -3328,6 +3318,15 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_db_path_test_build_defaults_to_temp() {
+        user_env::with_vars(&[("RTK_DB_PATH", None)], || {
+            let path = get_db_path().expect("isolated database path");
+            assert_eq!(path, test_isolation::db_path());
+            assert!(path.starts_with(test_isolation::scratch_dir()));
+        });
+    }
+
     // 8b. Tracker::new() gates schema migration behind PRAGMA user_version, so a
     // fresh DB gets stamped to SCHEMA_VERSION and a second open on the same file
     // still works (and doesn't re-run/fail the migration).
@@ -3520,6 +3519,35 @@ mod tests {
         assert_eq!(
             failures.total, 0,
             "parse_failures table should be empty after reset"
+        );
+    }
+
+    #[test]
+    fn test_by_command_savings_pct_is_weighted_by_tokens() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+
+        tracker
+            .record("rg huge", "rtk grep", 1000, 600, 1)
+            .expect("Failed to record large grep");
+        tracker
+            .record("rg tiny", "rtk grep", 10, 0, 1)
+            .expect("Failed to record tiny grep");
+
+        let summary = tracker.get_summary().expect("Failed to get summary");
+        let grep = summary
+            .by_command
+            .iter()
+            .find(|(cmd, _, _, _, _)| cmd == "rtk grep")
+            .expect("rtk grep summary missing");
+
+        assert_eq!(grep.1, 2);
+        assert_eq!(grep.2, 410);
+        let expected = 410.0 / 1010.0 * 100.0;
+        assert!(
+            (grep.3 - expected).abs() < 0.01,
+            "by-command pct must be weighted by input tokens; got {:.3}, expected {:.3}",
+            grep.3,
+            expected
         );
     }
 

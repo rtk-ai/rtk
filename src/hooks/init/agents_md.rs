@@ -232,11 +232,17 @@ pub(super) fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -
     Ok(true)
 }
 
+fn line_has_rtk_reference(line: &str, refs: &[&str]) -> bool {
+    refs.iter().any(|reference| {
+        line == *reference || (*reference != RTK_MD_REF && line.ends_with(reference))
+    })
+}
+
 pub(super) fn has_rtk_reference(content: &str, refs: &[&str]) -> bool {
     content
         .lines()
         .map(str::trim)
-        .any(|line| refs.contains(&line))
+        .any(|line| line_has_rtk_reference(line, refs))
 }
 
 pub(super) fn remove_rtk_reference_from_agents(
@@ -259,10 +265,7 @@ pub(super) fn remove_rtk_reference_from_agents(
 
     let new_content = content
         .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !refs.contains(&trimmed)
-        })
+        .filter(|line| !line_has_rtk_reference(line.trim(), refs))
         .collect::<Vec<_>>()
         .join("\n");
     let cleaned = clean_double_blanks(&new_content);
