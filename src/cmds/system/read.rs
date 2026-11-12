@@ -76,8 +76,25 @@ pub fn run(
         timer.track(&cat_label(file), "rtk read", &window, &window);
         return Ok(());
     }
-    let content = String::from_utf8(bytes)
-        .with_context(|| format!("Failed to decode file: {}", file.display()))?;
+    let content = match decode_or_number(
+        bytes,
+        level,
+        max_lines,
+        head_lines,
+        tail_lines,
+        line_numbers,
+    ) {
+        Ok(content) => content,
+        Err(numbered) => {
+            io::stdout()
+                .lock()
+                .write_all(&numbered)
+                .context("Failed to write numbered bytes")?;
+            let numbered = String::from_utf8_lossy(&numbered);
+            timer.track(&cat_label(file), "rtk read", &numbered, &numbered);
+            return Ok(());
+        }
+    };
 
     // Detect language from extension
     let lang = file
@@ -179,7 +196,25 @@ pub fn run_stdin(
         timer.track("cat - (stdin)", "rtk read -", &window, &window);
         return Ok(());
     }
-    let content = String::from_utf8(bytes).context("Failed to decode stdin")?;
+    let content = match decode_or_number(
+        bytes,
+        level,
+        max_lines,
+        head_lines,
+        tail_lines,
+        line_numbers,
+    ) {
+        Ok(content) => content,
+        Err(numbered) => {
+            io::stdout()
+                .lock()
+                .write_all(&numbered)
+                .context("Failed to write numbered bytes")?;
+            let numbered = String::from_utf8_lossy(&numbered);
+            timer.track("cat - (stdin)", "rtk read -", &numbered, &numbered);
+            return Ok(());
+        }
+    };
 
     // No file extension, so use Unknown language
     let lang = Language::Unknown;
@@ -424,6 +459,46 @@ fn raw_byte_window(
     }
     byte_line_window(content, head_lines, tail_lines)
         .or_else(|| max_lines.is_none().then_some(content))
+}
+
+/// The text the filter path works on, or `Err` with the finished output when the input is not
+/// valid UTF-8 and only needs numbering: `cat -n` rewrites to `-n`, and native `cat -n` prints
+/// such a file byte for byte, so the bytes are numbered as they are. Anything else that needs a
+/// `&str` gets the input decoded lossily rather than no output at all.
+fn decode_or_number(
+    bytes: Vec<u8>,
+    level: FilterLevel,
+    max_lines: Option<usize>,
+    head_lines: Option<usize>,
+    tail_lines: Option<usize>,
+    line_numbers: bool,
+) -> std::result::Result<String, Vec<u8>> {
+    let bytes = match String::from_utf8(bytes) {
+        Ok(content) => return Ok(content),
+        Err(err) => err.into_bytes(),
+    };
+    if level == FilterLevel::None && line_numbers && max_lines.is_none() {
+        let window = byte_line_window(&bytes, head_lines, tail_lines).unwrap_or(&bytes);
+        return Err(number_byte_lines(window));
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// [`format_with_line_numbers`] on bytes, splitting lines the way `str::lines` does.
+fn number_byte_lines(content: &[u8]) -> Vec<u8> {
+    let mut lines: Vec<&[u8]> = content.split(|&b| b == b'\n').collect();
+    if content.is_empty() || content.ends_with(b"\n") {
+        lines.pop();
+    }
+    let width = lines.len().to_string().len();
+    let mut out = Vec::with_capacity(content.len() + lines.len() * (width + 2));
+    for (i, line) in lines.iter().enumerate() {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        out.extend_from_slice(format!("{:>width$}\t", i + 1, width = width).as_bytes());
+        out.extend_from_slice(line);
+        out.push(b'\n');
+    }
+    out
 }
 
 fn byte_line_window(
@@ -815,6 +890,24 @@ fn main() {{
             assert_eq!(
                 raw_byte_window(input, level, max_lines, None, None, line_numbers),
                 None
+            );
+        }
+    }
+
+    #[test]
+    fn test_number_byte_lines_matches_format_with_line_numbers() {
+        for input in [
+            "",
+            "a",
+            "a\n",
+            "a\r\nb",
+            "a\n\nb\n",
+            "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n",
+        ] {
+            assert_eq!(
+                number_byte_lines(input.as_bytes()),
+                format_with_line_numbers(input).into_bytes(),
+                "{input:?}"
             );
         }
     }
