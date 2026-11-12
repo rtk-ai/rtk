@@ -216,16 +216,23 @@ fn tracking_preserves_argv_labels_and_counts_both_streams() {
     fs::create_dir(&db_dir).expect("create isolated DB directory");
     let db = db_dir.join("history.db");
     let stderr = "▲ [WARNING] preserve every budget diagnostic\n";
-    let out = ng_command(
+    let mut cmd = ng_command(
         dir.path(),
         &["build", "my app", "--output-path", "dist folder"],
         TABLE,
         stderr,
         0,
+    );
+    // The built project must exist in the workspace.
+    fs::write(
+        dir.path().join("angular.json"),
+        WORKSPACE.replace("\"app\"", "\"my app\""),
     )
-    .env("RTK_DB_PATH", &db)
-    .output()
-    .expect("run tracked build");
+    .expect("write workspace");
+    let out = cmd
+        .env("RTK_DB_PATH", &db)
+        .output()
+        .expect("run tracked build");
     assert!(out.status.success());
     let conn = rusqlite::Connection::open(db).expect("open tracking DB");
     let (original, rtk, input, output): (String, String, usize, usize) = conn
@@ -360,17 +367,39 @@ fn known_builder_names_and_targets_are_compacted() {
 }
 
 #[test]
-fn mixed_library_and_empty_workspaces_pass_through() {
-    for workspace in [
-        r#"{"projects":{"app":{"architect":{"build":{"builder":"@angular/build:application"}}},"library":{"architect":{"build":{"builder":"@angular/build:ng-packagr"}}}}}"#,
-        r#"{"projects":{}}"#,
+fn library_beside_the_built_application_is_compacted_but_a_library_build_is_not() {
+    let library = r#"{"projects":{"app":{"architect":{"build":{"builder":"@angular/build:application"}}},"library":{"architect":{"build":{"builder":"@angular/build:ng-packagr"}}}}}"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut cmd = ng_command(dir.path(), &["build", "app"], TABLE, "", 0);
+    fs::write(dir.path().join("angular.json"), library).expect("write workspace");
+    let out = cmd.output().expect("run app build");
+    assert!(out.stdout.len() < TABLE.len(), "{} bytes", out.stdout.len());
+    for args in [
+        vec!["build", "-c", "development"],
+        vec!["build", "--configuration", "development", "app"],
+        vec!["build", "-c", "development", "app"],
     ] {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut cmd = ng_command(dir.path(), &["build", "app"], TABLE, "diagnostic\n", 7);
+        let mut cmd = ng_command(dir.path(), &args, TABLE, "", 0);
+        fs::write(dir.path().join("angular.json"), library).expect("write workspace");
+        let out = cmd.output().expect("run configuration build");
+        assert!(out.stdout.len() < TABLE.len(), "{args:?}");
+    }
+
+    for (args, workspace) in [
+        (vec!["build", "library"], library),
+        (
+            vec!["build", "-c", "library"],
+            r#"{"projects":{"app":{"architect":{"build":{"builder":"@angular/build:application"}}},"library":{"architect":{"build":{"builder":"custom:live"}}}}}"#,
+        ),
+        (vec!["build", "app"], r#"{"projects":{}}"#),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cmd = ng_command(dir.path(), &args, TABLE, "diagnostic\n", 7);
         fs::write(dir.path().join("angular.json"), workspace).expect("write workspace");
         let out = cmd.output().expect("run uncertain workspace");
         assert_eq!(out.status.code(), Some(7));
-        assert_eq!(out.stdout, TABLE.as_bytes());
+        assert_eq!(out.stdout, TABLE.as_bytes(), "{args:?}");
         assert_eq!(out.stderr, b"diagnostic\n");
     }
 }
