@@ -2615,7 +2615,14 @@ fn run_cli() -> Result<i32> {
                     )
                 };
                 if let Err(e) = result {
-                    eprintln!("cat: {}: {}", file.display(), e.root_cause());
+                    let tool = if head_lines.is_some() {
+                        "head"
+                    } else if tail_lines.is_some() {
+                        "tail"
+                    } else {
+                        "cat"
+                    };
+                    eprintln!("{}: {}: {}", tool, file.display(), e.root_cause());
                     had_error = true;
                 }
             }

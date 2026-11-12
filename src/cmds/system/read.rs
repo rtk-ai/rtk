@@ -56,6 +56,14 @@ pub fn run(
         return Ok(());
     }
 
+    // GNU `tail -n 0` exits 0 without opening the file. Since `tail -n 0 <file>`
+    // rewrites to `rtk read <file> --tail-lines 0`, avoid `fs::read(file)` when
+    // no filtering or line numbering is requested and the tail window is 0 lines.
+    if level == FilterLevel::None && !line_numbers && tail_lines == Some(0) {
+        timer.track(&cat_label(file), "rtk read", "", "");
+        return Ok(());
+    }
+
     // Read file content
     let bytes =
         fs::read(file).with_context(|| format!("Failed to read file: {}", file.display()))?;
@@ -449,6 +457,23 @@ mod tests {
     fn cat_label_quotes_a_path_as_one_word() {
         assert_eq!(cat_label(Path::new("src/main.rs")), "cat src/main.rs");
         assert_eq!(cat_label(Path::new("my notes.txt")), "cat 'my notes.txt'");
+    }
+
+    #[test]
+    fn tail_zero_lines_does_not_open_missing_file() {
+        let missing = Path::new("/nonexistent/rtk_tail_zero_missing.txt");
+        assert!(
+            run(missing, FilterLevel::None, None, None, Some(0), false, 0).is_ok(),
+            "unfiltered tail -n 0 must succeed without opening a missing file"
+        );
+        assert!(
+            run(missing, FilterLevel::None, None, None, Some(1), false, 0).is_err(),
+            "tail -n 1 on a missing file must still error"
+        );
+        assert!(
+            run(missing, FilterLevel::None, None, Some(0), None, false, 0).is_err(),
+            "head -n 0 on a missing file must still open the file and error"
+        );
     }
 
     /// `read_head_lines` must agree with `head_window` byte-for-byte on every shape, since it
