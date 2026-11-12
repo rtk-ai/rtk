@@ -171,6 +171,10 @@ pub fn migrate_legacy_rules_at(
     if !is_regular_file {
         return None;
     }
+    if let Err(e) = ensure_project_file_inside(&legacy_file, "Antigravity") {
+        eprintln!("  [warn] Failed to clean legacy Antigravity rules file: {e:#}");
+        return None;
+    }
 
     let raw = match fs::read_to_string(&legacy_file) {
         Ok(c) => c,
@@ -232,8 +236,12 @@ pub fn migrate_legacy_rules_at(
             continue;
         }
 
-        if !ctx.dry_run {
-            if let Err(e) = atomic_write(&legacy_file, remaining_bytes) {
+        if ctx.dry_run {
+            if !dry_run_would_write(&legacy_file, WriteKind::Instructions) {
+                return None;
+            }
+        } else {
+            if let Err(e) = write_file(&legacy_file, WriteKind::Instructions, remaining_bytes) {
                 eprintln!(
                     "  [warn] Failed to clean legacy Antigravity rules file {}: {e}",
                     legacy_file.display()
@@ -278,6 +286,7 @@ fn print_legacy_install_action(action: &Option<LegacyRulesAction>, dry_run: bool
 }
 
 pub fn run_antigravity_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let _scope = (!global).then(|| ProjectScope::enter(ctx));
     if global {
         let home = user_dirs::home().context("Could not determine user home directory")?;
         let base_dir = home.join(".gemini/config");
@@ -300,9 +309,7 @@ fn run_antigravity_mode_with_workspace(
     workspace_dir: Option<&Path>,
     ctx: InitContext,
 ) -> Result<()> {
-    let InitContext {
-        verbose, dry_run, ..
-    } = ctx;
+    let InitContext { dry_run, .. } = ctx;
     let plugin_dir = if global {
         base_dir.join("plugins/rtk")
     } else {
@@ -314,57 +321,56 @@ fn run_antigravity_mode_with_workspace(
     // Rules under `rules/` apply whenever the plugin is active, as plain markdown
     // with no frontmatter (Antigravity's plugin docs); `awareness.level` picks
     // the text, as it does for every agent with a command hook.
-    let rules_dir = plugin_dir.join("rules");
-    let rules_path = rules_dir.join(ANTIGRAVITY_RULES_FILE);
+    let rules_path = plugin_dir.join("rules").join(ANTIGRAVITY_RULES_FILE);
     let rules_content = awareness_content(ctx.awareness);
+    // The plugin makes Antigravity run `rtk hook antigravity`, so a project install keeps
+    // every file of it inside the project.
+    for path in [&rules_path, &hooks_json_path, &plugin_json_path] {
+        ensure_project_file_inside(path, "Antigravity")?;
+    }
 
     if dry_run {
         println!(
             "[dry-run] would create plugin directory: {}",
             plugin_dir.display()
         );
-        println!("[dry-run] would write {}", rules_path.display());
-        println!("[dry-run] would write {}", hooks_json_path.display());
-        println!("[dry-run] would write {}", plugin_json_path.display());
-        if verbose > 0 {
-            println!(
-                "[dry-run] plugin.json content:\n{}",
-                ANTIGRAVITY_PLUGIN_JSON
-            );
-            println!("[dry-run] hooks.json content:\n{}", ANTIGRAVITY_HOOKS_JSON);
-            println!(
-                "[dry-run] rules/{ANTIGRAVITY_RULES_FILE} content:\n{}",
-                rules_content
-            );
-        }
-        let legacy_action = workspace_dir.and_then(|ws| migrate_legacy_rules_at(ws, ctx));
+    }
+    // plugin.json is what makes Antigravity discover the directory, so it goes last: a first
+    // install that fails halfway leaves no plugin rather than one missing its rules. A re-run
+    // over an existing plugin has no such guarantee.
+    let rules_name = format!("rules/{ANTIGRAVITY_RULES_FILE}");
+    for (path, content, name, what) in [
+        (
+            &rules_path,
+            rules_content,
+            rules_name.as_str(),
+            "plugin rules",
+        ),
+        (
+            &hooks_json_path,
+            ANTIGRAVITY_HOOKS_JSON,
+            "hooks.json",
+            "hooks.json",
+        ),
+        (
+            &plugin_json_path,
+            ANTIGRAVITY_PLUGIN_JSON,
+            "plugin.json",
+            "plugin.json",
+        ),
+    ] {
+        let report = Report::new(format!("[dry-run] would write {}", path.display()))
+            .with_detail(format!("[dry-run] {name} content:\n{content}"))
+            .done_verbose(format!("Wrote {}", path.display()));
+        write_reported(path, WriteKind::Owned, content, ctx, report)
+            .with_context(|| format!("Failed to write Antigravity {what}"))?;
+    }
+    let legacy_action = workspace_dir.and_then(|ws| migrate_legacy_rules_at(ws, ctx));
+
+    if dry_run {
         print_legacy_install_action(&legacy_action, true);
         print_dry_run_footer();
     } else {
-        fs::create_dir_all(&rules_dir).with_context(|| {
-            format!(
-                "Failed to create Antigravity plugin rules directory: {}",
-                rules_dir.display()
-            )
-        })?;
-        // plugin.json is what makes Antigravity discover the directory, so it goes last:
-        // a first install that fails halfway leaves no plugin rather than one missing its
-        // rules. A re-run over an existing plugin has no such guarantee.
-        atomic_write(&rules_path, rules_content)
-            .context("Failed to write Antigravity plugin rules")?;
-        atomic_write(&hooks_json_path, ANTIGRAVITY_HOOKS_JSON)
-            .context("Failed to write Antigravity hooks.json")?;
-        atomic_write(&plugin_json_path, ANTIGRAVITY_PLUGIN_JSON)
-            .context("Failed to write Antigravity plugin.json")?;
-
-        if verbose > 0 {
-            eprintln!("Wrote {}", rules_path.display());
-            eprintln!("Wrote {}", hooks_json_path.display());
-            eprintln!("Wrote {}", plugin_json_path.display());
-        }
-
-        let legacy_action = workspace_dir.and_then(|ws| migrate_legacy_rules_at(ws, ctx));
-
         println!("\nRTK plugin configured for Google Antigravity.\n");
         println!("  Plugin: {} (installed)", plugin_dir.display());
         println!("  Hooks:  PreToolUse -> rtk hook antigravity");
@@ -385,6 +391,7 @@ fn run_antigravity_mode_with_workspace(
 }
 
 pub fn uninstall_antigravity_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let _scope = (!global).then(|| ProjectScope::enter(ctx));
     let base_dir = if global {
         user_dirs::home()
             .context("Could not determine user home directory")?
@@ -444,6 +451,8 @@ pub fn uninstall_antigravity_mode_at(
     } else {
         base_dir.join(".agents/plugins/rtk")
     };
+    // Removed whole, so a project uninstall must not reach a directory outside the project.
+    ensure_project_file_inside(&plugin_dir, "Antigravity")?;
 
     if plugin_dir.exists() {
         if !dry_run {
@@ -910,5 +919,108 @@ mod tests {
             !legacy_file.exists(),
             "global uninstall must remove workspace legacy rules file"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_project_install_refuses_a_plugin_dir_linked_outside_the_project() {
+        use crate::core::test_isolation;
+        use std::os::unix::fs::symlink;
+
+        let project = test_isolation::tempdir();
+        let elsewhere = TempDir::new().expect("elsewhere");
+        symlink(elsewhere.path(), project.path().join(".agents")).expect("symlink");
+
+        let _entered = test_isolation::enter(project.path());
+        let error = run_antigravity_mode(false, InitContext::default())
+            .expect_err("a plugin outside the project is refused");
+
+        assert!(error.to_string().contains("outside the project"), "{error}");
+        assert!(
+            !elsewhere.path().join("plugins").exists(),
+            "nothing is written through the link"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_project_uninstall_leaves_a_plugin_dir_linked_outside_the_project_alone() {
+        use crate::core::test_isolation;
+        use std::os::unix::fs::symlink;
+
+        let project = test_isolation::tempdir();
+        let elsewhere = TempDir::new().expect("elsewhere");
+        let outside_plugin = elsewhere.path().join("plugins/rtk");
+        fs::create_dir_all(&outside_plugin).expect("outside plugin dir");
+        fs::write(outside_plugin.join("plugin.json"), ANTIGRAVITY_PLUGIN_JSON).expect("write");
+        symlink(elsewhere.path(), project.path().join(".agents")).expect("symlink");
+
+        let _entered = test_isolation::enter(project.path());
+        let error = uninstall_antigravity_mode(false, InitContext::default())
+            .expect_err("a plugin outside the project is refused");
+
+        assert!(error.to_string().contains("outside the project"), "{error}");
+        assert!(
+            outside_plugin.join("plugin.json").exists(),
+            "a directory outside the project is not removed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_migration_dry_run_does_not_announce_a_strip_the_real_run_refuses() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let legacy_file = temp.path().join(LEGACY_RULES_REL_PATH);
+        fs::create_dir_all(legacy_file.parent().unwrap()).unwrap();
+        let content = format!("# Mine\n\n{LEGACY_ANTIGRAVITY_RULES_V036}");
+        fs::write(&legacy_file, &content).unwrap();
+        fs::set_permissions(&legacy_file, fs::Permissions::from_mode(0o444)).unwrap();
+        // Root ignores the file's mode, and then the strip is simply made.
+        let locked_for_us = fs::OpenOptions::new()
+            .write(true)
+            .open(&legacy_file)
+            .is_err();
+
+        let dry_run = migrate_legacy_rules_at(
+            temp.path(),
+            InitContext {
+                dry_run: true,
+                ..InitContext::default()
+            },
+        );
+        let real_run = migrate_legacy_rules_at(temp.path(), InitContext::default());
+
+        assert_eq!(dry_run.is_some(), real_run.is_some());
+        if locked_for_us {
+            assert_eq!(real_run, None);
+            assert_eq!(fs::read_to_string(&legacy_file).unwrap(), content);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_project_migration_leaves_legacy_rules_linked_outside_the_project_alone() {
+        use crate::core::test_isolation;
+        use std::os::unix::fs::symlink;
+
+        let project = test_isolation::tempdir();
+        let elsewhere = TempDir::new().expect("elsewhere");
+        fs::create_dir(project.path().join(".agents")).expect("mkdir");
+        symlink(elsewhere.path(), project.path().join(".agents/rules")).expect("symlink");
+        let outside_file = elsewhere.path().join("antigravity-rtk-rules.md");
+        let _entered = test_isolation::enter(project.path());
+
+        for content in [
+            LEGACY_ANTIGRAVITY_RULES_V036.to_string(),
+            format!("# Mine\n\n{LEGACY_ANTIGRAVITY_RULES_V036}"),
+        ] {
+            fs::write(&outside_file, &content).expect("write");
+
+            uninstall_antigravity_mode(false, InitContext::default()).expect("uninstall");
+
+            assert_eq!(fs::read_to_string(&outside_file).expect("read"), content);
+        }
     }
 }

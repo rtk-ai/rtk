@@ -23,13 +23,6 @@ fn run_claude_md_mode_with(global: bool, block: &str, ctx: InitContext) -> Resul
         user_dirs::in_working_dir(CLAUDE_MD)
     };
 
-    if global
-        && !dry_run
-        && let Some(parent) = path.parent()
-    {
-        fs::create_dir_all(parent)?;
-    }
-
     if verbose > 0 {
         eprintln!("Writing rtk instructions to: {}", path.display());
     }
@@ -59,9 +52,7 @@ fn run_claude_md_mode_with(global: bool, block: &str, ctx: InitContext) -> Resul
 
 /// Patch CLAUDE.md: add @RTK.md, migrate if old block exists
 fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
-    let InitContext {
-        verbose, dry_run, ..
-    } = ctx;
+    let InitContext { verbose, .. } = ctx;
     let mut content = if path.exists() {
         fs::read_to_string(path)?
     } else {
@@ -88,14 +79,11 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
             eprintln!("@RTK.md reference already present in CLAUDE.md");
         }
         if migrated {
-            if dry_run {
-                println!(
-                    "[dry-run] would migrate old RTK block in CLAUDE.md: {}",
-                    path.display()
-                );
-            } else {
-                fs::write(path, content)?;
-            }
+            let report = Report::new(format!(
+                "[dry-run] would migrate old RTK block in CLAUDE.md: {}",
+                path.display()
+            ));
+            write_reported(path, WriteKind::Instructions, &content, ctx, report)?;
         }
         return Ok(migrated);
     }
@@ -107,21 +95,13 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
         format!("{}\n\n@RTK.md\n", content.trim())
     };
 
-    if dry_run {
-        println!(
-            "[dry-run] would add @RTK.md reference to CLAUDE.md: {}",
-            path.display()
-        );
-        if verbose > 0 {
-            println!("[dry-run] content:\n{}", new_content);
-        }
-    } else {
-        fs::write(path, new_content)?;
-
-        if verbose > 0 {
-            eprintln!("Added @RTK.md reference to CLAUDE.md");
-        }
-    }
+    let report = Report::new(format!(
+        "[dry-run] would add @RTK.md reference to CLAUDE.md: {}",
+        path.display()
+    ))
+    .with_content()
+    .done_verbose("Added @RTK.md reference to CLAUDE.md");
+    write_reported(path, WriteKind::Instructions, &new_content, ctx, report)?;
 
     Ok(migrated)
 }
@@ -212,12 +192,12 @@ pub(super) fn remove_settings_entries(ctx: InitContext) -> Result<SettingsRemova
             &root,
             ctx,
             "settings.json",
-            &format!(
+            Report::new(format!(
                 "[dry-run] would remove RTK hook entry from {}",
                 settings_path.display()
-            ),
-            true,
-            Written::Line("Removed RTK hook from settings.json".to_string()),
+            ))
+            .with_content()
+            .done_verbose("Removed RTK hook from settings.json".to_string()),
         )?;
     }
 
@@ -334,6 +314,22 @@ fn patch_settings_json_command(
         return Ok(PatchResult::AlreadyPresent);
     }
 
+    // A project settings file registers a hook, which runs commands, so it has to stay inside
+    // the project like every other agent's project hook config.
+    if scope == HookInstallScope::ProjectExtra {
+        ensure_project_json_inside(&settings_path, "Claude")?;
+    }
+
+    // A file the patch would refuse is neither asked about nor patched, whatever the mode:
+    // say why, and leave it to the user as a declined prompt does.
+    if mode != PatchMode::Skip
+        && let Err(error) = ensure_patchable(&settings_path)
+    {
+        eprintln!("[warn] {error:#}");
+        print_manual_instructions(hook_command, include_opencode);
+        return Ok(PatchResult::Skipped);
+    }
+
     // Handle mode (one consent prompt covers every event being registered)
     match mode {
         PatchMode::Skip => {
@@ -375,45 +371,36 @@ fn patch_settings_json_command(
     let serialized =
         serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
 
-    if dry_run {
-        for (event_key, matcher) in &missing {
-            println!(
+    let would = missing
+        .iter()
+        .map(|(event_key, matcher)| {
+            format!(
                 "[dry-run] would patch settings.json ({event_key}, matcher \"{matcher}\"): {}",
                 settings_path.display()
-            );
-        }
-        for (event_key, matcher) in &refreshed {
-            println!(
+            )
+        })
+        .chain(refreshed.iter().map(|(event_key, matcher)| {
+            format!(
                 "[dry-run] would update {event_key} matcher to \"{matcher}\": {}",
                 settings_path.display()
-            );
-        }
-        if verbose > 0 {
-            println!("[dry-run] content:\n{}", serialized);
-        }
+            )
+        }))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let backup = write_reported(
+        &settings_path,
+        WriteKind::Config,
+        &serialized,
+        ctx,
+        Report::new(would).with_content(),
+    )?;
+    if dry_run {
         return Ok(PatchResult::WouldPatch);
     }
 
-    super::ensure_parent_dir(&settings_path)?;
-    // Backup original
-    if settings_path.exists() {
-        let backup_path = settings_path.with_extension("json.bak");
-        fs::copy(&settings_path, &backup_path)
-            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
-        if verbose > 0 {
-            eprintln!("Backup: {}", backup_path.display());
-        }
-    }
-
-    // Atomic write
-    atomic_write(&settings_path, &serialized)?;
-
     println!("\n  {}: hook added", settings_path.display());
-    if settings_path.with_extension("json.bak").exists() {
-        println!(
-            "  Backup: {}",
-            settings_path.with_extension("json.bak").display()
-        );
+    if let Some(backup) = &backup {
+        println!("  Backup: {}", backup.display());
     }
     if include_opencode {
         println!("  Restart Claude Code and OpenCode. Test with: git status");
@@ -834,9 +821,6 @@ fn migrate_old_hook_script(ctx: InitContext) {
 /// Remove only legacy `rtk-rewrite.sh` entries from settings.json.
 /// Preserves any existing `rtk hook claude` entries (new format).
 fn remove_legacy_settings_entries(ctx: InitContext) -> Result<()> {
-    let InitContext {
-        verbose, dry_run, ..
-    } = ctx;
     let claude_dir = resolve_claude_dir()?;
     let settings_path = claude_dir.join(SETTINGS_JSON);
 
@@ -858,26 +842,14 @@ fn remove_legacy_settings_entries(ctx: InitContext) -> Result<()> {
         return Ok(());
     }
 
-    if dry_run {
-        println!(
-            "[dry-run] would remove legacy rtk-rewrite.sh entry from {}",
-            settings_path.display()
-        );
-        return Ok(());
-    }
-
-    // Backup before modifying
-    let backup_path = settings_path.with_extension("json.bak");
-    fs::copy(&settings_path, &backup_path)
-        .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
-
     let serialized =
         serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
-    atomic_write(&settings_path, &serialized)?;
-
-    if verbose > 0 {
-        eprintln!("  [ok] Removed legacy rtk-rewrite.sh entry from settings.json");
-    }
+    let report = Report::new(format!(
+        "[dry-run] would remove legacy rtk-rewrite.sh entry from {}",
+        settings_path.display()
+    ))
+    .done_verbose("  [ok] Removed legacy rtk-rewrite.sh entry from settings.json");
+    write_reported(&settings_path, WriteKind::Config, &serialized, ctx, report)?;
     Ok(())
 }
 
@@ -1557,15 +1529,15 @@ mod tests {
             let path = dir.join(SETTINGS_JSON);
             fs::write(&path, "{}").unwrap();
             fs::create_dir(path.with_extension("json.bak")).unwrap();
-            let error = patch_settings_json_command(
+            let result = patch_settings_json_command(
                 CLAUDE_HOOK_COMMAND,
                 PatchMode::Auto,
                 false,
                 InitContext::default(),
                 HookInstallScope::UserGlobal,
-            )
-            .unwrap_err();
-            assert!(format!("{error:#}").contains(&path.display().to_string()));
+            );
+            // Left to the manual instructions, and untouched.
+            assert!(matches!(result, Ok(PatchResult::Skipped)), "{result:?}");
             assert_eq!(fs::read_to_string(&path).unwrap(), "{}");
         });
     }
@@ -1589,6 +1561,81 @@ mod tests {
                 claude_dir.join(SETTINGS_JSON).exists(),
                 "settings.json must be created"
             );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_patch_settings_json_skips_a_read_only_file_without_asking() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let settings = claude_dir.join(SETTINGS_JSON);
+            fs::write(&settings, "{}").unwrap();
+            fs::set_permissions(&settings, fs::Permissions::from_mode(0o444)).unwrap();
+            if !read_only_is_enforced(&settings) {
+                return;
+            }
+
+            let result = patch_settings_json_command(
+                CLAUDE_HOOK_COMMAND,
+                PatchMode::Ask,
+                false,
+                InitContext::default(),
+                HookInstallScope::UserGlobal,
+            );
+            fs::set_permissions(&settings, fs::Permissions::from_mode(0o644)).unwrap();
+
+            // Not asked about: skipped with the manual instructions, as a declined prompt is.
+            assert!(matches!(result, Ok(PatchResult::Skipped)), "{result:?}");
+            assert_eq!(fs::read_to_string(&settings).unwrap(), "{}");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_patch_settings_json_auto_patch_skips_a_read_only_file_instead_of_failing() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let settings = claude_dir.join(SETTINGS_JSON);
+            fs::write(&settings, "{}").unwrap();
+            fs::set_permissions(&settings, fs::Permissions::from_mode(0o444)).unwrap();
+            if !read_only_is_enforced(&settings) {
+                return;
+            }
+
+            let result = patch_settings_json_command(
+                CLAUDE_HOOK_COMMAND,
+                PatchMode::Auto,
+                false,
+                InitContext::default(),
+                HookInstallScope::UserGlobal,
+            );
+            fs::set_permissions(&settings, fs::Permissions::from_mode(0o644)).unwrap();
+
+            assert!(matches!(result, Ok(PatchResult::Skipped)), "{result:?}");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_patch_settings_json_skips_a_link_into_a_missing_directory_without_asking() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            let settings = claude_dir.join(SETTINGS_JSON);
+            std::os::unix::fs::symlink("../unmounted/settings.json", &settings).unwrap();
+
+            let result = patch_settings_json_command(
+                CLAUDE_HOOK_COMMAND,
+                PatchMode::Ask,
+                false,
+                InitContext::default(),
+                HookInstallScope::UserGlobal,
+            );
+
+            assert!(matches!(result, Ok(PatchResult::Skipped)), "{result:?}");
+            assert!(fs::symlink_metadata(&settings).unwrap().is_symlink());
         });
     }
 
@@ -1704,6 +1751,94 @@ mod tests {
                     assert!(
                         hook_already_present(&root, POST_TOOL_USE_KEY, CLAUDE_HOOK_COMMAND),
                         "an entry the pipeline no longer requires is reported, never deleted"
+                    );
+                },
+            );
+        });
+    }
+
+    /// The project's `.claude` linked elsewhere, as a repository can ship it, with or without
+    /// a project pipeline that needs an extra hook event.
+    #[cfg(unix)]
+    fn project_with_claude_dir_linked_outside(tmp: &Path, posthook: bool) -> (PathBuf, PathBuf) {
+        let project = tmp.join("proj");
+        let elsewhere = tmp.join("elsewhere");
+        fs::create_dir_all(project.join(".rtk")).unwrap();
+        fs::create_dir_all(&elsewhere).unwrap();
+        if posthook {
+            fs::write(
+                project.join(".rtk").join("pipeline.toml"),
+                "schema_version = 1\n[pipeline]\nextends = \"rtk:posthook\"\n",
+            )
+            .unwrap();
+        }
+        fs::write(elsewhere.join(SETTINGS_JSON), "{}").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, project.join(".claude")).unwrap();
+        (project, elsewhere)
+    }
+
+    #[cfg(all(unix, feature = "engine"))]
+    #[test]
+    fn project_hook_settings_linked_outside_the_project_are_refused() {
+        let tmp = test_isolation::tempdir();
+        let (project, elsewhere) = project_with_claude_dir_linked_outside(tmp.path(), true);
+
+        let _entered = test_isolation::enter(&project);
+        let ctx = InitContext {
+            patch_mode: PatchMode::Auto,
+            ..InitContext::default()
+        };
+        let _scope = ProjectScope::enter(ctx);
+        with_claude_dir_override(&tmp, |_| {
+            crate::core::user_env::with_vars(
+                &[("CI", Some("1")), ("RTK_TRUST_PROJECT_FILTERS", Some("1"))],
+                || {
+                    let error = patch_settings_json_command(
+                        CLAUDE_HOOK_COMMAND,
+                        PatchMode::Auto,
+                        false,
+                        ctx,
+                        HookInstallScope::ProjectExtra,
+                    )
+                    .expect_err("a project hook outside the project is refused");
+                    assert!(error.to_string().contains("outside the project"), "{error}");
+                    assert_eq!(
+                        fs::read_to_string(elsewhere.join(SETTINGS_JSON)).unwrap(),
+                        "{}",
+                        "nothing is written through the link"
+                    );
+                },
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_hook_settings_linked_outside_are_fine_when_nothing_is_registered() {
+        let tmp = test_isolation::tempdir();
+        let (project, elsewhere) = project_with_claude_dir_linked_outside(tmp.path(), false);
+
+        let _entered = test_isolation::enter(&project);
+        let ctx = InitContext {
+            patch_mode: PatchMode::Auto,
+            ..InitContext::default()
+        };
+        let _scope = ProjectScope::enter(ctx);
+        with_claude_dir_override(&tmp, |_| {
+            crate::core::user_env::with_vars(
+                &[("CI", Some("1")), ("RTK_TRUST_PROJECT_FILTERS", Some("1"))],
+                || {
+                    patch_settings_json_command(
+                        CLAUDE_HOOK_COMMAND,
+                        PatchMode::Auto,
+                        false,
+                        ctx,
+                        HookInstallScope::ProjectExtra,
+                    )
+                    .expect("a link is no reason to fail a run that writes nothing");
+                    assert_eq!(
+                        fs::read_to_string(elsewhere.join(SETTINGS_JSON)).unwrap(),
+                        "{}"
                     );
                 },
             );
