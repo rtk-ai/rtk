@@ -1,0 +1,34 @@
+[1m[92m   Compiling[0m failc v0.1.0 (/tmp/failc)
+[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`test` profile [unoptimized + debuginfo]]8;;\ target(s) in 0.05s
+────────────
+[32;1m Nextest run[0m ID [1m5468985e-1fdf-40aa-a01e-4759652d1b15[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m3[0m tests across [1m1[0m binary
+[32;1m        PASS[0m [   0.003s] (1/3) [35;1mfailc[0m [36mtests[0m[36m::[0m[34;1ma[0m
+[31;1m        FAIL[0m [   0.003s] (2/3) [35;1mfailc[0m [36mtests[0m[36m::[0m[34;1mfails[0m
+[31;1m [0m [31;1mstdout[0m [31;1m───[0m
+
+    running 1 test
+    out-line
+    test tests::fails ... FAILED
+
+    failures:
+
+    failures:
+        tests::fails
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+    [0m
+[31;1m [0m [31;1mstderr[0m [31;1m───[0m
+
+    [0m[31;1mthread 'tests::fails' (338357) panicked at src/lib.rs:4:48:[0m
+    [31;1massertion `left == right` failed: boom[0m
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace[0m
+
+[31;1m  Cancelling[0m due to [31;1mtest failure[0m: [1m1[0m test still running
+[32;1m        PASS[0m [   0.103s] (3/3) [35;1mfailc[0m [36mtests[0m[36m::[0m[34;1mslow[0m
+────────────
+[31;1m     Summary[0m [   0.103s] [1m3[0m tests run: [1m2[0m [32;1mpassed[0m, [1m1[0m [31;1mfailed[0m, [1m0[0m [33;1mskipped[0m
+[31;1m        FAIL[0m [   0.003s] (2/3) [35;1mfailc[0m [36mtests[0m[36m::[0m[34;1mfails[0m
+[31;1merror[0m: test run failed
