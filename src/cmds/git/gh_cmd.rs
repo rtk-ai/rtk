@@ -1086,7 +1086,7 @@ fn pr_diff(args: &[String], _verbose: u8) -> Result<i32> {
             if raw.trim().is_empty() {
                 "No diff".to_string()
             } else {
-                git_cmd::compact_diff(raw, 500)
+                git_cmd::compact_diff(raw, 500, "[full diff: rtk gh pr diff --no-compact]")
             }
         },
         RunOptions::stdout_only().early_exit_on_failure(),
