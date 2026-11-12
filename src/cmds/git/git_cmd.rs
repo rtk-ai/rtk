@@ -406,10 +406,15 @@ fn run_diff(
 
     let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git diff")?;
 
-    if !diff_result.success() {
-        if !diff_result.stderr.trim().is_empty() {
-            eprint!("{}", diff_result.stderr);
-        }
+    // `--no-index` implies `--exit-code`: git exits 1 with the diff on stdout when the inputs
+    // differ. Exit 1 with empty stdout stays an error (`--no-index` on a missing file).
+    let inputs_differ = diff_result.exit_code == 1 && !diff_result.stdout.is_empty();
+
+    if !diff_result.success() && !diff_result.stderr.trim().is_empty() {
+        eprint!("{}", diff_result.stderr);
+    }
+
+    if !diff_result.success() && !inputs_differ {
         timer.track(
             &tracked,
             &format!("rtk {tracked}"),
@@ -448,7 +453,7 @@ fn run_diff(
 
     timer.track(&tracked, &format!("rtk {tracked}"), &raw, shown);
 
-    Ok(0)
+    Ok(diff_result.exit_code)
 }
 
 /// `git show` with RTK's own shape flags in front. `drop_patch_shape` removes the user's

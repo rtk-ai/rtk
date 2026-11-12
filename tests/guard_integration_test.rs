@@ -664,3 +664,89 @@ fn git_show_blob_spec_after_double_dash_is_a_pathspec_not_an_object() {
         "pathspec past -- must not be windowed as a blob: {stdout:?}"
     );
 }
+
+/// Writes `x.txt` (`a\nb\n`) and `y.txt` (`a\nc\n`) into a fresh directory outside any repo.
+fn no_index_pair() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("x.txt"), "a\nb\n").expect("write x");
+    std::fs::write(dir.path().join("y.txt"), "a\nc\n").expect("write y");
+    dir
+}
+
+#[test]
+fn git_diff_no_index_keeps_the_diff_when_files_differ() {
+    // `--no-index` implies `--exit-code`: git exits 1 with the diff on stdout, and the compact
+    // path read that 1 as a failure and printed only stderr, so the diff came back empty.
+    let dir = no_index_pair();
+
+    let (stdout, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["git", "diff", "--no-index", "x.txt", "y.txt"]);
+
+    assert_eq!(
+        code,
+        Some(1),
+        "git's own code for differing inputs; stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("-b") && stdout.contains("+c"),
+        "the diff must survive git's exit 1: {stdout:?}"
+    );
+}
+
+#[test]
+fn git_diff_no_index_identical_files_exits_0() {
+    let dir = no_index_pair();
+
+    let (_, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["git", "diff", "--no-index", "x.txt", "x.txt"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+}
+
+#[test]
+fn git_diff_no_index_missing_file_reports_git_error() {
+    // Exit 1 with nothing on stdout is an error, not a difference.
+    let dir = no_index_pair();
+
+    let (stdout, stderr, code) = rtk_output_in_dir(
+        dir.path(),
+        &["git", "diff", "--no-index", "missing.txt", "x.txt"],
+    );
+
+    assert_eq!(code, Some(1));
+    assert!(
+        stdout.trim().is_empty(),
+        "nothing to show on stdout: {stdout:?}"
+    );
+    assert!(
+        stderr.contains("Could not access"),
+        "expected git's own error, got: {stderr:?}"
+    );
+}
+
+#[test]
+fn git_diff_no_index_forwards_git_warnings_with_the_diff() {
+    let dir = no_index_pair();
+
+    let (stdout, stderr, code) = rtk_output_in_dir(
+        dir.path(),
+        &[
+            "git",
+            "-c",
+            "core.autocrlf=true",
+            "-c",
+            "core.safecrlf=warn",
+            "diff",
+            "--no-index",
+            "x.txt",
+            "y.txt",
+        ],
+    );
+
+    assert_eq!(code, Some(1));
+    assert!(stdout.contains("+c"), "diff expected: {stdout:?}");
+    assert!(
+        stderr.contains("LF will be replaced by CRLF"),
+        "git's warning must reach stderr: {stderr:?}"
+    );
+}
