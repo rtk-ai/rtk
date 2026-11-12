@@ -1735,15 +1735,17 @@ impl Tracker {
         Ok(saved)
     }
 
-    /// Top N passthrough commands (0% savings) — commands missing a filter.
+    /// Top N passthrough commands — commands recorded under a passthrough /
+    /// fallback / bypass / proxy label (where `timing_sql("rtk_cmd") = 0`).
     /// Groups by the program's file name only, to avoid leaking arguments or a
     /// path into telemetry.
     pub fn top_passthrough(&self, limit: usize) -> Result<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {} AS program, COUNT(*) AS cnt FROM commands
-             WHERE input_tokens = 0 AND output_tokens = 0
+             WHERE {} = 0
              GROUP BY program",
-            first_word_key_sql("original_cmd")
+            first_word_key_sql("original_cmd"),
+            timing_sql("rtk_cmd")
         ))?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
@@ -2500,7 +2502,7 @@ mod command_label_tests {
         let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
         let cmd = "don't-run.sh --token s3cr3t deploy";
         tracker
-            .record(cmd, &format!("rtk:toml {cmd}"), 0, 0, 1)
+            .record(cmd, &format!("rtk:passthrough {cmd}"), 0, 0, 1)
             .expect("Failed to record");
         let top = tracker.top_passthrough(5).expect("Failed to query");
         assert_eq!(top, vec![("don't-run.sh".to_string(), 1)]);
@@ -2538,7 +2540,7 @@ mod command_label_tests {
         let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
         let cmd = "it's.sh --token o'brien";
         tracker
-            .record(cmd, &format!("rtk:toml {cmd}"), 0, 0, 1)
+            .record(cmd, &format!("rtk:passthrough {cmd}"), 0, 0, 1)
             .expect("Failed to record");
         let top = tracker.top_passthrough(5).expect("Failed to query");
         assert_eq!(top, vec![("it's.sh".to_string(), 1)]);
@@ -2664,9 +2666,9 @@ mod command_label_tests {
     fn rows_without_a_tool_name_are_left_out() {
         let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
         for (original, rtk_cmd) in [
-            ("./scripts/", "rtk:toml ./scripts/"),
-            ("", "rtk"),
-            ("git tag", "rtk git tag"),
+            ("./scripts/", "rtk:passthrough ./scripts/"),
+            ("", "rtk:passthrough"),
+            ("git tag", "rtk:passthrough git tag"),
         ] {
             tracker
                 .record(original, rtk_cmd, 0, 0, 1)
@@ -2676,6 +2678,48 @@ mod command_label_tests {
         assert_eq!(top, vec!["git"]);
         let top = tracker.top_passthrough(5).expect("Failed to query");
         assert_eq!(top, vec![("git".to_string(), 1)]);
+    }
+
+    #[test]
+    fn top_passthrough_selects_passthrough_labels_not_empty_filtered_runs() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        // Filtered commands whose output happened to be empty (0, 0) must not
+        // appear in top_passthrough.
+        for (original, rtk_cmd) in [
+            ("grep needle src", "rtk grep"),
+            ("cat empty.txt", "rtk read"),
+            ("my-tool --check", "rtk:toml my-tool --check"),
+        ] {
+            tracker
+                .record(original, rtk_cmd, 0, 0, 1)
+                .expect("Failed to record");
+        }
+        // Every passthrough / fallback / bypass / proxy label (including rows
+        // with non-zero token counts such as rtk proxy / rtk bypass) must be
+        // counted.
+        for (original, rtk_cmd, input_tokens, output_tokens) in [
+            ("git tag", "rtk:passthrough git tag", 0, 0),
+            ("cargo +nightly fmt", "rtk fallback: cargo +nightly fmt", 0, 0),
+            ("echo hi", "rtk bypass echo hi", 1, 1),
+            ("git log -20", "rtk proxy git log -20", 4, 4),
+            ("git zz", "rtk git zz (passthrough)", 0, 0),
+            ("kubectl get pods", "rtk (passthrough)", 0, 0),
+        ] {
+            tracker
+                .record(original, rtk_cmd, input_tokens, output_tokens, 1)
+                .expect("Failed to record");
+        }
+
+        let top = tracker.top_passthrough(10).expect("Failed to query");
+        assert_eq!(
+            top,
+            vec![
+                ("git".to_string(), 3),
+                ("cargo".to_string(), 1),
+                ("echo".to_string(), 1),
+                ("kubectl".to_string(), 1),
+            ]
+        );
     }
 
     #[test]
