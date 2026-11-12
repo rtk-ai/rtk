@@ -474,6 +474,14 @@ fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
 }
 
 fn asks_for_usage(stem: &str, args: &[String]) -> bool {
+    // Cargo's prefix does not change the command's existing help/version semantics.
+    let args = if stem == "cargo"
+        && let Some((_, index)) = crate::cmds::rust::cargo_cmd::CargoCommand::parse(args)
+    {
+        &args[index..]
+    } else {
+        args
+    };
     let first = args.first().map(String::as_str);
     let spelling = help_spelling(stem, first);
     let takes_value = |kind: TokenKind, name: &str| {

@@ -917,7 +917,7 @@ pub fn strip_quotes(s: &str) -> String {
 /// Turns a coalesced word's raw text (quotes/escapes still literal, as
 /// `tokenize()` preserves them) into argv-ready text: quote chars that
 /// open/close a span are stripped, backslash escapes resolved.
-fn resolve_word_text(raw: &str) -> String {
+pub(super) fn resolve_word_text(raw: &str) -> String {
     let mut result = String::new();
     let mut chars = raw.chars().peekable();
     let mut quote: Option<char> = None;
