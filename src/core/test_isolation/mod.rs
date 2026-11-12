@@ -457,7 +457,7 @@ const DIRECT_READS: [(&str, &str); 10] = [
     ("src/core/classify.rs", "var(env)"),
     ("src/core/pipeline_cmd.rs", "var(&env)"),
     ("src/core/task_cmd.rs", "var(var)"),
-    ("src/llm_proxy.rs", "var(agent.base_url_var)"),
+    ("src/llm_proxy.rs", "var(var)"),
 ];
 
 /// The environment variable an accessor call names: a literal names itself, a

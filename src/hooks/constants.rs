@@ -157,6 +157,7 @@ pub const VIBE_HOOKS_FILE: &str = "hooks.toml";
 pub const VIBE_PROMPTS_SUBDIR: &str = "prompts";
 pub const VIBE_PROMPT_FILE: &str = "rtk.md";
 pub const VIBE_HOOK_NAME: &str = "rtk-rewrite";
+pub const VIBE_POSTHOOK_NAME: &str = "rtk-posthook";
 pub const VIBE_BASH_MATCH: &str = "bash";
 
 #[cfg(all(test, feature = "engine"))]

@@ -3,13 +3,175 @@
 use super::*;
 use crate::hooks::constants::{
     VIBE_BASH_MATCH, VIBE_DIR, VIBE_HOOK_COMMAND, VIBE_HOOK_NAME, VIBE_HOOKS_FILE,
-    VIBE_PROMPT_FILE, VIBE_PROMPTS_SUBDIR,
+    VIBE_POSTHOOK_NAME, VIBE_PROMPT_FILE, VIBE_PROMPTS_SUBDIR,
 };
 
 // Vibe integration
 
 fn resolve_vibe_dir() -> Result<PathBuf> {
     resolve_home_subdir(VIBE_DIR)
+}
+
+pub(crate) const VIBE_PROXY_PATH: &str = "/mistral/v1";
+const VIBE_CONFIG_FILE: &str = "config.toml";
+const MISTRAL_PROVIDER: &str = "mistral";
+const MISTRAL_API_BASE_DEFAULT: &str = "https://api.mistral.ai/v1";
+const MISTRAL_API_KEY_ENV: &str = "MISTRAL_API_KEY";
+const RTK_PROVIDER_KEYS: &[&str] = &["name", "api_base", "api_key_env_var", "backend"];
+
+pub(crate) fn mistral_api_base() -> Option<String> {
+    let path = resolve_vibe_dir().ok()?.join(VIBE_CONFIG_FILE);
+    let text = fs::read_to_string(path).ok()?;
+    mistral_api_base_in(&text)
+}
+
+fn is_mistral(table: &toml_edit::Table) -> bool {
+    table.get("name").and_then(toml_edit::Item::as_str) == Some(MISTRAL_PROVIDER)
+}
+
+fn mistral_api_base_in(text: &str) -> Option<String> {
+    let doc: toml_edit::DocumentMut = text.parse().ok()?;
+    doc.get("providers")?
+        .as_array_of_tables()?
+        .iter()
+        .find(|table| is_mistral(table))?
+        .get("api_base")?
+        .as_str()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(any(feature = "engine", test))]
+fn set_mistral_api_base(text: &str, url: &str) -> Result<String> {
+    let mut doc: toml_edit::DocumentMut = text.parse().context("parse Vibe config.toml")?;
+    if doc
+        .get("providers")
+        .is_some_and(|item| item.as_array_of_tables().is_none())
+    {
+        anyhow::bail!(
+            "`providers` in config.toml is not a [[providers]] table array; set the mistral api_base by hand"
+        );
+    }
+    if doc.get("providers").is_none() {
+        doc["providers"] = toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
+    }
+    let providers = doc
+        .get_mut("providers")
+        .and_then(toml_edit::Item::as_array_of_tables_mut)
+        .context("providers table")?;
+    let existing = providers.iter().position(is_mistral);
+    match existing {
+        Some(idx) => {
+            if let Some(table) = providers.get_mut(idx) {
+                table["api_base"] = toml_edit::value(url);
+            }
+        }
+        None => {
+            let mut table = toml_edit::Table::new();
+            table["name"] = toml_edit::value(MISTRAL_PROVIDER);
+            table["api_base"] = toml_edit::value(url);
+            table["api_key_env_var"] = toml_edit::value(MISTRAL_API_KEY_ENV);
+            table["backend"] = toml_edit::value(MISTRAL_PROVIDER);
+            providers.push(table);
+        }
+    }
+    Ok(doc.to_string())
+}
+
+fn remove_rtk_mistral_provider(text: &str, rtk_url: &str) -> Option<String> {
+    let mut doc: toml_edit::DocumentMut = text.parse().ok()?;
+    let providers = doc
+        .get_mut("providers")
+        .and_then(toml_edit::Item::as_array_of_tables_mut)?;
+    let idx = providers.iter().position(is_mistral)?;
+    let ours_only = {
+        let table = providers.get(idx)?;
+        let api_base = table.get("api_base").and_then(toml_edit::Item::as_str)?;
+        if api_base.trim().trim_end_matches('/') != rtk_url.trim_end_matches('/') {
+            return None;
+        }
+        let value = |key: &str| table.get(key).and_then(toml_edit::Item::as_str);
+        table
+            .iter()
+            .all(|(key, _)| RTK_PROVIDER_KEYS.contains(&key))
+            && value("api_key_env_var") == Some(MISTRAL_API_KEY_ENV)
+            && value("backend") == Some(MISTRAL_PROVIDER)
+    };
+    if ours_only {
+        providers.remove(idx);
+        let empty = providers.is_empty();
+        if empty {
+            doc.remove("providers");
+        }
+    } else if let Some(table) = providers.get_mut(idx) {
+        table["api_base"] = toml_edit::value(MISTRAL_API_BASE_DEFAULT);
+    }
+    Some(doc.to_string())
+}
+
+#[cfg(feature = "engine")]
+const VIBE_SPEC: super::proxy_onramp::OnrampSpec = super::proxy_onramp::OnrampSpec {
+    label: "Mistral Vibe",
+    config: "config.toml",
+    key: "providers[mistral].api_base",
+    path: VIBE_PROXY_PATH,
+    manual_option: "Neither — print the provider entry; config.toml is not touched",
+    autostart_option: None,
+    autostart_done: "",
+    autostart_persistence: "",
+    enable_later: "`rtk init -g --agent vibe`",
+    rerun: "rtk init -g --agent vibe",
+    default_target: Some(MISTRAL_API_BASE_DEFAULT),
+};
+
+#[cfg(feature = "engine")]
+struct VibeOnramp {
+    config_path: PathBuf,
+}
+
+#[cfg(feature = "engine")]
+impl VibeOnramp {
+    fn text(&self) -> Result<String> {
+        if !self.config_path.exists() {
+            return Ok(String::new());
+        }
+        fs::read_to_string(&self.config_path)
+            .with_context(|| format!("Failed to read {}", self.config_path.display()))
+    }
+}
+
+#[cfg(feature = "engine")]
+impl super::proxy_onramp::ProxyOnramp for VibeOnramp {
+    fn spec(&self) -> &'static super::proxy_onramp::OnrampSpec {
+        &VIBE_SPEC
+    }
+
+    fn current_target(&self) -> Result<Option<String>> {
+        Ok(mistral_api_base_in(&self.text()?))
+    }
+
+    fn autostart_present(&self) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn manual_line(&self, base_url: &str) -> String {
+        format!(
+            "[[providers]]\n    name = \"{MISTRAL_PROVIDER}\"\n    api_base = \"{base_url}\"\n    api_key_env_var = \"{MISTRAL_API_KEY_ENV}\"\n    backend = \"{MISTRAL_PROVIDER}\""
+        )
+    }
+
+    fn write(&self, base_url: &str, _autostart: bool) -> Result<Vec<String>> {
+        let updated = set_mistral_api_base(&self.text()?, base_url)?;
+        let backup = backup_and_atomic_write(&self.config_path, &updated)?;
+        let mut lines = vec![format!(
+            "  config.toml: providers[mistral].api_base = {base_url}"
+        )];
+        if let Some(path) = backup {
+            lines.push(format!("  Backup: {}", path.display()));
+        }
+        Ok(lines)
+    }
 }
 
 /// Entry point for `rtk init -g --agent vibe`.
@@ -45,7 +207,8 @@ fn run_vibe_mode_at(
     }
 
     let hooks_path = vibe_dir.join(VIBE_HOOKS_FILE);
-    let hook_outcome = patch_vibe_hooks_toml(&hooks_path, patch_mode, ctx)?;
+    let (entries, skipped) = vibe_entries();
+    let hook_outcome = patch_vibe_hooks_toml(&hooks_path, &entries, patch_mode, ctx)?;
 
     if !hook_only {
         let prompts_dir = vibe_dir.join(VIBE_PROMPTS_SUBDIR);
@@ -64,6 +227,9 @@ fn run_vibe_mode_at(
     }
 
     if dry_run {
+        for line in &skipped {
+            println!("[dry-run] {line}");
+        }
         print_dry_run_footer();
     } else if let Some(summary_verb) = hook_outcome.summary_verb() {
         println!("\nMistral Vibe CLI hook {summary_verb} (global).\n");
@@ -78,8 +244,45 @@ fn run_vibe_mode_at(
             );
         }
         println!("  Restart Vibe. Test with: git status\n");
+        for line in &skipped {
+            println!("  {line}");
+        }
+    }
+    #[cfg(feature = "engine")]
+    if should_offer_onramp(dry_run, hook_outcome) {
+        let onramp = VibeOnramp {
+            config_path: vibe_dir.join(VIBE_CONFIG_FILE),
+        };
+        if let Err(e) = super::proxy_onramp::offer_proxy_onramp(&onramp, patch_mode, ctx) {
+            eprintln!("  [warn] proxy on-ramp skipped: {e}");
+        }
     }
     Ok(())
+}
+
+#[cfg(feature = "engine")]
+fn vibe_entries() -> (Vec<super::plan::Entry>, Vec<String>) {
+    match super::plan::plan_for("vibe", true) {
+        Some(plan) => (plan.entries(), plan.skipped_lines()),
+        None => (legacy_vibe_entries(), Vec::new()),
+    }
+}
+
+#[cfg(not(feature = "engine"))]
+fn vibe_entries() -> (Vec<(&'static str, Option<String>)>, Vec<String>) {
+    (legacy_vibe_entries(), Vec::new())
+}
+
+fn legacy_vibe_entries() -> Vec<(&'static str, Option<String>)> {
+    vec![("pre_tool", Some(VIBE_BASH_MATCH.to_string()))]
+}
+
+fn vibe_hook_name(event: &str) -> &'static str {
+    if event == "post_tool" {
+        VIBE_POSTHOOK_NAME
+    } else {
+        VIBE_HOOK_NAME
+    }
 }
 
 /// Outcome of `patch_vibe_hooks_toml`. Distinguishes installed / already-present /
@@ -89,6 +292,11 @@ enum VibeHookPatchOutcome {
     Installed,
     AlreadyPresent,
     Skipped,
+}
+
+#[cfg(any(feature = "engine", test))]
+fn should_offer_onramp(dry_run: bool, hook_outcome: VibeHookPatchOutcome) -> bool {
+    !dry_run && hook_outcome != VibeHookPatchOutcome::Skipped
 }
 
 impl VibeHookPatchOutcome {
@@ -107,6 +315,7 @@ impl VibeHookPatchOutcome {
 /// to preserve any user comments and formatting in the file.
 fn patch_vibe_hooks_toml(
     hooks_path: &Path,
+    entries: &[(&'static str, Option<String>)],
     patch_mode: PatchMode,
     ctx: InitContext,
 ) -> Result<VibeHookPatchOutcome> {
@@ -121,7 +330,27 @@ fn patch_vibe_hooks_toml(
         String::new()
     };
 
-    if vibe_hooks_toml_has_rtk(&existing) {
+    let wanted: Vec<(&'static str, String)> = entries
+        .iter()
+        .map(|(event, matcher)| {
+            (
+                vibe_hook_name(event),
+                vibe_hook_entry(event, matcher.as_deref()),
+            )
+        })
+        .collect();
+    let stale: Vec<&str> = wanted
+        .iter()
+        .filter(|(name, text)| {
+            vibe_hooks_toml_has_entry(&existing, name) && !existing.contains(text.as_str())
+        })
+        .map(|(name, _)| *name)
+        .collect();
+    let missing: Vec<&(&'static str, String)> = wanted
+        .iter()
+        .filter(|(name, _)| !vibe_hooks_toml_has_entry(&existing, name) || stale.contains(name))
+        .collect();
+    if missing.is_empty() {
         if verbose > 0 {
             eprintln!("Vibe hooks.toml already has RTK hook");
         }
@@ -158,8 +387,18 @@ fn patch_vibe_hooks_toml(
         }
     }
 
-    let entry = vibe_hook_entry();
-    let new_content = if existing.is_empty() {
+    let mut existing = existing;
+    for name in &stale {
+        if let Some(stripped) = strip_vibe_entry(&existing, name) {
+            existing = stripped;
+        }
+    }
+    let entry = missing
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let new_content = if existing.trim().is_empty() {
         entry.clone()
     } else if existing.ends_with("\n\n") {
         format!("{existing}{entry}")
@@ -184,21 +423,24 @@ fn patch_vibe_hooks_toml(
     Ok(VibeHookPatchOutcome::Installed)
 }
 
-/// TOML entry emitted for the Vibe pre_tool hook. Mirrors the shape documented
-/// at <https://docs.mistral.ai/vibe/code/cli/hooks>.
-fn vibe_hook_entry() -> String {
+fn vibe_hook_entry(event: &str, matcher: Option<&str>) -> String {
+    let description = if event == "post_tool" {
+        "Compress tool output through rtk before the model reads it."
+    } else {
+        "Rewrite bash commands through rtk to save tokens."
+    };
     format!(
         r#"[[hooks]]
 name = "{name}"
-type = "pre_tool"
-match = "{match_glob}"
+type = "{event}"
+match = '{matcher}'
 command = "{command}"
 timeout = 10.0
 strict = false
-description = "Rewrite bash commands through rtk to save tokens."
+description = "{description}"
 "#,
-        name = VIBE_HOOK_NAME,
-        match_glob = VIBE_BASH_MATCH,
+        name = vibe_hook_name(event),
+        matcher = matcher.unwrap_or("*"),
         command = VIBE_HOOK_COMMAND,
     )
 }
@@ -213,9 +455,13 @@ description = "Rewrite bash commands through rtk to save tokens."
 /// installer only ever writes the canonical spacing, and the alternative
 /// (parse-serialize round-trip via toml_edit) would clobber user comments
 /// and formatting in the file.
-fn vibe_hooks_toml_has_rtk(content: &str) -> bool {
-    let needle = format!(r#"name = "{VIBE_HOOK_NAME}""#);
+fn vibe_hooks_toml_has_entry(content: &str, name: &str) -> bool {
+    let needle = format!(r#"name = "{name}""#);
     content.contains(&needle)
+}
+
+fn vibe_hooks_toml_has_rtk(content: &str) -> bool {
+    vibe_hooks_toml_has_entry(content, VIBE_HOOK_NAME)
 }
 
 /// Public entry point for `rtk init -g --agent vibe --uninstall`.
@@ -281,7 +527,7 @@ fn uninstall_vibe_at(vibe_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
     if hooks_path.exists() {
         let content = fs::read_to_string(&hooks_path)
             .with_context(|| format!("Failed to read {}", hooks_path.display()))?;
-        if let Some(new_content) = strip_vibe_rtk_entry(&content) {
+        if let Some(new_content) = strip_vibe_rtk_entries(&content) {
             if dry_run {
                 println!(
                     "[dry-run] would remove RTK hook from Vibe hooks.toml: {}",
@@ -302,6 +548,32 @@ fn uninstall_vibe_at(vibe_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
         }
     }
 
+    let config_path = vibe_dir.join(VIBE_CONFIG_FILE);
+    if config_path.exists() {
+        let content = fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read {}", config_path.display()))?;
+        let rtk_url = format!(
+            "http://{}{}",
+            crate::llm_proxy::DEFAULT_BIND,
+            VIBE_PROXY_PATH
+        );
+        if let Some(new_content) = remove_rtk_mistral_provider(&content, &rtk_url) {
+            if dry_run {
+                println!(
+                    "[dry-run] would stop routing Vibe through the RTK proxy: {}",
+                    config_path.display()
+                );
+            } else {
+                atomic_write(&config_path, &new_content)
+                    .with_context(|| format!("Failed to write {}", config_path.display()))?;
+            }
+            removed.push(format!(
+                "Vibe config.toml: removed the RTK proxy from the mistral provider ({})",
+                config_path.display()
+            ));
+        }
+    }
+
     if verbose > 0 && !removed.is_empty() {
         eprintln!("Vibe artifacts removed");
     }
@@ -313,8 +585,23 @@ fn uninstall_vibe_at(vibe_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
 /// is set. Returns `None` when the entry is absent, `Some(new_content)` after
 /// removal (with surrounding blank lines collapsed). The scan walks `[[hooks]]`
 /// section boundaries — anything else in the file is preserved verbatim.
+fn strip_vibe_rtk_entries(content: &str) -> Option<String> {
+    let mut out: Option<String> = None;
+    for name in [VIBE_HOOK_NAME, VIBE_POSTHOOK_NAME] {
+        if let Some(stripped) = strip_vibe_entry(out.as_deref().unwrap_or(content), name) {
+            out = Some(stripped);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
 fn strip_vibe_rtk_entry(content: &str) -> Option<String> {
-    let needle = format!(r#"name = "{VIBE_HOOK_NAME}""#);
+    strip_vibe_entry(content, VIBE_HOOK_NAME)
+}
+
+fn strip_vibe_entry(content: &str, name: &str) -> Option<String> {
+    let needle = format!(r#"name = "{name}""#);
     if !content.contains(&needle) {
         return None;
     }
@@ -387,13 +674,76 @@ mod tests {
 
     #[test]
     fn test_vibe_hook_entry_shape_matches_docs() {
-        let entry = vibe_hook_entry();
+        let entry = vibe_hook_entry("pre_tool", Some("bash"));
         assert!(entry.contains("[[hooks]]"));
         assert!(entry.contains(r#"name = "rtk-rewrite""#));
         assert!(entry.contains(r#"type = "pre_tool""#));
-        assert!(entry.contains(r#"match = "bash""#));
+        assert!(entry.contains("match = 'bash'"));
         assert!(entry.contains(r#"command = "rtk hook vibe""#));
         assert!(entry.contains("strict = false"));
+
+        let post = vibe_hook_entry("post_tool", Some(r"re:^(?:bash|file_system\.bash)$"));
+        assert!(post.contains(r#"name = "rtk-posthook""#));
+        assert!(post.contains(r#"type = "post_tool""#));
+        assert!(post.contains(r"match = 're:^(?:bash|file_system\.bash)$'"));
+        let parsed: toml::Value = toml::from_str(&post).expect("valid toml");
+        assert_eq!(
+            parsed["hooks"][0]["match"].as_str(),
+            Some(r"re:^(?:bash|file_system\.bash)$")
+        );
+    }
+
+    #[test]
+    fn test_vibe_patch_widens_a_stale_match_and_adds_post_tool() {
+        let temp = TempDir::new().unwrap();
+        let hooks_path = temp.path().join(VIBE_HOOKS_FILE);
+        let user_hook = "[[hooks]]\nname = \"user-audit\"\ntype = \"post_tool\"\nmatch = \"*\"\ncommand = \"audit.py\"\n";
+        fs::write(
+            &hooks_path,
+            format!("{user_hook}\n{}", vibe_hook_entry("pre_tool", Some("bash"))),
+        )
+        .unwrap();
+
+        let entries = vec![
+            ("pre_tool", Some("re:^(?:bash|edit)$".to_string())),
+            ("post_tool", Some("re:^(?:bash)$".to_string())),
+        ];
+        let outcome = patch_vibe_hooks_toml(
+            &hooks_path,
+            &entries,
+            PatchMode::Auto,
+            InitContext::default(),
+        )
+        .unwrap();
+        assert_eq!(outcome, VibeHookPatchOutcome::Installed);
+        let content = fs::read_to_string(&hooks_path).unwrap();
+        assert!(content.contains(r#"name = "user-audit""#));
+        assert_eq!(content.matches(r#"name = "rtk-rewrite""#).count(), 1);
+        assert!(content.contains("match = 're:^(?:bash|edit)$'"));
+        assert!(!content.contains("match = 'bash'"));
+        assert!(content.contains(r#"name = "rtk-posthook""#));
+        let parsed: toml::Value = toml::from_str(&content).expect("valid toml");
+        assert_eq!(parsed["hooks"].as_array().unwrap().len(), 3);
+
+        let outcome = patch_vibe_hooks_toml(
+            &hooks_path,
+            &entries,
+            PatchMode::Auto,
+            InitContext::default(),
+        )
+        .unwrap();
+        assert_eq!(outcome, VibeHookPatchOutcome::AlreadyPresent);
+
+        assert!(
+            strip_vibe_rtk_entries(&content)
+                .unwrap()
+                .contains("user-audit")
+        );
+        assert!(
+            !strip_vibe_rtk_entries(&content)
+                .unwrap()
+                .contains("rtk-posthook")
+        );
     }
 
     #[test]
@@ -513,104 +863,130 @@ mod tests {
 }
 
 #[cfg(test)]
+mod proxy_provider_tests {
+    use super::*;
+
+    const RTK: &str = "http://127.0.0.1:8080/mistral/v1";
+
+    #[test]
+    fn the_mistral_api_base_is_read_from_the_provider_table() {
+        assert_eq!(mistral_api_base_in(""), None);
+        assert_eq!(mistral_api_base_in("active_model = \"devstral\"\n"), None);
+        assert_eq!(
+            mistral_api_base_in(
+                "[[providers]]\nname = \"other\"\napi_base = \"http://x\"\n\n[[providers]]\nname = \"mistral\"\napi_base = \"https://api.mistral.ai/v1\"\n"
+            )
+            .as_deref(),
+            Some("https://api.mistral.ai/v1")
+        );
+        assert_eq!(
+            mistral_api_base_in("[[providers]]\nname = \"mistral\"\napi_base = \"  \"\n"),
+            None
+        );
+        assert_eq!(
+            mistral_api_base_in("providers = [{ name = \"mistral\" }]\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn pointing_vibe_at_the_proxy_adds_a_full_provider_entry_once() {
+        let created = set_mistral_api_base("", RTK).unwrap();
+        assert_eq!(
+            created,
+            "[[providers]]\nname = \"mistral\"\napi_base = \"http://127.0.0.1:8080/mistral/v1\"\napi_key_env_var = \"MISTRAL_API_KEY\"\nbackend = \"mistral\"\n"
+        );
+        let again = set_mistral_api_base(&created, RTK).unwrap();
+        assert_eq!(again, created);
+    }
+
+    #[test]
+    fn an_existing_mistral_provider_keeps_its_other_fields_and_comments() {
+        let text = "# my vibe config\nactive_model = \"devstral\"\n\n[[providers]]\nname = \"mistral\"\napi_base = \"https://api.mistral.ai/v1\"\napi_key_env_var = \"MY_KEY\" # custom\nbackend = \"mistral\"\nextra = 1\n\n[[providers]]\nname = \"local\"\napi_base = \"http://localhost:11434/v1\"\n";
+        let updated = set_mistral_api_base(text, RTK).unwrap();
+        assert!(updated.starts_with("# my vibe config\nactive_model = \"devstral\"\n"));
+        assert!(updated.contains("api_base = \"http://127.0.0.1:8080/mistral/v1\""));
+        assert!(updated.contains("api_key_env_var = \"MY_KEY\" # custom"));
+        assert!(updated.contains("extra = 1"));
+        assert!(updated.contains("name = \"local\"\napi_base = \"http://localhost:11434/v1\""));
+        assert_eq!(mistral_api_base_in(&updated).as_deref(), Some(RTK));
+        assert!(set_mistral_api_base("providers = [{ name = \"mistral\" }]\n", RTK).is_err());
+    }
+
+    #[test]
+    fn uninstall_removes_only_what_rtk_wrote_and_restores_a_customised_entry() {
+        let ours = set_mistral_api_base("", RTK).unwrap();
+        assert_eq!(remove_rtk_mistral_provider(&ours, RTK).as_deref(), Some(""));
+
+        let with_other = format!(
+            "[[providers]]\nname = \"local\"\napi_base = \"http://localhost:1/v1\"\n\n{ours}"
+        );
+        let stripped = remove_rtk_mistral_provider(&with_other, RTK).unwrap();
+        assert!(stripped.contains("name = \"local\""));
+        assert!(!stripped.contains("mistral"));
+
+        let customised = "[[providers]]\nname = \"mistral\"\napi_base = \"http://127.0.0.1:8080/mistral/v1/\"\napi_key_env_var = \"MY_KEY\"\nbackend = \"mistral\"\ntemperature = 0.2\n";
+        let restored = remove_rtk_mistral_provider(customised, RTK).unwrap();
+        assert!(restored.contains("api_base = \"https://api.mistral.ai/v1\""));
+        assert!(restored.contains("temperature = 0.2"));
+        assert!(restored.contains("api_key_env_var = \"MY_KEY\""));
+
+        let own_key = "[[providers]]\nname = \"mistral\"\napi_base = \"http://127.0.0.1:8080/mistral/v1\"\napi_key_env_var = \"MY_MISTRAL_KEY\"\nbackend = \"mistral\"\n";
+        let restored = remove_rtk_mistral_provider(own_key, RTK).unwrap();
+        assert!(restored.contains("api_key_env_var = \"MY_MISTRAL_KEY\""));
+        assert!(restored.contains("api_base = \"https://api.mistral.ai/v1\""));
+
+        let other_backend = format!(
+            "[[providers]]\nname = \"mistral\"\napi_base = \"{RTK}\"\napi_key_env_var = \"{MISTRAL_API_KEY_ENV}\"\nbackend = \"generic\"\n"
+        );
+        let restored = remove_rtk_mistral_provider(&other_backend, RTK).unwrap();
+        assert!(restored.contains("backend = \"generic\""));
+        assert!(restored.contains("api_base = \"https://api.mistral.ai/v1\""));
+
+        let foreign = "[[providers]]\nname = \"mistral\"\napi_base = \"https://gateway.corp/v1\"\n";
+        assert_eq!(remove_rtk_mistral_provider(foreign, RTK), None);
+        assert_eq!(remove_rtk_mistral_provider("", RTK), None);
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn the_vibe_onramp_writes_and_reads_back_the_provider_entry() {
+        use super::super::proxy_onramp::ProxyOnramp;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+        let onramp = VibeOnramp {
+            config_path: config_path.clone(),
+        };
+        assert_eq!(onramp.current_target().unwrap(), None);
+        assert!(!onramp.autostart_present().unwrap());
+        assert!(onramp.spec().autostart_option.is_none());
+        assert_eq!(onramp.spec().path, "/mistral/v1");
+        let lines = onramp.write(RTK, false).unwrap();
+        assert!(
+            lines[0].contains("providers[mistral].api_base = http://127.0.0.1:8080/mistral/v1"),
+            "{lines:?}"
+        );
+        assert_eq!(onramp.current_target().unwrap().as_deref(), Some(RTK));
+        assert!(onramp.manual_line(RTK).starts_with("[[providers]]\n"));
+        assert!(
+            onramp
+                .manual_line(RTK)
+                .contains("api_base = \"http://127.0.0.1:8080/mistral/v1\"")
+        );
+
+        let removed = uninstall_vibe_at(temp.path(), InitContext::default()).unwrap();
+        assert!(
+            removed.iter().any(|l| l.contains("RTK proxy")),
+            "{removed:?}"
+        );
+        assert_eq!(onramp.current_target().unwrap(), None);
+    }
+}
+
+#[cfg(test)]
 mod onramp_report_tests {
     use super::*;
     use crate::hooks::hook_check::HookStatus;
-
-    #[cfg(feature = "engine")]
-    const BASE: &str = "http://127.0.0.1:8080";
-
-    #[cfg(feature = "engine")]
-    #[test]
-    fn a_daemon_nothing_points_at_is_not_configured() {
-        let lines = proxy_verification_lines(BASE, true, None, None).join("\n");
-        assert!(lines.contains("env.ANTHROPIC_BASE_URL missing"), "{lines}");
-        assert!(lines.contains("NOT fully configured"), "{lines}");
-    }
-
-    #[cfg(feature = "engine")]
-    #[test]
-    fn an_env_var_aimed_at_a_dead_daemon_is_not_configured() {
-        let lines = proxy_verification_lines(BASE, false, Some(BASE), None).join("\n");
-        assert!(lines.contains("NOT responding"), "{lines}");
-        assert!(lines.contains("NOT fully configured"), "{lines}");
-    }
-
-    #[cfg(feature = "engine")]
-    #[test]
-    fn an_env_var_aimed_elsewhere_is_named_rather_than_accepted() {
-        let other = "http://127.0.0.1:9999";
-        let lines = proxy_verification_lines(BASE, true, Some(other), None).join("\n");
-        assert!(lines.contains("not this daemon"), "{lines}");
-        assert!(lines.contains("NOT fully configured"), "{lines}");
-    }
-
-    #[cfg(feature = "engine")]
-    #[test]
-    fn configured_state_warns_when_nothing_restarts_the_daemon() {
-        let lines = proxy_verification_lines(BASE, true, Some(BASE), None).join("\n");
-        assert!(lines.contains("nothing restarts the daemon"), "{lines}");
-        let lines =
-            proxy_verification_lines(BASE, true, Some(BASE), Some("SessionStart autostart"))
-                .join("\n");
-        assert!(
-            lines.contains("restart persistence — SessionStart autostart"),
-            "{lines}"
-        );
-        assert!(!lines.contains("nothing restarts"), "{lines}");
-    }
-
-    #[cfg(feature = "engine")]
-    #[test]
-    fn session_start_entry_roundtrip() {
-        let mut root = serde_json::json!({});
-        assert!(!session_start_entry_present(&root));
-        insert_session_start_entry(&mut root).expect("insert");
-        assert!(session_start_entry_present(&root));
-        let entry = root
-            .pointer("/hooks/SessionStart/0/hooks/0/command")
-            .and_then(|v| v.as_str())
-            .expect("command written");
-        assert_eq!(entry, "rtk hook claude");
-        assert!(
-            root.pointer("/hooks/SessionStart/0/matcher").is_none(),
-            "SessionStart entries carry no matcher"
-        );
-        assert!(claude::remove_hook_from_json(&mut root));
-        assert!(!session_start_entry_present(&root));
-        assert!(
-            root.get("hooks").is_none(),
-            "uninstall must drop the emptied hooks object: {root}"
-        );
-    }
-
-    #[cfg(feature = "engine")]
-    #[test]
-    fn foreign_session_start_hooks_survive_uninstall() {
-        let mut root = serde_json::json!({
-            "hooks": { "SessionStart": [
-                { "hooks": [{ "type": "command", "command": "my-own-tool --hello" }] }
-            ]}
-        });
-        insert_session_start_entry(&mut root).expect("insert");
-        assert!(claude::remove_hook_from_json(&mut root));
-        let arr = root
-            .pointer("/hooks/SessionStart")
-            .and_then(|v| v.as_array())
-            .expect("foreign entry must survive");
-        assert_eq!(arr.len(), 1, "{root}");
-        assert!(arr[0].to_string().contains("my-own-tool"), "{root}");
-    }
-
-    #[cfg(feature = "engine")]
-    #[test]
-    fn both_halves_holding_is_the_only_configured_state() {
-        let lines = proxy_verification_lines(BASE, true, Some(BASE), None).join("\n");
-        assert!(lines.contains("proxy: configured"), "{lines}");
-        assert!(!lines.contains("NOT"), "{lines}");
-        // The prompt must not promise what rtk:proxy does not enable.
-        assert!(lines.contains("CCR ships off"), "{lines}");
-    }
 
     #[test]
     fn the_project_footer_reports_global_state_and_points_at_g() {
@@ -630,5 +1006,16 @@ mod onramp_report_tests {
     fn a_running_but_unused_daemon_is_called_out_in_project_scope() {
         let lines = project_scope_footer_lines(HookStatus::Ok, false, true).join("\n");
         assert!(lines.contains("nothing routed to it"), "{lines}");
+    }
+
+    #[test]
+    fn the_onramp_is_offered_only_after_a_real_hook_patch() {
+        assert!(should_offer_onramp(false, VibeHookPatchOutcome::Installed));
+        assert!(should_offer_onramp(
+            false,
+            VibeHookPatchOutcome::AlreadyPresent
+        ));
+        assert!(!should_offer_onramp(false, VibeHookPatchOutcome::Skipped));
+        assert!(!should_offer_onramp(true, VibeHookPatchOutcome::Installed));
     }
 }

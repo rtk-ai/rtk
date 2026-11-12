@@ -16,6 +16,8 @@ pub struct UsageRow {
     /// RFC3339 UTC timestamp.
     pub ts: String,
     pub provider: String,
+    pub upstream: Option<String>,
+    pub uncached_input: i64,
     pub model: String,
     /// Estimated input tokens (request body).
     pub tokens_in: i64,
@@ -115,7 +117,9 @@ CREATE TABLE IF NOT EXISTS usage_records (
     session TEXT,
     pipeline TEXT,
     routed_from TEXT,
-    cost_without REAL NOT NULL DEFAULT 0
+    cost_without REAL NOT NULL DEFAULT 0,
+    upstream TEXT,
+    uncached_input INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_usage_ts    ON usage_records(ts);
 CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_records(model);
@@ -171,6 +175,8 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE usage_records ADD COLUMN saved_normalize INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE usage_records ADD COLUMN routed_from TEXT",
     "ALTER TABLE usage_records ADD COLUMN cost_without REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE usage_records ADD COLUMN upstream TEXT",
+    "ALTER TABLE usage_records ADD COLUMN uncached_input INTEGER NOT NULL DEFAULT 0",
 ];
 
 impl Store {
@@ -240,8 +246,8 @@ impl Store {
                     path,
                     compression_level, ctx_total, ctx_tool_result, ctx_tool_use, ctx_duplicate, ctx_image,
                     saved_ingest_filter, saved_pixel_compress, saved_ccr, saved_normalize, project, session, pipeline,
-                    routed_from, cost_without)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)",
+                    routed_from, cost_without, upstream, uncached_input)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31)",
                 params![
                     row.ts, row.provider, row.model, row.tokens_in, row.tokens_out,
                     row.tokens_saved, row.cost_usd, row.status, row.client,
@@ -251,7 +257,7 @@ impl Store {
                     row.ctx_total, row.ctx_tool_result, row.ctx_tool_use, row.ctx_duplicate, row.ctx_image,
                     row.saved_ingest_filter, row.saved_pixel_compress, row.saved_ccr,
                     row.saved_normalize, row.project, row.session, row.pipeline,
-                    row.routed_from, row.cost_without
+                    row.routed_from, row.cost_without, row.upstream, row.uncached_input
                 ],
             )?;
             Ok(())
@@ -802,5 +808,64 @@ mod tests {
             .query_row("SELECT pipeline FROM usage_records", [], |r| r.get(0))
             .unwrap();
         assert_eq!(pipe.as_deref(), Some("my-pipe"));
+    }
+
+    const OLDEST_USAGE_TABLE: &str = "CREATE TABLE usage_records (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts           TEXT    NOT NULL,
+        provider     TEXT    NOT NULL,
+        model        TEXT    NOT NULL,
+        tokens_in    INTEGER NOT NULL DEFAULT 0,
+        tokens_out   INTEGER NOT NULL DEFAULT 0,
+        tokens_saved INTEGER NOT NULL DEFAULT 0,
+        cost_usd     REAL    NOT NULL DEFAULT 0,
+        status       INTEGER NOT NULL DEFAULT 0,
+        client       TEXT
+    );
+    INSERT INTO usage_records (ts, provider, model, tokens_in, status)
+        VALUES ('2025-01-01T00:00:00Z', 'anthropic', 'claude-opus-5', 7, 200);";
+
+    #[tokio::test]
+    async fn an_old_database_gains_the_upstream_and_uncached_input_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        let path = path.to_str().unwrap();
+        {
+            let old = Connection::open(path).unwrap();
+            old.execute_batch(OLDEST_USAGE_TABLE).unwrap();
+        }
+
+        let s = Store::open(path).unwrap();
+        s.record(UsageRow {
+            ts: "2026-01-01T00:00:00Z".into(),
+            provider: "openai-responses".into(),
+            upstream: Some("chatgpt".into()),
+            uncached_input: 42,
+            model: "gpt-5-codex".into(),
+            status: 200,
+            ..Default::default()
+        })
+        .await;
+        drop(s);
+
+        let check = Connection::open(path).unwrap();
+        let rows: Vec<(String, Option<String>, i64)> = check
+            .prepare("SELECT provider, upstream, uncached_input FROM usage_records ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("anthropic".to_string(), None, 0),
+                (
+                    "openai-responses".to_string(),
+                    Some("chatgpt".to_string()),
+                    42
+                ),
+            ]
+        );
     }
 }
