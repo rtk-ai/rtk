@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_ANTHROPIC_UPSTREAM: &str = "https://api.anthropic.com";
 const DEFAULT_OPENAI_UPSTREAM: &str = "https://api.openai.com";
+/// Forward path appended to the resolved `openai_upstream` for
+/// `/v1/chat/completions` requests when `openai_path` is not set.
+const DEFAULT_OPENAI_PATH: &str = "/v1/chat/completions";
 const DB_FILE_NAME: &str = "rtk-proxy.db";
 const ICM_DB_FILE_NAME: &str = "rtk-proxy-memory.db";
 const DEFAULT_UPSTREAM_RETRIES: u32 = 2;
@@ -110,6 +113,11 @@ pub struct Config {
     pub anthropic_upstream: String,
     /// Upstream base URL for the OpenAI Chat Completions API.
     pub openai_upstream: String,
+    /// Forward path for OpenAI Chat Completions requests, appended to
+    /// `openai_upstream`. Override for providers whose endpoint doesn't live
+    /// under `/v1` (e.g. Z.AI's `/chat/completions`). Boot-only: restarting
+    /// re-applies it, same as the upstream base.
+    pub openai_path: String,
     /// Boot default for CCR (Compress-Cache-Retrieve). On — it is the only
     /// compression this proxy performs. A persisted runtime value wins over
     /// this (see `settings::RuntimeSettings`).
@@ -168,6 +176,11 @@ pub struct StartArgs {
     #[arg(long, env = "RTK_PROXY_OPENAI_UPSTREAM")]
     openai_upstream: Option<String>,
 
+    /// Forward path for OpenAI Chat Completions requests, appended to
+    /// `openai_upstream`. [default: /v1/chat/completions]
+    #[arg(long, env = "RTK_PROXY_OPENAI_PATH")]
+    openai_path: Option<String>,
+
     /// Compress context with CCR before forwarding. [default: true]
     #[arg(long, env = "RTK_PROXY_CCR")]
     ccr: Option<bool>,
@@ -221,6 +234,7 @@ pub(crate) struct FileConfig {
     bind: Option<String>,
     anthropic_upstream: Option<String>,
     openai_upstream: Option<String>,
+    openai_path: Option<String>,
     ccr: Option<bool>,
     cache_align: Option<bool>,
     normalize: Option<bool>,
@@ -320,6 +334,19 @@ impl Config {
                 .openai_upstream
                 .or(file.openai_upstream)
                 .unwrap_or_else(|| DEFAULT_OPENAI_UPSTREAM.into()),
+            openai_path: {
+                // A missing leading slash would silently join into an invalid
+                // host; normalize here instead of failing every request at
+                // runtime with an opaque DNS error.
+                let mut p = cli
+                    .openai_path
+                    .or(file.openai_path)
+                    .unwrap_or_else(|| DEFAULT_OPENAI_PATH.into());
+                if !p.starts_with('/') {
+                    p.insert(0, '/');
+                }
+                p
+            },
             ccr: cli.ccr.or(file.ccr).unwrap_or(true),
             cache_align: cli.cache_align.or(file.cache_align).unwrap_or(true),
             normalize: cli.normalize.or(file.normalize).unwrap_or(true),
@@ -360,6 +387,7 @@ impl Config {
             bind: Some(self.bind.clone()),
             anthropic_upstream: Some(self.anthropic_upstream.clone()),
             openai_upstream: Some(self.openai_upstream.clone()),
+            openai_path: Some(self.openai_path.clone()),
             ccr: Some(self.ccr),
             cache_align: Some(self.cache_align),
             normalize: Some(self.normalize),
@@ -448,6 +476,7 @@ mod tests {
             bind: None,
             anthropic_upstream: None,
             openai_upstream: None,
+            openai_path: None,
             ccr: None,
             cache_align: None,
             normalize: None,
@@ -466,6 +495,7 @@ mod tests {
         let c = Config::resolve(empty_cli(), FileConfig::default());
         assert_eq!(c.bind, DEFAULT_BIND);
         assert_eq!(c.anthropic_upstream, DEFAULT_ANTHROPIC_UPSTREAM);
+        assert_eq!(c.openai_path, DEFAULT_OPENAI_PATH);
         assert_eq!(c.db, default_db_path());
         assert_eq!(c.icm_db, default_icm_db_path());
         // Bounded by default: a wedged upstream must not hold a turn open
@@ -498,6 +528,7 @@ mod tests {
             r#"
             bind = "0.0.0.0:9000"
             openai_upstream = "https://api.groq.com/openai"
+            openai_path = "chat/completions"
         "#,
         )
         .unwrap();
@@ -505,6 +536,8 @@ mod tests {
         let c = Config::resolve(empty_cli(), file);
         assert_eq!(c.bind, "0.0.0.0:9000");
         assert_eq!(c.openai_upstream, "https://api.groq.com/openai");
+        // Missing leading slash is normalized, not relayed as-is.
+        assert_eq!(c.openai_path, "/chat/completions");
         // Untouched key still defaults.
         assert_eq!(c.anthropic_upstream, DEFAULT_ANTHROPIC_UPSTREAM);
 
@@ -565,6 +598,7 @@ mod default_paths {
                 bind: None,
                 anthropic_upstream: None,
                 openai_upstream: None,
+                openai_path: None,
                 ccr: None,
                 cache_align: None,
                 normalize: None,

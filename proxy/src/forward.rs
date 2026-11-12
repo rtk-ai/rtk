@@ -873,6 +873,7 @@ mod tests {
             bind: "127.0.0.1:0".into(),
             anthropic_upstream: "https://api.anthropic.com".into(),
             openai_upstream: "https://api.openai.com".into(),
+            openai_path: "/v1/chat/completions".into(),
             ccr,
             compression: "off".into(),
             pixel_compress: Default::default(),

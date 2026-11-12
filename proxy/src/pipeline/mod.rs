@@ -53,9 +53,11 @@ pub mod ccr;
 pub mod engine_methods;
 pub mod image_opt;
 pub mod ingest_filter;
+pub mod ingest_openai;
 pub mod level;
 pub mod model_route;
 pub mod normalize;
+pub mod normalize_openai;
 pub mod pixel_compress;
 pub mod redact;
 
