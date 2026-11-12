@@ -17,6 +17,7 @@ Never use Bash for search (`find`, `grep`, `rg`) — use dedicated tools.
 src/
 ├── main.rs                    ← Commands enum + routing (start here for any command)
 ├── core/                      ← Shared infrastructure
+│   ├── cmdline/lexer.rs       ← Shell lexer: tokens, words, command segmentation
 │   ├── config.rs              ← ~/.config/rtk/config.toml
 │   ├── tracking.rs            ← SQLite token metrics
 │   ├── tee.rs                 ← Raw output recovery on failure
@@ -59,7 +60,7 @@ src/
 │   ├── ruby/                  ← rake, rspec, rubocop
 │   ├── jvm/                   ← gradlew, mvn
 │   └── php/                   ← php, artisan, phpunit, phpstan, pest, paratest, ecs, pint
-├── discover/                  ← Claude Code history analysis
+├── discover/                  ← Rewrite registry + Claude Code history analysis
 ├── learn/                     ← CLI correction detection
 ├── parser/                    ← Parser infrastructure
 └── filters/                   ← 62 TOML filter configs
