@@ -1,0 +1,31 @@
+   Compiling m7 v0.1.0 (/tmp/m7)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (target/debug/deps/m7-39e5382e370bff94)
+WARN token for user 7 expired
+
+thread 'tests::rejects_bad_token' (9938) panicked at src/lib.rs:12:9:
+assertion `left == right` failed: bad token must be rejected
+  left: 401
+ right: 403
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+INFO request 0 handled in 3ms
+INFO request 1 handled in 4ms
+INFO request 2 handled in 5ms
+INFO request 3 handled in 6ms
+INFO request 4 handled in 3ms
+INFO request 5 handled in 4ms
+INFO request 6 handled in 5ms
+INFO request 7 handled in 6ms
+INFO request 8 handled in 3ms
+INFO request 9 handled in 4ms
+INFO request 10 handled in 5ms
+INFO request 11 handled in 6ms
+INFO request 12 handled in 3ms
+INFO request 13 handled in 4ms
+INFO request 14 handled in 5ms
+INFO request 15 handled in 6ms
+INFO request 16 handled in 3ms
+INFO request 17 handled in 4ms
+INFO request 18 handled in 5ms
+INFO request 19 handled in 6ms
+error: test failed, to rerun pass `--lib`

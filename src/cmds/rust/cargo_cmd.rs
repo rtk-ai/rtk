@@ -8,6 +8,7 @@ use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{join_with_overflow, resolved_command, truncate};
 use anyhow::Result;
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -120,11 +121,22 @@ impl BlockHandler for CargoBuildHandler {
     }
 }
 
+/// The line libtest prints when a test binary starts: `running 3 tests`, `running 1 test`,
+/// and `running 2 tests (shuffle seed: 7)` when it shuffles them.
+static RUNNING_TESTS: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"^running \d+ tests?(?: \(shuffle seed: \d+\))?$")
+        .expect("invalid running regex")
+});
+
 struct CargoTestHandler {
     in_failure_section: bool,
     in_failure_names: bool,
     summary_lines: Vec<String>,
     has_compile_errors: bool,
+    /// A test binary started (libtest printed `running N tests`), so the run got past the build.
+    ran_tests: bool,
+    /// A `---- name stdout ----` block of the `failures:` section was shown.
+    saw_failure_block: bool,
 }
 
 impl CargoTestHandler {
@@ -134,6 +146,8 @@ impl CargoTestHandler {
             in_failure_names: false,
             summary_lines: Vec::new(),
             has_compile_errors: false,
+            ran_tests: false,
+            saw_failure_block: false,
         }
     }
 
@@ -206,7 +220,8 @@ impl BlockHandler for CargoTestHandler {
         {
             return true;
         }
-        if line.starts_with("running ") {
+        if RUNNING_TESTS.is_match(line) {
+            self.ran_tests = true;
             return true;
         }
         if line.starts_with("test ") && line.ends_with("... ok") {
@@ -244,14 +259,23 @@ impl BlockHandler for CargoTestHandler {
     }
 
     fn is_block_start(&mut self, line: &str) -> bool {
-        self.in_failure_section && line.starts_with("---- ")
+        let starts = self.in_failure_section && line.starts_with("---- ");
+        self.saw_failure_block |= starts;
+        starts
     }
 
     fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
         self.in_failure_section && !line.starts_with("---- ")
     }
 
-    fn format_summary(&self, _exit_code: i32, raw: &str) -> Option<String> {
+    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String> {
+        // A failed run that started tests and shows no failure block would say nothing about
+        // why it failed: `--nocapture` prints a panic as it happens, outside the `failures:`
+        // section, and a test binary that aborts prints no result. Such a run is handed back,
+        // and printed as the command printed it.
+        if exit_code != 0 && self.ran_tests && !self.saw_failure_block {
+            return Some(raw.to_string());
+        }
         // Same never-worse guard as CargoBuildHandler (#3430 review): if the
         // compacted summary ends up larger than the raw output (e.g. a tiny
         // `cargo test` run), keep the raw output instead of "compacting" it
@@ -650,16 +674,20 @@ fn nextest_test_name(block: &str) -> &str {
         .map_or(name, |(_, name)| name)
 }
 
+/// nextest annotates `passed` in place, e.g. `2 passed (1 slow), 1 failed`
+static NEXTEST_SUMMARY_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run:\s+(\d+) passed(?:\s+\([^)]*\))?(?:,\s+(\d+) failed)?(?:,\s+(\d+) exec failed)?(?:,\s+(\d+) timed out)?(?:,\s+(\d+) skipped)?"
+    ).expect("invalid nextest summary regex")
+});
+
+static NEXTEST_STARTING_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"Starting \d+ tests? across (\d+) binar(?:y|ies)")
+        .expect("invalid nextest starting regex")
+});
+
 /// Filter cargo nextest output - show failures + compact summary
 fn filter_cargo_nextest(output: &str) -> String {
-    // nextest annotates `passed` in place, e.g. `2 passed (1 slow), 1 failed`
-    let summary_re = regex::Regex::new(
-        r"Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run:\s+(\d+) passed(?:\s+\([^)]*\))?(?:,\s+(\d+) failed)?(?:,\s+(\d+) exec failed)?(?:,\s+(\d+) timed out)?(?:,\s+(\d+) skipped)?"
-    ).expect("invalid nextest summary regex");
-
-    let starting_re = regex::Regex::new(r"Starting \d+ tests? across (\d+) binar(?:y|ies)")
-        .expect("invalid nextest starting regex");
-
     let mut failures: Vec<String> = Vec::new();
     let mut in_failure_block = false;
     let mut past_summary = false;
@@ -669,7 +697,15 @@ fn filter_cargo_nextest(output: &str) -> String {
     let mut binaries: u32 = 0;
     let mut has_cancel_line = false;
 
-    for line in output.lines() {
+    // A coloured run (`--color always`, `CARGO_TERM_COLOR=always`) wraps the status word in
+    // escape codes, so `PASS`, `FAIL` and `Summary` would not be found at the start of a line.
+    let plain = if output.contains('\x1b') {
+        Cow::Owned(crate::core::utils::strip_ansi(output))
+    } else {
+        Cow::Borrowed(output)
+    };
+
+    for line in plain.lines() {
         let trimmed = line.trim();
 
         // Strip compilation noise
@@ -695,7 +731,7 @@ fn filter_cargo_nextest(output: &str) -> String {
 
         // Parse binary count from Starting line
         if trimmed.starts_with("Starting") {
-            if let Some(caps) = starting_re.captures(trimmed)
+            if let Some(caps) = NEXTEST_STARTING_RE.captures(trimmed)
                 && let Some(m) = caps.get(1)
             {
                 binaries = m.as_str().parse().unwrap_or(0);
@@ -773,7 +809,7 @@ fn filter_cargo_nextest(output: &str) -> String {
     }
 
     // Parse summary with regex
-    if let Some(caps) = summary_re.captures(&summary_line) {
+    if let Some(caps) = NEXTEST_SUMMARY_RE.captures(&summary_line) {
         let duration = caps.get(1).map_or("?", |m| m.as_str());
         let passed: u32 = caps
             .get(3)
@@ -855,7 +891,8 @@ fn filter_cargo_nextest(output: &str) -> String {
         return result.trim().to_string();
     }
 
-    // Fallback: if summary regex didn't match, show what we have
+    // No summary, or one the regex does not read: a run killed after a `FAIL` line shows its
+    // failure blocks (and the summary line when there is one), nothing else.
     if !failures.is_empty() {
         let mut result = String::new();
         for failure in &failures {
@@ -872,8 +909,10 @@ fn filter_cargo_nextest(output: &str) -> String {
         return summary_line;
     }
 
-    // Empty or unrecognized
-    String::new()
+    // No summary and no failure block: `list`, `show-config`, `help`, a build error, a rejected
+    // option, and a run killed before its summary that had only `PASS` lines print text with
+    // nothing in it to report on, so show it as it came.
+    output.to_string()
 }
 
 struct JsonDiagnostics {
@@ -2734,6 +2773,82 @@ error: test run failed
     }
 
     #[test]
+    fn test_filter_cargo_nextest_without_a_summary_shows_the_output() {
+        // The runner hands the filter stdout followed by stderr; each fixture after the first
+        // holds the one stream that operation writes to.
+        for input in [
+            concat!(
+                include_str!("../../../tests/fixtures/cargo_nextest_list_stdout_raw.txt"),
+                include_str!("../../../tests/fixtures/cargo_nextest_list_stderr_raw.txt"),
+            ),
+            include_str!("../../../tests/fixtures/cargo_nextest_show_config_stdout_raw.txt"),
+            include_str!("../../../tests/fixtures/cargo_nextest_archive_stderr_raw.txt"),
+            include_str!("../../../tests/fixtures/cargo_nextest_run_compile_error_stderr_raw.txt"),
+            include_str!("../../../tests/fixtures/cargo_nextest_run_bad_option_stderr_raw.txt"),
+        ] {
+            assert_eq!(filter_cargo_nextest(input), input);
+        }
+    }
+
+    /// A run killed before its summary (`kill -9`, a CI timeout) that printed only `PASS` lines
+    /// has no count to report and no failure to show, so the output is shown as it came.
+    #[test]
+    fn test_filter_cargo_nextest_run_without_a_summary_shows_the_output() {
+        let input = include_str!("../../../tests/fixtures/cargo_nextest_run_interrupted_raw.txt");
+        assert!(input.contains("PASS ["), "fixture must carry PASS lines");
+        assert!(
+            !input.contains("Summary"),
+            "fixture must not carry a summary"
+        );
+        assert_eq!(filter_cargo_nextest(input), input);
+    }
+
+    /// A run killed after a `FAIL` line goes through the failure branch: the failure block is
+    /// shown, the `PASS` lines and the rest are not, and there is no summary line to add.
+    #[test]
+    fn test_filter_cargo_nextest_run_killed_after_a_failure_shows_the_failure_only() {
+        let input = "    Starting 3 tests across 1 binary\n\
+                     \x20       PASS [   0.003s] (1/3) kc tests::quick\n\
+                     \x20       FAIL [   0.004s] (2/3) kc tests::broken\n\
+                     \x20 stderr ───\n\
+                     \n\
+                     \x20   thread 'tests::broken' panicked at src/lib.rs:4:5:\n\
+                     \x20   boom\n";
+        let result = filter_cargo_nextest(input);
+        assert!(result.starts_with("FAIL ["), "got: {result}");
+        assert!(result.contains("tests::broken"), "got: {result}");
+        assert!(result.contains("boom"), "got: {result}");
+        assert!(!result.contains("PASS"), "got: {result}");
+        assert!(!result.contains("Starting"), "got: {result}");
+        assert!(!result.contains("cargo nextest:"), "got: {result}");
+    }
+
+    /// `--color always` puts escape codes around `PASS`, `FAIL` and `Summary`; the summary a
+    /// coloured run gets is the one the same run gets without colour.
+    #[test]
+    fn test_filter_cargo_nextest_coloured_run_gets_its_summary() {
+        let passing = include_str!("../../../tests/fixtures/cargo_nextest_pass_color_raw.txt");
+        assert!(passing.contains('\u{1b}'), "fixture must be coloured");
+        assert_eq!(
+            filter_cargo_nextest(passing),
+            "cargo nextest: 2 passed, 1 skipped (1 binary, 0.004s)"
+        );
+
+        let failing = include_str!("../../../tests/fixtures/cargo_nextest_fail_color_raw.txt");
+        assert!(failing.contains('\u{1b}'), "fixture must be coloured");
+        assert_eq!(
+            filter_cargo_nextest(failing),
+            filter_cargo_nextest(&crate::core::utils::strip_ansi(failing))
+        );
+        let result = filter_cargo_nextest(failing);
+        assert!(
+            result.ends_with("cargo nextest: 2 passed, 1 failed (1 binary, 0.103s)"),
+            "got: {result}"
+        );
+        assert!(result.contains("tests::fails"), "got: {result}");
+    }
+
+    #[test]
     fn test_filter_cargo_nextest_cancellation_notice() {
         let output = r#"    Starting 3 tests across 1 binary
         FAIL [   0.005s] (1/3) proj tests::bad
@@ -3385,5 +3500,166 @@ error: could not compile `rtk` (test "repro_compile_fail") due to 1 previous err
             result
         );
         assert!(result.contains("could not compile"), "got: {}", result);
+    }
+
+    /// Feeds a run to the test filter the way the stream runner does, with `raw` being stdout
+    /// followed by stderr, and returns what the filter showed while the run went on and what it
+    /// returned once it ended.
+    fn feed_test_run(stdout: &str, stderr: &str, exit_code: i32) -> (String, Option<String>) {
+        let mut f = BlockStreamFilter::new(CargoTestHandler::new());
+        let mut live = String::new();
+        for line in stdout.lines().chain(stderr.lines()) {
+            if let Some(s) = f.feed_line(line) {
+                live.push_str(&s);
+            }
+        }
+        live.push_str(&f.flush());
+        let at_exit = f.on_exit(exit_code, &format!("{stdout}{stderr}"));
+        (live, at_exit)
+    }
+
+    /// A failed run in which tests ran and no failure block was shown is handed back: nothing is
+    /// shown live, and the filter returns the very text it was given, which the stream runner
+    /// prints as the command printed it.
+    #[test]
+    fn test_cargo_test_failed_run_without_failure_block_is_handed_back() {
+        for (name, stdout, stderr) in [
+            (
+                "--nocapture",
+                include_str!("../../../tests/fixtures/cargo_test_nocapture_failed_stdout_raw.txt"),
+                include_str!("../../../tests/fixtures/cargo_test_nocapture_failed_stderr_raw.txt"),
+            ),
+            (
+                "--nocapture --test-threads=1",
+                include_str!(
+                    "../../../tests/fixtures/cargo_test_nocapture_single_thread_stdout_raw.txt"
+                ),
+                include_str!(
+                    "../../../tests/fixtures/cargo_test_nocapture_single_thread_stderr_raw.txt"
+                ),
+            ),
+            (
+                "--nocapture, a test logging to stderr",
+                include_str!("../../../tests/fixtures/cargo_test_nocapture_logging_stdout_raw.txt"),
+                include_str!("../../../tests/fixtures/cargo_test_nocapture_logging_stderr_raw.txt"),
+            ),
+            (
+                "a test binary that aborts",
+                include_str!("../../../tests/fixtures/cargo_test_abort_only_stdout_raw.txt"),
+                include_str!("../../../tests/fixtures/cargo_test_abort_only_stderr_raw.txt"),
+            ),
+        ] {
+            let (live, at_exit) = feed_test_run(stdout, stderr, 101);
+            assert_eq!(live, "", "{name}: nothing is shown live");
+            let raw = format!("{stdout}{stderr}");
+            assert!(
+                at_exit
+                    .as_deref()
+                    .is_some_and(|shown| crate::core::stream::is_handed_back(shown, &raw)),
+                "{name}: got {at_exit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cargo_test_failed_run_with_failure_blocks_is_summarised() {
+        let stdout =
+            include_str!("../../../tests/fixtures/cargo_test_failed_blocks_stdout_raw.txt");
+        let stderr =
+            include_str!("../../../tests/fixtures/cargo_test_failed_blocks_stderr_raw.txt");
+        let (live, at_exit) = feed_test_run(stdout, stderr, 101);
+        assert!(live.contains("lib reason"), "got: {live}");
+        assert!(live.contains("it reason"), "got: {live}");
+        assert_eq!(
+            at_exit.as_deref(),
+            Some(concat!(
+                "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+                "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+                "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+            ))
+        );
+    }
+
+    #[test]
+    fn test_cargo_test_passing_nocapture_run_is_summarised() {
+        // Under --nocapture a #[should_panic] test prints its panic while passing.
+        let stdout = concat!(
+            "running 2 tests\n",
+            "test tests::expected - should panic ... ok\n",
+            "test tests::other ... ok\n",
+            "\n",
+            "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+        );
+        let stderr = concat!(
+            "thread 'tests::expected' (1) panicked at src/main.rs:5:9:\n",
+            "expected boom\n",
+        );
+        let (live, at_exit) = feed_test_run(stdout, stderr, 0);
+        assert_eq!(live, "");
+        assert_eq!(
+            at_exit.as_deref(),
+            Some("cargo test: 2 passed (1 suite, 0.00s)\n")
+        );
+    }
+
+    #[test]
+    fn test_cargo_test_running_line_that_is_not_the_harness_does_not_start_a_run() {
+        // `running 2 tests` and `running 1 test` are libtest's; any other line that starts
+        // with `running` is output, and a build that fails after it is still a compile error.
+        let stderr = concat!(
+            "running pre-build hook\n",
+            "error[E0425]: cannot find value `m` in this scope\n",
+            " --> src/lib.rs:1:1\n",
+            "error: could not compile `x` (lib test) due to 1 previous error\n",
+        );
+        let (_, at_exit) = feed_test_run("", stderr, 101);
+        let at_exit = at_exit.expect("a compile error is summarised");
+        assert!(
+            at_exit.starts_with("cargo test: 1 errors"),
+            "got: {at_exit}"
+        );
+    }
+
+    /// A test's own line that starts with `running` is part of its failure block.
+    #[test]
+    fn test_cargo_test_failure_block_keeps_a_running_line_of_its_own() {
+        let stdout = concat!(
+            "running 1 test\n",
+            "test tests::migrate ... FAILED\n",
+            "\n",
+            "failures:\n",
+            "\n",
+            "---- tests::migrate stdout ----\n",
+            "running migration 3\n",
+            "thread 'tests::migrate' panicked at src/lib.rs:4:5:\n",
+            "boom\n",
+            "\n",
+            "failures:\n",
+            "    tests::migrate\n",
+            "\n",
+            "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+        );
+        let (live, _) = feed_test_run(stdout, "", 101);
+        assert!(live.contains("running migration 3"), "got: {live}");
+        assert!(!live.contains("running 1 test"), "got: {live}");
+    }
+
+    /// libtest names its shuffle seed on the start line; the tests still ran.
+    #[test]
+    fn test_cargo_test_shuffled_run_without_failure_block_is_handed_back() {
+        let stdout = concat!(
+            "running 2 tests (shuffle seed: 7)\n",
+            "test tests::passes ... ok\n",
+            "test tests::fails ... FAILED\n",
+            "\n",
+            "test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+        );
+        let stderr = "thread 'tests::fails' panicked at src/lib.rs:9:5:\nthe real reason\n";
+        let (live, at_exit) = feed_test_run(stdout, stderr, 101);
+        assert_eq!(live, "");
+        assert_eq!(
+            at_exit.as_deref(),
+            Some(format!("{stdout}{stderr}").as_str())
+        );
     }
 }

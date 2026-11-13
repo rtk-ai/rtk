@@ -1,0 +1,10 @@
+   Compiling c3 v0.1.0 (/tmp/c3)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (target/debug/deps/c3-d291d5434cc58ba5)
+error: test failed, to rerun pass `--lib`
+     Running tests/it.rs (target/debug/deps/it-01b1a9fd8cfb57ad)
+error: test failed, to rerun pass `--test it`
+   Doc-tests c3
+error: 2 targets failed:
+    `--lib`
+    `--test it`

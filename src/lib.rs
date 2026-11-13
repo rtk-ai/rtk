@@ -1647,9 +1647,9 @@ enum CargoCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Nextest with failures-only output
+    /// Nextest with failures-only output (output that is not a test run is shown as printed)
     Nextest {
-        /// Additional cargo nextest arguments (e.g., run, list, --lib)
+        /// Additional cargo nextest arguments (e.g., run, run --lib, list)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
