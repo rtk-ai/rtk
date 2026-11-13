@@ -14,18 +14,12 @@ use std::cell::OnceCell;
 use std::collections::HashMap;
 
 use provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
-use registry::{
-    Call, ChainPart, Classification, ExcludePattern, category_avg_tokens, classify_command_at,
-    strip_disabled_prefix_for_analytics,
-};
+use registry::{Call, Classification, ExcludePattern, PartRead, category_avg_tokens};
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
 use crate::core::cmdline::lexer::{self, JoinedLine, tokenize, words};
-use crate::core::cmdline::rtk::rtk_invocation;
-use crate::core::cmdline::walker::Position;
 use crate::core::tracking::{HookDecisionRecord, Tracker};
 use crate::core::user_dirs;
-use crate::discover::registry::prefix_contains_rtk_disabled;
 use crate::hooks::hook_check::{HookStatus, status as hook_status};
 use crate::hooks::permissions::{self, PermissionVerdict};
 
@@ -69,20 +63,49 @@ struct PermissionRules {
 /// besides the command (and `tool_use_id`) itself — built once per `discover` run
 /// and passed by reference to every per-command call.
 ///
-/// Grouped into one struct rather than several individual positional params: with
-/// `excluded`/`transparent_prefixes` both `Vec<String>`, a swapped argument order
-/// at a call site would compile silently and misclassify RTK_DISABLED bypass
-/// coverage (code-review finding on rtk-ai/rtk#3206's fixup round).
-///
-/// `exclude_patterns`/`normalized_transparent_prefixes` are the rewrite's exclude-pattern
-/// regexes and normalized prefixes, precompiled once per scan here instead of once per
-/// call that `registry::read_call` asks it about.
+/// `rewrite` is the configuration the rewrite runs under, compiled once per scan here
+/// instead of once per call that `registry::read_call` asks it about.
 struct CoverageContext {
     hook_log: HashMap<String, HookDecisionRecord>,
     hook_installed: bool,
     rules: PermissionRules,
+    rewrite: RewriteConfig,
+}
+
+/// The configuration the hook rewrites under, compiled once for a run of a report: the
+/// exclude-pattern regexes and the normalized transparent prefixes, which decide what the
+/// rewrite does with a command and so what the report reads of it.
+#[derive(Default)]
+pub(crate) struct RewriteConfig {
     exclude_patterns: Vec<ExcludePattern>,
     normalized_transparent_prefixes: Vec<String>,
+}
+
+impl RewriteConfig {
+    /// The user's `exclude_commands` and `transparent_prefixes`, as the hook reads them.
+    pub(crate) fn load() -> Self {
+        let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
+        Self::of(&excluded, &transparent_prefixes)
+    }
+
+    pub(crate) fn of(excluded: &[String], transparent_prefixes: &[String]) -> Self {
+        Self {
+            exclude_patterns: registry::compile_exclude_patterns(excluded),
+            normalized_transparent_prefixes: registry::normalize_transparent_prefixes(
+                transparent_prefixes,
+            ),
+        }
+    }
+
+    /// The commands of `line` and what the rewrite does with them, under this
+    /// configuration ([`registry::read_call`]).
+    fn read_call<'a>(&self, line: &'a JoinedLine<'_>) -> Call<'a> {
+        registry::read_call(
+            line,
+            &self.exclude_patterns,
+            &self.normalized_transparent_prefixes,
+        )
+    }
 }
 
 /// Determine whether a command of a call was (or, absent a log entry, likely would have
@@ -134,6 +157,7 @@ struct CallCheck<'a> {
     /// never splits or strips it; see `hook_coverage`'s doc comment for why an isolated
     /// chain segment would blind the deny/ask check to sibling segments).
     line: &'a str,
+    attestable: OnceCell<bool>,
     allows_rewrite: OnceCell<bool>,
 }
 
@@ -141,8 +165,17 @@ impl<'a> CallCheck<'a> {
     fn new(line: &'a str) -> Self {
         Self {
             line,
+            attestable: OnceCell::new(),
             allows_rewrite: OnceCell::new(),
         }
+    }
+
+    /// Whether the hook can attest the line: one with a substitution, or a redirect that
+    /// names a file (`git log > out`), it leaves alone.
+    fn attestable(&self) -> bool {
+        *self
+            .attestable
+            .get_or_init(|| !lexer::line_is_unattestable(self.line))
     }
 
     /// Whether the hook's checks of the whole line leave it free to rewrite a command of
@@ -160,9 +193,9 @@ impl<'a> CallCheck<'a> {
                     &ctx.rules.deny,
                     &ctx.rules.ask,
                     &ctx.rules.allow,
-                    &ctx.normalized_transparent_prefixes,
+                    &ctx.rewrite.normalized_transparent_prefixes,
                 );
-                allows_rewrite_with_verdict(self.line, verdict, ctx)
+                allows_rewrite_with_verdict(self, verdict, ctx)
             }
         })
     }
@@ -174,7 +207,7 @@ impl<'a> CallCheck<'a> {
 /// unattestable construct means the hook would never have rewritten this, regardless
 /// of registry support.
 fn allows_rewrite_with_verdict(
-    permission_cmd: &str,
+    call: &CallCheck<'_>,
     verdict: PermissionVerdict,
     ctx: &CoverageContext,
 ) -> bool {
@@ -183,46 +216,21 @@ fn allows_rewrite_with_verdict(
             verdict,
             PermissionVerdict::Deny | PermissionVerdict::Defer | PermissionVerdict::TooComplex
         )
-        && !lexer::line_is_unattestable(permission_cmd)
+        && call.attestable()
 }
 
-/// The segment `strip_disabled_prefix_for_analytics` split into `env_prefix` and
-/// `actual_cmd`, with the words that set `RTK_DISABLED` removed, as the rewrite's refusal
-/// reads them (`registry::sets_rtk_disabled`, so `RTK_DISABLED+=1` too), and every other
-/// word kept verbatim, wrapper included. Words are split the way the rest of discover
-/// splits them (`lexer::tokenize` + `lexer::words`), so a quoted or expanded value
-/// (`RTK_DISABLED='1 2'`, `RTK_DISABLED=$CI`) goes as a whole.
-fn without_rtk_disabled(env_prefix: &str, actual_cmd: &str) -> String {
-    let words = words(env_prefix, &tokenize(env_prefix));
-    let mut line = String::with_capacity(env_prefix.len() + actual_cmd.len() + 1);
-    for ((i, word), sets) in words
-        .iter()
-        .enumerate()
-        .zip(registry::sets_rtk_disabled(&words))
-    {
-        let end = words.get(i + 1).map_or(env_prefix.len(), |next| next.start);
-        if !sets {
-            line.push_str(&env_prefix[word.start..end]);
-        }
-    }
-    if !line.is_empty() && !line.ends_with(char::is_whitespace) {
-        line.push(' ');
-    }
-    line.push_str(actual_cmd);
-    line
-}
-
-/// What a segment carrying `RTK_DISABLED=` contributes to the report.
+/// What a command of the call that the rewrite refuses at an `RTK_DISABLED=` run
+/// contributes to the report.
 #[derive(Debug, PartialEq)]
 enum DisabledSegment {
     /// The hook would have rewritten the line without the assignment: lost savings.
     Bypass,
-    /// The assignment cost nothing. The line as typed without it is classified like
-    /// any other command, so `sudo RTK_DISABLED=1 docker ps` is an unhandled `sudo`
-    /// line rather than hook coverage of `docker ps`.
-    Unbypassed(String),
-    /// `classify_command_at` does not recognise the peeled command; the segment is left
-    /// out of the report.
+    /// The assignment cost nothing. The command without it is classified like any other,
+    /// so a `sudo` the hook does not read through is an unsupported `sudo` line rather
+    /// than hook coverage of the command behind it.
+    Unbypassed,
+    /// No rule takes the command without the assignment: the segment is left out of the
+    /// report.
     Unhandled,
 }
 
@@ -242,35 +250,46 @@ enum DisabledSegment {
 /// own answer for the command, in its place in the call, once its bypass is read past
 /// (`registry::Call::reached_without_bypass`): `docker ps` rewrites by default,
 /// while `sudo docker ps` only does when `sudo` is in `hooks.transparent_prefixes`, and
-/// a consumer at the end of a pipeline is left raw wherever the rewrite leaves it.
+/// a consumer at the end of a pipeline is left raw wherever the rewrite leaves it. `class`
+/// is what the command classifies as, read with the bypass past
+/// (`registry::PartRead::command`).
 fn judge_disabled_segment(
     call: &CallCheck<'_>,
     reached_without_bypass: bool,
-    env_prefix: &str,
-    actual_cmd: &str,
-    start: Position,
+    class: &Classification,
     ctx: &CoverageContext,
 ) -> DisabledSegment {
-    if !matches!(
-        classify_command_at(actual_cmd, start),
-        Classification::Supported { .. }
-    ) {
+    if !matches!(class, Classification::Supported { .. }) {
         return DisabledSegment::Unhandled;
     }
     if reached_without_bypass && call.allows_rewrite(ctx) {
         DisabledSegment::Bypass
     } else {
-        DisabledSegment::Unbypassed(without_rtk_disabled(env_prefix, actual_cmd))
+        DisabledSegment::Unbypassed
     }
 }
 
-/// Whether a command that runs rtk counts as coverage. `rtk bypass <cmd>` (or its
-/// deprecated alias `rtk proxy`) deliberately runs the raw command unfiltered, so it
-/// must not count — that would let the audit flatter itself via its own escape
-/// hatch. This is ground truth read directly from the transcript (the model really
-/// did invoke `rtk`), not a guess.
-pub(crate) fn is_already_rtk(cmd: &str) -> bool {
-    rtk_invocation(&words(cmd, &tokenize(cmd))).is_some_and(|rtk| !rtk.bypass)
+/// How many commands `call` runs, and how many of them rtk filters, read as the report
+/// reads them ([`registry::read_call`], under the same `config`): one that runs rtk, under
+/// any assignments and wrappers, or one with a rule (a supported row in discover) that the
+/// hook rewrites where it stands. A command the hook leaves alone, for an `RTK_DISABLED=`,
+/// an exclusion, its place in a pipe or a line it cannot attest, is not filtered, and nor
+/// is one the rewrite declines, a raw pipe producer included.
+pub(crate) fn commands_rtk_filters(call: &str, config: &RewriteConfig) -> (usize, usize) {
+    let line = JoinedLine::of(call);
+    let Call { reads, reached, .. } = config.read_call(&line);
+    let call = CallCheck::new(&line.text);
+    let filtered = reads
+        .iter()
+        .zip(&reached)
+        .filter(|(read, reached)| {
+            read.runs_rtk()
+                || (**reached
+                    && matches!(read.class, Classification::Supported { .. })
+                    && call.attestable())
+        })
+        .count();
+    (reads.len(), filtered)
 }
 
 /// Aggregation bucket for supported commands.
@@ -317,9 +336,11 @@ enum Disposition {
 /// becomes `rtk read` alone but not in `cat f.log | grep ERROR`, so the producer
 /// of every such line would read as adoption RTK never had.
 ///
-/// `reached` is the rewrite's answer for the command as it would be without an
-/// `RTK_DISABLED=` bypass, if it carries one: a bypassed command the report did not
-/// count as a bypass is judged like the same command without the assignment.
+/// `reached` is whether the hook would take the command where it stands: the rewrite's
+/// answer for it, as it would be without an `RTK_DISABLED=` bypass if it carries one (a
+/// bypassed command the report did not count as a bypass is judged like the same command
+/// without the assignment), on a line the hook can attest or one a measured row records
+/// it rewrote.
 fn disposition(reached: bool, covered: bool, consumes_a_pipe: bool) -> Disposition {
     if reached && covered {
         return Disposition::AlreadyRtk;
@@ -348,56 +369,13 @@ fn average_tokens(category: &str, command: &str) -> usize {
     category_avg_tokens(category, head.get(1).copied().unwrap_or(""))
 }
 
-/// One command of a call, read once for the output shares and for its row.
-struct PartReading<'a> {
-    /// The command as written.
-    text: &'a str,
-    /// The assignments in front of it, and the command after them.
-    env_prefix: &'a str,
-    command: &'a str,
-    /// Whether it is a pipeline's stage after the first, reading the output of the one
-    /// before it.
-    consumes: bool,
-    /// Where it starts: after a pipe, `time` is the program `time`.
-    start: Position,
-    /// What the part classifies as, as written.
-    class: Classification,
-    /// Whether it runs rtk, which the classifier leaves aside although rtk runs a tool.
-    runs_rtk: bool,
-}
-
-impl<'a> PartReading<'a> {
-    fn of(parts: &[ChainPart<'a>]) -> Vec<Self> {
-        parts
-            .iter()
-            .map(|part| {
-                let (env_prefix, command) = strip_disabled_prefix_for_analytics(part.text);
-                let start = if part.consumes_pipe {
-                    Position::STAGE
-                } else {
-                    Position::START
-                };
-                Self {
-                    text: part.text,
-                    env_prefix,
-                    command,
-                    consumes: part.consumes_pipe,
-                    start,
-                    class: classify_command_at(part.text, start),
-                    runs_rtk: part.runs_rtk,
-                }
-            })
-            .collect()
-    }
-
-    /// What weighs its share of the call's output: its category average when it has a
-    /// rule, the average of any command when it runs rtk, [`NO_RULE_WEIGHT`] otherwise.
-    fn weight(&self) -> usize {
-        match &self.class {
-            Classification::Supported { category, .. } => average_tokens(category, self.command),
-            _ if self.runs_rtk => category_avg_tokens("", ""),
-            _ => NO_RULE_WEIGHT,
-        }
+/// What weighs a command's share of its call's output: its category average when it has
+/// a rule, the average of any command when it runs rtk, [`NO_RULE_WEIGHT`] otherwise.
+fn weight(read: &PartRead<'_>) -> usize {
+    match &read.class {
+        Classification::Supported { category, .. } => average_tokens(category, read.command),
+        _ if read.rtk.is_some() => category_avg_tokens("", ""),
+        _ => NO_RULE_WEIGHT,
     }
 }
 
@@ -425,14 +403,14 @@ enum Share {
 /// marked estimated, and a call of one command takes it whole. A command that runs rtk weighs
 /// the average of any command, and one with no rule [`NO_RULE_WEIGHT`]; neither share goes to
 /// a row.
-fn output_shares(parts: &[PartReading<'_>], output_len: Option<usize>) -> Vec<Share> {
+fn output_shares(parts: &[PartRead<'_>], output_len: Option<usize>) -> Vec<Share> {
     let Some(len) = output_len else {
         return vec![Share::Average; parts.len()];
     };
     if let [_] = parts {
         return vec![Share::Known(len)];
     }
-    let weights: Vec<usize> = parts.iter().map(PartReading::weight).collect();
+    let weights: Vec<usize> = parts.iter().map(weight).collect();
     let total: usize = weights.iter().sum();
     weights
         .iter()
@@ -480,32 +458,23 @@ impl Tally {
         // saving the hook does not take.
         let Call {
             parts,
+            reads,
             reached,
             reached_without_bypass,
-        } = registry::read_call(
-            &line,
-            &ctx.exclude_patterns,
-            &ctx.normalized_transparent_prefixes,
-        );
-        let readings = PartReading::of(&parts);
-        let shares = output_shares(&readings, ext_cmd.output_len);
+        } = ctx.rewrite.read_call(&line);
+        let shares = output_shares(&reads, ext_cmd.output_len);
         let call = CallCheck::new(command);
-        for (index, reading) in readings.into_iter().enumerate() {
-            let part = reading.text;
-            let start = reading.start;
+        for (index, read) in reads.into_iter().enumerate() {
             self.total_commands += 1;
 
-            // Detect RTK_DISABLED= bypass before classification
-            let (env_prefix, actual_cmd) = (reading.env_prefix, reading.command);
-            let bypassed = prefix_contains_rtk_disabled(env_prefix);
+            let bypassed = read.bypassed;
             // What the rewrite does with the command: as written, or without its bypass.
             let part_reached = if bypassed {
                 reached_without_bypass[index]
             } else {
                 reached[index]
             };
-            let unbypassed;
-            let part = if bypassed {
+            if bypassed {
                 // A bypass counts only if the hook would have covered the line
                 // without it — otherwise RTK_DISABLED= bypassed nothing (hook not
                 // installed / excluded / would defer / would deny / the wrapper is
@@ -513,41 +482,22 @@ impl Tally {
                 // flagging it would be false advice. See `judge_disabled_segment`'s
                 // doc comment for why this must never go through `hook_coverage`'s
                 // measured-log path. A segment that bypassed nothing falls through
-                // to the normal classification as typed without the assignment,
-                // instead of vanishing from the report.
-                match judge_disabled_segment(
-                    &call,
-                    part_reached,
-                    env_prefix,
-                    actual_cmd,
-                    start,
-                    ctx,
-                ) {
+                // to the normal classification of the command without the
+                // assignment, instead of vanishing from the report.
+                match judge_disabled_segment(&call, part_reached, &read.class, ctx) {
                     DisabledSegment::Bypass => {
                         self.rtk_disabled_count += 1;
                         self.rtk_disabled_estimated += 1;
-                        let display = head_words(actual_cmd).join(" ");
+                        let display = head_words(read.command).join(" ");
                         *self.rtk_disabled_cmds.entry(display).or_insert(0) += 1;
                         continue;
                     }
-                    DisabledSegment::Unbypassed(line) => {
-                        unbypassed = line;
-                        unbypassed.as_str()
-                    }
+                    DisabledSegment::Unbypassed => {}
                     DisabledSegment::Unhandled => continue,
                 }
-            } else {
-                part
-            };
+            }
 
-            // An unbypassed line has lost its `RTK_DISABLED=`, which classification
-            // reads past only in front (`sudo RTK_DISABLED=1 docker ps` is `sudo`).
-            let class = if bypassed {
-                classify_command_at(part, start)
-            } else {
-                reading.class
-            };
-            match class {
+            match read.class {
                 Classification::Supported {
                     rtk_equivalent,
                     category,
@@ -561,19 +511,27 @@ impl Tally {
                         hook_coverage(&call, part_reached, &ext_cmd.tool_use_id, ctx)
                     };
 
-                    let map =
-                        match disposition(part_reached, coverage.is_covered(), reading.consumes) {
-                            Disposition::AlreadyRtk => {
-                                self.already_rtk += 1;
-                                if coverage.is_estimated() {
-                                    self.already_rtk_estimated += 1;
-                                }
-                                continue;
+                    // The hook leaves a line it cannot attest alone, so none of its commands
+                    // is reached; a consumer the rewrite would take there is still no consumer
+                    // it leaves raw on purpose. A measured rewrite is what the hook that ran
+                    // did, whichever lines it attested.
+                    let map = match disposition(
+                        part_reached
+                            && (matches!(coverage, Coverage::Measured(true)) || call.attestable()),
+                        coverage.is_covered(),
+                        parts[index].consumes_pipe && !part_reached,
+                    ) {
+                        Disposition::AlreadyRtk => {
+                            self.already_rtk += 1;
+                            if coverage.is_estimated() {
+                                self.already_rtk_estimated += 1;
                             }
-                            Disposition::Dropped => continue,
-                            Disposition::Missed => &mut self.supported,
-                            Disposition::Opportunity => &mut self.opportunities,
-                        };
+                            continue;
+                        }
+                        Disposition::Dropped => continue,
+                        Disposition::Missed => &mut self.supported,
+                        Disposition::Opportunity => &mut self.opportunities,
+                    };
 
                     let bucket = map
                         .entry(rtk_equivalent)
@@ -592,13 +550,13 @@ impl Tally {
                     let (output_tokens, estimated) = match shares[index] {
                         Share::Known(len) => (len / 4, false),
                         Share::Estimated(len) => (len / 4, true),
-                        Share::Average => (average_tokens(category, actual_cmd), true),
+                        Share::Average => (average_tokens(category, read.command), true),
                     };
                     if estimated {
                         bucket.estimated_occurrences += 1;
                     }
 
-                    let head = head_words(part);
+                    let head = head_words(read.command);
 
                     let savings = (output_tokens as f64 * estimated_savings_pct / 100.0) as usize;
                     bucket.total_output_tokens += savings;
@@ -620,7 +578,7 @@ impl Tally {
                             .entry(base_command)
                             .or_insert_with(|| UnsupportedBucket {
                                 count: 0,
-                                example: part.to_string(),
+                                example: parts[index].text.to_string(),
                             });
                     bucket.count += 1;
                 }
@@ -628,7 +586,7 @@ impl Tally {
                     // Ground truth from the transcript itself — the model really
                     // did invoke `rtk` directly (excluding the deliberate
                     // unfiltered `rtk bypass` escape hatch).
-                    if is_already_rtk(part) {
+                    if read.runs_rtk() {
                         self.already_rtk += 1;
                     }
                     // Otherwise just skip
@@ -749,12 +707,8 @@ pub fn run(
     // today's hook-install state; fall back to a heuristic only for history that
     // predates logging (or isn't Claude Code).
     let hook_installed = hook_status() != HookStatus::Missing;
-    let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
-    // Compiled once here (see `CoverageContext`'s doc comment), not once per
-    // command inside `registry::rewrite_command`.
-    let exclude_patterns = registry::compile_exclude_patterns(&excluded);
-    let normalized_transparent_prefixes =
-        registry::normalize_transparent_prefixes(&transparent_prefixes);
+    // Compiled once here (see `CoverageContext`'s doc comment), not once per call.
+    let rewrite = RewriteConfig::load();
 
     // Loaded once up front (see `PermissionRules`), not once per command.
     let (deny, ask, allow) = permissions::load_rules_for(permissions::Host::Claude);
@@ -802,8 +756,7 @@ pub fn run(
         hook_log,
         hook_installed,
         rules,
-        exclude_patterns,
-        normalized_transparent_prefixes,
+        rewrite,
     };
 
     let mut parse_errors: usize = 0;
@@ -960,8 +913,7 @@ mod tests {
             hook_log: HashMap::new(),
             hook_installed,
             rules: empty_rules(),
-            exclude_patterns: vec![],
-            normalized_transparent_prefixes: vec![],
+            rewrite: RewriteConfig::default(),
         }
     }
 
@@ -974,15 +926,16 @@ mod tests {
         verdict: PermissionVerdict,
         ctx: &CoverageContext,
     ) -> bool {
-        let call = CallCheck {
-            line: permission_cmd,
-            allows_rewrite: OnceCell::from(allows_rewrite_with_verdict(
-                permission_cmd,
-                verdict,
-                ctx,
-            )),
-        };
+        let call = CallCheck::new(permission_cmd);
+        let allows = allows_rewrite_with_verdict(&call, verdict, ctx);
+        call.allows_rewrite.get_or_init(|| allows);
         hook_coverage(&call, reached, "", ctx).is_covered()
+    }
+
+    /// Whether the first command of `cmd` runs rtk, and it is not the escape hatch.
+    fn is_already_rtk(cmd: &str) -> bool {
+        let line = JoinedLine::of(cmd);
+        registry::read_call(&line, &[], &[]).reads[0].runs_rtk()
     }
 
     /// What the estimate says of a command of the call `line`, the rewrite having `reached`
@@ -1108,16 +1061,21 @@ mod tests {
         );
     }
 
-    /// A stage after a pipe is classified where it stands, where `time` is the program
-    /// `time`, also behind a group the pipe follows.
+    /// A stage after a pipe is read where it stands, where `time` is the program `time`,
+    /// which runs the command after it as the reserved word does, also behind a group the
+    /// pipe follows.
     #[test]
-    fn test_a_stage_after_a_pipe_is_classified_where_it_stands() {
+    fn test_a_stage_after_a_pipe_is_read_where_it_stands() {
         for command in ["foo | time cargo test", "{ foo; } | time cargo test"] {
             let tally = tally_of(&[command], &test_ctx(false));
             assert!(
-                tally.unsupported.contains_key("time cargo"),
+                !tally.unsupported.contains_key("time cargo"),
                 "{command:?}: {:?}",
                 tally.unsupported.keys()
+            );
+            assert!(
+                tally.unsupported.keys().all(|key| key == "foo"),
+                "{command:?}"
             );
         }
     }
@@ -1137,17 +1095,16 @@ mod tests {
             row_of_a_call("cargo test | foo\necho done", "rtk cargo"),
             (1, MEASURED * cargo_avg / (cargo_avg + 2 * other))
         );
-        // After a pipe, `time` is the program `time`, which has no rule.
-        for command in [
-            "foo | time cargo test; git status",
-            "git status; : | time echo x",
-        ] {
-            assert_eq!(
-                row_of_a_call(command, "rtk git").1,
-                MEASURED * git_avg / (git_avg + 2 * other),
-                "{command:?}"
-            );
-        }
+        // After a pipe, `time` is the program `time`, which runs the command after it: a
+        // command with a rule takes its share, and one with none, `echo`, does not.
+        assert_eq!(
+            row_of_a_call("foo | time cargo test; git status", "rtk git").1,
+            MEASURED * git_avg / (git_avg + other + cargo_avg)
+        );
+        assert_eq!(
+            row_of_a_call("git status; : | time echo x", "rtk git").1,
+            MEASURED * git_avg / (git_avg + 2 * other)
+        );
     }
 
     /// The commands of a block that a loop spreads over lines are counted once each:
@@ -1305,7 +1262,8 @@ mod tests {
     }
 
     /// A command with no row, or already through rtk, may have written it all. One that
-    /// runs rtk weighs the average of any command, the others the weight of no rule.
+    /// runs rtk weighs the average of any command, behind a wrapper as well, the others the
+    /// weight of no rule.
     #[test]
     fn test_a_command_with_no_row_keeps_its_share() {
         let git_avg = category_avg_tokens("Git", "status");
@@ -1316,6 +1274,11 @@ mod tests {
             ("git status\nrtk bypass cargo test", through_rtk),
             ("git status\nRTK_DISABLED=1 rtk cargo test", through_rtk),
             ("git status; env FOO=1 rtk cargo test", through_rtk),
+            ("git status; timeout 5 rtk cargo test", through_rtk),
+            ("git status; command rtk cargo test", through_rtk),
+            ("git status; nohup rtk cargo test", through_rtk),
+            ("git status; uv run rtk pytest", through_rtk),
+            ("git status; FOO=1 timeout 5 rtk cargo test", through_rtk),
             ("git status; echo rtk", NO_RULE_WEIGHT),
             ("git status\nbash ./build.sh", NO_RULE_WEIGHT),
             ("git status; sed -n 1,9p big.log", NO_RULE_WEIGHT),
@@ -1675,7 +1638,7 @@ mod tests {
     #[test]
     fn test_a_bypassed_command_that_is_no_bypass_is_judged_like_the_plain_one() {
         let mut excluded = test_ctx(true);
-        excluded.exclude_patterns = registry::compile_exclude_patterns(&["git status".to_string()]);
+        excluded.rewrite = RewriteConfig::of(&["git status".to_string()], &[]);
         let mut denied = test_ctx(true);
         denied.rules.deny = vec!["cd /sensitive".to_string()];
         for (bypassed, plain, ctx) in [
@@ -1725,6 +1688,161 @@ mod tests {
         assert!(tally.supported.is_empty());
     }
 
+    /// The command of a part is the word the rewrite's own decision settles at, a fall-through
+    /// search's included: behind a transparent prefix the rewrite reads past the wrapper's
+    /// own layer (`nice -n 19 ionice git status` is `git status` under that prefix), and the
+    /// report files, covers and counts it as that.
+    #[test]
+    fn test_the_command_is_where_the_rewrite_settles_behind_a_user_prefix() {
+        let prefixed = CoverageContext {
+            rewrite: RewriteConfig::of(&[], &["nice -n 19 ionice".to_string()]),
+            ..test_ctx(true)
+        };
+        let command = "nice -n 19 ionice git status";
+        // The hook rewrites it, so it is covered, and nothing is an unsupported `ionice`.
+        let tally = tally_of(&[command], &prefixed);
+        assert_eq!(tally.already_rtk, 1);
+        assert!(tally.unsupported.is_empty() && tally.supported.is_empty());
+        // Without the prefix the rewrite leaves it: an `ionice` row, as it stands.
+        let tally = tally_of(&[command], &test_ctx(true));
+        assert_eq!(tally.already_rtk, 0);
+        assert_eq!(
+            tally.unsupported.keys().collect::<Vec<_>>(),
+            [&"ionice git".to_string()]
+        );
+    }
+
+    /// Where nothing settles behind a user prefix (no rule, or the command is excluded) the
+    /// command is still the one behind the prefix, which the search read the walk of, not the
+    /// word the first walk stopped at: a `frobnicate x` there is a `frobnicate x` row as
+    /// behind `timeout 30`, and an excluded `git status` is the opportunity a plain one is.
+    #[test]
+    fn test_nothing_settled_behind_a_user_prefix_is_read_behind_it() {
+        let under = |prefixes: &[&str], excluded: &[&str]| CoverageContext {
+            rewrite: RewriteConfig::of(
+                &excluded.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+                &prefixes.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+            ),
+            ..test_ctx(true)
+        };
+        let rows = |tally: &Tally| {
+            (
+                tally.unsupported.keys().cloned().collect::<Vec<_>>(),
+                counts(&tally.supported),
+                counts(&tally.opportunities),
+                tally.already_rtk,
+                tally.rtk_disabled_count,
+            )
+        };
+        let nice = under(&["nice -n 19 ionice"], &[]);
+        assert_eq!(
+            rows(&tally_of(&["nice -n 19 ionice frobnicate x"], &nice)),
+            rows(&tally_of(&["timeout 30 frobnicate x"], &nice)),
+        );
+        assert_eq!(
+            tally_of(&["nice -n 19 ionice frobnicate x"], &nice)
+                .unsupported
+                .keys()
+                .collect::<Vec<_>>(),
+            [&"frobnicate x".to_string()]
+        );
+        let excluded = under(&["nice -n 19 ionice"], &["git"]);
+        assert_eq!(
+            rows(&tally_of(&["nice -n 19 ionice git status"], &excluded)),
+            rows(&tally_of(&["git status"], &excluded)),
+        );
+        assert_eq!(
+            counts(&tally_of(&["nice -n 19 ionice git status"], &excluded).opportunities),
+            vec![("rtk git", 1)]
+        );
+        // A command that is none behind the prefix is the row of the layer behind it.
+        assert_eq!(
+            tally_of(&["nice -n 19 ionice env -i git status"], &nice)
+                .unsupported
+                .keys()
+                .collect::<Vec<_>>(),
+            [&"env".to_string()]
+        );
+        // A bypass behind the prefix of a command the rewrite leaves alone keeps the row the
+        // command has without the bypass.
+        let timeout = under(&["timeout 5"], &["git"]);
+        let tally = tally_of(&["timeout 5 RTK_DISABLED=1 git status"], &timeout);
+        assert_eq!(
+            rows(&tally),
+            rows(&tally_of(&["RTK_DISABLED=1 git status"], &timeout))
+        );
+        assert_eq!(counts(&tally.opportunities), vec![("rtk git", 1)]);
+        assert!(tally.unsupported.is_empty());
+    }
+
+    /// The command is read under the user's `exclude_commands` as the rewrite reads it: an
+    /// excluded command keeps a routable wrapper from being matched whole, so the call is
+    /// the command it wraps, which the rewrite leaves alone, not an `rtk uv` row.
+    #[test]
+    fn test_the_command_is_read_under_the_users_exclusions() {
+        let command = "uv run python x.py";
+        let tally = tally_of(&[command], &test_ctx(true));
+        assert_eq!(tally.already_rtk, 1);
+        let mut excluded = test_ctx(true);
+        excluded.rewrite = RewriteConfig::of(&["python".to_string()], &[]);
+        let tally = tally_of(&[command], &excluded);
+        assert_eq!(tally.already_rtk, 0);
+        assert!(tally.supported.is_empty() && tally.opportunities.is_empty());
+        assert_eq!(
+            tally.unsupported.keys().collect::<Vec<_>>(),
+            [&"python".to_string()]
+        );
+    }
+
+    /// A command the walk reaches that is no command (`env`'s own option, an assignment
+    /// behind a wrapper) stays in the tables as the layer that owns it, which the rewrite
+    /// leaves alone: an `env` row, where there had been `-i git`.
+    #[test]
+    fn test_an_option_of_a_layer_keeps_the_call_in_the_tables_as_the_layer() {
+        for (command, row) in [
+            ("env -i git status", "env"),
+            ("env -u FOO git status", "env"),
+            ("env -- git status", "env"),
+            ("FOO=1 env -u BAR cargo test", "FOO=1 env"),
+            // An assignment behind a wrapper names a program.
+            ("nice FOO=1 git status", "nice FOO=1"),
+        ] {
+            let tally = tally_of(&[command], &test_ctx(true));
+            assert_eq!(
+                tally.unsupported.keys().collect::<Vec<_>>(),
+                [&row.to_string()],
+                "{command:?}"
+            );
+            assert_eq!(tally.already_rtk, 0, "{command:?}");
+        }
+    }
+
+    /// A bypass needs a rule: the rewrite takes `stat` through a filter and `bash -c` by its
+    /// script, but neither is a command the report has a row for, with the bypass or
+    /// without it, so neither goes into the bypass bucket.
+    #[test]
+    fn test_a_bypass_needs_a_rule_not_only_an_edit() {
+        let ctx = test_ctx(true);
+        for command in [
+            "RTK_DISABLED=1 stat f",
+            "RTK_DISABLED=1 bash -c 'git status'",
+        ] {
+            assert!(
+                registry::rewrite_command(&command.replacen("RTK_DISABLED=1 ", "", 1), &[], &[])
+                    .is_some(),
+                "the rewrite takes {command:?} without the bypass"
+            );
+            assert_eq!(
+                judge(command, &ctx),
+                DisabledSegment::Unhandled,
+                "{command:?}"
+            );
+            let tally = tally_of(&[command], &ctx);
+            assert_eq!(tally.rtk_disabled_count, 0, "{command:?}");
+            assert!(tally.supported.is_empty() && tally.opportunities.is_empty());
+        }
+    }
+
     /// A bypassed command ran raw, whatever the hook logged for the call: a measured row is
     /// one decision for the whole call, and it says nothing of the command the bypass kept
     /// out of the rewrite. Such a command that is no bypass is not covered, so it is a
@@ -1762,6 +1880,241 @@ mod tests {
         // A command that is not bypassed takes its measured row.
         let tally = tally_with_row("git status", &mut test_ctx(false));
         assert_eq!(tally.already_rtk, 1);
+    }
+
+    /// A line the hook cannot attest has no command the estimate counts as reached, and a
+    /// measured row that the hook left it alone (the `defer` the hook logs for such a line)
+    /// keeps it so; a measured rewrite, as a hook of another version may have made, covered
+    /// its commands.
+    #[test]
+    fn test_a_measured_rewrite_covers_a_line_the_estimate_cannot_attest() {
+        let line = "git log > out";
+        let mut ctx = test_ctx(true);
+        let tally = tally_of(&[line], &ctx);
+        assert_eq!(tally.already_rtk, 0);
+        assert_eq!(counts(&tally.opportunities), vec![("rtk git", 1)]);
+
+        let tally_with_row = |outcome, ctx: &mut CoverageContext| {
+            ctx.hook_log.insert("toolu_1".to_string(), record(outcome));
+            let mut command = scanned(line, None);
+            command.tool_use_id = "toolu_1".to_string();
+            let mut tally = Tally::default();
+            tally.add(&command, ctx);
+            tally
+        };
+        for outcome in [HookOutcome::Defer, HookOutcome::Deny] {
+            let tally = tally_with_row(outcome, &mut ctx);
+            assert_eq!(tally.already_rtk, 0);
+            assert!(tally.supported.is_empty());
+            assert_eq!(counts(&tally.opportunities), vec![("rtk git", 1)]);
+        }
+        let tally = tally_with_row(HookOutcome::Allow, &mut ctx);
+        assert_eq!(tally.already_rtk, 1);
+        assert!(tally.opportunities.is_empty() && tally.supported.is_empty());
+    }
+
+    /// A command is read where the rewrite's walk finds it, under the assignments, keyword
+    /// prefixes and process wrappers it reads through: classified, sized and named as the
+    /// command it runs (`timeout 30 cargo test` is `cargo test`).
+    #[test]
+    fn test_the_report_reads_the_command_under_its_wrappers() {
+        let ctx = test_ctx(false);
+        for (command, shown) in [
+            ("timeout 30 cargo test", "cargo test"),
+            ("time cargo test", "cargo test"),
+            ("FOO=1 time -p cargo test", "cargo test"),
+            ("nohup cargo test", "cargo test"),
+            ("command cargo test", "cargo test"),
+            ("env FOO=1 cargo test", "cargo test"),
+            ("A=\"b c\" cargo test", "cargo test"),
+            ("git status && timeout 5 cargo test", "cargo test"),
+            ("if timeout 5 cargo test; then echo ok; fi", "cargo test"),
+        ] {
+            let mut tally = tally_of(&[command], &ctx);
+            assert!(tally.unsupported.is_empty(), "{command:?}");
+            // Sized as the command it runs, not by the wrapper's words.
+            assert_eq!(
+                tally.supported["rtk cargo"].total_raw_output_tokens,
+                category_avg_tokens("Cargo", "test"),
+                "{command:?}"
+            );
+            let rows = tally.take_rows().supported;
+            let row = rows.iter().find(|row| row.rtk_equivalent == "rtk cargo");
+            assert_eq!(
+                row.map(|row| row.command.as_str()),
+                Some(shown),
+                "{command:?}"
+            );
+        }
+
+        // An `rtk` behind them is rtk, and its escape hatch still is not. rtk does not read
+        // `RTK_DISABLED`, so an `rtk` behind one filters as any other.
+        for (command, rtk) in [
+            ("FOO=1 rtk git status", 1),
+            ("env rtk git status", 1),
+            ("timeout 30 rtk git status", 1),
+            ("command rtk git status", 1),
+            ("uv run rtk pytest", 1),
+            ("RTK_DISABLED=1 rtk git status", 1),
+            ("FOO=1 rtk bypass git status", 0),
+        ] {
+            let tally = tally_of(&[command], &ctx);
+            assert_eq!(tally.already_rtk, rtk, "{command:?}");
+            assert!(tally.unsupported.is_empty(), "{command:?}");
+            assert_eq!(tally.rtk_disabled_count, 0, "{command:?}");
+        }
+        // Under a routable wrapper, the escape hatch is no adoption, and the rewrite leaves
+        // the call as it is, so there is no row.
+        let tally = tally_of(&["uv run rtk bypass pytest"], &ctx);
+        assert_eq!(tally.already_rtk, 0);
+        assert!(tally.supported.is_empty() && tally.opportunities.is_empty());
+
+        // A layer with no command after it is the command, as written: a redirect, or an
+        // option of the layer itself.
+        for command in [
+            "exec >log 2>&1",
+            "command -v cargo",
+            "FOO=1 command -v cargo",
+            "timeout 5 command -v cargo",
+        ] {
+            let line = JoinedLine::of(command);
+            let call = registry::read_call(&line, &[], &[]);
+            let read = call.reads[0].command;
+            assert!(command.ends_with(read), "{command:?} read as {read:?}");
+            assert!(
+                read.starts_with("exec") || read.starts_with("command"),
+                "{command:?} read as {read:?}"
+            );
+        }
+        // Assignments alone run no command.
+        let tally = tally_of(&["rc=1", "FOO=1 BAR=2"], &ctx);
+        assert!(tally.unsupported.is_empty());
+        // A wrapper followed by what reads as grammar keeps the call in the tables, filed as
+        // written: bash runs a program named `[[` there.
+        let tally = tally_of(&["timeout 5 [[ -f x ]]"], &ctx);
+        assert_eq!(
+            tally.unsupported.keys().collect::<Vec<_>>(),
+            [&"timeout 5".to_string()]
+        );
+        // Behind an assignment `[[` names a program too, and the call stays as the layer's.
+        let tally = tally_of(&["FOO=1 [[ -f x ]]", "env FOO=1 [[ -f x ]]"], &ctx);
+        let mut rows: Vec<_> = tally.unsupported.keys().map(String::as_str).collect();
+        rows.sort();
+        assert_eq!(rows, ["FOO=1 [[", "env FOO=1"]);
+        // Past the layers the rewrite peels before it stops, nothing is read: it decides
+        // nothing about the command there, and the whole part is filed.
+        let deep = format!("FOO=1 {}cargo test", "nohup ".repeat(9));
+        assert_eq!(registry::rewrite_command(&deep, &[], &[]), None);
+        let tally = tally_of(&[&deep], &ctx);
+        assert!(!tally.supported.contains_key("rtk cargo"));
+        assert!(!tally.opportunities.contains_key("rtk cargo"));
+        assert_eq!(
+            tally.unsupported.keys().collect::<Vec<_>>(),
+            [&"FOO=1 nohup".to_string()]
+        );
+        // The command the walk reaches being none, the part is read at the last layer the
+        // walk peeled, the layer that owns it: the wrapper that stands next to a grammar
+        // word, an `env` run too.
+        for (command, read) in [
+            ("timeout 5 time", "timeout 5 time"),
+            ("nice timeout 5 time", "timeout 5 time"),
+            ("FOO=1 nohup timeout 5 time", "timeout 5 time"),
+            ("timeout 5 env FOO=1 [[ -f x ]]", "env FOO=1 [[ -f x ]]"),
+        ] {
+            let line = JoinedLine::of(command);
+            let call = registry::read_call(&line, &[], &[]);
+            assert_eq!(call.reads[0].command, read, "{command:?}");
+        }
+        // An unsupported row keeps the command as it ran for its example.
+        let tally = tally_of(&["timeout 30 frobnicate x"], &ctx);
+        assert_eq!(
+            tally.unsupported["frobnicate x"].example,
+            "timeout 30 frobnicate x"
+        );
+    }
+
+    /// The hook leaves a line it cannot attest alone, so none of its commands is reached:
+    /// they are opportunities, a change to the line reaches them.
+    #[test]
+    fn test_a_line_the_hook_leaves_alone_is_reached_nowhere() {
+        for command in [
+            "git log > out",
+            "git log $(git rev-parse HEAD)",
+            "git status; echo $(date)",
+            "echo $(date)\ngit status",
+            "RTK_DISABLED=1 git log > out",
+        ] {
+            let tally = tally_of(&[command], &test_ctx(false));
+            assert!(tally.supported.is_empty(), "{command:?}");
+            assert!(tally.opportunities.contains_key("rtk git"), "{command:?}");
+        }
+        // A pipe consumer the rewrite would take there is an opportunity too, behind its
+        // own bypass as well.
+        for command in [
+            "git log | grep foo > out",
+            "git log | RTK_DISABLED=1 grep foo > out",
+        ] {
+            for hook in [false, true] {
+                let tally = tally_of(&[command], &test_ctx(hook));
+                assert!(tally.supported.is_empty(), "{command:?}");
+                assert_eq!(
+                    counts(&tally.opportunities),
+                    [("rtk git", 1), ("rtk grep", 1)],
+                    "{command:?} hook={hook}"
+                );
+            }
+        }
+        // A copy or `/dev/null` names no file.
+        let tally = tally_of(&["git log >&2", "git status 2>/dev/null"], &test_ctx(false));
+        assert_eq!(tally.supported["rtk git"].count, 2);
+    }
+
+    /// A bypass is read where the rewrite refuses it, behind the wrappers it reads through,
+    /// and named after the command it kept the hook off, which is the command the rewrite
+    /// finds with the run read past.
+    #[test]
+    fn test_a_bypass_is_named_after_the_command_it_kept_the_hook_off() {
+        let ctx = CoverageContext {
+            rewrite: RewriteConfig::of(&[], &["sudo".to_string(), "nohup".to_string()]),
+            ..test_ctx(true)
+        };
+        for (command, named) in [
+            ("RTK_DISABLED=1 git status", "git status"),
+            ("RTK_DISABLED=1 timeout 5 git status", "git status"),
+            ("RTK_DISABLED=1 nice git status", "git status"),
+            ("RTK_DISABLED=1 time cargo test", "cargo test"),
+            ("RTK_DISABLED=1 time -p cargo test", "cargo test"),
+            ("FOO=1 RTK_DISABLED=1 env git status", "git status"),
+            ("timeout 5 env RTK_DISABLED=1 git status", "git status"),
+            ("sudo RTK_DISABLED=1 docker ps", "docker ps"),
+            ("RTK_DISABLED=1 sudo docker ps", "docker ps"),
+            ("nohup RTK_DISABLED=1 git status", "git status"),
+        ] {
+            let tally = tally_of(&[command], &ctx);
+            let named_as: Vec<_> = tally.rtk_disabled_cmds.keys().map(String::as_str).collect();
+            assert_eq!(named_as, [named], "{command:?}");
+            assert_eq!(tally.rtk_disabled_count, 1, "{command:?}");
+            assert!(tally.unsupported.is_empty(), "{command:?}");
+        }
+        // An assignment alone runs no command, so it keeps nothing off the others.
+        for command in [
+            "RTK_DISABLED=1 && git status && RTK_DISABLED=1 cargo test",
+            "RTK_DISABLED=1; RTK_DISABLED=1 cargo test",
+        ] {
+            let tally = tally_of(&[command], &test_ctx(true));
+            assert_eq!(tally.rtk_disabled_count, 1, "{command:?}");
+            assert_eq!(
+                tally.rtk_disabled_cmds.get("cargo test"),
+                Some(&1),
+                "{command:?}"
+            );
+        }
+        // Each line of a call is read.
+        let tally = tally_of(
+            &["RTK_DISABLED=1 git status\nRTK_DISABLED=1 git log"],
+            &test_ctx(true),
+        );
+        assert_eq!(tally.rtk_disabled_count, 2);
     }
 
     /// The estimate of a command is the rewrite's: one the rewrite of the call leaves
@@ -1905,71 +2258,37 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_without_rtk_disabled_keeps_every_other_word() {
-        for (env_prefix, expected) in [
-            ("RTK_DISABLED=1 ", "docker ps"),
-            ("sudo RTK_DISABLED=1 ", "sudo docker ps"),
-            ("RTK_DISABLED=1 sudo -E ", "sudo -E docker ps"),
-            ("FOO=1 RTK_DISABLED=true ", "FOO=1 docker ps"),
-            ("FOO='a  b' RTK_DISABLED=1 ", "FOO='a  b' docker ps"),
-            ("RTK_DISABLED='1 2' ", "docker ps"),
-            ("RTK_DISABLED=$CI ", "docker ps"),
-            ("sudo", "sudo docker ps"),
-            ("RTK_DISABLED+=1 ", "docker ps"),
-            ("FOO=1 RTK_DISABLED+=1 ", "FOO=1 docker ps"),
-            ("env RTK_DISABLED+=1 ", "env RTK_DISABLED+=1 docker ps"),
-        ] {
-            assert_eq!(
-                without_rtk_disabled(env_prefix, "docker ps"),
-                expected,
-                "{env_prefix:?}"
-            );
-        }
-    }
-
     /// The report's judgement of `raw`, a call of one command carrying `RTK_DISABLED=`: what
     /// the rewrite of the call does with it once the bypass is read past.
     fn judge(raw: &str, ctx: &CoverageContext) -> DisabledSegment {
         let line = JoinedLine::of(raw);
-        let call = registry::read_call(
-            &line,
-            &ctx.exclude_patterns,
-            &ctx.normalized_transparent_prefixes,
-        );
-        let (env_prefix, actual_cmd) = strip_disabled_prefix_for_analytics(raw);
+        let call = ctx.rewrite.read_call(&line);
         judge_disabled_segment(
             &CallCheck::new(raw),
             call.reached_without_bypass[0],
-            env_prefix,
-            actual_cmd,
-            Position::START,
+            &call.reads[0].class,
             ctx,
         )
     }
 
     #[test]
-    fn test_disabled_segment_is_judged_as_typed_without_the_bypass() {
-        // The analytics peel strips `sudo` so the bypass can be *detected*, but the
-        // counterfactual ("would the hook have rewritten this without the
-        // RTK_DISABLED=") keeps the wrapper. `docker ps` always rewrites; `sudo
-        // docker ps` does not (#146 / test_rewrite_sudo_passthrough), so a
-        // sudo-wrapped bypass recovers no savings: it is judged as the line
-        // without the assignment, not as a bypass.
-        let unbypassed = |line: &str| DisabledSegment::Unbypassed(line.to_string());
+    fn test_disabled_segment_is_judged_as_the_command_without_the_bypass() {
+        // The walk reads through the layers the rewrite reads through, and no further:
+        // `sudo` is none unless the user declares it transparent, so `sudo
+        // RTK_DISABLED=1 docker ps` has no bypass to read past and is the `sudo` command
+        // it is written as, as `sudo FOO=1 docker ps` is. A bypass that recovers no
+        // savings is judged as the command without the assignment, not as a bypass.
         let ctx = test_ctx(true);
-        assert_eq!(
-            judge("sudo RTK_DISABLED=1 docker ps", &ctx),
-            unbypassed("sudo docker ps")
-        );
+        let tally = tally_of(&["sudo RTK_DISABLED=1 docker ps"], &ctx);
+        assert_eq!(tally.rtk_disabled_count, 0);
+        let rows: Vec<&String> = tally.unsupported.keys().collect();
+        assert_eq!(rows, vec!["sudo RTK_DISABLED=1"]);
+        // The command behind the run is read with the run past, so a bypass of what is
+        // not a command a rule or the rewrite takes is left out of the report.
         assert_eq!(
             judge("RTK_DISABLED=1 env -i git status", &ctx),
-            unbypassed("env -i git status")
+            DisabledSegment::Unhandled
         );
-        // Its row is the line without the assignment, not the line as typed.
-        let tally = tally_of(&["sudo RTK_DISABLED=1 docker ps"], &ctx);
-        let rows: Vec<&String> = tally.unsupported.keys().collect();
-        assert_eq!(rows, vec!["sudo docker"]);
         // A wrapper's script too complex to read rewrites nothing of the line.
         let line = "git status; bash -c 'a[1 # 2]=b'";
         assert!(!estimate_with_verdict(
@@ -1980,7 +2299,7 @@ mod tests {
         ));
         // A sudo-wrapped bypass is a real one once the user declares sudo transparent.
         let mut ctx_sudo = test_ctx(true);
-        ctx_sudo.normalized_transparent_prefixes = vec!["sudo".to_string()];
+        ctx_sudo.rewrite.normalized_transparent_prefixes = vec!["sudo".to_string()];
         assert_eq!(
             judge("sudo RTK_DISABLED=1 docker ps", &ctx_sudo),
             DisabledSegment::Bypass
@@ -2002,7 +2321,7 @@ mod tests {
         // No hook installed: nothing was bypassed; the command is a plain miss.
         assert_eq!(
             judge("RTK_DISABLED=1 docker ps", &test_ctx(false)),
-            unbypassed("docker ps")
+            DisabledSegment::Unbypassed
         );
         assert_eq!(
             judge("RTK_DISABLED=1 frobnicate x", &ctx),
@@ -2039,7 +2358,7 @@ mod tests {
             1,
             "the hook takes it unless excluded"
         );
-        ctx.exclude_patterns = registry::compile_exclude_patterns(&["grep".to_string()]);
+        ctx.rewrite = RewriteConfig::of(&["grep".to_string()], &[]);
         let tally = tally_of(&["grep -n foo bar.py"], &ctx);
         assert_eq!(tally.already_rtk, 0);
         assert_eq!(counts(&tally.opportunities), vec![("rtk grep", 1)]);
@@ -2129,28 +2448,12 @@ mod tests {
         assert_eq!((tally.already_rtk, tally.rtk_disabled_count), (1, 1));
     }
 
-    #[test]
-    fn test_is_already_rtk_plain_rewrite() {
-        assert!(is_already_rtk("rtk grep -n foo bar.py"));
-    }
-
-    #[test]
-    fn test_is_already_rtk_excludes_bypass_escape_hatch() {
-        // rtk#3148 secondary finding: `rtk bypass` deliberately bypasses filtering,
-        // so it must not count as coverage.
-        assert!(!is_already_rtk("rtk bypass grep -n foo bar.py"));
-    }
-
-    #[test]
-    fn test_is_already_rtk_false_for_unrelated_command() {
-        assert!(!is_already_rtk("grep -n foo bar.py"));
-    }
-
-    /// The first word decides, as bash ends it (at a space, a tab or a newline)
-    /// and removes its quoting.
+    /// The first word decides, as bash ends it (at a space, a tab or a newline) and
+    /// removes its quoting, and `rtk bypass` (or `rtk proxy`) is no adoption.
     #[test]
     fn test_is_already_rtk_reads_the_first_word() {
         for cmd in [
+            "rtk grep -n foo bar.py",
             "rtk\tgit status",
             "  rtk  ls",
             "rtk\nls",
@@ -2162,6 +2465,8 @@ mod tests {
             assert!(is_already_rtk(cmd), "{cmd:?}");
         }
         for cmd in [
+            "grep -n foo bar.py",
+            "rtk bypass grep -n foo bar.py",
             "rtk\tproxy git status",
             "rtk  proxy ls",
             "'rtk' 'proxy' ls",
