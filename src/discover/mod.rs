@@ -65,7 +65,7 @@ struct PermissionRules {
     allow: Vec<String>,
 }
 
-/// Everything `hook_coverage`/`estimate_hook_coverage` need to judge a command,
+/// Everything `hook_coverage` and the bypass counterfactual need to judge a command,
 /// besides the command (and `tool_use_id`) itself — built once per `discover` run
 /// and passed by reference to every per-command call.
 ///
@@ -74,10 +74,9 @@ struct PermissionRules {
 /// at a call site would compile silently and misclassify RTK_DISABLED bypass
 /// coverage (code-review finding on rtk-ai/rtk#3206's fixup round).
 ///
-/// `exclude_patterns`/`normalized_transparent_prefixes` are `registry::
-/// rewrite_command`'s exclude-pattern regexes and normalized prefixes,
-/// precompiled once per scan here instead of inside `rewrite_command` once per command
-/// that `estimate_hook_coverage` asks about.
+/// `exclude_patterns`/`normalized_transparent_prefixes` are the rewrite's exclude-pattern
+/// regexes and normalized prefixes, precompiled once per scan here instead of once per
+/// call that `registry::read_call` asks it about.
 struct CoverageContext {
     hook_log: HashMap<String, HookDecisionRecord>,
     hook_installed: bool,
@@ -86,37 +85,27 @@ struct CoverageContext {
     normalized_transparent_prefixes: Vec<String>,
 }
 
-/// Determine whether `cmd` was (or, absent a log entry, likely would have been)
-/// routed through RTK by the installed PreToolUse hook.
+/// Determine whether a command of a call was (or, absent a log entry, likely would have
+/// been) routed through RTK by the installed PreToolUse hook.
 ///
-/// Do NOT call this for an `RTK_DISABLED=`-bypassed command — call
-/// `would_be_covered_without_bypass` instead. `hook_coverage` trusts a measured
-/// `hook_decisions` row as ground truth, but for a bypassed command the real logged
-/// decision is always `Defer` (see `registry.rs` #345 / `get_rewritten`), which only
-/// confirms the hook stepped aside — it says nothing about whether the command would
-/// have been covered absent the bypass, which is the actual question the
-/// RTK_DISABLED= bucket is answering. Consulting the measured log there made that
-/// bucket silently collapse to (near) zero once real `hook_decisions` rows
-/// accumulated (rtk-ai/rtk#3206 review) — the counterfactual can only ever be
-/// answered by the estimate.
+/// Not for an `RTK_DISABLED=`-bypassed command: whether the bypass cost a saving is
+/// `judge_disabled_segment`'s question (its doc says why a measured row cannot answer
+/// it), and one that cost none ran raw, so `Tally::add` takes it as not covered.
 ///
 /// The caller splits a chained command (`a && b`) into parts and calls this once
 /// per part with the *same* `tool_use_id`, since Claude Code's PreToolUse hook
 /// fires once per tool call for the whole raw command. `call` MUST hold the full,
 /// unsplit command line, as the hook reads it, even though this is
-/// being asked about one `part` of it — passing an isolated segment here would
-/// silently blind the `Deny`/`Ask` permission check to sibling segments (a
-/// chain-wide deny rule matching only `a` would go undetected when checking `b` in
-/// isolation, since `permissions::check_command_with_rules` only re-derives the
-/// chain from whatever string it's given). The real rewrite (`registry::
-/// rewrite_command`) genuinely is best-effort *per segment* though — it can
-/// rewrite just `a` and leave an unsupported `b` untouched — so `rewrite_cmd` is
-/// deliberately the isolated `part`, not the call's line. Neither `Measured` (one
-/// `hook_decisions` row per `tool_use_id`, no per-segment detail) nor `Estimated`
-/// re-derives the rewrite's per-segment split, so a segment can still be reported
-/// covered/missed based on a sibling segment's rewrite fate — that residual
-/// imprecision is unavoidable without per-segment hook logging and isn't worth
-/// chasing further. `Estimated` is the fallback for history that predates
+/// being asked about one part of it — a chain-wide deny rule matching only `a` must
+/// still keep the hook off `b`, and `permissions::check_command_with_rules` only
+/// re-derives the chain from whatever string it's given. The real rewrite is
+/// genuinely best-effort *per segment* though — it can rewrite just `a` and leave an
+/// unsupported `b` untouched — so the estimate asks it: `reached` says whether the
+/// rewrite of the whole call, read once ([`registry::read_call`]), edits this part. A
+/// `hook_decisions` row is one decision for the whole call, with no per-segment
+/// detail, so a measured answer can still be reported covered/missed based on a sibling
+/// segment's rewrite fate; that residual imprecision is unavoidable without
+/// per-segment hook logging. `Estimated` is the fallback for history that predates
 /// `hook_decisions` logging — but note it does NOT simply fade out over time:
 /// `hook_decisions` rows are pruned by the same `DEFAULT_HISTORY_DAYS` retention
 /// window as the rest of the tracking DB (see `Tracker::cleanup_hook_decisions`),
@@ -124,14 +113,14 @@ struct CoverageContext {
 /// `Estimated`, indefinitely, not just during an initial backfill period.
 fn hook_coverage(
     call: &CallCheck<'_>,
-    rewrite_cmd: &str,
+    reached: bool,
     tool_use_id: &str,
     ctx: &CoverageContext,
 ) -> Coverage {
     if let Some(record) = ctx.hook_log.get(tool_use_id) {
         return Coverage::Measured(record.decision.is_covered());
     }
-    Coverage::Estimated(estimate_hook_coverage(call, rewrite_cmd, ctx))
+    Coverage::Estimated(reached && call.allows_rewrite(ctx))
 }
 
 /// A call as the hook's permission checks read it: its whole line, with what they decide
@@ -179,31 +168,6 @@ impl<'a> CallCheck<'a> {
     }
 }
 
-/// Best-effort guess at whether the *currently* installed hook would rewrite this
-/// command, used only when no `hook_decisions` log row exists for this exact
-/// invocation.
-///
-/// Takes two forms of the command because callers generally need them to differ:
-/// `call` holds the line checked against permission rules and scanned for
-/// unattestable constructs ([`CallCheck`]). `rewrite_cmd` is
-/// passed to `registry::rewrite_command`, which is genuinely best-effort
-/// *per segment* — pass the isolated segment being evaluated. For the RTK_DISABLED=
-/// bypass call site specifically, `rewrite_cmd` must also have its `RTK_DISABLED=`
-/// words removed (`without_rtk_disabled` does it, keeping any wrapper),
-/// since `rewrite_command` itself detects and refuses a raw
-/// `RTK_DISABLED=` prefix (registry.rs #345) — passing it unremoved there would
-/// make every bypassed command register as never-covered regardless of whether
-/// it's otherwise supported, defeating the point of the RTK_DISABLED bucket.
-fn estimate_hook_coverage(call: &CallCheck<'_>, rewrite_cmd: &str, ctx: &CoverageContext) -> bool {
-    call.allows_rewrite(ctx)
-        && registry::rewrite_command_precompiled(
-            rewrite_cmd,
-            &ctx.exclude_patterns,
-            &ctx.normalized_transparent_prefixes,
-        )
-        .is_some()
-}
-
 /// Pure core of [`CallCheck::allows_rewrite`], taking the permission verdict directly so
 /// it's testable without depending on real config files. Mirrors the real hook's own
 /// decision order (`hooks::decision::decide`): a `Deny`-rule match or an
@@ -222,53 +186,23 @@ fn allows_rewrite_with_verdict(
         && !lexer::line_is_unattestable(permission_cmd)
 }
 
-/// Would the call (its line still carrying its `RTK_DISABLED=` prefix) have been covered
-/// by the hook if the bypass weren't there?
-///
-/// The *only* correct way to answer this question — deliberately named and kept
-/// separate from `hook_coverage` so an RTK_DISABLED= call site reaches for this
-/// instead of `hook_coverage` by construction, not just by doc comment. A prior
-/// review round had to catch exactly this mixup once already: `hook_coverage`
-/// trusts a measured `hook_decisions` row as ground truth, but a bypassed
-/// command's real logged decision is always `Defer` (`get_rewritten` refuses an
-/// `RTK_DISABLED=` prefix unconditionally — registry.rs #345), which only confirms
-/// the hook stepped aside and says nothing about the counterfactual this function
-/// answers. Consulting the measured log there made the RTK_DISABLED bucket
-/// silently collapse to (near) zero once real `hook_decisions` rows accumulated
-/// (rtk-ai/rtk#3206 review) — only the estimate can ever answer this.
-///
-/// `call` must hold the *full, unsplit* command line, as the hook reads it, prefix
-/// and any sibling chain segments intact —
-/// what the real hook's permission check would have seen (see `hook_coverage`'s
-/// doc comment for why an isolated segment would blind the deny/ask check to
-/// siblings). `unbypassed_cmd` is the segment as [`without_rtk_disabled`]
-/// rebuilds it: `docker ps` rewrites by default, while `sudo docker ps` only does when
-/// `sudo` is in `hooks.transparent_prefixes`, so asking about the peeled command
-/// alone would report savings the hook never offered.
-fn would_be_covered_without_bypass(
-    call: &CallCheck<'_>,
-    unbypassed_cmd: &str,
-    ctx: &CoverageContext,
-) -> bool {
-    estimate_hook_coverage(call, unbypassed_cmd, ctx)
-}
-
 /// The segment `strip_disabled_prefix_for_analytics` split into `env_prefix` and
-/// `actual_cmd`, with its `RTK_DISABLED=` words removed and every other word kept
-/// verbatim, wrapper included. Words are split the way the rest of discover splits
-/// them (`lexer::tokenize` + `lexer::words`), so a quoted or expanded value
+/// `actual_cmd`, with the words that set `RTK_DISABLED` removed, as the rewrite's refusal
+/// reads them (`registry::sets_rtk_disabled`, so `RTK_DISABLED+=1` too), and every other
+/// word kept verbatim, wrapper included. Words are split the way the rest of discover
+/// splits them (`lexer::tokenize` + `lexer::words`), so a quoted or expanded value
 /// (`RTK_DISABLED='1 2'`, `RTK_DISABLED=$CI`) goes as a whole.
 fn without_rtk_disabled(env_prefix: &str, actual_cmd: &str) -> String {
-    let starts: Vec<usize> = words(env_prefix, &tokenize(env_prefix))
-        .iter()
-        .map(|word| word.start)
-        .collect();
+    let words = words(env_prefix, &tokenize(env_prefix));
     let mut line = String::with_capacity(env_prefix.len() + actual_cmd.len() + 1);
-    for (i, &start) in starts.iter().enumerate() {
-        let end = starts.get(i + 1).copied().unwrap_or(env_prefix.len());
-        let word = &env_prefix[start..end];
-        if !word.starts_with("RTK_DISABLED=") {
-            line.push_str(word);
+    for ((i, word), sets) in words
+        .iter()
+        .enumerate()
+        .zip(registry::sets_rtk_disabled(&words))
+    {
+        let end = words.get(i + 1).map_or(env_prefix.len(), |next| next.start);
+        if !sets {
+            line.push_str(&env_prefix[word.start..end]);
         }
     }
     if !line.is_empty() && !line.ends_with(char::is_whitespace) {
@@ -292,8 +226,26 @@ enum DisabledSegment {
     Unhandled,
 }
 
+/// What a command of the call, carrying `RTK_DISABLED=` in front of it, contributes to
+/// the report: would the call's hook have covered it if the bypass weren't there?
+///
+/// Never answered from a measured `hook_decisions` row: a bypassed command's logged
+/// decision is always `Defer` (`get_rewritten` refuses an `RTK_DISABLED=` prefix, #345),
+/// which only confirms the hook stepped aside and says nothing about the counterfactual
+/// asked here. For the same reason `Tally::add` gives a bypassed command that is no bypass
+/// `Coverage::Estimated(false)` and never asks `hook_coverage` about it: it ran raw.
+///
+/// `call` must hold the *full, unsplit* command line, as the hook reads it, prefix
+/// and any sibling chain segments intact — what the real hook's permission check
+/// would have seen (see `hook_coverage`'s doc comment for why an isolated segment would
+/// blind the deny/ask check to siblings). `reached_without_bypass` is the rewrite's
+/// own answer for the command, in its place in the call, once its bypass is read past
+/// (`registry::Call::reached_without_bypass`): `docker ps` rewrites by default,
+/// while `sudo docker ps` only does when `sudo` is in `hooks.transparent_prefixes`, and
+/// a consumer at the end of a pipeline is left raw wherever the rewrite leaves it.
 fn judge_disabled_segment(
     call: &CallCheck<'_>,
+    reached_without_bypass: bool,
     env_prefix: &str,
     actual_cmd: &str,
     start: Position,
@@ -305,11 +257,10 @@ fn judge_disabled_segment(
     ) {
         return DisabledSegment::Unhandled;
     }
-    let line = without_rtk_disabled(env_prefix, actual_cmd);
-    if would_be_covered_without_bypass(call, &line, ctx) {
+    if reached_without_bypass && call.allows_rewrite(ctx) {
         DisabledSegment::Bypass
     } else {
-        DisabledSegment::Unbypassed(line)
+        DisabledSegment::Unbypassed(without_rtk_disabled(env_prefix, actual_cmd))
     }
 }
 
@@ -361,19 +312,19 @@ enum Disposition {
 /// Kept apart from the scanning loop so a test can reach it: the loop needs a
 /// real session directory and a real tracking database.
 ///
-/// `covered` alone cannot be trusted, because neither source behind it knows
-/// where the command sat: a `hook_decisions` row is one decision for the whole
-/// tool call, and the estimate asks about the command on its own. `cat f.log`
+/// `covered` alone cannot be trusted, because a `hook_decisions` row is one
+/// decision for the whole tool call and knows nothing of where the command sat. `cat f.log`
 /// becomes `rtk read` alone but not in `cat f.log | grep ERROR`, so the producer
 /// of every such line would read as adoption RTK never had.
-fn disposition(bypassed: bool, reached: bool, covered: bool, consumes_a_pipe: bool) -> Disposition {
+///
+/// `reached` is the rewrite's answer for the command as it would be without an
+/// `RTK_DISABLED=` bypass, if it carries one: a bypassed command the report did not
+/// count as a bypass is judged like the same command without the assignment.
+fn disposition(reached: bool, covered: bool, consumes_a_pipe: bool) -> Disposition {
     if reached && covered {
         return Disposition::AlreadyRtk;
     }
-    // A bypassed command belongs in the main table: the rewriter refused it for
-    // its prefix, not for its position, and the bypass bucket has already had
-    // its say about that.
-    if bypassed || reached {
+    if reached {
         return Disposition::Missed;
     }
     // A consumer the rewriter does not take (`tail` in `cargo test | tail -1`,
@@ -527,7 +478,11 @@ impl Tally {
         // rewriter does to one command depends on the ones around it, and a
         // report that counts a command the rewriter passes over promises a
         // saving the hook does not take.
-        let Call { parts, reached } = registry::read_call(
+        let Call {
+            parts,
+            reached,
+            reached_without_bypass,
+        } = registry::read_call(
             &line,
             &ctx.exclude_patterns,
             &ctx.normalized_transparent_prefixes,
@@ -543,18 +498,31 @@ impl Tally {
             // Detect RTK_DISABLED= bypass before classification
             let (env_prefix, actual_cmd) = (reading.env_prefix, reading.command);
             let bypassed = prefix_contains_rtk_disabled(env_prefix);
+            // What the rewrite does with the command: as written, or without its bypass.
+            let part_reached = if bypassed {
+                reached_without_bypass[index]
+            } else {
+                reached[index]
+            };
             let unbypassed;
             let part = if bypassed {
                 // A bypass counts only if the hook would have covered the line
                 // without it — otherwise RTK_DISABLED= bypassed nothing (hook not
                 // installed / excluded / would defer / would deny / the wrapper is
-                // not rewritable), and flagging it would be false advice. See
-                // `would_be_covered_without_bypass`'s doc comment for why this must
-                // never go through `hook_coverage`'s measured-log path. A segment
-                // that bypassed nothing falls through to the normal classification
-                // as typed without the assignment, instead of vanishing from the
-                // report (rtk-ai/rtk#3206 review).
-                match judge_disabled_segment(&call, env_prefix, actual_cmd, start, ctx) {
+                // not rewritable, or left raw where it sits in its pipeline), and
+                // flagging it would be false advice. See `judge_disabled_segment`'s
+                // doc comment for why this must never go through `hook_coverage`'s
+                // measured-log path. A segment that bypassed nothing falls through
+                // to the normal classification as typed without the assignment,
+                // instead of vanishing from the report.
+                match judge_disabled_segment(
+                    &call,
+                    part_reached,
+                    env_prefix,
+                    actual_cmd,
+                    start,
+                    ctx,
+                ) {
                     DisabledSegment::Bypass => {
                         self.rtk_disabled_count += 1;
                         self.rtk_disabled_estimated += 1;
@@ -586,25 +554,26 @@ impl Tally {
                     estimated_savings_pct,
                     status,
                 } => {
-                    let coverage = hook_coverage(&call, part, &ext_cmd.tool_use_id, ctx);
-
-                    let map = match disposition(
-                        bypassed,
-                        reached.get(index).copied().unwrap_or(false),
-                        coverage.is_covered(),
-                        reading.consumes,
-                    ) {
-                        Disposition::AlreadyRtk => {
-                            self.already_rtk += 1;
-                            if coverage.is_estimated() {
-                                self.already_rtk_estimated += 1;
-                            }
-                            continue;
-                        }
-                        Disposition::Dropped => continue,
-                        Disposition::Missed => &mut self.supported,
-                        Disposition::Opportunity => &mut self.opportunities,
+                    // A bypassed command ran raw, whatever a measured row says of the call.
+                    let coverage = if bypassed {
+                        Coverage::Estimated(false)
+                    } else {
+                        hook_coverage(&call, part_reached, &ext_cmd.tool_use_id, ctx)
                     };
+
+                    let map =
+                        match disposition(part_reached, coverage.is_covered(), reading.consumes) {
+                            Disposition::AlreadyRtk => {
+                                self.already_rtk += 1;
+                                if coverage.is_estimated() {
+                                    self.already_rtk_estimated += 1;
+                                }
+                                continue;
+                            }
+                            Disposition::Dropped => continue,
+                            Disposition::Missed => &mut self.supported,
+                            Disposition::Opportunity => &mut self.opportunities,
+                        };
 
                     let bucket = map
                         .entry(rtk_equivalent)
@@ -940,44 +909,33 @@ mod tests {
     use super::*;
     use crate::core::tracking::HookOutcome;
 
-    /// Every combination of the four facts, written out rather than derived, so
+    /// Every combination of the three facts, written out rather than derived, so
     /// that changing the rule means changing this table and saying why. Deriving
     /// the expected value would restate the rule and agree with it no matter
     /// what the rule became.
     #[test]
     fn test_every_disposition_is_pinned() {
         use Disposition::{AlreadyRtk, Dropped, Missed, Opportunity};
-        // bypassed, reached, covered, consumes_a_pipe
+        // reached, covered, consumes_a_pipe
         let table = [
-            ((false, false, false, false), Opportunity),
-            ((false, false, false, true), Dropped),
+            ((false, false, false), Opportunity),
+            ((false, false, true), Dropped),
             // Coverage says yes, but the rewriter never took this command —
             // that is the producer of `cat f.log | grep ERROR`, and calling it
             // adoption is what the `reached` gate exists to stop.
-            ((false, false, true, false), Opportunity),
-            ((false, false, true, true), Dropped),
-            ((false, true, false, false), Missed),
-            ((false, true, false, true), Missed),
-            ((false, true, true, false), AlreadyRtk),
-            ((false, true, true, true), AlreadyRtk),
-            // A bypassed command is a missed saving wherever it sits: the
-            // rewriter refused it for its prefix, not for its position.
-            ((true, false, false, false), Missed),
-            ((true, false, false, true), Missed),
-            ((true, false, true, false), Missed),
-            ((true, false, true, true), Missed),
-            ((true, true, false, false), Missed),
-            ((true, true, false, true), Missed),
-            ((true, true, true, false), AlreadyRtk),
-            ((true, true, true, true), AlreadyRtk),
+            ((false, true, false), Opportunity),
+            ((false, true, true), Dropped),
+            ((true, false, false), Missed),
+            ((true, false, true), Missed),
+            ((true, true, false), AlreadyRtk),
+            ((true, true, true), AlreadyRtk),
         ];
-        assert_eq!(table.len(), 16, "one row per combination of four facts");
-        for ((bypassed, reached, covered, consumes_a_pipe), expected) in table {
+        assert_eq!(table.len(), 8, "one row per combination of three facts");
+        for ((reached, covered, consumes_a_pipe), expected) in table {
             assert_eq!(
-                disposition(bypassed, reached, covered, consumes_a_pipe),
+                disposition(reached, covered, consumes_a_pipe),
                 expected,
-                "bypassed={bypassed} reached={reached} covered={covered} \
-                 consumes_a_pipe={consumes_a_pipe}"
+                "reached={reached} covered={covered} consumes_a_pipe={consumes_a_pipe}"
             );
         }
     }
@@ -1007,11 +965,12 @@ mod tests {
         }
     }
 
-    /// [`estimate_hook_coverage`] for a call whose line the permission rules gave
-    /// `verdict`, without reading any config file.
-    fn estimate_hook_coverage_with_verdict(
+    /// What the estimate says of a command of a call whose line the permission rules gave
+    /// `verdict`, when the rewrite has (`reached`) or has not edited it, without reading
+    /// any config file.
+    fn estimate_with_verdict(
         permission_cmd: &str,
-        rewrite_cmd: &str,
+        reached: bool,
         verdict: PermissionVerdict,
         ctx: &CoverageContext,
     ) -> bool {
@@ -1023,7 +982,13 @@ mod tests {
                 ctx,
             )),
         };
-        estimate_hook_coverage(&call, rewrite_cmd, ctx)
+        hook_coverage(&call, reached, "", ctx).is_covered()
+    }
+
+    /// What the estimate says of a command of the call `line`, the rewrite having `reached`
+    /// it, with the permission rules of `ctx`.
+    fn estimate(line: &str, reached: bool, ctx: &CoverageContext) -> bool {
+        hook_coverage(&CallCheck::new(line), reached, "", ctx).is_covered()
     }
 
     fn scanned(command: &str, output_len: Option<usize>) -> ExtractedCommand {
@@ -1602,8 +1567,8 @@ mod tests {
         );
     }
 
-    /// A bypassed command is a missed saving, not an opportunity and not
-    /// adoption, and it still counts once in the denominator.
+    /// A bypassed command the hook would have taken is a bypass, not an opportunity and
+    /// not adoption, and it still counts once in the denominator.
     #[test]
     fn test_a_bypassed_command_is_counted_as_a_bypass() {
         let tally = tally_of(&["RTK_DISABLED=1 git status"], &test_ctx(true));
@@ -1648,6 +1613,165 @@ mod tests {
             tally_of(&["RTK_DISABLED=1 git status"], &test_ctx(true)).rtk_disabled_count,
             1
         );
+    }
+
+    /// A bypass is counted when the hook would have taken the command where it sits in its
+    /// call, without the assignment: a consumer at the end of a pipeline is left raw
+    /// wherever the rewrite leaves it, and a producer is skipped when the rewrite takes the
+    /// last stage, so neither lost a saving to the bypass. What the other commands of the
+    /// call carry is read as written.
+    #[test]
+    fn test_a_bypass_counts_only_where_the_rewrite_would_take_the_command() {
+        for (line, bypasses) in [
+            ("RTK_DISABLED=1 git status", 1),
+            ("RTK_DISABLED=1 git status && RTK_DISABLED=1 git log", 2),
+            ("RTK_DISABLED=1 cargo test | tail -1", 1),
+            ("cargo test | RTK_DISABLED=1 grep FAILED", 1),
+            ("RTK_DISABLED=1 docker ps | RTK_DISABLED=1 grep web", 1),
+            ("cargo test | RTK_DISABLED=1 tail -n 5 f.log", 0),
+            ("RTK_DISABLED=1 cat f.log | grep ERROR", 0),
+            ("RTK_DISABLED=1 cargo test | RTK_DISABLED=1 tail -1", 0),
+            ("git status | RTK_DISABLED=1 cat | head -3", 0),
+            ("RTK_DISABLED=1 git status | tee out.txt | head", 0),
+        ] {
+            let tally = tally_of(&[line], &test_ctx(true));
+            assert_eq!(tally.rtk_disabled_count, bypasses, "{line:?}");
+        }
+        let tally = tally_of(
+            &["RTK_DISABLED=1 docker ps | RTK_DISABLED=1 grep web"],
+            &test_ctx(true),
+        );
+        assert_eq!(
+            tally.rtk_disabled_cmds.keys().collect::<Vec<_>>(),
+            ["grep web"]
+        );
+    }
+
+    /// Whichever way the assignment is spelled, the command is the one the rewrite reads
+    /// without it: the append spelling the rewrite refuses is a bypass as `=` is.
+    #[test]
+    fn test_every_spelling_the_rewrite_refuses_is_a_bypass() {
+        for line in [
+            "RTK_DISABLED=1 git status",
+            "RTK_DISABLED+=1 git status",
+            "FOO=1 RTK_DISABLED+=1 git status",
+            "env RTK_DISABLED=1 git status",
+            "RTK_DISABLED='1 2' git status",
+            "RTK_DISABLED=$CI git status",
+        ] {
+            let tally = tally_of(&[line], &test_ctx(true));
+            assert_eq!(
+                (tally.rtk_disabled_count, tally.supported.len()),
+                (1, 0),
+                "{line:?}"
+            );
+        }
+    }
+
+    /// A bypassed command that is no bypass is judged like the same command without the
+    /// assignment: a missed saving when the rewrite would take it where it sits and the
+    /// hook's checks refuse, an opportunity or a dropped consumer when the rewrite would
+    /// leave it, exactly as for the plain command.
+    #[test]
+    fn test_a_bypassed_command_that_is_no_bypass_is_judged_like_the_plain_one() {
+        let mut excluded = test_ctx(true);
+        excluded.exclude_patterns = registry::compile_exclude_patterns(&["git status".to_string()]);
+        let mut denied = test_ctx(true);
+        denied.rules.deny = vec!["cd /sensitive".to_string()];
+        for (bypassed, plain, ctx) in [
+            // Left raw where it sits: the producer of a pipeline whose last stage is taken.
+            (
+                "RTK_DISABLED=1 cat f.log | grep ERROR",
+                "cat f.log | grep ERROR",
+                test_ctx(true),
+            ),
+            // The user's exclusion.
+            ("RTK_DISABLED=1 git status", "git status", excluded),
+            // The hook's checks of the line refuse what the rewrite would take.
+            (
+                "cd /sensitive && RTK_DISABLED=1 git status",
+                "cd /sensitive && git status",
+                denied,
+            ),
+            // No hook installed.
+            ("RTK_DISABLED=1 git status", "git status", test_ctx(false)),
+        ] {
+            let rows = |tally: &Tally| {
+                (
+                    counts(&tally.supported),
+                    counts(&tally.opportunities),
+                    tally.already_rtk,
+                )
+            };
+            let tally = tally_of(&[bypassed], &ctx);
+            assert_eq!(
+                rows(&tally),
+                rows(&tally_of(&[plain], &ctx)),
+                "{bypassed:?} as {plain:?}"
+            );
+            assert_eq!(tally.rtk_disabled_count, 0, "{bypassed:?}");
+        }
+        // Neither is a missed saving. The consumer is dropped, and the producer next to it
+        // is an opportunity, since a bypassed stage is no safe consumer and the hook leaves
+        // the producer raw too.
+        let tally = tally_of(&["RTK_DISABLED=1 cat f.log | grep ERROR"], &test_ctx(true));
+        assert_eq!(counts(&tally.opportunities), vec![("rtk read", 1)]);
+        assert!(tally.supported.is_empty());
+        let tally = tally_of(
+            &["cargo test | RTK_DISABLED=1 tail -n 5 f.log"],
+            &test_ctx(true),
+        );
+        assert_eq!(counts(&tally.opportunities), vec![("rtk cargo", 1)]);
+        assert!(tally.supported.is_empty());
+    }
+
+    /// A bypassed command ran raw, whatever the hook logged for the call: a measured row is
+    /// one decision for the whole call, and it says nothing of the command the bypass kept
+    /// out of the rewrite. Such a command that is no bypass is not covered, so it is a
+    /// missed saving when the rewrite would take it, though the call's other commands were
+    /// measured as covered.
+    #[test]
+    fn test_a_measured_row_never_covers_a_bypassed_command() {
+        let tally_with_row = |line: &str, ctx: &mut CoverageContext| {
+            ctx.hook_log
+                .insert("toolu_1".to_string(), record(HookOutcome::Allow));
+            let mut command = scanned(line, None);
+            command.tool_use_id = "toolu_1".to_string();
+            let mut tally = Tally::default();
+            tally.add(&command, ctx);
+            tally
+        };
+        let mut denied = test_ctx(true);
+        denied.rules.deny = vec!["cd /sensitive".to_string()];
+        for (line, mut ctx, adopted) in [
+            // The hook is no longer installed, so no bypass was lost: a plain miss.
+            ("RTK_DISABLED=1 git status", test_ctx(false), 0),
+            (
+                "RTK_DISABLED=1 git status && cargo test",
+                test_ctx(false),
+                1,
+            ),
+            // A deny rule keeps the hook off the line, as the line's checks say.
+            ("cd /sensitive && RTK_DISABLED=1 git status", denied, 0),
+        ] {
+            let tally = tally_with_row(line, &mut ctx);
+            assert_eq!(tally.already_rtk, adopted, "{line:?}");
+            assert_eq!(counts(&tally.supported), vec![("rtk git", 1)], "{line:?}");
+            assert_eq!(tally.rtk_disabled_count, 0, "{line:?}");
+        }
+        // A command that is not bypassed takes its measured row.
+        let tally = tally_with_row("git status", &mut test_ctx(false));
+        assert_eq!(tally.already_rtk, 1);
+    }
+
+    /// The estimate of a command is the rewrite's: one the rewrite of the call leaves
+    /// alone is not covered, however the permission rules and the hook's install state
+    /// stand.
+    #[test]
+    fn test_the_estimate_is_false_when_the_rewrite_leaves_the_command_alone() {
+        let ctx = test_ctx(true);
+        assert!(estimate("cargo test | tail -1", true, &ctx));
+        assert!(!estimate("cargo test | tail -1", false, &ctx));
     }
 
     /// A command that runs rtk counts as adoption however its first word is
@@ -1738,44 +1862,44 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_hook_coverage_false_when_hook_not_installed() {
+    fn test_the_estimate_false_when_hook_not_installed() {
         // No hook installed → the raw command genuinely ran unfiltered; still a miss.
-        assert!(!estimate_hook_coverage_with_verdict(
+        assert!(!estimate_with_verdict(
             "grep -n foo bar.py",
-            "grep -n foo bar.py",
+            true,
             PermissionVerdict::Default,
             &test_ctx(false),
         ));
     }
 
     #[test]
-    fn test_estimate_hook_coverage_false_for_deferred_wrapper() {
-        assert!(!estimate_hook_coverage_with_verdict(
+    fn test_the_estimate_false_for_deferred_wrapper() {
+        assert!(!estimate_with_verdict(
             "env bash -c 'git push'",
-            "env bash -c 'git push'",
+            true,
             PermissionVerdict::Defer,
             &test_ctx(true),
         ));
-        assert!(estimate_hook_coverage_with_verdict(
+        assert!(estimate_with_verdict(
             "env bash -c 'git push'",
-            "env bash -c 'git push'",
+            true,
             PermissionVerdict::Ask,
             &test_ctx(true),
         ));
     }
 
     #[test]
-    fn test_estimate_hook_coverage_true_for_rewritable_command() {
+    fn test_the_estimate_true_for_rewritable_command() {
         let ctx = test_ctx(true);
-        assert!(estimate_hook_coverage_with_verdict(
+        assert!(estimate_with_verdict(
             "grep -n foo bar.py",
-            "grep -n foo bar.py",
+            true,
             PermissionVerdict::Default,
             &ctx,
         ));
-        assert!(estimate_hook_coverage_with_verdict(
+        assert!(estimate_with_verdict(
             "ls -la",
-            "ls -la",
+            true,
             PermissionVerdict::Allow,
             &ctx,
         ));
@@ -1792,6 +1916,9 @@ mod tests {
             ("RTK_DISABLED='1 2' ", "docker ps"),
             ("RTK_DISABLED=$CI ", "docker ps"),
             ("sudo", "sudo docker ps"),
+            ("RTK_DISABLED+=1 ", "docker ps"),
+            ("FOO=1 RTK_DISABLED+=1 ", "FOO=1 docker ps"),
+            ("env RTK_DISABLED+=1 ", "env RTK_DISABLED+=1 docker ps"),
         ] {
             assert_eq!(
                 without_rtk_disabled(env_prefix, "docker ps"),
@@ -1799,6 +1926,26 @@ mod tests {
                 "{env_prefix:?}"
             );
         }
+    }
+
+    /// The report's judgement of `raw`, a call of one command carrying `RTK_DISABLED=`: what
+    /// the rewrite of the call does with it once the bypass is read past.
+    fn judge(raw: &str, ctx: &CoverageContext) -> DisabledSegment {
+        let line = JoinedLine::of(raw);
+        let call = registry::read_call(
+            &line,
+            &ctx.exclude_patterns,
+            &ctx.normalized_transparent_prefixes,
+        );
+        let (env_prefix, actual_cmd) = strip_disabled_prefix_for_analytics(raw);
+        judge_disabled_segment(
+            &CallCheck::new(raw),
+            call.reached_without_bypass[0],
+            env_prefix,
+            actual_cmd,
+            Position::START,
+            ctx,
+        )
     }
 
     #[test]
@@ -1809,16 +1956,6 @@ mod tests {
         // docker ps` does not (#146 / test_rewrite_sudo_passthrough), so a
         // sudo-wrapped bypass recovers no savings: it is judged as the line
         // without the assignment, not as a bypass.
-        fn judge(raw: &str, ctx: &CoverageContext) -> DisabledSegment {
-            let (env_prefix, actual_cmd) = strip_disabled_prefix_for_analytics(raw);
-            judge_disabled_segment(
-                &CallCheck::new(raw),
-                env_prefix,
-                actual_cmd,
-                Position::START,
-                ctx,
-            )
-        }
         let unbypassed = |line: &str| DisabledSegment::Unbypassed(line.to_string());
         let ctx = test_ctx(true);
         assert_eq!(
@@ -1835,19 +1972,13 @@ mod tests {
         assert_eq!(rows, vec!["sudo docker"]);
         // A wrapper's script too complex to read rewrites nothing of the line.
         let line = "git status; bash -c 'a[1 # 2]=b'";
-        assert!(!estimate_hook_coverage_with_verdict(
+        assert!(!estimate_with_verdict(
             line,
-            line,
+            true,
             PermissionVerdict::TooComplex,
             &ctx
         ));
-        // The stripped segment alone would say yes.
-        assert!(estimate_hook_coverage(
-            &CallCheck::new("sudo RTK_DISABLED=1 docker ps"),
-            "docker ps",
-            &ctx
-        ));
-        // …and it becomes a real bypass once the user declares sudo transparent.
+        // A sudo-wrapped bypass is a real one once the user declares sudo transparent.
         let mut ctx_sudo = test_ctx(true);
         ctx_sudo.normalized_transparent_prefixes = vec!["sudo".to_string()];
         assert_eq!(
@@ -1880,97 +2011,90 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_hook_coverage_false_for_unattestable_construct() {
+    fn test_the_estimate_false_for_unattestable_construct() {
         // The hook itself defers on unattestable constructs (substitutions, etc.),
         // so a command containing one was never actually rewritten — genuine miss.
-        assert!(!estimate_hook_coverage_with_verdict(
+        assert!(!estimate_with_verdict(
             "git status $(rm -rf /tmp/x)",
-            "git status $(rm -rf /tmp/x)",
+            true,
             PermissionVerdict::Default,
             &test_ctx(true),
         ));
         // Read as the hook reads it: bash joins this into a substitution.
-        assert!(!estimate_hook_coverage_with_verdict(
+        assert!(!estimate_with_verdict(
             "git status $\\\n(date)",
-            "git status $\\\n(date)",
+            true,
             PermissionVerdict::Default,
             &test_ctx(true),
         ));
     }
 
     #[test]
-    fn test_estimate_hook_coverage_false_when_excluded_by_config() {
+    fn test_the_estimate_false_when_excluded_by_config() {
         // Even with the hook installed, a command the user excluded via config
         // was never rewritten — the hook stepped aside, so it's a genuine miss.
         let mut ctx = test_ctx(true);
+        assert_eq!(
+            tally_of(&["grep -n foo bar.py"], &ctx).already_rtk,
+            1,
+            "the hook takes it unless excluded"
+        );
         ctx.exclude_patterns = registry::compile_exclude_patterns(&["grep".to_string()]);
-        assert!(!estimate_hook_coverage_with_verdict(
-            "grep -n foo bar.py",
-            "grep -n foo bar.py",
-            PermissionVerdict::Default,
-            &ctx,
-        ));
+        let tally = tally_of(&["grep -n foo bar.py"], &ctx);
+        assert_eq!(tally.already_rtk, 0);
+        assert_eq!(counts(&tally.opportunities), vec![("rtk grep", 1)]);
     }
 
     #[test]
-    fn test_estimate_hook_coverage_false_when_denied() {
+    fn test_the_estimate_false_when_denied() {
         // A command matching a permissions.deny rule is never auto-rewritten by the
         // real hook (it defers to Claude Code's native deny handling) — counting it
         // as covered would over-count savings for commands the hook actually denied.
-        assert!(!estimate_hook_coverage_with_verdict(
+        assert!(!estimate_with_verdict(
             "rm -rf /",
-            "rm -rf /",
+            true,
             PermissionVerdict::Deny,
             &test_ctx(true),
         ));
     }
 
     #[test]
-    fn test_estimate_hook_coverage_uses_full_raw_command_for_permission_check() {
+    fn test_the_estimate_uses_full_raw_command_for_permission_check() {
         // Regression: the RTK_DISABLED= bypass path must check permission rules
         // against the *full* raw command (prefix intact) — matching what the real
-        // hook's permission engine actually evaluates — even though the rewrite
-        // check needs the stripped form. An exact-match deny rule on the literal
-        // prefixed command only matches the raw form, not the stripped one.
+        // hook's permission engine actually evaluates. An exact-match deny rule on
+        // the literal prefixed command only matches the raw form, not the stripped one.
         let mut ctx = test_ctx(true);
         ctx.rules.deny = vec!["RTK_DISABLED=1 git status".to_string()];
 
-        assert!(
-            !would_be_covered_without_bypass(
-                &CallCheck::new("RTK_DISABLED=1 git status"),
-                "git status",
-                &ctx
-            ),
+        assert_ne!(
+            judge("RTK_DISABLED=1 git status", &ctx),
+            DisabledSegment::Bypass,
             "a deny rule matching the raw (prefixed) command must still apply"
         );
 
-        // Sanity check: the same deny rule does NOT match the stripped form alone —
-        // if `estimate_hook_coverage` regressed to checking permissions against
-        // `rewrite_cmd` instead of the call's line, this assertion would start failing
-        // (the bug would make it come back true instead of false above).
-        assert!(estimate_hook_coverage(
-            &CallCheck::new("git status"),
-            "git status",
-            &ctx
-        ));
+        // Sanity check: the same deny rule does NOT match the command without the
+        // prefix — if the check ran against anything but the call's line, the
+        // assertion above would come back true instead of false.
+        assert!(estimate("git status", true, &ctx));
     }
 
     #[test]
-    fn test_estimate_hook_coverage_sees_chain_wide_deny_from_full_raw_command() {
+    fn test_the_estimate_sees_chain_wide_deny_from_full_raw_command() {
         // Regression: check_command_with_rules re-derives the chain from whatever
         // string it's handed, so a deny rule matching only a *sibling* segment
         // (e.g. "cd /sensitive" in "cd /sensitive && grep -rn foo .") is invisible
         // if the isolated segment being evaluated ("grep -rn foo .") is what gets
         // passed as the permission-check command — exactly what the real hook
         // would NOT do (it always evaluates the whole raw line). Must pass the
-        // full, unsplit command as the call's line, not the isolated `rewrite_cmd`.
+        // full, unsplit command as the call's line, not the isolated segment.
         let mut ctx = test_ctx(true);
         ctx.rules.deny = vec!["cd /sensitive".to_string()];
         let full_chain = "cd /sensitive && grep -rn foo .";
         let isolated_segment = "grep -rn foo .";
 
         assert!(
-            !estimate_hook_coverage(&CallCheck::new(full_chain), isolated_segment, &ctx),
+            !estimate(full_chain, true, &ctx),
             "a deny rule matching a sibling chain segment must still deny the whole chain"
         );
 
@@ -1978,7 +2102,7 @@ mod tests {
         // permissions against the isolated segment alone (instead of the full
         // chain) misses the sibling's deny match entirely.
         assert!(
-            estimate_hook_coverage(&CallCheck::new(isolated_segment), isolated_segment, &ctx),
+            estimate(isolated_segment, true, &ctx),
             "checking the isolated segment alone should miss the sibling's deny rule \
              (demonstrates why the call's line must be the full chain, not a segment)"
         );
@@ -2073,7 +2197,7 @@ mod tests {
         ctx.hook_log
             .insert("toolu_1".to_string(), record(HookOutcome::Allow));
 
-        let coverage = hook_coverage(&CallCheck::new("git status"), "git status", "toolu_1", &ctx);
+        let coverage = hook_coverage(&CallCheck::new("git status"), true, "toolu_1", &ctx);
         assert!(matches!(coverage, Coverage::Measured(true)));
         assert!(coverage.is_covered());
         assert!(!coverage.is_estimated());
@@ -2085,7 +2209,7 @@ mod tests {
         ctx.hook_log
             .insert("toolu_1".to_string(), record(HookOutcome::Deny));
 
-        let coverage = hook_coverage(&CallCheck::new("rm -rf /"), "rm -rf /", "toolu_1", &ctx);
+        let coverage = hook_coverage(&CallCheck::new("rm -rf /"), true, "toolu_1", &ctx);
         assert!(matches!(coverage, Coverage::Measured(false)));
         assert!(!coverage.is_covered());
     }
@@ -2096,7 +2220,7 @@ mod tests {
         // falls back to the current-state heuristic, flagged as estimated.
         let coverage = hook_coverage(
             &CallCheck::new("ls -la"),
-            "ls -la",
+            true,
             "toolu_missing",
             &test_ctx(true),
         );
