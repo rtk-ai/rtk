@@ -224,6 +224,8 @@ fn a_rewrite_runs_the_same_programs() {
         "d='# shellcheck disable=SC2034'; sink \"$d\"",
         "foo+=x git status && cargo build",
         "foo=bar git status",
+        // An escaped blank belongs to the value: this runs `status`, not `git`.
+        "cargo build; FOO=a\\ git status",
         // A blank inside an array, an expansion or a substitution is part of the value.
         "a=(git diff --stat); \"${a[@]}\"",
         "x=$(git status) cargo build",
