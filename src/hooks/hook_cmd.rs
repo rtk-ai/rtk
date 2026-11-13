@@ -20,15 +20,23 @@ use crate::core::utils::strip_leading_bom;
 mod claude_pipeline;
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
+// Tool output is the payload, not a command, so it gets Claude Code's
+// after-tool ceiling instead of the 1 MiB pre-tool one.
+#[cfg(feature = "engine")]
+const STDIN_CAP_AFTER_TOOL: usize = 64 * 1_048_576; // 64 MiB
 
 fn read_stdin_limited() -> Result<String> {
+    read_stdin_capped(STDIN_CAP)
+}
+
+fn read_stdin_capped(cap: usize) -> Result<String> {
     let mut input = String::new();
     io::stdin()
-        .take((STDIN_CAP + 1) as u64)
+        .take((cap + 1) as u64)
         .read_to_string(&mut input)
         .context("Failed to read stdin")?;
-    if input.len() > STDIN_CAP {
-        anyhow::bail!("hook stdin exceeds {} byte limit", STDIN_CAP);
+    if input.len() > cap {
+        anyhow::bail!("hook stdin exceeds {cap} byte limit");
     }
     Ok(input)
 }
@@ -1254,6 +1262,46 @@ fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) ->
 pub fn run_opencode(cmd: &str, agent: Option<&str>) -> Result<()> {
     let _ = writeln!(io::stdout(), "{}", opencode_answer_for(cmd, agent));
     Ok(())
+}
+
+/// Run OpenCode's `tool.execute.after` transport.
+///
+/// Reads `{"tool": ..., "args": {...}, "output": ...}` on stdin and writes the
+/// replacement text to stdout, or nothing. Every parse, size or pipeline
+/// failure is a silent pass-through: OpenCode keeps the tool's original
+/// output, exactly as Claude Code does when the posthook emits nothing.
+#[cfg(feature = "engine")]
+pub fn run_opencode_after() -> Result<()> {
+    let Ok(input) = read_stdin_capped(STDIN_CAP_AFTER_TOOL) else {
+        return Ok(());
+    };
+    let Some((tool, args, output)) = opencode_after_payload(strip_leading_bom(&input)) else {
+        return Ok(());
+    };
+    crate::hooks::posthook::run_agent_text("opencode", &tool, &args, &output);
+    Ok(())
+}
+
+#[cfg(not(feature = "engine"))]
+pub fn run_opencode_after() -> Result<()> {
+    Ok(())
+}
+
+/// Parse the `tool.execute.after` payload. `None` for anything that is not
+/// the shape the plugin promised — the caller then emits nothing.
+#[cfg(feature = "engine")]
+fn opencode_after_payload(input: &str) -> Option<(String, Value, String)> {
+    let v: Value = serde_json::from_str(input.trim()).ok()?;
+    let tool = v.get("tool")?.as_str()?;
+    let output = v.get("output")?.as_str()?;
+    if tool.is_empty() || output.is_empty() {
+        return None;
+    }
+    let args = match v.get("args") {
+        Some(args) if args.is_object() => args.clone(),
+        _ => json!({}),
+    };
+    Some((tool.to_string(), args, output.to_string()))
 }
 
 /// [`opencode_answer`] against the rules OpenCode resolves for `agent`.
@@ -2929,6 +2977,53 @@ mod tests {
                     "an agent file with no rules key keeps the rewrite"
                 );
             });
+        }
+    }
+
+    // --- OpenCode: the `tool.execute.after` transport ---
+    //
+    // The plugin forwards the tool name, its args and the tool's output as
+    // JSON on stdin. Anything else is a pass-through: OpenCode must keep its
+    // original output on every malformed payload.
+
+    #[cfg(feature = "engine")]
+    mod opencode_after {
+        use super::super::opencode_after_payload;
+        use serde_json::json;
+
+        #[test]
+        fn malformed_payloads_are_ignored() {
+            for input in [
+                "",
+                "{",
+                "null",
+                "[]",
+                r#"{"tool":"bash"}"#,
+                r#"{"tool":"bash","output":""}"#,
+                r#"{"tool":"","output":"x"}"#,
+                r#"{"tool":1,"output":"x"}"#,
+                r#"{"tool":"bash","output":3}"#,
+            ] {
+                assert!(opencode_after_payload(input).is_none(), "{input}");
+            }
+        }
+
+        #[test]
+        fn a_valid_payload_carries_tool_args_and_output() {
+            let (tool, args, output) = opencode_after_payload(
+                r#"{"tool":"bash","args":{"command":"cargo build"},"output":"x"}"#,
+            )
+            .expect("valid payload");
+            assert_eq!(tool, "bash");
+            assert_eq!(args, json!({"command": "cargo build"}));
+            assert_eq!(output, "x");
+        }
+
+        #[test]
+        fn non_object_args_are_dropped() {
+            let (_, args, _) = opencode_after_payload(r#"{"tool":"read","args":[],"output":"x"}"#)
+                .expect("valid payload");
+            assert_eq!(args, json!({}));
         }
     }
 
