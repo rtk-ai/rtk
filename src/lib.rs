@@ -798,6 +798,9 @@ enum Commands {
 
     /// Execute argv directly, or a command string through an explicit shell
     Run {
+        /// Filter direct-command stdout without changing the program or its arguments
+        #[arg(long, value_parser = ["pytest"], conflicts_with = "command", requires = "args")]
+        filter: Option<String>,
         /// Command string to execute through a shell
         #[arg(short = 'c', long = "command", conflicts_with = "args")]
         command: Option<String>,
@@ -3774,6 +3777,7 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Run {
+            filter,
             command,
             shell,
             args,
@@ -3792,28 +3796,46 @@ fn run_cli() -> Result<i32> {
                         format!("shell command: {script}"),
                         core::shell::program_name(&[], shell.as_deref()).to_string(),
                     ),
-                    None => (
-                        core::shell::direct_command(&args)
-                            .context("Failed to prepare direct run command")?,
-                        core::shell::display_command(&args),
-                        core::shell::program_name(&args, None).to_string(),
-                    ),
+                    None => {
+                        let launch = if filter.is_some() {
+                            use crate::core::utils::ChildArgExt;
+                            // Resolving this path first can change Python's
+                            // sys.executable, even within the same venv.
+                            let mut prepared = std::process::Command::new(&args[0]);
+                            prepared.child_args(&args[1..]);
+                            core::shell::Launch::Ready(prepared)
+                        } else {
+                            core::shell::direct_command(&args)
+                                .context("Failed to prepare direct run command")?
+                        };
+                        (
+                            launch,
+                            core::shell::display_command(&args),
+                            core::shell::program_name(&args, None).to_string(),
+                        )
+                    }
                 };
                 match launch {
-                    core::shell::Launch::Ready(mut prepared) => match prepared.status() {
-                        Ok(status) => core::utils::exit_code_from_status(&status, "run"),
-                        Err(error) => {
-                            let error = anyhow::Error::new(error)
-                                .context(format!("Failed to execute {description}"));
-                            match core::shell::spawn_failure(&program, &error) {
+                    core::shell::Launch::Ready(mut prepared) => {
+                        let result = if filter.is_some() {
+                            pytest_cmd::run_original(prepared, &core::shell::display_command(&args))
+                        } else {
+                            prepared
+                                .status()
+                                .map(|status| core::utils::exit_code_from_status(&status, "run"))
+                                .with_context(|| format!("Failed to execute {description}"))
+                        };
+                        match result {
+                            Ok(code) => code,
+                            Err(error) => match core::shell::spawn_failure(&program, &error) {
                                 Some(outcome) => {
                                     eprint!("{}", outcome.message);
                                     outcome.code
                                 }
                                 None => return Err(error),
-                            }
+                            },
                         }
-                    },
+                    }
                     // `rtk run` is a raw passthrough, so it reports a program it
                     // cannot run the way a shell does: the message on stderr and
                     // the shell's own exit code.
@@ -4116,6 +4138,10 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Ruff { .. }
             | Commands::Sqlfluff { .. }
             | Commands::Pytest { .. }
+            | Commands::Run {
+                filter: Some(_),
+                ..
+            }
             | Commands::Mypy { .. }
             | Commands::Php { .. }
             | Commands::Phpunit { .. }
@@ -4771,6 +4797,7 @@ mod tests {
                 command,
                 shell,
                 args,
+                ..
             } => {
                 assert_eq!(command, Some("git status && echo done".to_string()));
                 assert!(shell.is_none());
@@ -4788,6 +4815,7 @@ mod tests {
                 command,
                 shell,
                 args,
+                ..
             } => {
                 assert!(command.is_none());
                 assert!(shell.is_none());
@@ -4795,6 +4823,38 @@ mod tests {
             }
             _ => panic!("Expected Run command"),
         }
+    }
+
+    #[test]
+    fn filtered_run_preserves_inner_separator_and_checks_integrity() {
+        let cli = try_parse_cli_from([
+            "rtk",
+            "run",
+            "--filter",
+            "pytest",
+            "--",
+            "python",
+            "-m",
+            "pytest",
+            "--",
+            "-filename.py",
+            "a b",
+            "",
+        ])
+        .expect("filtered direct run parses");
+        assert!(is_operational_command(&cli.command));
+        match cli.command {
+            Commands::Run { filter, args, .. } => {
+                assert_eq!(filter.as_deref(), Some("pytest"));
+                assert_eq!(
+                    args,
+                    ["python", "-m", "pytest", "--", "-filename.py", "a b", ""]
+                );
+            }
+            _ => panic!("expected Run"),
+        }
+        assert!(try_parse_cli_from(["rtk", "run", "--filter", "pytest", "-c", "echo ok"]).is_err());
+        assert!(try_parse_cli_from(["rtk", "run", "--filter", "pytest"]).is_err());
     }
 
     #[test]
@@ -5240,6 +5300,7 @@ mod tests {
                 command,
                 shell,
                 args,
+                ..
             } => {
                 assert_eq!(command, Some("echo (pwd)".to_string()));
                 assert_eq!(shell, Some("fish".to_string()));
