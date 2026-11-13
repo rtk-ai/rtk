@@ -199,6 +199,8 @@ fn a_rewrite_runs_the_same_programs() {
         "d='# shellcheck disable=SC2034'; git status",
         "foo=bar git status",
         "foo+=x git status && cargo build",
+        // An escaped blank belongs to the value: this runs `status`, not `git`.
+        "cargo build; FOO=a\\ git status",
         "ls {a,b}.txt",
         "time (cargo build)",
         "cd / && git status",
