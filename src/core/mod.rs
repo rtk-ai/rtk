@@ -9,6 +9,7 @@ pub mod classify;
 pub mod config;
 pub mod constants;
 pub mod display_helpers;
+pub mod file_access;
 pub mod filter;
 pub mod guard;
 pub mod http;

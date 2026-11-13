@@ -314,8 +314,8 @@ fn resolve_symlink_components_within(path: &Path, budget: usize) -> Resolution {
 
 /// Refuse a project-scoped write whose path leaves the project.
 ///
-/// `.codex/hooks.json` and its backup sibling are relative names RTK joins itself, so a
-/// symlinked component is the only way they can resolve elsewhere -- and then `rtk init
+/// `.codex/hooks.json` is a relative name RTK joins itself, so a symlinked component is the
+/// only way it can resolve elsewhere -- and then `rtk init
 /// --codex` would register a hook, which runs shell commands, in a directory the user never
 /// named. The global mode exists for writing outside the project.
 ///
@@ -466,9 +466,7 @@ pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<Uninstal
         // other path is a symlink leaves the user with artifacts and no command to remove
         // them -- `--global` acts on `~/.codex`, which is not where these are.
         let hooks_json_path = user_dirs::in_working_dir(CODEX_DIR).join(HOOKS_JSON);
-        let hooks_json_path = match ensure_inside_project(&hooks_json_path)
-            .and_then(|()| ensure_inside_project(&backup_path_for(&hooks_json_path)))
-        {
+        let hooks_json_path = match ensure_inside_project(&hooks_json_path) {
             Ok(()) => Some(hooks_json_path.as_path()),
             Err(error) => {
                 hook_left_in_place = Some(error);
@@ -568,13 +566,9 @@ pub(super) fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
         // clone -- git stores symlinks -- in which case init appends its `@RTK.md` line to
         // whatever the link names, outside the project. That is accepted: the line is inert
         // text, where `.codex/hooks.json` is a hook that runs shell commands, and RTK creates
-        // `.codex` itself rather than following something the user put there.
-        //
-        // Its backup sibling is vouched for as well: `fs::copy` follows a symlink at the
-        // destination, so a planted `hooks.json.bak` carried the existing hooks.json out of
-        // the project even when `.codex` itself was a real directory.
+        // `.codex` itself rather than following something the user put there. Its backup
+        // sibling needs no vouching: the backup replaces a link there rather than following it.
         ensure_inside_project(&paths.2)?;
-        ensure_inside_project(&backup_path_for(&paths.2))?;
         paths
     };
 
@@ -1641,32 +1635,30 @@ mod tests {
         );
     }
 
-    /// `fs::copy` follows a symlink at the destination, so the backup sibling carries the
-    /// existing hooks out of the project while `.codex` itself is an ordinary directory.
+    /// A dangling link out of the project is refused, even while `.codex` itself is an
+    /// ordinary directory.
     #[cfg(unix)]
     #[test]
-    fn test_the_backup_destination_must_stay_inside_the_project_too() {
+    fn test_a_dangling_hooks_link_out_of_the_project_is_refused() {
         use std::os::unix::fs::symlink;
 
         let project = test_isolation::tempdir();
         let elsewhere = TempDir::new().expect("elsewhere");
         let hooks_json = Path::new(CODEX_DIR).join(HOOKS_JSON);
-        let backup = backup_path_for(&hooks_json);
 
         fs::create_dir(project.path().join(CODEX_DIR)).expect("mkdir");
-        // A real directory, and a backup path that does not exist yet, are both inside.
+        // A real directory and a file that does not exist yet are inside.
         ensure_inside_root(project.path(), &hooks_json).expect("real .codex");
-        ensure_inside_root(project.path(), &backup).expect("plain backup path");
 
-        // The link is dangling, as it would be before the first backup is taken: resolving
-        // only its existing ancestors would report it as sitting right where the link does.
+        // A dangling link: resolving only its existing ancestors would report it as sitting
+        // right where the link does.
         symlink(
             elsewhere.path().join("stolen.json"),
-            project.path().join(&backup),
+            project.path().join(&hooks_json),
         )
         .expect("symlink");
-        let error = ensure_inside_root(project.path(), &backup)
-            .expect_err("a symlinked backup destination must be refused");
+        let error = ensure_inside_root(project.path(), &hooks_json)
+            .expect_err("a symlinked hooks.json out of the project must be refused");
         assert!(error.to_string().contains("outside the project"), "{error}");
     }
 
@@ -2040,12 +2032,11 @@ mod tests {
         );
     }
 
-    /// Uninstall rewrites `hooks.json` through [`backup_and_atomic_write`], whose `fs::copy`
-    /// follows a symlink at the destination, so its backup sibling needs vouching for even
-    /// when `.codex` itself is an ordinary directory.
+    /// Uninstall rewrites `hooks.json` through [`backup_and_atomic_write`], which replaces a
+    /// planted backup link rather than following it out of the project.
     #[cfg(unix)]
     #[test]
-    fn test_uninstall_refuses_a_backup_sibling_that_leaves_the_project() {
+    fn test_uninstall_replaces_a_backup_link_out_of_the_project() {
         use std::os::unix::fs::symlink;
 
         let project = test_isolation::tempdir();
@@ -2064,18 +2055,28 @@ mod tests {
         .expect("symlink");
 
         let _entered = test_isolation::enter(project.path());
-        let outcome = uninstall_codex(false, InitContext::default())
-            .expect("uninstall still reports what it did");
-        assert!(matches!(outcome, UninstallCodexOutcome::HookRefused));
+        let outcome = uninstall_codex(false, InitContext::default()).expect("uninstall");
+        assert!(matches!(outcome, UninstallCodexOutcome::Clean));
 
         assert!(
             !elsewhere.path().join("stolen.json").exists(),
             "the project's hooks must not be copied out of it"
         );
+        let backup = hooks_json.with_extension("json.bak");
+        assert!(
+            fs::symlink_metadata(&backup)
+                .expect("lstat backup")
+                .is_file()
+        );
         assert_eq!(
-            fs::read_to_string(&hooks_json).expect("read"),
-            registered,
-            "and the hook is left registered rather than rewritten unsafely"
+            fs::read_to_string(&backup).expect("read backup"),
+            registered
+        );
+        assert!(
+            !fs::read_to_string(&hooks_json)
+                .expect("read")
+                .contains(CODEX_HOOK_COMMAND),
+            "the hook is removed"
         );
     }
 
@@ -2161,11 +2162,11 @@ mod tests {
         );
     }
 
-    /// The same, for the backup sibling: `fs::copy` follows a symlink at the destination, so
-    /// vouching only for `hooks.json` leaves the existing hooks free to travel.
+    /// Install backs `hooks.json` up the same way: a planted backup link is replaced, and
+    /// the existing hooks never leave the project through it.
     #[cfg(unix)]
     #[test]
-    fn test_install_refuses_a_backup_sibling_that_leaves_the_project() {
+    fn test_install_replaces_a_backup_link_out_of_the_project() {
         use std::os::unix::fs::symlink;
 
         let project = test_isolation::tempdir();
@@ -2180,14 +2181,19 @@ mod tests {
         .expect("symlink");
 
         let _entered = test_isolation::enter(project.path());
-        let result = run_codex_mode(false, InitContext::default());
+        run_codex_mode(false, InitContext::default()).expect("install");
 
-        let error = result.expect_err("install must refuse");
-        assert!(error.to_string().contains("outside the project"), "{error}");
         assert!(
             !elsewhere.path().join("stolen.json").exists(),
             "the project's hooks must not travel"
         );
+        let backup = codex_dir.join(HOOKS_JSON).with_extension("json.bak");
+        assert!(
+            fs::symlink_metadata(&backup)
+                .expect("lstat backup")
+                .is_file()
+        );
+        assert_eq!(fs::read_to_string(&backup).expect("read backup"), "{}\n");
     }
 
     /// Uninstall reads and rewrites `hooks.json`, so it needs the same vouching -- and must
