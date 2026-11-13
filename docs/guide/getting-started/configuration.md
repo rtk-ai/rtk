@@ -13,6 +13,7 @@ sidebar:
 |----------|------|
 | Linux | `~/.config/rtk/config.toml` |
 | macOS | `~/Library/Application Support/rtk/config.toml` |
+| Windows | `%APPDATA%\rtk\config.toml` |
 
 ```bash
 rtk config            # show current configuration
@@ -39,6 +40,13 @@ pro_hint = true             # rtk gain mentions RTK Pro once a day after your fi
 ignore_dirs = [".git", "node_modules", "target", "__pycache__", ".venv", "vendor"]
 ignore_files = ["*.lock", "*.min.js", "*.min.css"]
 
+[limits]
+grep_max_results = 200      # max total grep results to show
+grep_max_per_file = 25      # max matches per file in grep output
+status_max_files = 15       # max staged/modified files shown in git status
+status_max_untracked = 10   # max untracked files shown in git status
+passthrough_max_chars = 2000 # max chars for parser passthrough fallback
+
 [retriever]
 mode = "sqlite"             # sqlite (default) | tee (legacy files) | disabled
 max_entry_bytes = 10485760  # sqlite: 10 MiB per entry
@@ -53,9 +61,12 @@ tee_on_success = false      # tee mode: legacy `mode = "always"`, archive succes
 
 [telemetry]
 enabled = false             # opt-in anonymous daily ping (off by default) — see Telemetry & Privacy
+# consent_given = false     # recorded opt-in consent status
+# consent_date = "..."      # timestamp of opt-in consent
 
 [hooks]
 exclude_commands = []       # commands to never auto-rewrite
+transparent_prefixes = []   # prefixes where rtk executes transparently without rewrite
 suppress_hook_warning = false # suppress the missing-hook warning only
 wrap_fish_scripts = false   # opt in to handing a fish script back as `rtk run --shell fish -c '…'`
 
@@ -83,7 +94,7 @@ level = "high"
 
 Re-run `rtk init -g` (or your agent's init command) to rewrite the file.
 
-Agents without a hook (Codex CLI, Cline, Windsurf, Kilo Code, Kimi) always get `full`,
+Agents without a hook (Cline, Windsurf, Kilo Code, Kimi) always get `full`,
 since the agent must type `rtk` itself. `rtk init` prints a note when it does this.
 
 ## Environment variables
