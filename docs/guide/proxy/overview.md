@@ -74,7 +74,7 @@ Say yes, then choose how the daemon should come back after a reboot:
 | **2. Background service** | `rtk llm-proxy service install` — a per-user service, independent of any agent |
 | **3. Neither** | Prints the `export` line and leaves `settings.json` untouched |
 
-Choices 1 and 2 write `env.ANTHROPIC_BASE_URL` into `settings.json`. All three choices add `extends = "rtk:proxy"` to your pipeline.
+Choices 1 and 2 write `env.ANTHROPIC_BASE_URL` into `settings.json`. Setup also enables the `rtk:proxy` pipeline preset if needed, or prints the steps to add it manually when an existing pipeline needs your input.
 
 Declining leaves everything alone: *"Skipped — enable later with `rtk init -g` or `rtk llm-proxy start --env`."*
 
