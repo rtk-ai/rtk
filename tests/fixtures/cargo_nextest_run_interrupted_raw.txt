@@ -1,0 +1,6 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+────────────
+ Nextest run ID 5468985e-1fdf-40aa-a01e-4759652d1b15 with nextest profile: default
+    Starting 3 tests across 1 binary
+        PASS [   0.003s] (1/3) intr tests::quick_one
+        PASS [   0.003s] (2/3) intr tests::quick_two

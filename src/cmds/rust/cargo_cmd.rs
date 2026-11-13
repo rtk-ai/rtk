@@ -8,6 +8,7 @@ use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{join_with_overflow, resolved_command, truncate};
 use anyhow::Result;
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -650,16 +651,20 @@ fn nextest_test_name(block: &str) -> &str {
         .map_or(name, |(_, name)| name)
 }
 
+/// nextest annotates `passed` in place, e.g. `2 passed (1 slow), 1 failed`
+static NEXTEST_SUMMARY_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run:\s+(\d+) passed(?:\s+\([^)]*\))?(?:,\s+(\d+) failed)?(?:,\s+(\d+) exec failed)?(?:,\s+(\d+) timed out)?(?:,\s+(\d+) skipped)?"
+    ).expect("invalid nextest summary regex")
+});
+
+static NEXTEST_STARTING_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"Starting \d+ tests? across (\d+) binar(?:y|ies)")
+        .expect("invalid nextest starting regex")
+});
+
 /// Filter cargo nextest output - show failures + compact summary
 fn filter_cargo_nextest(output: &str) -> String {
-    // nextest annotates `passed` in place, e.g. `2 passed (1 slow), 1 failed`
-    let summary_re = regex::Regex::new(
-        r"Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run:\s+(\d+) passed(?:\s+\([^)]*\))?(?:,\s+(\d+) failed)?(?:,\s+(\d+) exec failed)?(?:,\s+(\d+) timed out)?(?:,\s+(\d+) skipped)?"
-    ).expect("invalid nextest summary regex");
-
-    let starting_re = regex::Regex::new(r"Starting \d+ tests? across (\d+) binar(?:y|ies)")
-        .expect("invalid nextest starting regex");
-
     let mut failures: Vec<String> = Vec::new();
     let mut in_failure_block = false;
     let mut past_summary = false;
@@ -669,7 +674,15 @@ fn filter_cargo_nextest(output: &str) -> String {
     let mut binaries: u32 = 0;
     let mut has_cancel_line = false;
 
-    for line in output.lines() {
+    // A coloured run (`--color always`, `CARGO_TERM_COLOR=always`) wraps the status word in
+    // escape codes, so `PASS`, `FAIL` and `Summary` would not be found at the start of a line.
+    let plain = if output.contains('\x1b') {
+        Cow::Owned(crate::core::utils::strip_ansi(output))
+    } else {
+        Cow::Borrowed(output)
+    };
+
+    for line in plain.lines() {
         let trimmed = line.trim();
 
         // Strip compilation noise
@@ -695,7 +708,7 @@ fn filter_cargo_nextest(output: &str) -> String {
 
         // Parse binary count from Starting line
         if trimmed.starts_with("Starting") {
-            if let Some(caps) = starting_re.captures(trimmed)
+            if let Some(caps) = NEXTEST_STARTING_RE.captures(trimmed)
                 && let Some(m) = caps.get(1)
             {
                 binaries = m.as_str().parse().unwrap_or(0);
@@ -773,7 +786,7 @@ fn filter_cargo_nextest(output: &str) -> String {
     }
 
     // Parse summary with regex
-    if let Some(caps) = summary_re.captures(&summary_line) {
+    if let Some(caps) = NEXTEST_SUMMARY_RE.captures(&summary_line) {
         let duration = caps.get(1).map_or("?", |m| m.as_str());
         let passed: u32 = caps
             .get(3)
@@ -855,7 +868,8 @@ fn filter_cargo_nextest(output: &str) -> String {
         return result.trim().to_string();
     }
 
-    // Fallback: if summary regex didn't match, show what we have
+    // No summary, or one the regex does not read: a run killed after a `FAIL` line shows its
+    // failure blocks (and the summary line when there is one), nothing else.
     if !failures.is_empty() {
         let mut result = String::new();
         for failure in &failures {
@@ -872,8 +886,10 @@ fn filter_cargo_nextest(output: &str) -> String {
         return summary_line;
     }
 
-    // Empty or unrecognized
-    String::new()
+    // No summary and no failure block: `list`, `show-config`, `help`, a build error, a rejected
+    // option, and a run killed before its summary that had only `PASS` lines print text with
+    // nothing in it to report on, so show it as it came.
+    output.to_string()
 }
 
 struct JsonDiagnostics {
@@ -2731,6 +2747,82 @@ error: test run failed
     fn test_filter_cargo_nextest_empty() {
         let result = filter_cargo_nextest("");
         assert!(result.is_empty(), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_without_a_summary_shows_the_output() {
+        // The runner hands the filter stdout followed by stderr; each fixture after the first
+        // holds the one stream that operation writes to.
+        for input in [
+            concat!(
+                include_str!("../../../tests/fixtures/cargo_nextest_list_stdout_raw.txt"),
+                include_str!("../../../tests/fixtures/cargo_nextest_list_stderr_raw.txt"),
+            ),
+            include_str!("../../../tests/fixtures/cargo_nextest_show_config_stdout_raw.txt"),
+            include_str!("../../../tests/fixtures/cargo_nextest_archive_stderr_raw.txt"),
+            include_str!("../../../tests/fixtures/cargo_nextest_run_compile_error_stderr_raw.txt"),
+            include_str!("../../../tests/fixtures/cargo_nextest_run_bad_option_stderr_raw.txt"),
+        ] {
+            assert_eq!(filter_cargo_nextest(input), input);
+        }
+    }
+
+    /// A run killed before its summary (`kill -9`, a CI timeout) that printed only `PASS` lines
+    /// has no count to report and no failure to show, so the output is shown as it came.
+    #[test]
+    fn test_filter_cargo_nextest_run_without_a_summary_shows_the_output() {
+        let input = include_str!("../../../tests/fixtures/cargo_nextest_run_interrupted_raw.txt");
+        assert!(input.contains("PASS ["), "fixture must carry PASS lines");
+        assert!(
+            !input.contains("Summary"),
+            "fixture must not carry a summary"
+        );
+        assert_eq!(filter_cargo_nextest(input), input);
+    }
+
+    /// A run killed after a `FAIL` line goes through the failure branch: the failure block is
+    /// shown, the `PASS` lines and the rest are not, and there is no summary line to add.
+    #[test]
+    fn test_filter_cargo_nextest_run_killed_after_a_failure_shows_the_failure_only() {
+        let input = "    Starting 3 tests across 1 binary\n\
+                     \x20       PASS [   0.003s] (1/3) kc tests::quick\n\
+                     \x20       FAIL [   0.004s] (2/3) kc tests::broken\n\
+                     \x20 stderr ───\n\
+                     \n\
+                     \x20   thread 'tests::broken' panicked at src/lib.rs:4:5:\n\
+                     \x20   boom\n";
+        let result = filter_cargo_nextest(input);
+        assert!(result.starts_with("FAIL ["), "got: {result}");
+        assert!(result.contains("tests::broken"), "got: {result}");
+        assert!(result.contains("boom"), "got: {result}");
+        assert!(!result.contains("PASS"), "got: {result}");
+        assert!(!result.contains("Starting"), "got: {result}");
+        assert!(!result.contains("cargo nextest:"), "got: {result}");
+    }
+
+    /// `--color always` puts escape codes around `PASS`, `FAIL` and `Summary`; the summary a
+    /// coloured run gets is the one the same run gets without colour.
+    #[test]
+    fn test_filter_cargo_nextest_coloured_run_gets_its_summary() {
+        let passing = include_str!("../../../tests/fixtures/cargo_nextest_pass_color_raw.txt");
+        assert!(passing.contains('\u{1b}'), "fixture must be coloured");
+        assert_eq!(
+            filter_cargo_nextest(passing),
+            "cargo nextest: 2 passed, 1 skipped (1 binary, 0.004s)"
+        );
+
+        let failing = include_str!("../../../tests/fixtures/cargo_nextest_fail_color_raw.txt");
+        assert!(failing.contains('\u{1b}'), "fixture must be coloured");
+        assert_eq!(
+            filter_cargo_nextest(failing),
+            filter_cargo_nextest(&crate::core::utils::strip_ansi(failing))
+        );
+        let result = filter_cargo_nextest(failing);
+        assert!(
+            result.ends_with("cargo nextest: 2 passed, 1 failed (1 binary, 0.103s)"),
+            "got: {result}"
+        );
+        assert!(result.contains("tests::fails"), "got: {result}");
     }
 
     #[test]
