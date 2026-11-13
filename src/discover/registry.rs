@@ -462,6 +462,8 @@ fn tokens_have_heredoc(tokens: &[Token<'_>]) -> bool {
 /// One command of a call, with what a report needs to know about it.
 pub(crate) struct ChainPart<'a> {
     pub(crate) text: &'a str,
+    /// Where `text` starts in the call's line, the text the rewrite's edits are spans of.
+    start: usize,
     /// Whether it is a stage of a pipeline after the first, so it reads the output of
     /// the stage before it.
     pub(crate) consumes_pipe: bool,
@@ -484,10 +486,20 @@ pub(crate) struct ChainPart<'a> {
 /// comments alone has none.
 pub(crate) fn split_command_chain_parts<'a>(line: &'a JoinedLine<'_>) -> Vec<ChainPart<'a>> {
     let lex = CompoundLex::new(&line.text);
-    let lines = match read_lines(&lex) {
+    chain_parts(&lex, &call_lines(&lex, line))
+}
+
+/// How the report reads the lines of `line`, which `lex` lexes: as the rewrite does
+/// ([`read_lines`]), except that a block that could not be joined is one text.
+fn call_lines(lex: &CompoundLex<'_>, line: &JoinedLine<'_>) -> Lines {
+    match read_lines(lex) {
         Lines::Units(_) if !line.joined => Lines::Refused,
         lines => lines,
-    };
+    }
+}
+
+/// The commands of `lex`, read as `lines`, which [`split_command_chain_parts`] describes.
+fn chain_parts<'a>(lex: &CompoundLex<'a>, lines: &Lines) -> Vec<ChainPart<'a>> {
     let mut parts = Vec::new();
     match lines {
         Lines::Opaque | Lines::Refused => {
@@ -503,7 +515,7 @@ pub(crate) fn split_command_chain_parts<'a>(line: &'a JoinedLine<'_>) -> Vec<Cha
         }
         Lines::Units(units) => {
             for unit in units {
-                if let Some(slice) = Slice::new(lex.text, &lex.tokens[unit]) {
+                if let Some(slice) = Slice::new(lex.text, &lex.tokens[unit.clone()]) {
                     push_chain_parts(&slice, &mut parts);
                 }
             }
@@ -549,6 +561,7 @@ fn push_chain_part<'a>(
     let program = env_run_end(&words).map_or(0, |end| words.partition_point(|w| w.start < end));
     parts.push(ChainPart {
         text: command.as_str(),
+        start: command.start(),
         consumes_pipe,
         runs_rtk: rtk_invocation(&words[program..]).is_some(),
     });
@@ -578,45 +591,72 @@ pub(crate) fn split_command_chain(cmd: &str) -> Vec<String> {
         .collect()
 }
 
-/// Which commands of `line` the rewriter acts on, one flag per part of `parts`, which are
-/// `line`'s own ([`split_command_chain_parts`]).
+/// A call's commands, and which of them the rewrite acts on.
+pub(crate) struct Call<'a> {
+    pub(crate) parts: Vec<ChainPart<'a>>,
+    /// One flag per part: whether the rewrite edits it ([`parts_edited`]).
+    ///
+    /// Position decides it. `tail -1` alone becomes `rtk read`, but in
+    /// `cargo test 2>&1 | tail -1` the rewriter takes the producer and leaves the
+    /// consumer alone: RTK filters what `cargo` writes, and rewriting the stage
+    /// that reads it would change what the pipeline prints. In
+    /// `cargo test | grep FAILED` it is the other way round, because `rtk grep` is
+    /// one of the rules that are safe to run at the end of a pipeline. A command
+    /// the rewriter passes over offers nothing to save.
+    pub(crate) reached: Vec<bool>,
+}
+
+/// The commands of `line` ([`split_command_chain_parts`]) and the ones the rewrite acts on,
+/// read off one lex of the line: the rewrite runs over the lex and the lines the commands
+/// are cut from, so each of its edits lies in the command it was made in.
 ///
-/// Put to the rewriter rather than re-derived from `PipelineSafety`, so the two
-/// cannot drift: a second copy of the rule is a second thing to keep in step.
-/// Answered for the whole line at once, because what happens to one command
-/// depends on the ones around it.
-///
-/// Position decides it. `tail -1` alone becomes `rtk read`, but in
-/// `cargo test 2>&1 | tail -1` the rewriter takes the producer and leaves the
-/// consumer alone — RTK filters what `cargo` writes, and rewriting the stage
-/// that reads it would change what the pipeline prints. In
-/// `cargo test | grep FAILED` it is the other way round, because `rtk grep` is
-/// one of the rules that are safe to run at the end of a pipeline. A command
-/// the rewriter passes over offers nothing to save.
-pub(crate) fn stages_the_rewriter_reaches(
-    line: &JoinedLine<'_>,
-    parts: &[ChainPart<'_>],
+/// The rewrite is put to the rewriter rather than re-derived from `PipelineSafety`, so the
+/// two cannot drift: a second copy of the rule is a second thing to keep in step. It is
+/// asked about the whole line at once, because what happens to one command depends on the
+/// ones around it. A line that could not be joined is not rewritten.
+pub(crate) fn read_call<'a>(
+    line: &'a JoinedLine<'_>,
     excluded: &[ExcludePattern],
     normalized_prefixes: &[String],
-) -> Vec<bool> {
-    // The rewrite emits the line with its continuations joined, which `line` already is.
-    let Some(rewritten) = rewrite_command_precompiled(&line.text, excluded, normalized_prefixes)
-    else {
-        return vec![false; parts.len()];
-    };
-    let rewritten = JoinedLine::of(&rewritten);
-    let after = split_command_chain_parts(&rewritten);
-    // A rewrite substitutes commands and keeps every separator, so the chains
-    // line up command for command. If they ever do not, nothing can be located
-    // and claiming a saving would be a guess.
-    if parts.len() != after.len() {
-        return vec![false; parts.len()];
+) -> Call<'a> {
+    let lex = CompoundLex::new(&line.text);
+    let lines = call_lines(&lex, line);
+    let parts = chain_parts(&lex, &lines);
+    let mut rewriter = Rewriter::new(excluded, normalized_prefixes, 0);
+    // A line the rewrite makes no text of is left as written, whatever edits it recorded.
+    let rewritten = line.joined && rewrite_lex(&lex, &lines, &mut rewriter).is_some();
+    let edits: &[Edit] = if rewritten { &rewriter.edits } else { &[] };
+    let reached = parts_edited(&parts, edits);
+    Call { parts, reached }
+}
+
+/// One flag per part of `parts`: whether one of `edits` falls in it.
+///
+/// An edit is a span of the call's line, and an edit made in a command lies inside the
+/// command's own words, so the part it belongs to is the last one that starts at or before
+/// it (the parts come in the order of the line). An edit's rank among the others says
+/// nothing of its part: a command the rewrite passes over has none, and neither has a stage
+/// in the middle of a pipeline.
+fn parts_edited(parts: &[ChainPart<'_>], edits: &[Edit]) -> Vec<bool> {
+    debug_assert!(
+        parts.windows(2).all(|pair| pair[0].start < pair[1].start),
+        "the parts come in the order of the line"
+    );
+    let mut edited = vec![false; parts.len()];
+    for edit in edits {
+        let index = parts
+            .partition_point(|part| part.start <= edit.span.start)
+            .checked_sub(1);
+        debug_assert!(
+            index.is_some_and(|i| edit.span.start <= parts[i].start + parts[i].text.len()),
+            "an edit at {:?} lies in no command",
+            edit.span
+        );
+        if let Some(index) = index {
+            edited[index] = true;
+        }
     }
-    parts
-        .iter()
-        .zip(after)
-        .map(|(before, after)| before.text != after.text)
-        .collect()
+    edited
 }
 
 fn normalize_php_tool_command(cmd: &str) -> String {
@@ -1123,14 +1163,24 @@ fn rewrite_line(cmd: &str, compiled: &[ExcludePattern], normalized_prefixes: &[S
     }
 
     let mut rewriter = Rewriter::new(compiled, normalized_prefixes, 0);
-    let text = match read_lines(&line) {
-        Lines::Opaque | Lines::Refused => None,
-        Lines::Whole => rewrite_single(&line, &mut rewriter),
-        Lines::Units(units) => rewrite_multiline_block(&line, &units, &mut rewriter),
-    };
+    let text = rewrite_lex(&line, &read_lines(&line), &mut rewriter);
     Answer {
         text,
         disabled: rewriter.disabled,
+    }
+}
+
+/// The rewrite of the lexed line `line`, read as `lines`: its edits are recorded in
+/// `rewriter`, and the line they make comes back, if the rewrite acts on it.
+fn rewrite_lex(
+    line: &CompoundLex<'_>,
+    lines: &Lines,
+    rewriter: &mut Rewriter<'_>,
+) -> Option<String> {
+    match lines {
+        Lines::Opaque | Lines::Refused => None,
+        Lines::Whole => rewrite_single(line, rewriter),
+        Lines::Units(units) => rewrite_multiline_block(line, units, rewriter),
     }
 }
 
@@ -3618,11 +3668,9 @@ mod tests {
     use crate::core::cmdline::lexer::shell_split;
     use crate::core::test_isolation;
 
-    /// [`stages_the_rewriter_reaches`] for `cmd` read as the report reads a call.
+    /// [`Call::reached`] for `cmd` read as the report reads a call.
     fn reaches(cmd: &str) -> Vec<bool> {
-        let line = JoinedLine::of(cmd);
-        let parts = split_command_chain_parts(&line);
-        stages_the_rewriter_reaches(&line, &parts, &[], &[])
+        read_call(&JoinedLine::of(cmd), &[], &[]).reached
     }
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
@@ -5665,23 +5713,127 @@ mod tests {
         }
     }
 
-    /// One flag per part, whatever the line looks like — a caller indexes this
-    /// by part, so a short answer would silently point at the wrong command.
+    /// A call is cut once, for its parts and for its edits: the parts of [`read_call`] are
+    /// the ones [`split_command_chain_parts`] cuts, with one flag each, however the line
+    /// reads, a call that could not be joined included.
     #[test]
-    fn test_every_part_gets_a_reachability_flag() {
+    fn test_a_call_has_one_flag_per_part_it_is_split_into() {
         for cmd in [
             "cargo test | grep FAILED",
             "a && b || c ; d | e",
             "cat <<EOF | wc -l",
             "echo $((1 + 2))",
             "git status",
+            "git status\ngit log\n# c\nfrobnicate",
+            "git status\na[1 # 2]=b",
+            "git status && a[1 # 2]=b",
         ] {
+            let line = JoinedLine::of(cmd);
+            let call = read_call(&line, &[], &[]);
+            let texts: Vec<&str> = call.parts.iter().map(|part| part.text).collect();
+            assert_eq!(texts, split_command_chain(cmd), "{cmd:?}");
+            assert_eq!(call.reached.len(), texts.len(), "{cmd:?}");
+        }
+    }
+
+    /// A command is reached when the rewrite made an edit in it, wherever it stands in the
+    /// call: its edit is placed by where it falls, not by how many edits came before, so a
+    /// command the rewrite passes over, one the report does not count, and the words of a
+    /// group between two edited ones do not shift the flags.
+    #[test]
+    fn test_a_command_is_reached_by_the_edit_made_in_it() {
+        for (cmd, parts, expected) in [
+            (
+                "frobnicate && git status",
+                vec!["frobnicate", "git status"],
+                vec![false, true],
+            ),
+            (
+                "git status && frobnicate && git log",
+                vec!["git status", "frobnicate", "git log"],
+                vec![true, false, true],
+            ),
+            (
+                "FOO=1 git status; frobnicate",
+                vec!["FOO=1 git status", "frobnicate"],
+                vec![true, false],
+            ),
+            (
+                "  frobnicate   &&   git status  ",
+                vec!["frobnicate", "git status"],
+                vec![false, true],
+            ),
+            // A group's closing word is no command, and stands between two that are.
+            (
+                "if true; then git status; fi; frobnicate; git log",
+                vec!["if true", "then git status", "frobnicate", "git log"],
+                vec![false, true, false, true],
+            ),
+            (
+                "(echo a) git status; git log",
+                vec!["echo a", "git log"],
+                vec![false, true],
+            ),
+            (
+                "frobnicate\n# comment\ngit status\n\nfrobnicate\ngit log",
+                vec!["frobnicate", "git status", "frobnicate", "git log"],
+                vec![false, true, false, true],
+            ),
+            // An edit inside a quoted script is made in the command that runs it.
+            (
+                "frobnicate && bash -c 'git status' && frobnicate",
+                vec!["frobnicate", "bash -c 'git status'", "frobnicate"],
+                vec![false, true, false],
+            ),
+            // The rewrite takes the last stage of a pipeline, or else the first, and
+            // none of those between.
+            (
+                "frobnicate | frobnicate | grep x && frobnicate | frobnicate",
+                vec![
+                    "frobnicate",
+                    "frobnicate",
+                    "grep x",
+                    "frobnicate",
+                    "frobnicate",
+                ],
+                vec![false, false, true, false, false],
+            ),
+            (
+                "frobnicate | cargo test 2>&1 | tail -1 && git log",
+                vec!["frobnicate", "cargo test 2>&1", "tail -1", "git log"],
+                vec![false, false, false, true],
+            ),
+            (
+                "git status | cat | head -3",
+                vec!["git status", "cat", "head -3"],
+                vec![true, false, false],
+            ),
+        ] {
+            let line = JoinedLine::of(cmd);
+            let call = read_call(&line, &[], &[]);
+            let texts: Vec<&str> = call.parts.iter().map(|part| part.text).collect();
+            assert_eq!(texts, parts, "{cmd:?}");
             assert_eq!(
-                reaches(cmd).len(),
-                split_command_chain(cmd).len(),
-                "flag count does not match part count for {cmd:?}"
+                call.reached,
+                expected,
+                "{cmd:?} rewrites to {:?}",
+                rewrite_command_no_prefixes(cmd, &[])
             );
         }
+    }
+
+    /// A call too complex to join is not rewritten, so none of its commands is reached,
+    /// although the same command alone would be.
+    #[test]
+    fn test_a_call_that_cannot_be_joined_reaches_no_command() {
+        for (cmd, expected) in [
+            ("git status && a[1 # 2]=b", vec![false, false]),
+            ("git status\na[1 # 2]=b", vec![false]),
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+            assert_eq!(reaches(cmd), expected, "{cmd:?}");
+        }
+        assert_eq!(reaches("git status"), [true]);
     }
 
     /// Whether the rewrite of `cmd` refused a command on `RTK_DISABLED=`,
