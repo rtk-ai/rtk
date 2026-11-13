@@ -34,8 +34,8 @@ impl RtkStatus {
 pub struct SupportedEntry {
     pub command: String,
     pub count: usize,
-    /// How many of `count` were sized by the category average rather than by a
-    /// measured output. See `SupportedBucket::estimated_occurrences`.
+    /// How many of `count` were estimated from category averages rather than taking a
+    /// measured output whole. See `SupportedBucket::estimated_occurrences`.
     pub estimated_occurrences: usize,
     pub rtk_equivalent: &'static str,
     pub category: &'static str,
@@ -335,11 +335,9 @@ fn append_savings_table(
     append_estimate_note(out, entries);
 }
 
-/// Say how much of a table's figure was measured and how much was averaged, so
-/// a reader can tell a number taken from a tool result from one taken from a
-/// per-category constant. A command that feeds a pipe is never the last of its
-/// line and so is always averaged, which makes the opportunities table the one
-/// this matters most for.
+/// Say how much of a table's figure was measured and how much was estimated, so
+/// a reader can tell a number taken whole from a tool result from one sized, or
+/// split between the commands of a call, by per-category constants.
 fn append_estimate_note(out: &mut String, entries: &[SupportedEntry]) {
     let estimated: usize = entries.iter().map(|e| e.estimated_occurrences).sum();
     let total: usize = entries.iter().map(|e| e.count).sum();
@@ -347,10 +345,10 @@ fn append_estimate_note(out: &mut String, entries: &[SupportedEntry]) {
         return;
     }
     if estimated == total {
-        out.push_str("  every figure above is a per-category average, not a measured output\n");
+        out.push_str("  every figure above is estimated from per-category averages\n");
     } else {
         out.push_str(&format!(
-            "  {estimated} of {total} sized by per-category average, the rest measured\n"
+            "  {estimated} of {total} estimated from per-category averages, the rest measured\n"
         ));
     }
 }
@@ -479,11 +477,11 @@ mod tests {
 
         let output = format_text(&report, 20, false);
         assert!(
-            output.contains("4 of 10 sized by per-category average"),
+            output.contains("4 of 10 estimated from per-category averages"),
             "a mixed table says how much of it was averaged, got:\n{output}"
         );
         assert!(
-            output.contains("every figure above is a per-category average"),
+            output.contains("every figure above is estimated from per-category averages"),
             "a wholly averaged table says so outright, got:\n{output}"
         );
     }
