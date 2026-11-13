@@ -417,9 +417,9 @@ mod tests {
 
         // 7. Hermes (full init/uninstall + individual arms)
         run_isolated(&|home, _ws| {
-            super::super::init::hermes::run_hermes_mode(InitContext::default()).unwrap();
+            super::super::init::hermes::run_hermes_mode(InitContext::default(), &[]).unwrap();
             assert!(is_any_agent_configured(), "hermes init");
-            super::super::init::hermes::uninstall_hermes(InitContext::default()).unwrap();
+            super::super::init::hermes::uninstall_hermes(InitContext::default(), &[]).unwrap();
             assert!(!is_any_agent_configured(), "hermes uninstalled");
 
             // Plugin file arm alone

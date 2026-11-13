@@ -14,9 +14,15 @@ const HERMES_PLUGIN_INIT: &str = include_str!("../../../hooks/hermes/rtk-rewrite
 
 const HERMES_PLUGIN_YAML: &str = include_str!("../../../hooks/hermes/rtk-rewrite/plugin.yaml");
 
-pub fn run_hermes_mode(ctx: InitContext) -> Result<()> {
+/// Sentinel value accepted by `--profile` to target all discovered profiles.
+const PROFILE_ALL: &str = "all";
+
+/// Subdirectory inside the Hermes home that holds named profiles.
+const HERMES_PROFILES_SUBDIR: &str = "profiles";
+
+pub fn run_hermes_mode(ctx: InitContext, profiles: &[String]) -> Result<()> {
     let hermes_home = resolve_hermes_home()?;
-    run_hermes_mode_at(&hermes_home, ctx)
+    run_hermes_mode_at(&hermes_home, ctx, profiles)
 }
 
 fn hermes_plugin_dir(hermes_home: &Path) -> PathBuf {
@@ -25,18 +31,29 @@ fn hermes_plugin_dir(hermes_home: &Path) -> PathBuf {
         .join(HERMES_PLUGIN_NAME)
 }
 
-fn run_hermes_mode_at(hermes_home: &Path, ctx: InitContext) -> Result<()> {
+/// Return the path to a named profile's directory.
+fn hermes_profile_dir(hermes_home: &Path, profile: &str) -> PathBuf {
+    hermes_home.join(HERMES_PROFILES_SUBDIR).join(profile)
+}
+
+/// Return the path to a named profile's plugin directory.
+fn hermes_profile_plugin_dir(hermes_home: &Path, profile: &str) -> PathBuf {
+    hermes_profile_dir(hermes_home, profile)
+        .join(HERMES_PLUGINS_SUBDIR)
+        .join(HERMES_PLUGIN_NAME)
+}
+
+/// Write the RTK rewrite plugin files (`__init__.py` and `plugin.yaml`) into `plugin_dir`.
+fn write_hermes_plugin_files(plugin_dir: &Path, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    let plugin_dir = hermes_plugin_dir(hermes_home);
     if !dry_run {
-        fs::create_dir_all(&plugin_dir).with_context(|| {
+        fs::create_dir_all(plugin_dir).with_context(|| {
             format!(
                 "Failed to create Hermes plugin directory: {}",
                 plugin_dir.display()
             )
         })?;
     }
-
     let init_path = plugin_dir.join(HERMES_PLUGIN_INIT_FILE);
     let manifest_path = plugin_dir.join(HERMES_PLUGIN_MANIFEST_FILE);
     write_if_changed(&init_path, HERMES_PLUGIN_INIT, "Hermes plugin", ctx)?;
@@ -46,34 +63,255 @@ fn run_hermes_mode_at(hermes_home: &Path, ctx: InitContext) -> Result<()> {
         "Hermes plugin manifest",
         ctx,
     )?;
+    Ok(())
+}
 
-    let config_path = hermes_home.join("config.yaml");
-    let existing_config = if config_path.exists() {
-        fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read Hermes config: {}", config_path.display()))?
+/// List the names of all profiles that exist under `~/.hermes/profiles/`.
+/// Returns an empty vec when the directory is absent (not an error).
+fn list_hermes_profiles(hermes_home: &Path) -> Result<Vec<String>> {
+    let profiles_dir = hermes_home.join(HERMES_PROFILES_SUBDIR);
+    if !profiles_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut names: Vec<String> = fs::read_dir(&profiles_dir)
+        .with_context(|| {
+            format!(
+                "Failed to read Hermes profiles directory: {}",
+                profiles_dir.display()
+            )
+        })?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if entry.file_type().ok()?.is_dir() {
+                let name = entry.file_name().into_string().ok()?;
+                if !name.starts_with('.') {
+                    Some(name)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// Normalize, trim, split, and deduplicate profile names, filtering out empty entries.
+fn sanitize_profiles(profiles: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    for p in profiles {
+        for segment in p.split(',') {
+            let trimmed = segment.trim();
+            if !trimmed.is_empty() && !result.iter().any(|existing: &String| existing == trimmed) {
+                result.push(trimmed.to_string());
+            }
+        }
+    }
+    result
+}
+
+/// Reject names that are not a single plain path component. `Path::join` with an
+/// absolute path discards the base, and `..` walks out of `profiles/`.
+fn validate_profile_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || Path::new(name).is_absolute()
+    {
+        anyhow::bail!(
+            "Invalid Hermes profile name: {name:?}\n\
+             Profile names must be a plain directory name: no '/', '\\', '.' or '..', \
+             and no absolute paths.\n\
+             Usage: rtk init --agent hermes --profile <name|all>"
+        );
+    }
+    Ok(())
+}
+
+/// Validate that every requested profile name is a plain component and exists on disk.
+/// Returns a formatted error listing the missing names and available profiles.
+fn validate_profiles(hermes_home: &Path, profiles: &[String]) -> Result<()> {
+    let mut missing: Vec<&str> = Vec::new();
+    for name in profiles {
+        if name == PROFILE_ALL {
+            continue;
+        }
+        validate_profile_name(name)?;
+        if !hermes_profile_dir(hermes_home, name).is_dir() {
+            missing.push(name.as_str());
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let available = list_hermes_profiles(hermes_home).unwrap_or_default();
+    let available_str = if available.is_empty() {
+        "  (no profiles found under ~/.hermes/profiles/)".to_string()
+    } else {
+        available
+            .iter()
+            .map(|n| format!("  - {n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let missing_str = missing.join(", ");
+    anyhow::bail!(
+        "Hermes profile{} not found: {missing_str}\n\
+         Available profiles:\n{available_str}\n\
+         Use --profile all to target every profile.",
+        if missing.len() == 1 { "" } else { "s" }
+    );
+}
+
+/// Patch a single Hermes config file at `config_path`.
+fn patch_hermes_config_file(config_path: &Path, ctx: InitContext, label: &str) -> Result<()> {
+    let existing = if config_path.exists() {
+        fs::read_to_string(config_path)
+            .with_context(|| format!("Failed to read {label}: {}", config_path.display()))?
     } else {
         String::new()
     };
-    let patched_config = patch_hermes_config(&existing_config);
-    write_if_changed(&config_path, &patched_config, "Hermes config", ctx)?;
+    let patched = patch_hermes_config(&existing);
+    write_if_changed(config_path, &patched, label, ctx)?;
+    Ok(())
+}
+
+/// Unpatch a single Hermes config file at `config_path`.
+/// Returns `true` if the file was (or would be) modified.
+fn unpatch_hermes_config_file(config_path: &Path, ctx: InitContext, label: &str) -> Result<bool> {
+    if !config_path.exists() {
+        return Ok(false);
+    }
+    let InitContext {
+        verbose, dry_run, ..
+    } = ctx;
+    let existing = fs::read_to_string(config_path)
+        .with_context(|| format!("Failed to read {label}: {}", config_path.display()))?;
+    let patched = unpatch_hermes_config(&existing);
+    if patched == existing {
+        return Ok(false);
+    }
+    if dry_run {
+        println!("[dry-run] would update {label}: {}", config_path.display());
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", patched);
+        }
+    } else {
+        atomic_write(config_path, &patched)
+            .with_context(|| format!("Failed to write {label}: {}", config_path.display()))?;
+        if verbose > 0 {
+            eprintln!("Updated {label}: {}", config_path.display());
+        }
+    }
+    Ok(true)
+}
+
+fn run_hermes_mode_at(hermes_home: &Path, ctx: InitContext, raw_profiles: &[String]) -> Result<()> {
+    let profiles = sanitize_profiles(raw_profiles);
+    if !raw_profiles.is_empty() && profiles.is_empty() {
+        anyhow::bail!(
+            "Hermes profile name cannot be empty.\nUsage: rtk init --agent hermes --profile <name|all>"
+        );
+    }
+
+    // Resolve the full set of configs to patch.
+    let use_all = profiles.iter().any(|p| p == PROFILE_ALL);
+    let named: Vec<&str> = profiles
+        .iter()
+        .filter(|p| p.as_str() != PROFILE_ALL)
+        .map(String::as_str)
+        .collect();
+
+    // Validate named profiles before writing anything.
+    if !named.is_empty() {
+        validate_profiles(
+            hermes_home,
+            &named.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        )?;
+    }
+
+    let InitContext { dry_run, .. } = ctx;
+
+    let target_profile_names: Vec<String> = if use_all {
+        list_hermes_profiles(hermes_home)?
+    } else {
+        named.iter().map(|s| s.to_string()).collect()
+    };
+
+    let no_profiles_requested = profiles.is_empty();
+    let include_default = no_profiles_requested || use_all;
+
+    // Collect plugin directories to install.
+    let mut plugin_dirs: Vec<PathBuf> = Vec::new();
+    if include_default {
+        plugin_dirs.push(hermes_plugin_dir(hermes_home));
+    }
+    for profile_name in &target_profile_names {
+        plugin_dirs.push(hermes_profile_plugin_dir(hermes_home, profile_name));
+    }
+
+    // Write plugin files to each plugin directory.
+    for p_dir in &plugin_dirs {
+        write_hermes_plugin_files(p_dir, ctx)?;
+    }
+
+    // Collect config paths to patch.
+    let mut config_paths: Vec<(PathBuf, String)> = Vec::new();
+    if include_default {
+        let default_config = hermes_home.join("config.yaml");
+        config_paths.push((default_config, "Hermes default config".to_string()));
+    }
+    for profile_name in &target_profile_names {
+        let path = hermes_profile_dir(hermes_home, profile_name).join("config.yaml");
+        config_paths.push((path, format!("Hermes profile '{profile_name}' config")));
+    }
+
+    // Patch each config.
+    for (config_path, label) in &config_paths {
+        patch_hermes_config_file(config_path, ctx, label)?;
+    }
 
     if dry_run {
         print_dry_run_footer();
     } else {
         println!("\nRTK configured for Hermes.\n");
-        println!("  Plugin: {}", plugin_dir.display());
-        println!("  Config: {}", config_path.display());
+        for p_dir in &plugin_dirs {
+            println!("  Plugin: {}", p_dir.display());
+        }
+        for (config_path, label) in &config_paths {
+            println!("  {label}: {}", config_path.display());
+        }
         println!("  Hermes will now rewrite terminal commands through rtk.");
-        println!("  Restart Hermes. Test with: git status\n");
+        if use_all {
+            println!("  Restart Hermes (all profiles). Test with: git status\n");
+        } else if named.len() == 1 {
+            println!(
+                "  Restart Hermes profile '{}'. Test with: git status\n",
+                named[0]
+            );
+        } else if named.len() > 1 {
+            let list = named
+                .iter()
+                .map(|n| format!("'{n}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("  Restart Hermes profiles {list}. Test with: git status\n");
+        } else {
+            println!("  Restart Hermes. Test with: git status\n");
+        }
     }
 
     Ok(())
 }
 
-pub fn uninstall_hermes(ctx: InitContext) -> Result<()> {
+pub fn uninstall_hermes(ctx: InitContext, profiles: &[String]) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
     let hermes_home = resolve_hermes_home()?;
-    let removed = uninstall_hermes_at(&hermes_home, ctx)?;
+    let removed = uninstall_hermes_at(&hermes_home, ctx, profiles)?;
 
     if removed.is_empty() {
         println!("RTK Hermes support was not installed (nothing to remove)");
@@ -96,58 +334,93 @@ pub fn uninstall_hermes(ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
-fn uninstall_hermes_at(hermes_home: &Path, ctx: InitContext) -> Result<Vec<String>> {
+fn uninstall_hermes_at(
+    hermes_home: &Path,
+    ctx: InitContext,
+    raw_profiles: &[String],
+) -> Result<Vec<String>> {
+    let profiles = sanitize_profiles(raw_profiles);
+    if !raw_profiles.is_empty() && profiles.is_empty() {
+        anyhow::bail!(
+            "Hermes profile name cannot be empty.\nUsage: rtk init --uninstall --agent hermes --profile <name|all>"
+        );
+    }
+
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
     let mut removed = Vec::new();
 
-    let plugin_dir = hermes_plugin_dir(hermes_home);
-    if plugin_dir.exists() {
-        if dry_run {
-            println!(
-                "[dry-run] would remove Hermes plugin directory: {}",
-                plugin_dir.display()
-            );
-        } else {
-            // nosemgrep: filesystem-deletion -- uninstall intentionally removes only RTK's Hermes plugin directory.
-            fs::remove_dir_all(&plugin_dir).with_context(|| {
-                format!(
-                    "Failed to remove Hermes plugin directory: {}",
-                    plugin_dir.display()
-                )
-            })?;
-            if verbose > 0 {
-                eprintln!("Removed Hermes plugin directory: {}", plugin_dir.display());
-            }
-        }
-        removed.push(format!("Hermes plugin: {}", plugin_dir.display()));
+    // Determine which configs to unpatch.
+    let use_all = profiles.iter().any(|p| p == PROFILE_ALL);
+    let named: Vec<&str> = profiles
+        .iter()
+        .filter(|p| p.as_str() != PROFILE_ALL)
+        .map(String::as_str)
+        .collect();
+
+    if !named.is_empty() {
+        validate_profiles(
+            hermes_home,
+            &named.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        )?;
     }
 
-    let config_path = hermes_home.join("config.yaml");
-    if config_path.exists() {
-        let existing_config = fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read Hermes config: {}", config_path.display()))?;
-        let patched_config = unpatch_hermes_config(&existing_config);
+    let no_profiles_requested = profiles.is_empty();
+    let include_default = no_profiles_requested || use_all;
 
-        if patched_config != existing_config {
+    let target_profile_names: Vec<String> = if use_all {
+        list_hermes_profiles(hermes_home)?
+    } else {
+        named.iter().map(|s| s.to_string()).collect()
+    };
+
+    let mut plugin_targets: Vec<(PathBuf, String)> = Vec::new();
+    if include_default {
+        plugin_targets.push((hermes_plugin_dir(hermes_home), "Hermes plugin".to_string()));
+    }
+    for profile_name in &target_profile_names {
+        plugin_targets.push((
+            hermes_profile_plugin_dir(hermes_home, profile_name),
+            format!("Hermes profile '{profile_name}' plugin"),
+        ));
+    }
+
+    for (p_dir, label) in plugin_targets {
+        if p_dir.exists() {
             if dry_run {
                 println!(
-                    "[dry-run] would update Hermes config: {}",
-                    config_path.display()
+                    "[dry-run] would remove {label} directory: {}",
+                    p_dir.display()
                 );
-                if verbose > 0 {
-                    println!("[dry-run] content:\n{}", patched_config);
-                }
             } else {
-                atomic_write(&config_path, &patched_config).with_context(|| {
-                    format!("Failed to write Hermes config: {}", config_path.display())
+                // nosemgrep: filesystem-deletion -- uninstall intentionally removes only RTK's Hermes plugin directory.
+                fs::remove_dir_all(&p_dir).with_context(|| {
+                    format!("Failed to remove {label} directory: {}", p_dir.display())
                 })?;
                 if verbose > 0 {
-                    eprintln!("Updated Hermes config: {}", config_path.display());
+                    eprintln!("Removed {label} directory: {}", p_dir.display());
                 }
             }
-            removed.push("Hermes config: removed RTK plugin entry".to_string());
+            removed.push(format!("{label}: {}", p_dir.display()));
+        }
+    }
+
+    let mut config_targets: Vec<(PathBuf, String)> = Vec::new();
+    if include_default {
+        config_targets.push((
+            hermes_home.join("config.yaml"),
+            "Hermes default config".to_string(),
+        ));
+    }
+    for profile_name in &target_profile_names {
+        let path = hermes_profile_dir(hermes_home, profile_name).join("config.yaml");
+        config_targets.push((path, format!("Hermes profile '{profile_name}' config")));
+    }
+
+    for (config_path, label) in &config_targets {
+        if unpatch_hermes_config_file(config_path, ctx, label)? {
+            removed.push(format!("{label}: removed RTK plugin entry"));
         }
     }
 
@@ -554,7 +827,7 @@ mod tests {
     #[test]
     fn test_hermes_mode_creates_plugin_files() {
         let temp = TempDir::new().unwrap();
-        run_hermes_mode_at(temp.path(), InitContext::default()).unwrap();
+        run_hermes_mode_at(temp.path(), InitContext::default(), &[]).unwrap();
 
         let plugin_dir = temp.path().join("plugins/rtk-rewrite");
         let init_path = plugin_dir.join("__init__.py");
@@ -588,9 +861,9 @@ mod tests {
         )
         .unwrap();
 
-        run_hermes_mode_at(temp.path(), InitContext::default()).unwrap();
+        run_hermes_mode_at(temp.path(), InitContext::default(), &[]).unwrap();
         let first = fs::read_to_string(&config_path).unwrap();
-        run_hermes_mode_at(temp.path(), InitContext::default()).unwrap();
+        run_hermes_mode_at(temp.path(), InitContext::default(), &[]).unwrap();
         let second = fs::read_to_string(&config_path).unwrap();
 
         assert_eq!(first, second, "Hermes config patch should be idempotent");
@@ -611,9 +884,9 @@ mod tests {
         )
         .unwrap();
 
-        run_hermes_mode_at(temp.path(), InitContext::default()).unwrap();
+        run_hermes_mode_at(temp.path(), InitContext::default(), &[]).unwrap();
         let first = fs::read_to_string(&config_path).unwrap();
-        run_hermes_mode_at(temp.path(), InitContext::default()).unwrap();
+        run_hermes_mode_at(temp.path(), InitContext::default(), &[]).unwrap();
         let second = fs::read_to_string(&config_path).unwrap();
 
         let expected = "theme: dark\nplugins:\n disabled:\n - google_meet\n - spotify\n enabled:\n - disk-cleanup\n - rtk-rewrite\n search_path: ./plugins\nother: true\n";
@@ -642,9 +915,9 @@ mod tests {
         )
         .unwrap();
 
-        run_hermes_mode_at(hermes_home, InitContext::default()).unwrap();
+        run_hermes_mode_at(hermes_home, InitContext::default(), &[]).unwrap();
         let first = fs::read_to_string(&config_path).unwrap();
-        run_hermes_mode_at(hermes_home, InitContext::default()).unwrap();
+        run_hermes_mode_at(hermes_home, InitContext::default(), &[]).unwrap();
         let second = fs::read_to_string(&config_path).unwrap();
 
         let installed = "theme: dark\nplugins:\n disabled:\n - google_meet\n - spotify\n search_path: ./plugins\n enabled:\n - rtk-rewrite\nother: true\n";
@@ -654,8 +927,8 @@ mod tests {
         assert!(plugin_dir.exists());
         assert_eq!(fs::read_to_string(&other_plugin_file).unwrap(), "keep");
 
-        let removed_first = uninstall_hermes_at(hermes_home, InitContext::default()).unwrap();
-        let removed_second = uninstall_hermes_at(hermes_home, InitContext::default()).unwrap();
+        let removed_first = uninstall_hermes_at(hermes_home, InitContext::default(), &[]).unwrap();
+        let removed_second = uninstall_hermes_at(hermes_home, InitContext::default(), &[]).unwrap();
 
         assert_eq!(removed_first.len(), 2);
         assert!(removed_second.is_empty());
@@ -693,8 +966,8 @@ mod tests {
         )
         .unwrap();
 
-        let removed_first = uninstall_hermes_at(hermes_home, InitContext::default()).unwrap();
-        let removed_second = uninstall_hermes_at(hermes_home, InitContext::default()).unwrap();
+        let removed_first = uninstall_hermes_at(hermes_home, InitContext::default(), &[]).unwrap();
+        let removed_second = uninstall_hermes_at(hermes_home, InitContext::default(), &[]).unwrap();
 
         assert_eq!(removed_first.len(), 2);
         assert!(removed_second.is_empty());
@@ -730,8 +1003,8 @@ mod tests {
         )
         .unwrap();
 
-        let removed_first = uninstall_hermes_at(hermes_home, InitContext::default()).unwrap();
-        let removed_second = uninstall_hermes_at(hermes_home, InitContext::default()).unwrap();
+        let removed_first = uninstall_hermes_at(hermes_home, InitContext::default(), &[]).unwrap();
+        let removed_second = uninstall_hermes_at(hermes_home, InitContext::default(), &[]).unwrap();
 
         assert_eq!(removed_first.len(), 2);
         assert!(removed_second.is_empty());
@@ -754,8 +1027,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let hermes_home = temp.path();
 
-        let removed_first = uninstall_hermes_at(hermes_home, InitContext::default()).unwrap();
-        let removed_second = uninstall_hermes_at(hermes_home, InitContext::default()).unwrap();
+        let removed_first = uninstall_hermes_at(hermes_home, InitContext::default(), &[]).unwrap();
+        let removed_second = uninstall_hermes_at(hermes_home, InitContext::default(), &[]).unwrap();
 
         assert!(removed_first.is_empty());
         assert!(removed_second.is_empty());
@@ -1057,5 +1330,264 @@ mod tests {
 
         assert_eq!(empty_falls_back, home_dir.join(".hermes"));
         assert_eq!(missing_falls_back, home_dir.join(".hermes"));
+    }
+
+    #[test]
+    fn test_hermes_mode_named_profile_patches_only_profile_config() {
+        let temp = TempDir::new().unwrap();
+        let hermes_home = temp.path();
+
+        let profile_dir = hermes_home.join("profiles").join("work");
+        fs::create_dir_all(&profile_dir).unwrap();
+        let profile_config = profile_dir.join("config.yaml");
+        fs::write(&profile_config, "model: gpt-4\n").unwrap();
+
+        let profiles = vec!["work".to_string()];
+        run_hermes_mode_at(hermes_home, InitContext::default(), &profiles).unwrap();
+
+        assert!(!hermes_home.join("config.yaml").exists());
+
+        let content = fs::read_to_string(&profile_config).unwrap();
+        assert!(content.contains("rtk-rewrite"));
+
+        // Profile's own plugin dir should have the plugin files
+        assert!(
+            hermes_profile_plugin_dir(hermes_home, "work")
+                .join(HERMES_PLUGIN_INIT_FILE)
+                .exists()
+        );
+    }
+
+    #[test]
+    fn test_hermes_mode_sanitizes_commas_and_whitespace() {
+        let temp = TempDir::new().unwrap();
+        let hermes_home = temp.path();
+
+        let p1 = hermes_home.join("profiles").join("reviewer");
+        let p2 = hermes_home.join("profiles").join("writer");
+        fs::create_dir_all(&p1).unwrap();
+        fs::create_dir_all(&p2).unwrap();
+
+        // Simulate "reviewer," and " writer" (with trailing comma and spaces)
+        let raw_profiles = vec![
+            "reviewer,".to_string(),
+            " writer".to_string(),
+            "".to_string(),
+        ];
+        run_hermes_mode_at(hermes_home, InitContext::default(), &raw_profiles).unwrap();
+
+        // Must NOT create a config.yaml directly in ~/.hermes/profiles/
+        assert!(!hermes_home.join("profiles").join("config.yaml").exists());
+
+        // Both intended profiles must have the plugin and config
+        assert!(hermes_profile_plugin_dir(hermes_home, "reviewer").exists());
+        assert!(hermes_profile_plugin_dir(hermes_home, "writer").exists());
+        assert!(p1.join("config.yaml").exists());
+        assert!(p2.join("config.yaml").exists());
+    }
+
+    #[test]
+    fn test_hermes_mode_rejects_empty_profile_name() {
+        let temp = TempDir::new().unwrap();
+        let hermes_home = temp.path();
+
+        let raw_profiles = vec!["".to_string(), "   ".to_string(), ",".to_string()];
+        let err =
+            run_hermes_mode_at(hermes_home, InitContext::default(), &raw_profiles).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Hermes profile name cannot be empty")
+        );
+    }
+
+    #[test]
+    fn test_hermes_mode_missing_profile_errors_with_available_list() {
+        let temp = TempDir::new().unwrap();
+        let hermes_home = temp.path();
+
+        fs::create_dir_all(hermes_home.join("profiles").join("alpha")).unwrap();
+        fs::create_dir_all(hermes_home.join("profiles").join("beta")).unwrap();
+
+        let profiles = vec!["nonexistent".to_string()];
+        let err = run_hermes_mode_at(hermes_home, InitContext::default(), &profiles).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("Hermes profile not found: nonexistent"));
+        assert!(msg.contains("alpha"));
+        assert!(msg.contains("beta"));
+        assert!(msg.contains("--profile all"));
+    }
+
+    #[test]
+    fn test_validate_profile_name_accepts_plain_names_and_rejects_paths() {
+        for bad in [
+            "",
+            ".",
+            "..",
+            "/abs/target",
+            "/",
+            "../x",
+            "a/b",
+            "a\\b",
+            "../../etc",
+        ] {
+            assert!(validate_profile_name(bad).is_err(), "should reject {bad:?}");
+        }
+        for good in ["work", "openpic-merge-conflict-resolver", "a.b", "all"] {
+            assert!(
+                validate_profile_name(good).is_ok(),
+                "should accept {good:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hermes_mode_rejects_escaping_profile_names_without_writing() {
+        let temp = TempDir::new().unwrap();
+        let hermes_home = temp.path().join("hermes");
+        fs::create_dir_all(hermes_home.join("profiles")).unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+
+        let absolute = outside.to_str().unwrap().to_string();
+        let bad_names = [absolute, "../../outside".to_string(), "a/b".to_string()];
+
+        for name in bad_names {
+            let err = run_hermes_mode_at(
+                &hermes_home,
+                InitContext::default(),
+                std::slice::from_ref(&name),
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("Invalid Hermes profile name"),
+                "unexpected error for {name:?}: {err:#}"
+            );
+            assert!(
+                !outside.join("config.yaml").exists(),
+                "wrote outside for {name:?}"
+            );
+            assert!(
+                !outside.join("plugins").exists(),
+                "wrote plugin outside for {name:?}"
+            );
+            assert!(
+                !hermes_home.join("config.yaml").exists(),
+                "wrote default config for {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_uninstall_rejects_escaping_profile_names_without_deleting() {
+        let temp = TempDir::new().unwrap();
+        let hermes_home = temp.path().join("hermes");
+        fs::create_dir_all(hermes_home.join("profiles")).unwrap();
+
+        // A real plugin directory outside the profiles tree that must survive.
+        let victim_plugin = temp.path().join("victim/plugins/rtk-rewrite");
+        fs::create_dir_all(&victim_plugin).unwrap();
+        fs::write(victim_plugin.join("__init__.py"), "keep me").unwrap();
+
+        let absolute = victim_plugin.to_str().unwrap().to_string();
+        let bad_names = [absolute, "../../victim".to_string()];
+
+        for name in bad_names {
+            let err = uninstall_hermes_at(
+                &hermes_home,
+                InitContext::default(),
+                std::slice::from_ref(&name),
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("Invalid Hermes profile name"),
+                "unexpected error for {name:?}: {err:#}"
+            );
+            assert!(
+                victim_plugin.join("__init__.py").exists(),
+                "deleted outside profiles tree for {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hermes_mode_all_profiles_patches_default_and_every_named_profile() {
+        let temp = TempDir::new().unwrap();
+        let hermes_home = temp.path();
+
+        let p1 = hermes_home.join("profiles").join("dev");
+        let p2 = hermes_home.join("profiles").join("prod");
+        fs::create_dir_all(&p1).unwrap();
+        fs::create_dir_all(&p2).unwrap();
+        fs::write(p1.join("config.yaml"), "env: dev\n").unwrap();
+        fs::write(p2.join("config.yaml"), "env: prod\n").unwrap();
+        fs::write(hermes_home.join("config.yaml"), "env: default\n").unwrap();
+
+        let profiles = vec!["all".to_string()];
+        run_hermes_mode_at(hermes_home, InitContext::default(), &profiles).unwrap();
+
+        assert!(
+            fs::read_to_string(hermes_home.join("config.yaml"))
+                .unwrap()
+                .contains("rtk-rewrite")
+        );
+        assert!(
+            fs::read_to_string(p1.join("config.yaml"))
+                .unwrap()
+                .contains("rtk-rewrite")
+        );
+        assert!(
+            fs::read_to_string(p2.join("config.yaml"))
+                .unwrap()
+                .contains("rtk-rewrite")
+        );
+
+        // Plugins installed in both default and profile directories
+        assert!(hermes_plugin_dir(hermes_home).exists());
+        assert!(hermes_profile_plugin_dir(hermes_home, "dev").exists());
+        assert!(hermes_profile_plugin_dir(hermes_home, "prod").exists());
+    }
+
+    #[test]
+    fn test_uninstall_hermes_named_profile_preserves_default_plugin_dir() {
+        let temp = TempDir::new().unwrap();
+        let hermes_home = temp.path();
+
+        // Simulate default profile installed
+        run_hermes_mode_at(hermes_home, InitContext::default(), &[]).unwrap();
+        assert!(hermes_plugin_dir(hermes_home).exists());
+
+        // Install for named profile
+        let profile_dir = hermes_home.join("profiles").join("work");
+        fs::create_dir_all(&profile_dir).unwrap();
+        let profiles = vec!["work".to_string()];
+        run_hermes_mode_at(hermes_home, InitContext::default(), &profiles).unwrap();
+        assert!(hermes_profile_plugin_dir(hermes_home, "work").exists());
+
+        // Uninstall only the named profile
+        let removed = uninstall_hermes_at(hermes_home, InitContext::default(), &profiles).unwrap();
+        assert!(removed.iter().any(|r| r.contains("work")));
+        // Profile plugin dir is removed, but default plugin dir is preserved!
+        assert!(!hermes_profile_plugin_dir(hermes_home, "work").exists());
+        assert!(hermes_plugin_dir(hermes_home).exists());
+    }
+
+    #[test]
+    fn test_uninstall_hermes_all_profiles_removes_all_plugin_dirs() {
+        let temp = TempDir::new().unwrap();
+        let hermes_home = temp.path();
+
+        let profile_dir = hermes_home.join("profiles").join("work");
+        fs::create_dir_all(&profile_dir).unwrap();
+
+        let profiles = vec!["all".to_string()];
+        run_hermes_mode_at(hermes_home, InitContext::default(), &profiles).unwrap();
+        assert!(hermes_plugin_dir(hermes_home).exists());
+        assert!(hermes_profile_plugin_dir(hermes_home, "work").exists());
+
+        let removed = uninstall_hermes_at(hermes_home, InitContext::default(), &profiles).unwrap();
+        assert!(removed.iter().any(|r| r.contains("Hermes plugin")));
+        assert!(removed.iter().any(|r| r.contains("work")));
+        assert!(!hermes_plugin_dir(hermes_home).exists());
+        assert!(!hermes_profile_plugin_dir(hermes_home, "work").exists());
     }
 }
