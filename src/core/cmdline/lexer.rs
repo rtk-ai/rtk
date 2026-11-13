@@ -2392,7 +2392,7 @@ impl SegmentWalk<'_> {
 /// in this codebase. The other two, [`split_for_classify`] (classification of a lone
 /// line) and `discover/registry.rs::rewrite_compound`'s token walk (actual rewrite),
 /// both read the line through [`read_grammar`]. Discover and analytics take their
-/// commands from the rewrite's walk (`discover/registry.rs::split_command_chain_parts`).
+/// commands from the rewrite's walk (`discover/registry.rs::read_call`).
 ///
 /// All three agree on where a command begins and ends. Where a row below still
 /// differs, the difference is the consumer's purpose, not an accident, and
