@@ -1073,6 +1073,13 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
         );
     } else {
         eprintln!();
+        eprintln!(
+            "  Note: the RTK proxy disables Claude Code Remote Control for proxied sessions."
+        );
+        eprintln!(
+            "  For Remote Control in plain `claude` sessions, leave ANTHROPIC_BASE_URL unset"
+        );
+        eprintln!("  in settings.json and your shell; use `rtk claude` only for proxied sessions.");
         if let Some(foreign) = already.as_deref() {
             eprintln!(
                 "  settings.json already routes Claude Code through {foreign} — another proxy or gateway."
