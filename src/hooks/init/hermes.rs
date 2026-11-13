@@ -112,7 +112,27 @@ fn sanitize_profiles(profiles: &[String]) -> Vec<String> {
     result
 }
 
-/// Validate that every requested profile name exists on disk.
+/// Reject names that are not a single plain path component. `Path::join` with an
+/// absolute path discards the base, and `..` walks out of `profiles/`.
+fn validate_profile_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || Path::new(name).is_absolute()
+    {
+        anyhow::bail!(
+            "Invalid Hermes profile name: {name:?}\n\
+             Profile names must be a plain directory name: no '/', '\\', '.' or '..', \
+             and no absolute paths.\n\
+             Usage: rtk init --agent hermes --profile <name|all>"
+        );
+    }
+    Ok(())
+}
+
+/// Validate that every requested profile name is a plain component and exists on disk.
 /// Returns a formatted error listing the missing names and available profiles.
 fn validate_profiles(hermes_home: &Path, profiles: &[String]) -> Result<()> {
     let mut missing: Vec<&str> = Vec::new();
@@ -120,7 +140,8 @@ fn validate_profiles(hermes_home: &Path, profiles: &[String]) -> Result<()> {
         if name == PROFILE_ALL {
             continue;
         }
-        if name.trim().is_empty() || !hermes_profile_dir(hermes_home, name).is_dir() {
+        validate_profile_name(name)?;
+        if !hermes_profile_dir(hermes_home, name).is_dir() {
             missing.push(name.as_str());
         }
     }
@@ -1394,6 +1415,98 @@ mod tests {
         assert!(msg.contains("alpha"));
         assert!(msg.contains("beta"));
         assert!(msg.contains("--profile all"));
+    }
+
+    #[test]
+    fn test_validate_profile_name_accepts_plain_names_and_rejects_paths() {
+        for bad in [
+            "",
+            ".",
+            "..",
+            "/abs/target",
+            "/",
+            "../x",
+            "a/b",
+            "a\\b",
+            "../../etc",
+        ] {
+            assert!(validate_profile_name(bad).is_err(), "should reject {bad:?}");
+        }
+        for good in ["work", "openpic-merge-conflict-resolver", "a.b", "all"] {
+            assert!(
+                validate_profile_name(good).is_ok(),
+                "should accept {good:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hermes_mode_rejects_escaping_profile_names_without_writing() {
+        let temp = TempDir::new().unwrap();
+        let hermes_home = temp.path().join("hermes");
+        fs::create_dir_all(hermes_home.join("profiles")).unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+
+        let absolute = outside.to_str().unwrap().to_string();
+        let bad_names = [absolute, "../../outside".to_string(), "a/b".to_string()];
+
+        for name in bad_names {
+            let err = run_hermes_mode_at(
+                &hermes_home,
+                InitContext::default(),
+                std::slice::from_ref(&name),
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("Invalid Hermes profile name"),
+                "unexpected error for {name:?}: {err:#}"
+            );
+            assert!(
+                !outside.join("config.yaml").exists(),
+                "wrote outside for {name:?}"
+            );
+            assert!(
+                !outside.join("plugins").exists(),
+                "wrote plugin outside for {name:?}"
+            );
+            assert!(
+                !hermes_home.join("config.yaml").exists(),
+                "wrote default config for {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_uninstall_rejects_escaping_profile_names_without_deleting() {
+        let temp = TempDir::new().unwrap();
+        let hermes_home = temp.path().join("hermes");
+        fs::create_dir_all(hermes_home.join("profiles")).unwrap();
+
+        // A real plugin directory outside the profiles tree that must survive.
+        let victim_plugin = temp.path().join("victim/plugins/rtk-rewrite");
+        fs::create_dir_all(&victim_plugin).unwrap();
+        fs::write(victim_plugin.join("__init__.py"), "keep me").unwrap();
+
+        let absolute = victim_plugin.to_str().unwrap().to_string();
+        let bad_names = [absolute, "../../victim".to_string()];
+
+        for name in bad_names {
+            let err = uninstall_hermes_at(
+                &hermes_home,
+                InitContext::default(),
+                std::slice::from_ref(&name),
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("Invalid Hermes profile name"),
+                "unexpected error for {name:?}: {err:#}"
+            );
+            assert!(
+                victim_plugin.join("__init__.py").exists(),
+                "deleted outside profiles tree for {name:?}"
+            );
+        }
     }
 
     #[test]

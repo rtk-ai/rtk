@@ -557,12 +557,7 @@ enum Commands {
         ///
         /// An error is reported if a named profile does not exist on disk.
         /// Available profiles are listed in the error message.
-        #[arg(
-            long = "profile",
-            value_name = "PROFILE",
-            value_delimiter = ',',
-            num_args = 1..,
-        )]
+        #[arg(long = "profile", value_name = "PROFILE", value_delimiter = ',')]
         hermes_profiles: Vec<String>,
     },
 
@@ -4438,6 +4433,22 @@ mod tests {
             }
             _ => panic!("Expected Init command"),
         }
+    }
+
+    #[test]
+    fn test_try_parse_init_rejects_extra_profile_positional() {
+        // --profile takes one value per occurrence; a bare word after it must not
+        // be swallowed as a second profile name.
+        let result = try_parse_cli_from([
+            "rtk",
+            "init",
+            "--agent",
+            "hermes",
+            "--profile",
+            "work",
+            "junk",
+        ]);
+        assert!(result.is_err(), "stray positional should be rejected");
     }
 
     #[test]
