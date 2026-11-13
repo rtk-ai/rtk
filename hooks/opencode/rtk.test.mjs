@@ -5,8 +5,10 @@ import { tmpdir } from "node:os"
 import { delimiter, join } from "node:path"
 import RtkOpenCodePlugin, {
   probeRtkHookOpencode,
+  probeRtkHookOpencodeAfter,
   resolveRtkPath,
   runHookOpencode,
+  tryCompressOutput,
   tryRewriteCommand,
   _resetCachedRtkPath,
 } from "./rtk.ts"
@@ -31,28 +33,47 @@ const [sub, ...rest] = process.argv.slice(2)
 if (rest[0] === "--help") {
   if (process.env.MOCK_PROBE_LOG) fs.appendFileSync(process.env.MOCK_PROBE_LOG, "probe\\n")
   // pre-#4349 rtk has no such subcommand and answers like clap does: exit 2
-  process.exit(process.env.MOCK_NO_SUB ? 2 : 0)
-}
-if (sub !== "opencode") process.exit(3)
-
-const agent = rest[0] === "--agent" ? rest[1] : undefined
-const command = agent ? rest[2] : rest[0]
-
-if (process.env.MOCK_ECHO) {
-  console.log(JSON.stringify({ command: JSON.stringify(process.argv.slice(2)) }))
-} else if (command === "ls -la") {
-  console.log(JSON.stringify({ command: "rtk ls -la" }))
-} else if (command === "unchanged") {
-  // what the Rust side answers when the rewrite would change the verdict
-  console.log("{}")
-} else if (command === "garbage") {
-  console.log("not json at all")
-} else if (command === "empty") {
+  if (process.env.MOCK_NO_SUB) process.exit(2)
+  // A binary can carry the before subcommand and predate the after one.
+  if (sub === "opencode-after" && process.env.MOCK_NO_AFTER) process.exit(2)
   process.exit(0)
-} else if (command === "fail") {
-  process.exit(2)
-} else if (command === "sleep") {
-  setTimeout(() => process.exit(0), 5000)
+}
+
+if (sub === "opencode-after") {
+  let data = ""
+  process.stdin.setEncoding("utf8")
+  process.stdin.on("data", (chunk) => (data += chunk))
+  process.stdin.on("end", () => {
+    if (process.env.MOCK_AFTER_FAIL) process.exit(2)
+    let payload = null
+    try { payload = JSON.parse(data) } catch {}
+    if (!payload || typeof payload.output !== "string") return
+    if (payload.output === "unchanged") return
+    if (payload.output === "sleep-after") { setTimeout(() => process.exit(0), 5000); return }
+    process.stdout.write("compressed:" + payload.tool)
+  })
+} else if (sub === "opencode") {
+  const agent = rest[0] === "--agent" ? rest[1] : undefined
+  const command = agent ? rest[2] : rest[0]
+
+  if (process.env.MOCK_ECHO) {
+    console.log(JSON.stringify({ command: JSON.stringify(process.argv.slice(2)) }))
+  } else if (command === "ls -la") {
+    console.log(JSON.stringify({ command: "rtk ls -la" }))
+  } else if (command === "unchanged") {
+    // what the Rust side answers when the rewrite would change the verdict
+    console.log("{}")
+  } else if (command === "garbage") {
+    console.log("not json at all")
+  } else if (command === "empty") {
+    process.exit(0)
+  } else if (command === "fail") {
+    process.exit(2)
+  } else if (command === "sleep") {
+    setTimeout(() => process.exit(0), 5000)
+  }
+} else {
+  process.exit(3)
 }
 `
 
@@ -69,21 +90,21 @@ const v2Event = (command) => ({
   id: "call_1",
   input: { command },
 })
-const v1Input = { tool: "bash", sessionID: "ses_1", callID: "call_1" }
+const v1Input = { tool: "bash", sessionID: "ses_1", callID: "call_1", args: { command: "make" } }
 const v1Output = (command) => ({ args: { command, description: "list files" } })
 
 async function captureSetup() {
   const names = []
-  let hook = null
+  const hooks = {}
   await RtkOpenCodePlugin.setup({
     tool: {
-      hook(name, callback) {
+      async hook(name, callback) {
         names.push(name)
-        if (name === "execute.before") hook = callback
+        hooks[name] = callback
       },
     },
   })
-  return { names, hook }
+  return { names, hooks, hook: hooks["execute.before"] }
 }
 
 async function captureServer() {
@@ -109,6 +130,8 @@ after(() => {
   process.env.PATH = savedPath
   delete process.env.MOCK_ECHO
   delete process.env.MOCK_NO_SUB
+  delete process.env.MOCK_NO_AFTER
+  delete process.env.MOCK_AFTER_FAIL
   delete process.env.MOCK_PROBE_LOG
   delete process.env.RTK_DISABLED
   _resetCachedRtkPath()
@@ -119,7 +142,7 @@ after(() => {
 test("2.0.22: execute.before mutates event.input.command", async () => {
   assert.equal(RtkOpenCodePlugin.id, "rtk")
   const { names, hook } = await captureSetup()
-  assert.deepEqual(names, ["execute.before"])
+  assert.deepEqual(names, ["execute.before", "execute.after"])
   assert.equal(typeof hook, "function")
 
   const rewritten = v2Event("ls -la")
@@ -132,9 +155,38 @@ test("2.0.22: execute.before mutates event.input.command", async () => {
   assert.equal(kept.input.command, "unchanged")
 })
 
+test("2.0.22: execute.after replaces the completed tool result content", async () => {
+  const { hooks } = await captureSetup()
+  const event = {
+    ...v2Event("make"),
+    status: "completed",
+    result: { content: "raw build output that is long", metadata: { exit: 0 } },
+  }
+  await hooks["execute.after"](event)
+  assert.equal(event.result.content, "compressed:shell")
+  assert.deepEqual(event.result.metadata, { exit: 0 })
+
+  // Error results carry no model-visible content to replace.
+  const failed = { ...v2Event("make"), status: "error", error: { message: "boom" } }
+  await hooks["execute.after"](failed)
+  assert.equal(failed.result, undefined)
+
+  // A mixed content array cannot be rebuilt confidently.
+  const mixed = {
+    ...v2Event("make"),
+    status: "completed",
+    result: { content: [{ type: "text", text: "a" }, { type: "file", uri: "file:///a" }] },
+  }
+  await hooks["execute.after"](mixed)
+  assert.deepEqual(mixed.result.content, [
+    { type: "text", text: "a" },
+    { type: "file", uri: "file:///a" },
+  ])
+})
+
 test("1.18.34: tool.execute.before mutates output.args.command", async () => {
   const { names, hooks } = await captureServer()
-  assert.deepEqual(names, ["tool.execute.before"])
+  assert.deepEqual(names, ["tool.execute.before", "tool.execute.after"])
   assert.equal(typeof hooks["tool.execute.before"], "function")
 
   const rewritten = v1Output("ls -la")
@@ -145,6 +197,55 @@ test("1.18.34: tool.execute.before mutates output.args.command", async () => {
   const kept = v1Output("unchanged")
   await hooks["tool.execute.before"](v1Input, kept)
   assert.equal(kept.args.command, "unchanged")
+})
+
+test("1.18.34: tool.execute.after replaces output.output", async () => {
+  const { hooks } = await captureServer()
+  const output = { title: "make", output: "raw build output", metadata: { exit: 0 } }
+  await hooks["tool.execute.after"](v1Input, output)
+  assert.equal(output.output, "compressed:bash")
+  assert.deepEqual(output.metadata, { exit: 0 })
+})
+
+test("the after transport fails open on anything unusable", async () => {
+  const { hooks } = await captureServer()
+
+  // No rule matched / output unchanged: the mock emits nothing.
+  const unchanged = { title: "make", output: "unchanged", metadata: {} }
+  await hooks["tool.execute.after"](v1Input, unchanged)
+  assert.equal(unchanged.output, "unchanged")
+
+  // Malformed input shapes never reach the binary.
+  const badTool = { title: "x", output: "raw build output", metadata: {} }
+  await hooks["tool.execute.after"](undefined, badTool)
+  assert.equal(badTool.output, "raw build output")
+
+  const badOutput = { title: "x", output: 42, metadata: {} }
+  await hooks["tool.execute.after"](v1Input, badOutput)
+  assert.equal(badOutput.output, 42)
+
+  try {
+    process.env.MOCK_AFTER_FAIL = "1"
+    _resetCachedRtkPath()
+    const failed = { title: "make", output: "raw build output", metadata: {} }
+    await (await captureServer())["hooks"]["tool.execute.after"](v1Input, failed)
+    assert.equal(failed.output, "raw build output")
+  } finally {
+    delete process.env.MOCK_AFTER_FAIL
+    _resetCachedRtkPath()
+  }
+})
+
+test("tryCompressOutput accepts only a strictly smaller result", async () => {
+  assert.equal(await tryCompressOutput("bash", { command: "make" }, ""), null)
+  assert.equal(await tryCompressOutput("", {}, "raw build output"), null)
+  assert.equal(await tryCompressOutput("bash", { command: "make" }, 42), null)
+  // Mock answer `compressed:bash` is longer than `short`, so it is refused.
+  assert.equal(await tryCompressOutput("bash", { command: "make" }, "short"), null)
+  assert.equal(
+    await tryCompressOutput("bash", { command: "make" }, "raw build output"),
+    "compressed:bash"
+  )
 })
 
 test("argv is exact and shell-free, and the agent is forwarded", async () => {
@@ -211,6 +312,23 @@ test("the `hook opencode --help` probe is asked once per binary", async () => {
     assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 1)
   } finally {
     delete process.env.MOCK_PROBE_LOG
+    _resetCachedRtkPath()
+  }
+})
+
+test("an rtk without `hook opencode-after` keeps rewriting and skips compression", async () => {
+  process.env.MOCK_NO_AFTER = "1"
+  _resetCachedRtkPath()
+  try {
+    assert.equal(await probeRtkHookOpencode(mockBin()), true)
+    assert.equal(await probeRtkHookOpencodeAfter(mockBin()), false)
+
+    // The before path still registers; only the after hook is absent.
+    const { names } = await captureSetup()
+    assert.deepEqual(names, ["execute.before"])
+    assert.deepEqual((await captureServer()).names, ["tool.execute.before"])
+  } finally {
+    delete process.env.MOCK_NO_AFTER
     _resetCachedRtkPath()
   }
 })

@@ -1301,6 +1301,9 @@ enum HookCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Answer for OpenCode's `tool.execute.after`: the compressed tool output,
+    /// or nothing when no rule matches or the result is not smaller
+    OpencodeAfter,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -3723,6 +3726,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Opencode { agent, args } => {
                 hooks::hook_cmd::run_opencode(&args.join(" "), agent.as_deref())?;
+                0
+            }
+            HookCommands::OpencodeAfter => {
+                hooks::hook_cmd::run_opencode_after()?;
                 0
             }
             HookCommands::Check { agent, command } => {
