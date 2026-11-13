@@ -665,9 +665,10 @@ fn launch_plan(existing: Option<&str>, proxy_url: &str, daemon_up: bool) -> Laun
     }
 }
 
-/// Start the daemon if possible, point this agent at it, and hand over the
-/// process. On Unix this `exec`s, so signals, stdio and the exit code behave
-/// exactly as if the agent had been launched directly. Never blocks the
+/// Preserve an existing provider route, starting the daemon only when this
+/// agent will use it, and hand over the process. On Unix this `exec`s, so
+/// signals, stdio and the exit code behave exactly as if the agent had been
+/// launched directly. Never blocks the
 /// agent: when the daemon cannot run, the agent launches unproxied with a
 /// loud warning instead of failing.
 pub fn run_agent(agent: &ProxyAgent, args: &[String]) -> Result<i32> {
@@ -678,13 +679,17 @@ pub fn run_agent(agent: &ProxyAgent, args: &[String]) -> Result<i32> {
     let bind = daemon_bind();
     let base_url = format!("http://{bind}");
     let existing = std::env::var(agent.base_url_var).ok();
-    let daemon_up = match ensure_running(&bind) {
-        Ok(_) => true,
-        Err(e) => {
-            eprintln!("rtk: proxy unavailable ({e:#})");
-            false
-        }
-    };
+    let needs_proxy = existing
+        .as_deref()
+        .is_none_or(|url| url.is_empty() || url.trim_end_matches('/') == base_url);
+    let daemon_up = needs_proxy
+        && match ensure_running(&bind) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("rtk: proxy unavailable ({e:#})");
+                false
+            }
+        };
     let mut cmd = Command::new(agent.name);
     cmd.args(args);
     match launch_plan(existing.as_deref(), &base_url, daemon_up) {
