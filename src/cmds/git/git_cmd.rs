@@ -1713,6 +1713,21 @@ fn selects_by_diff(tokens: &[Token<'_>]) -> bool {
     })
 }
 
+/// Git applies a reverse walk's max-count before pickaxe and other selectors, which can
+/// discard early matches before RTK sees them. The full selection must be made first;
+/// RTK then windows the resulting commits itself.
+fn reverse_selection_needs_full_walk(tokens: &[Token<'_>]) -> bool {
+    let before = arg_tokenizer::before_dashdash(tokens);
+    before
+        .iter()
+        .any(|t| t.kind == TokenKind::Long && t.text == "reverse")
+        && (selects_by_diff(tokens)
+            || before.iter().any(|t| {
+                t.kind == TokenKind::Long
+                    && matches!(t.text, "grep" | "grep-reflog" | "author" | "committer")
+            }))
+}
+
 /// The user arguments [`walk_exceeds_limit`] forwards: everything that bounds the walk, and
 /// nothing that decides what git does with it.
 ///
@@ -2480,7 +2495,9 @@ fn run_log(
     // format, or where the format prints one line to a commit, can it tell the commits in the
     // run apart.
     let reads_lines = prints_one_line_per_commit(&tokens);
-    let overfetch = !has_limit_flag
+    let full_reverse_selection = !has_limit_flag && reverse_selection_needs_full_walk(&tokens);
+    let overfetch = !full_reverse_selection
+        && !has_limit_flag
         && (!has_format_flag || reads_lines)
         && fetches_one_past_the_limit(global_args, user_env::var, &tokens);
 
@@ -2491,7 +2508,7 @@ fn run_log(
         // Use %b (body) to preserve first line of commit body for agent context
         // (BREAKING CHANGE, Closes #xxx, design notes)
         if !has_format_flag {
-            let start = if overfetched {
+            let start = if overfetched || full_reverse_selection {
                 LOG_ENTRY_START_SPEC
             } else {
                 ""
@@ -2500,7 +2517,7 @@ fn run_log(
                 "--pretty=format:{start}%h %s (%ar) <%an>%n%b%n{LOG_ENTRY_MARKER}"
             ));
         }
-        if !has_limit_flag {
+        if !has_limit_flag && !full_reverse_selection {
             cmd.arg(format!("-{}", limit + usize::from(overfetched)));
         }
         // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
@@ -2521,7 +2538,15 @@ fn run_log(
     // adds lines of its own, cannot be cut at its commits, so git is asked again for the
     // limit itself and the run is read as any other user format.
     let mut window = None;
-    if overfetch && result.success() {
+    if full_reverse_selection && result.success() {
+        window = if reads_lines {
+            oneline_window(&result.stdout, limit)
+        } else if !has_format_flag {
+            Some(entries_window(&result.stdout, limit, wants_graph(&tokens)))
+        } else {
+            None
+        };
+    } else if overfetch && result.success() {
         window = if reads_lines {
             oneline_window(&result.stdout, limit)
         } else {
@@ -6703,6 +6728,32 @@ A  added.rs
             "show's --quiet is -s, which suppresses_diff_body renders as the summary"
         );
         assert!(tokens.iter().any(suppresses_diff_body));
+    }
+
+    #[test]
+    fn reverse_selection_only_requires_full_walk_for_real_selectors() {
+        let requires_full_walk = |args: &[&str]| {
+            let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            reverse_selection_needs_full_walk(&tokenize_git_log_args(&owned))
+        };
+        for args in [
+            &["--reverse", "-Sneedle"][..],
+            &["--reverse", "-Gneedle"][..],
+            &["--reverse", "--grep=needle"][..],
+            &["--reverse", "--author", "Ada"][..],
+            &["--reverse", "--committer=Ada"][..],
+        ] {
+            assert!(requires_full_walk(args), "{args:?}");
+        }
+        for args in [
+            &["--reverse"][..],
+            &["-Sneedle"][..],
+            &["--reverse", "--oneline"][..],
+            &["--reverse", "--", "-Sneedle"][..],
+            &["--reverse", "--", "--grep=needle"][..],
+        ] {
+            assert!(!requires_full_walk(args), "{args:?}");
+        }
     }
 
     #[test]

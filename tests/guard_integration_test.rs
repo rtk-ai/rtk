@@ -548,6 +548,59 @@ fn git_diff_keeps_the_body_when_git_colours_it() {
 }
 
 #[test]
+fn git_log_reverse_pickaxe_preserves_earliest_matches() {
+    let dir = init_git_repo();
+    let file = dir.path().join("needle.txt");
+    std::fs::write(&file, "NEEDLE_XYZ\\n").expect("write needle");
+    git_in_dir(dir.path(), &["add", "needle.txt"]);
+    git_in_dir(dir.path(), &["commit", "-qm", "oldest needle"]);
+
+    // All 55 updates change the needle count, so even the compact cap of 50
+    // must select the *oldest* matches before truncating the result.
+    for i in 0..55 {
+        std::fs::write(
+            &file,
+            if i % 2 == 0 {
+                "none\\n"
+            } else {
+                "NEEDLE_XYZ\\n"
+            },
+        )
+        .expect("update needle");
+        git_in_dir(dir.path(), &["add", "needle.txt"]);
+        git_in_dir(dir.path(), &["commit", "-qm", &format!("match {i:02}")]);
+    }
+
+    for (args, limit) in [
+        (&["git", "log", "--reverse", "-SNEEDLE_XYZ"][..], 10),
+        (&["git", "log", "--reverse", "-GNEEDLE_XYZ"][..], 10),
+        (
+            &["git", "log", "--reverse", "-SNEEDLE_XYZ", "--oneline"][..],
+            50,
+        ),
+    ] {
+        let (stdout, stderr, code) = rtk_output_in_dir(dir.path(), args);
+        assert_eq!(code, Some(0), "{args:?}: {stderr}");
+        assert!(stdout.contains("oldest needle"), "{args:?}: {stdout:?}");
+        assert!(
+            !stdout.contains("match 54"),
+            "{args:?} selected the newest matches"
+        );
+        assert!(
+            stderr.contains(&format!("[rtk] capped at {limit} commits")),
+            "{args:?}: missing cap notice: {stderr:?}"
+        );
+    }
+
+    // Message selection is subject to the same reverse-walk limit bug.
+    let (stdout, stderr, code) =
+        rtk_output_in_dir(dir.path(), &["git", "log", "--reverse", "--grep=oldest"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.contains("oldest needle"), "{stdout:?}");
+    assert!(!stderr.contains("[rtk] capped"), "{stderr:?}");
+}
+
+#[test]
 fn git_log_announces_its_limit_only_when_the_limit_took_something() {
     // The notice exists because that path streams and has no footer to notice missing commits
     // from. It must not claim a truncation that did not happen, nor precede a command git
