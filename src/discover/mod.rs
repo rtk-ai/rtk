@@ -15,8 +15,8 @@ use std::collections::HashMap;
 
 use provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
 use registry::{
-    ChainPart, Classification, ExcludePattern, category_avg_tokens, classify_command_at,
-    split_command_chain_parts, strip_disabled_prefix_for_analytics,
+    Call, ChainPart, Classification, ExcludePattern, category_avg_tokens, classify_command_at,
+    strip_disabled_prefix_for_analytics,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
@@ -523,14 +523,12 @@ impl Tally {
         // complex to join stays as written.
         let line = JoinedLine::of(&ext_cmd.command);
         let command: &str = &line.text;
-        let parts = split_command_chain_parts(&line);
         // One answer per command, worked out once for the line: what the
         // rewriter does to one command depends on the ones around it, and a
         // report that counts a command the rewriter passes over promises a
         // saving the hook does not take.
-        let reached = registry::stages_the_rewriter_reaches(
+        let Call { parts, reached } = registry::read_call(
             &line,
-            &parts,
             &ctx.exclude_patterns,
             &ctx.normalized_transparent_prefixes,
         );
