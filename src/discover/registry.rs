@@ -1281,6 +1281,43 @@ fn emit_segment(
     rewritten != trimmed
 }
 
+/// Byte ranges of the `for`/`while`/`until` bodies whose output feeds a pipe,
+/// each from its `do` to the end of its `done`.
+///
+/// Such a body writes to the consumer, not to the agent, so a filtered command
+/// there would change what the consumer reads (`for f in *; do git log "$f";
+/// done | wc -l`). The commands inside stay raw. A nested loop inside a piped
+/// one is covered by the outer range.
+fn piped_loop_bodies(tokens: &[ParsedToken]) -> Vec<(usize, usize)> {
+    let ends_command = |token: &ParsedToken| {
+        token.kind == TokenKind::Operator
+            || (token.kind == TokenKind::Shellism && token.value == "&")
+    };
+    let mut open = Vec::new();
+    let mut ranges = Vec::new();
+    for (i, token) in tokens.iter().enumerate() {
+        let at_command_start = i == 0 || ends_command(&tokens[i - 1]);
+        if token.kind != TokenKind::Arg || !at_command_start {
+            continue;
+        }
+        match token.value.as_str() {
+            "do" => open.push(token.offset),
+            "done" => {
+                let Some(start) = open.pop() else { continue };
+                let piped = tokens[i + 1..]
+                    .iter()
+                    .take_while(|next| !ends_command(next))
+                    .any(|next| matches!(next.kind, TokenKind::Pipe(_)));
+                if piped {
+                    ranges.push((start, token.offset + token.value.len()));
+                }
+            }
+            _ => {}
+        }
+    }
+    ranges
+}
+
 fn rewrite_compound(
     cmd: &str,
     excluded: &[ExcludePattern],
@@ -1297,6 +1334,24 @@ fn rewrite_compound(
     if has_pipe && has_opaque_grouping {
         return None;
     }
+    let piped_loops = piped_loop_bodies(&tokens);
+    let in_piped_loop =
+        |start: usize, end: usize| piped_loops.iter().any(|&(s, e)| start < e && end > s);
+    let emit = |out: &mut String, start: usize, end: usize| {
+        if in_piped_loop(start, end) {
+            out.push_str(&cmd[start..end]);
+            return false;
+        }
+        emit_segment(
+            out,
+            cmd,
+            start,
+            end,
+            excluded,
+            transparent_prefixes,
+            shell_wrapper_depth,
+        )
+    };
 
     let mut result = String::with_capacity(cmd.len() + 32);
     let mut any_changed = false;
@@ -1308,15 +1363,7 @@ fn rewrite_compound(
         }
         match tok.kind {
             TokenKind::Operator => {
-                any_changed |= emit_segment(
-                    &mut result,
-                    cmd,
-                    seg_start,
-                    tok.offset,
-                    excluded,
-                    transparent_prefixes,
-                    shell_wrapper_depth,
-                );
+                any_changed |= emit(&mut result, seg_start, tok.offset);
                 seg_start = tok.offset + tok.value.len();
                 result.push_str(&cmd[tok.offset..seg_start]);
             }
@@ -1328,25 +1375,29 @@ fn rewrite_compound(
                 let lead = raw_pipeline.len() - raw_pipeline.trim_start().len();
                 let pipeline = raw_pipeline.trim();
                 result.push_str(&raw_pipeline[..lead]);
-                let rewritten_pipeline = rewrite_pipeline_final_stage(
-                    cmd,
-                    seg_start,
-                    analysis,
-                    excluded,
-                    transparent_prefixes,
-                    shell_wrapper_depth,
-                )
-                .or_else(|| {
-                    rewrite_pipeline_producer(
+                let rewritten_pipeline = if in_piped_loop(seg_start, analysis.end_offset) {
+                    None
+                } else {
+                    rewrite_pipeline_final_stage(
                         cmd,
                         seg_start,
-                        tok.offset,
                         analysis,
                         excluded,
                         transparent_prefixes,
                         shell_wrapper_depth,
                     )
-                });
+                    .or_else(|| {
+                        rewrite_pipeline_producer(
+                            cmd,
+                            seg_start,
+                            tok.offset,
+                            analysis,
+                            excluded,
+                            transparent_prefixes,
+                            shell_wrapper_depth,
+                        )
+                    })
+                };
 
                 if let Some(rewritten) = rewritten_pipeline {
                     any_changed = true;
@@ -1367,15 +1418,7 @@ fn rewrite_compound(
                 }
             }
             TokenKind::Shellism if tok.value == "&" => {
-                any_changed |= emit_segment(
-                    &mut result,
-                    cmd,
-                    seg_start,
-                    tok.offset,
-                    excluded,
-                    transparent_prefixes,
-                    shell_wrapper_depth,
-                );
+                any_changed |= emit(&mut result, seg_start, tok.offset);
                 seg_start = tok.offset + tok.value.len();
                 result.push_str(&cmd[tok.offset..seg_start]);
             }
@@ -1383,15 +1426,7 @@ fn rewrite_compound(
         }
     }
 
-    any_changed |= emit_segment(
-        &mut result,
-        cmd,
-        seg_start,
-        cmd.len(),
-        excluded,
-        transparent_prefixes,
-        shell_wrapper_depth,
-    );
+    any_changed |= emit(&mut result, seg_start, cmd.len());
 
     if any_changed { Some(result) } else { None }
 }
@@ -1440,7 +1475,12 @@ const ROUTABLE_WRAPPER_PREFIXES: &[&str] = &["uv run"];
 
 /// Shell keywords that wrap a command without changing which one runs. They are
 /// not spawnable, so they must never fall through: `rtk exec foo` cannot run.
-const SHELL_KEYWORD_PREFIXES: &[&str] = &["noglob", "command", "builtin", "exec", "nocorrect"];
+///
+/// `do` opens a loop body, so the first command of the body sits behind it
+/// once the line is split on `;` (`for f in a b; do rg x "$f"; done`). The
+/// loop header and `done` are left alone. Refs: #5110.
+const SHELL_KEYWORD_PREFIXES: &[&str] =
+    &["noglob", "command", "builtin", "exec", "nocorrect", "do"];
 
 struct ProcessWrapper {
     name: &'static str,
@@ -8890,6 +8930,91 @@ mod tests {
                 "bash command must still rewrite: {command:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_rewrite_loop_body_behind_do() {
+        // #5110: the first command of a loop body follows `do` once the line
+        // is split on `;`. The header and `done` stay as written.
+        for (command, expected) in [
+            (
+                r#"for f in a b; do rg -n x "$f"; done"#,
+                r#"for f in a b; do rtk rg -n x "$f"; done"#,
+            ),
+            (
+                "while true; do git status; sleep 1; done",
+                "while true; do rtk git status; sleep 1; done",
+            ),
+            (
+                "until false; do cd sub && cargo test; done",
+                "until false; do cd sub && rtk cargo test; done",
+            ),
+            (
+                "for f in a b; do  git status;done",
+                "for f in a b; do  rtk git status;done",
+            ),
+            (
+                "for a in x; do for b in y; do git status; done; done",
+                "for a in x; do for b in y; do rtk git status; done; done",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.into()),
+                "loop body must rewrite: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_loop_header_and_substitution_untouched() {
+        // A `while` condition is the loop's control, not its output; command
+        // substitutions feed the script, not the agent.
+        for command in [
+            "while git diff --quiet; do sleep 1; done",
+            "x=$(rg -n foo)",
+            "for f in $(git ls-files); do echo $f; done",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "must pass through: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_piped_loop_body_stays_raw() {
+        // The body of a piped loop writes to the consumer, not the agent.
+        for command in [
+            r#"for f in a b; do git log "$f"; done | wc -l"#,
+            r#"for f in a b; do echo "$f"; git log "$f"; done 2>&1 | wc -l"#,
+            r#"for a in x; do for b in y; do git log; done; done | wc -l"#,
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "piped loop body must stay raw: {command:?}"
+            );
+        }
+        // Commands outside the piped loop still rewrite, as does a loop whose
+        // own body is piped but whose output is not.
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"git status; for f in a b; do git log "$f"; done | wc -l"#,
+                &[]
+            ),
+            Some(r#"rtk git status; for f in a b; do git log "$f"; done | wc -l"#.into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "for a in x; do for b in y; do git log; done | wc -l; git status; done",
+                &[]
+            ),
+            Some(
+                "for a in x; do for b in y; do git log; done | wc -l; rtk git status; done".into()
+            )
+        );
     }
 
     #[test]
