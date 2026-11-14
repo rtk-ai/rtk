@@ -309,17 +309,18 @@ pub async fn relay(
 ) -> Forwarded {
     let url = format!("{}{}", base.trim_end_matches('/'), path);
     let retries = state.config.upstream_retries;
-    let timeout = state.config.upstream_timeout_secs;
     let started = Instant::now();
 
     let mut attempt: u32 = 0;
     loop {
-        let mut req = state.http.post(&url).body(body.clone());
         // A total request timeout is safe only for buffered calls; a streamed SSE
         // response is long-lived and must never be cut mid-stream.
-        if !stream && timeout > 0 {
-            req = req.timeout(std::time::Duration::from_secs(timeout));
+        let mut req = if stream {
+            state.http.post(&url)
+        } else {
+            state.buffered_post(&url)
         }
+        .body(body.clone());
         for (k, v) in headers.iter() {
             if forwardable_to_upstream(k.as_str()) {
                 req = req.header(k, v);
@@ -900,6 +901,38 @@ mod tests {
             ]
         });
         Bytes::from(serde_json::to_vec(&body).unwrap())
+    }
+
+    /// A buffered call sends no byte until the completion is done, so the
+    /// client's per-read silence limit must not cut it: only
+    /// `upstream_timeout_secs` bounds it.
+    #[tokio::test]
+    async fn a_buffered_relay_outlives_the_read_timeout() {
+        let mut c = cfg(false);
+        c.upstream_timeout_secs = 30;
+        let mut st = AppState::new(c);
+        st.http = crate::http_client_with(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(200),
+        );
+        let base = crate::http_client_tests::slow_upstream(
+            std::time::Duration::from_millis(600),
+            r#"{"type":"message","content":[]}"#,
+        );
+        let out = relay(
+            &st,
+            &base,
+            "/v1/messages",
+            HeaderMap::new(),
+            Bytes::from_static(b"{}"),
+            Provider::Anthropic,
+            false,
+        )
+        .await;
+        let Forwarded::Buffered { outcome, .. } = out else {
+            panic!("a non-stream call must be buffered");
+        };
+        assert_eq!(outcome.status, 200, "{:?}", outcome.error_body);
     }
 
     #[tokio::test]

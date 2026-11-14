@@ -17,7 +17,18 @@ use crate::pipeline::ccr;
 use axum::body::Body;
 use axum::http::HeaderMap;
 use axum::response::Response;
-use std::time::Instant;
+use bytes::Bytes;
+use std::future::Future;
+use std::time::{Duration, Instant};
+
+/// How long a streaming client may wait on buffered CCR rounds before the
+/// proxy commits to an SSE response and keeps it alive with `ping` events.
+/// Well under the read timeouts of fronting proxies (Cloudflare's is a fixed
+/// 120 s), so a long generation never looks like a dead origin.
+const KEEPALIVE_SECS: u64 = 15;
+
+/// The Anthropic Messages API's own keepalive event; clients ignore it.
+const ANTHROPIC_PING: &[u8] = b"event: ping\ndata: {\"type\": \"ping\"}\n\n";
 
 /// Forward `req` through the CCR retrieve-resolution loop. The client's
 /// `stream` choice only affects how the FINAL answer is emitted; internally
@@ -31,6 +42,17 @@ pub async fn execute(
     memory: &IcmMemory,
 ) -> AppResult<Forwarded> {
     match req.provider {
+        Provider::Anthropic if req.stream => {
+            let (state, base, headers, req, memory) = (
+                state.clone(),
+                base.to_string(),
+                headers.clone(),
+                req.clone(),
+                memory.clone(),
+            );
+            let rounds = async move { run_anthropic(&state, &base, &headers, &req, &memory).await };
+            keep_alive(rounds, Duration::from_secs(KEEPALIVE_SECS)).await
+        }
         Provider::Anthropic => run_anthropic(state, base, headers, req, memory).await,
         Provider::Openai => run_openai(state, base, headers, req, memory).await,
         Provider::Google => {
@@ -48,7 +70,7 @@ async fn post_once(
     body: &serde_json::Value,
 ) -> Option<(u16, Vec<u8>)> {
     let body_bytes = serde_json::to_vec(body).ok()?;
-    let mut builder = state.http.post(url).body(body_bytes);
+    let mut builder = state.buffered_post(url).body(body_bytes);
     for (k, v) in headers.iter() {
         if forwardable_to_upstream(k.as_str()) {
             builder = builder.header(k, v);
@@ -69,6 +91,88 @@ async fn post_once(
             None
         }
     }
+}
+
+/// Run the buffered CCR `rounds` for a streaming Anthropic client without
+/// leaving its connection silent. A result that lands within `every` is
+/// returned as is, so fast turns (and the plain-relay fallback on a failed
+/// first round) are unchanged. Past that, the client gets the SSE headers at
+/// once and a `ping` event every `every` until the rounds end, then the
+/// synthesized events -- or an `error` event, as the 200 is already sent.
+async fn keep_alive<F>(rounds: F, every: Duration) -> AppResult<Forwarded>
+where
+    F: Future<Output = AppResult<Forwarded>> + Send + 'static,
+{
+    let mut rounds = Box::pin(rounds);
+    if let Ok(done) = tokio::time::timeout(every, &mut rounds).await {
+        return done;
+    }
+    let started = Instant::now();
+    let (tx, outcome_rx) = tokio::sync::oneshot::channel::<UsageOutcome>();
+    let body = async_stream::stream! {
+        let mut tick = tokio::time::interval(every);
+        let done = loop {
+            tokio::select! {
+                done = &mut rounds => break done,
+                _ = tick.tick() => yield Ok::<_, std::io::Error>(Bytes::from_static(ANTHROPIC_PING)),
+            }
+        };
+        let (status, bytes, outcome) = match done {
+            Ok(Forwarded::Buffered { response, outcome }) => {
+                let status = response.status().as_u16();
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap_or_default();
+                (status, bytes, outcome)
+            }
+            Ok(Forwarded::Streaming { response, outcome_rx }) => {
+                let status = response.status().as_u16();
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap_or_default();
+                (status, bytes, outcome_rx.await.unwrap_or_default())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "ccr forward failed after the SSE response began");
+                let msg = format!("rtk-proxy: {e}");
+                let outcome = UsageOutcome {
+                    status: 502,
+                    latency_ms: started.elapsed().as_millis() as i64,
+                    error_body: Some(msg.clone()),
+                    ..Default::default()
+                };
+                (502, Bytes::from(msg), outcome)
+            }
+        };
+        if status < 400 {
+            yield Ok(bytes);
+        } else {
+            yield Ok(Bytes::from(anthropic_sse_error(&bytes)));
+        }
+        let _ = tx.send(outcome);
+    };
+    let response = Response::builder()
+        .status(200)
+        .header("content-type", "text/event-stream")
+        .body(Body::from_stream(body))
+        .expect("valid sse response");
+    Ok(Forwarded::Streaming {
+        response,
+        outcome_rx,
+    })
+}
+
+/// An Anthropic SSE `error` event carrying `bytes`: the upstream's own error
+/// object when it is one, otherwise `bytes` as an `api_error` message.
+fn anthropic_sse_error(bytes: &[u8]) -> String {
+    let data = match serde_json::from_slice::<serde_json::Value>(bytes) {
+        Ok(j) if j.get("type").and_then(|t| t.as_str()) == Some("error") => j,
+        _ => serde_json::json!({
+            "type": "error",
+            "error": { "type": "api_error", "message": String::from_utf8_lossy(bytes) }
+        }),
+    };
+    format!("event: error\ndata: {data}\n\n")
 }
 
 async fn run_anthropic(
@@ -646,6 +750,133 @@ fn synthesize_openai_sse(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A finished CCR turn, as `finalize` hands it back to a streaming client.
+    fn buffered(status: u16, body: &str) -> AppResult<Forwarded> {
+        let response = Response::builder()
+            .status(status)
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let outcome = UsageOutcome {
+            status,
+            ..Default::default()
+        };
+        Ok(Forwarded::Buffered { response, outcome })
+    }
+
+    async fn drain(f: Forwarded) -> (u16, String, UsageOutcome) {
+        let Forwarded::Streaming {
+            response,
+            outcome_rx,
+        } = f
+        else {
+            panic!("a slow CCR turn must be streamed to the client");
+        };
+        let status = response.status().as_u16();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let outcome = outcome_rx.await.unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap(), outcome)
+    }
+
+    /// While buffered CCR rounds run past the keepalive interval, the client
+    /// already has its SSE headers and gets `ping` events, so a fronting
+    /// proxy's read timeout (Cloudflare: 120 s) never sees a silent origin.
+    #[tokio::test]
+    async fn a_slow_ccr_turn_pings_the_streaming_client() {
+        let rounds = async {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            buffered(200, "event: message_stop\ndata: {}\n\n")
+        };
+        let got = keep_alive(rounds, Duration::from_millis(50)).await.unwrap();
+        let (status, body, outcome) = drain(got).await;
+        assert_eq!(status, 200);
+        assert!(body.starts_with("event: ping\n"), "{body}");
+        assert!(
+            body.ends_with("event: message_stop\ndata: {}\n\n"),
+            "{body}"
+        );
+        assert_eq!(outcome.status, 200);
+    }
+
+    /// A turn that ends inside the interval is returned untouched: no ping,
+    /// and the upstream status still reaches the client.
+    #[tokio::test]
+    async fn a_fast_ccr_turn_is_returned_as_is() {
+        let rounds = async { buffered(429, r#"{"type":"error"}"#) };
+        let got = keep_alive(rounds, Duration::from_secs(5)).await.unwrap();
+        let Forwarded::Buffered { response, .. } = got else {
+            panic!("a fast CCR turn must stay buffered");
+        };
+        assert_eq!(response.status().as_u16(), 429);
+    }
+
+    /// Once the 200 is sent, an upstream error can only travel as an SSE
+    /// `error` event; the usage row still records the real status.
+    #[tokio::test]
+    async fn an_upstream_error_after_pings_becomes_an_sse_error_event() {
+        let err = r#"{"type":"error","error":{"type":"overloaded_error","message":"busy"}}"#;
+        let rounds = async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            buffered(529, err)
+        };
+        let got = keep_alive(rounds, Duration::from_millis(50)).await.unwrap();
+        let (status, body, outcome) = drain(got).await;
+        assert_eq!(status, 200);
+        let last = body.rsplit("\n\n").nth(1).unwrap_or_default();
+        assert!(last.starts_with("event: error\ndata: "), "{body}");
+        assert!(last.contains(r#""overloaded_error""#), "{body}");
+        assert_eq!(outcome.status, 529);
+
+        let rounds = async {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            Err(AppError::Upstream("down".into()))
+        };
+        let got = keep_alive(rounds, Duration::from_millis(50)).await.unwrap();
+        let (_, body, outcome) = drain(got).await;
+        assert!(body.contains(r#""type":"api_error""#), "{body}");
+        assert_eq!(outcome.status, 502);
+    }
+
+    /// Every CCR round is a buffered call: a long generation sends nothing
+    /// until it is done, so the per-read silence limit must not cut it.
+    #[tokio::test]
+    async fn a_ccr_round_outlives_the_read_timeout() {
+        let mut st = AppState::new(crate::config::Config {
+            cache_align: true,
+            normalize: true,
+            engine_methods: false,
+            bind: "127.0.0.1:0".into(),
+            anthropic_upstream: "https://api.anthropic.com".into(),
+            openai_upstream: "https://api.openai.com".into(),
+            ccr: true,
+            compression: "off".into(),
+            pixel_compress: Default::default(),
+            relay_borrowing: true,
+            db: ":memory:".into(),
+            icm_db: ":memory:".into(),
+            icm_ttl_secs: 0,
+            upstream_timeout_secs: 30,
+            upstream_retries: 0,
+        });
+        st.http = crate::http_client_with(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(200),
+        );
+        let base = crate::http_client_tests::slow_upstream(
+            std::time::Duration::from_millis(600),
+            r#"{"type":"message","content":[]}"#,
+        );
+        let got = post_once(
+            &st,
+            &format!("{base}/v1/messages"),
+            &HeaderMap::new(),
+            &serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(got.map(|(s, _)| s), Some(200));
+    }
 
     #[test]
     fn openai_ccr_body_drops_stream_options_with_streaming() {
