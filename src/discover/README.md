@@ -70,7 +70,7 @@ The classification logic is shared between discover and rewrite — same pattern
 
 ## Env Prefix Handling
 
-The `ENV_PREFIX` regex strips env variable assignments and `env` from the front of commands. `sudo` is deliberately not stripped, so sudo-prefixed commands stay unclassified and pass through unrewritten. It handles:
+`split_env_prefix` strips env variable assignments and `env` from the front of commands, a word at a time, a quoted value being one word. `sudo` is deliberately not stripped, so sudo-prefixed commands stay unclassified and pass through unrewritten. It handles:
 - Unquoted: `FOO=bar`
 - Double-quoted with spaces: `FOO="bar baz"`
 - Single-quoted: `FOO='bar baz'`
