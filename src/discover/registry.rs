@@ -727,23 +727,153 @@ fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
     (cmd_part, redir_part)
 }
 
-/// Matches a bash line-continuation: a backslash immediately followed by
-/// `\n` or `\r\n`, *plus* any horizontal whitespace on the line before AND
-/// after the break. This is what bash already collapses to a single space
-/// before executing the command — rtk's hook matcher needs to do the same
-/// so commands authored across multiple lines still hit the rewrite rules.
-/// Consuming the trailing whitespace prevents double spaces in cases like
-/// `git diff \<NL>HEAD~1`.
-static LINE_CONTINUATION_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?m)[ \t\x0B\x0C]*\\\r?\n[ \t\x0B\x0C]*").unwrap());
-
 static BASH_JOIN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\\r?\n").unwrap());
 
-/// Replace every bash line continuation with a single space, mirroring what
-/// bash does before dispatching the command. Returns a borrowed `&str` when the
-/// input contains no continuations, so the common fast path allocates nothing.
-pub(crate) fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
-    LINE_CONTINUATION_RE.replace_all(s, " ")
+/// Every backslash-newline plus the horizontal whitespace around it, with no
+/// quote or comment state. See [`join_all_line_continuations`].
+static ANY_LINE_CONTINUATION_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[ \t\x0B\x0C]*\\\r?\n[ \t\x0B\x0C]*").unwrap());
+
+/// Replace every backslash-newline with a single space, quoted or not.
+///
+/// Only for permission checks of shell wrappers: the script of
+/// `bash -c 'git \<NL>push'` is parsed again by the inner shell, where that
+/// backslash-newline *is* a continuation, so a deny rule must see `git push`.
+/// The rewrite itself uses [`collapse_line_continuations`], which keeps the
+/// bytes bash keeps.
+pub(crate) fn join_all_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
+    ANY_LINE_CONTINUATION_RE.replace_all(s, " ")
+}
+
+/// Horizontal whitespace around a line continuation (space, tab, VT, FF).
+fn is_continuation_blank(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\x0B' | b'\x0C')
+}
+
+/// Bytes that end a shell word, so a `#` right after one starts a comment.
+fn ends_shell_word(b: u8) -> bool {
+    matches!(
+        b,
+        b' ' | b'\t' | b'\n' | b'\r' | b';' | b'&' | b'|' | b'(' | b')' | b'<' | b'>'
+    )
+}
+
+/// Length of the line break starting at `i` (`\n` or `\r\n`), or 0.
+fn line_break_len(bytes: &[u8], i: usize) -> usize {
+    match bytes.get(i) {
+        Some(b'\n') => 1,
+        Some(b'\r') if bytes.get(i + 1) == Some(&b'\n') => 2,
+        _ => 0,
+    }
+}
+
+/// Replace every bash line continuation (`\<NL>`, `\<CRLF>`) with a single
+/// space, mirroring what bash does before dispatching the command, so commands
+/// authored across multiple lines still hit the rewrite rules. Horizontal
+/// whitespace on both sides of the break is consumed too, which keeps
+/// `git diff \<NL>  HEAD~1` from gaining a double space.
+///
+/// Bash only treats backslash-newline as a continuation outside single quotes,
+/// outside `$'...'` and outside a comment (#5090), so those bytes are kept: a
+/// single-quoted commit message keeps its backslash and newline, and a comment
+/// still ends at the newline, leaving the next line a separate command. Inside
+/// double quotes bash removes the backslash and the newline and nothing else,
+/// so the string's own whitespace is kept there.
+///
+/// Returns a borrowed `&str` when nothing is collapsed, so the common fast
+/// path allocates nothing.
+#[cfg(test)]
+fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
+    scan_line_continuations(s).0
+}
+
+/// The collapse described on [`collapse_line_continuations`], plus whether a
+/// comment ends in a backslash-newline (`ls # note \<NL>git push`). The
+/// comment-blind lexer reads that backslash as escaping the newline and joins
+/// the next line into the comment's segment, so no permission verdict
+/// describes it.
+fn scan_line_continuations(s: &str) -> (std::borrow::Cow<'_, str>, bool) {
+    #[derive(Clone, Copy)]
+    enum State {
+        Plain,
+        Single,
+        AnsiC,
+        Double,
+        Comment,
+    }
+
+    if !s.contains('\\') {
+        return (std::borrow::Cow::Borrowed(s), false);
+    }
+
+    let bytes = s.as_bytes();
+    // Copied lazily: stays `None` until the first continuation is collapsed.
+    let mut out: Option<Vec<u8>> = None;
+    let mut commented_continuation = false;
+    let mut state = State::Plain;
+    // End of the last escape pair, so an escaped `\$` never opens `$'...'`.
+    let mut escape_end = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && matches!(state, State::Plain | State::AnsiC | State::Double) {
+            let brk = line_break_len(bytes, i + 1);
+            if brk == 0 || matches!(state, State::AnsiC) {
+                // An escape pair (`\'`, `\#`, `\\`) is literal and never opens
+                // or closes quote or comment state; inside `$'...'` a
+                // backslash-newline is string content too.
+                let end = (i + 1 + brk.max(1)).min(bytes.len());
+                if let Some(o) = out.as_mut() {
+                    o.extend_from_slice(&bytes[i..end]);
+                }
+                i = end;
+                escape_end = end;
+                continue;
+            }
+            let o = out.get_or_insert_with(|| bytes[..i].to_vec());
+            i += 1 + brk;
+            if matches!(state, State::Plain) {
+                while o.last().is_some_and(|&c| is_continuation_blank(c)) {
+                    o.pop();
+                }
+                o.push(b' ');
+                while i < bytes.len() && is_continuation_blank(bytes[i]) {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if matches!(state, State::Comment) && b == b'\\' && line_break_len(bytes, i + 1) > 0 {
+            commented_continuation = true;
+        }
+
+        state = match (state, b) {
+            (State::Plain, b'\'') if i > 0 && bytes[i - 1] == b'$' && escape_end != i => {
+                State::AnsiC
+            }
+            (State::Plain, b'\'') => State::Single,
+            (State::Plain, b'"') => State::Double,
+            (State::Plain, b'#') if i == 0 || ends_shell_word(bytes[i - 1]) => State::Comment,
+            (State::Single | State::AnsiC, b'\'') | (State::Double, b'"') => State::Plain,
+            (State::Comment, b'\n') => State::Plain,
+            (s, _) => s,
+        };
+        if let Some(o) = out.as_mut() {
+            o.push(b);
+        }
+        i += 1;
+    }
+
+    let collapsed = match out {
+        // Only ASCII bytes are dropped or inserted, at ASCII positions, so the
+        // result stays valid UTF-8; the lossy branch is unreachable in practice.
+        Some(o) => std::borrow::Cow::Owned(
+            String::from_utf8(o)
+                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
+        ),
+        None => std::borrow::Cow::Borrowed(s),
+    };
+    (collapsed, commented_continuation)
 }
 
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
@@ -802,7 +932,14 @@ pub(crate) fn rewrite_command_precompiled(
     // follows are syntactically equivalent to a single space, but `cmd.trim()` does
     // not unwrap them so a leading backslash-newline used to defeat the whole matcher.
     // Normalize first, then trim. See issue #1564.
-    let normalized = collapse_line_continuations(cmd);
+    let (normalized, commented_continuation) = scan_line_continuations(cmd);
+    if commented_continuation {
+        // `ls # note \<NL>git push`: bash ends the comment at the newline and
+        // runs the next line, but the lexer joins it into the comment's
+        // segment, so no deny or ask rule would see it. Pass the command
+        // through to the agent's own permission handling (#5090).
+        return None;
+    }
     let trimmed = normalized.trim();
     if trimmed.is_empty() {
         return None;
@@ -8557,6 +8694,98 @@ mod tests {
         assert_eq!(
             collapse_line_continuations("git diff HEAD~1"),
             std::borrow::Cow::<str>::Borrowed("git diff HEAD~1"),
+        );
+    }
+
+    #[test]
+    fn test_collapse_keeps_continuations_bash_keeps() {
+        // #5090: single quotes, `$'...'` and comments keep backslash-newline.
+        for kept in [
+            "git commit -m 'one \\\ntwo'",
+            "echo $'x \\\ny'",
+            "ls # note \\\nls -la",
+            "ls #note \\\r\nls -la",
+        ] {
+            assert_eq!(collapse_line_continuations(kept), kept, "{kept:?}");
+        }
+    }
+
+    #[test]
+    fn test_collapse_quote_and_comment_state() {
+        // Outside quotes: the break and the blanks around it become one space.
+        assert_eq!(
+            collapse_line_continuations("git log \\\n  -3"),
+            "git log -3"
+        );
+        assert_eq!(
+            collapse_line_continuations("git log \\\r\n\t-3"),
+            "git log -3"
+        );
+        // Inside double quotes bash drops only the backslash and the newline.
+        assert_eq!(
+            collapse_line_continuations("git commit -m \"a \\\n  b\""),
+            "git commit -m \"a   b\""
+        );
+        // After the quote or comment closes, continuations collapse again.
+        assert_eq!(
+            collapse_line_continuations("echo 'a' \\\n b # c\ngit log \\\n -3"),
+            "echo 'a' b # c\ngit log -3"
+        );
+        // An escaped quote or `#` opens nothing.
+        assert_eq!(collapse_line_continuations("echo \\' \\\n x"), "echo \\' x");
+        assert_eq!(
+            collapse_line_continuations("echo a\\#b \\\n x"),
+            "echo a\\#b x"
+        );
+        // `#` inside a word is not a comment; `\$'` is a single-quoted string.
+        assert_eq!(collapse_line_continuations("echo a#b \\\n x"), "echo a#b x");
+        assert_eq!(
+            collapse_line_continuations("echo \\$'a\\' \\\n x"),
+            "echo \\$'a\\' x"
+        );
+        // `\'` inside `$'...'` does not close it.
+        assert_eq!(
+            collapse_line_continuations("echo $'a\\' \\\n b'"),
+            "echo $'a\\' \\\n b'"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_keeps_quoted_continuation() {
+        // #5090: the single-quoted message keeps its backslash and newline.
+        assert_eq!(
+            rewrite_command_no_prefixes("git commit -m 'one \\\ntwo' && ls", &[]),
+            Some("rtk git commit -m 'one \\\ntwo' && rtk ls".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("echo $'x \\\ny' && git status", &[]),
+            Some("echo $'x \\\ny' && rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git commit -m \"a \\\n  b\" && git status", &[]),
+            Some("rtk git commit -m \"a   b\" && rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_comment_ending_in_backslash_passes_through() {
+        // #5090: bash runs the second line; rewriting would either hide it in
+        // the comment or hand an allow to a line no rule was checked against.
+        assert_eq!(
+            rewrite_command_no_prefixes("ls # note \\\nls -la", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git status #x \\\ngit push --force", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_unquoted_continuation_still_joins() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log \\\n  --oneline -n 3", &[]),
+            Some("rtk git log --oneline -n 3".into())
         );
     }
 
