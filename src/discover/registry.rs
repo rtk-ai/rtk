@@ -27,7 +27,7 @@ use crate::core::cmdline::lexer::{
     starts_with_grammar, tokenize, tokenize_trimmed, trim_ifs, trim_ifs_end, trim_ifs_start,
     without_comments, words,
 };
-use crate::core::cmdline::rtk::rtk_invocation;
+use crate::core::cmdline::rtk::{RtkInvocation, rtk_invocation};
 use crate::core::cmdline::walker::{self, Line, Peel, Position};
 use crate::core::deferred;
 
@@ -37,6 +37,10 @@ const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "parates
 #[derive(Debug, PartialEq)]
 pub enum Classification {
     Supported {
+        /// The rule that matched, an index into [`RULES`]: the last of those whose pattern
+        /// matches. The rewrite and the `exclude_commands` check act on this rule, so the
+        /// rule is never looked up again (two rules can share an `rtk_equivalent`).
+        rule: usize,
         rtk_equivalent: &'static str,
         category: &'static str,
         estimated_savings_pct: f64,
@@ -184,15 +188,9 @@ struct GolangciRunParts<'a> {
 
 /// Classify a single (already-split) command, one that starts where a
 /// pipeline does.
+#[cfg(test)]
 pub fn classify_command(cmd: &str) -> Classification {
-    classify_command_at(cmd, Position::START)
-}
-
-/// [`classify_command`] for a command that starts at `pos`: a stage after
-/// `|` reads `time` as the program `time`.
-pub(crate) fn classify_command_at(cmd: &str, pos: Position) -> Classification {
-    let tokens = tokenize(cmd);
-    classify_words(cmd, &tokens, &words(cmd, &tokens), pos)
+    classify_command_from(cmd, Position::START)
 }
 
 /// Classify a single (already-split) command that a walk reached at `pos`:
@@ -233,49 +231,6 @@ fn is_ignored(cmd: &str) -> bool {
         || IGNORED_PREFIXES
             .iter()
             .any(|prefix| cmd.starts_with(prefix))
-}
-
-/// [`classify_command_at`] for the command made of `words`, spans of `text`,
-/// lexed as `tokens`. It runs from the first word to the end of the last, so
-/// an escaped blank that ends the last word stays in it.
-fn classify_words(
-    text: &str,
-    tokens: &[Token<'_>],
-    words: &[Word<'_>],
-    pos: Position,
-) -> Classification {
-    let (Some(first), Some(last)) = (words.first(), words.last()) else {
-        return Classification::Ignored;
-    };
-    let trimmed = &text[first.start..last.end];
-
-    // A command that runs rtk is not an opportunity: the report counts it as
-    // already rtk, unless it is `rtk proxy`.
-    if rtk_invocation(words).is_some() {
-        return Classification::Ignored;
-    }
-
-    // A segment that starts with a reserved word is grammar around commands,
-    // not a command: `rtk until …` or `rtk esac` would break the construct.
-    // Nor is one that starts with the `((` of an arithmetic command, which
-    // runs no command. `read_grammar`'s rules decide both, so `[[(-f a)]]`
-    // starts with `[[`, `"if"` is an ordinary word, `((ls) )` is two
-    // subshells, and after `|` `time` is a program.
-    if starts_with_grammar(tokens, pos.pipeline) {
-        return Classification::Ignored;
-    }
-
-    if is_ignored(trimmed) {
-        return Classification::Ignored;
-    }
-
-    // Strip env prefixes (env VAR=val, VAR=val); sudo is left untouched (#146)
-    let cmd_clean = env_run_end(words).map_or(trimmed, |end| &text[end..last.end]);
-    if cmd_clean.is_empty() {
-        return Classification::Ignored;
-    }
-
-    classify_clean(cmd_clean)
 }
 
 /// [`classify_command_from`] for the command made of `words`, read past its
@@ -405,6 +360,7 @@ fn classify_clean(cmd_clean: &str) -> Classification {
         };
 
         Classification::Supported {
+            rule: idx,
             rtk_equivalent: rule.rtk_cmd,
             category: rule.category,
             estimated_savings_pct: savings,
@@ -462,15 +418,32 @@ fn tokens_have_heredoc(tokens: &[Token<'_>]) -> bool {
 /// One command of a call, with what a report needs to know about it.
 pub(crate) struct ChainPart<'a> {
     pub(crate) text: &'a str,
+    /// Where `text` starts in the call's line, the text the rewrite's edits are spans of.
+    start: usize,
+    /// Its tokens, as a range of the call's lex.
+    tokens: Range<usize>,
     /// Whether it is a stage of a pipeline after the first, so it reads the output of
     /// the stage before it.
     pub(crate) consumes_pipe: bool,
-    /// Whether the command after its assignments and `env` words runs rtk, which the
-    /// classifier leaves aside although rtk runs a tool.
-    pub(crate) runs_rtk: bool,
 }
 
-/// The commands of `line`, cut where the rewrite cuts it: each is a segment of the
+/// The commands of a call, as [`chain_parts`] cuts them.
+#[cfg(test)]
+pub(crate) fn split_command_chain_parts<'a>(line: &'a JoinedLine<'_>) -> Vec<ChainPart<'a>> {
+    let lex = CompoundLex::new(&line.text);
+    chain_parts(&lex, &call_lines(&lex, line))
+}
+
+/// How the report reads the lines of `line`, which `lex` lexes: as the rewrite does
+/// ([`read_lines`]), except that a block that could not be joined is one text.
+fn call_lines(lex: &CompoundLex<'_>, line: &JoinedLine<'_>) -> Lines {
+    match read_lines(lex) {
+        Lines::Units(_) if !line.joined => Lines::Refused,
+        lines => lines,
+    }
+}
+
+/// The commands of `lex`, read as `lines`, cut where the rewrite cuts it: each is a segment of the
 /// rewrite's own reading ([`cut_line`], over the lex and reading it works from), every
 /// stage of a pipeline included, the middle ones too. A block is read line by line as
 /// the rewrite reads it ([`block_lines`]): a line is a command unit, a trailing operator
@@ -482,29 +455,27 @@ pub(crate) struct ChainPart<'a> {
 /// What the cut reads past is no command: what follows a subshell's `)`, and a part that
 /// holds only a comment or a group's own syntax ([`holds_no_command`]). A call of
 /// comments alone has none.
-pub(crate) fn split_command_chain_parts<'a>(line: &'a JoinedLine<'_>) -> Vec<ChainPart<'a>> {
-    let lex = CompoundLex::new(&line.text);
-    let lines = match read_lines(&lex) {
-        Lines::Units(_) if !line.joined => Lines::Refused,
-        lines => lines,
-    };
+fn chain_parts<'a>(lex: &CompoundLex<'a>, lines: &Lines) -> Vec<ChainPart<'a>> {
     let mut parts = Vec::new();
     match lines {
         Lines::Opaque | Lines::Refused => {
-            if let Some(whole) = lex.whole() {
+            if let (Some(whole), Some((first, _))) = (lex.whole(), content_bounds(&lex.tokens)) {
                 let part = Part::new(0..whole.tokens.len(), false);
-                push_chain_part(&whole, part, false, &mut parts);
+                push_chain_part(&whole, first, part, false, &mut parts);
             }
         }
         Lines::Whole => {
-            if let Some(whole) = lex.whole() {
-                push_chain_parts(&whole, &mut parts);
+            if let (Some(whole), Some((first, _))) = (lex.whole(), content_bounds(&lex.tokens)) {
+                push_chain_parts(&whole, first, &mut parts);
             }
         }
         Lines::Units(units) => {
             for unit in units {
-                if let Some(slice) = Slice::new(lex.text, &lex.tokens[unit]) {
-                    push_chain_parts(&slice, &mut parts);
+                let tokens = &lex.tokens[unit.clone()];
+                if let (Some(slice), Some((first, _))) =
+                    (Slice::new(lex.text, tokens), content_bounds(tokens))
+                {
+                    push_chain_parts(&slice, unit.start + first, &mut parts);
                 }
             }
         }
@@ -512,15 +483,16 @@ pub(crate) fn split_command_chain_parts<'a>(line: &'a JoinedLine<'_>) -> Vec<Cha
     parts
 }
 
-/// The parts of one unit of a call: the commands of its cuts.
-fn push_chain_parts<'a>(unit: &Slice<'a, '_>, parts: &mut Vec<ChainPart<'a>>) {
+/// The parts of one unit of a call, whose first token is the `base`th of the call's lex:
+/// the commands of its cuts.
+fn push_chain_parts<'a>(unit: &Slice<'a, '_>, base: usize, parts: &mut Vec<ChainPart<'a>>) {
     let read = LineRead::new(unit);
     for cut in cut_line(unit, &read) {
         match cut {
-            Cut::Command(part) => push_chain_part(unit, part, false, parts),
+            Cut::Command(part) => push_chain_part(unit, base, part, false, parts),
             Cut::Pipeline(analysis) => {
                 for (index, stage) in analysis.stages.into_iter().enumerate() {
-                    push_chain_part(unit, stage, index > 0, parts);
+                    push_chain_part(unit, base, stage, index > 0, parts);
                 }
             }
         }
@@ -529,9 +501,11 @@ fn push_chain_parts<'a>(unit: &Slice<'a, '_>, parts: &mut Vec<ChainPart<'a>>) {
 
 /// The part of `unit` that `part` cuts, as a [`ChainPart`], unless it is no command:
 /// nothing bash reads there, or a group's own syntax. `consumes_pipe` says whether it is a
-/// pipeline's stage after the first.
+/// pipeline's stage after the first. `base` is the place of the unit's first token in
+/// the call's lex.
 fn push_chain_part<'a>(
     unit: &Slice<'a, '_>,
+    base: usize,
     part: Part,
     consumes_pipe: bool,
     parts: &mut Vec<ChainPart<'a>>,
@@ -539,18 +513,23 @@ fn push_chain_part<'a>(
     if part.after_subshell {
         return;
     }
-    let Some(command) = Slice::new(unit.text, &unit.tokens[part.range]) else {
+    let Some((first, last)) = content_bounds(&unit.tokens[part.range.clone()]) else {
         return;
+    };
+    let tokens = part.range.start + first..part.range.start + last + 1;
+    let command = Slice {
+        text: unit.text,
+        tokens: &unit.tokens[tokens.clone()],
     };
     let words = command.words();
     if holds_no_command(&words) {
         return;
     }
-    let program = env_run_end(&words).map_or(0, |end| words.partition_point(|w| w.start < end));
     parts.push(ChainPart {
         text: command.as_str(),
+        start: command.start(),
+        tokens: base + tokens.start..base + tokens.end,
         consumes_pipe,
-        runs_rtk: rtk_invocation(&words[program..]).is_some(),
     });
 }
 
@@ -569,7 +548,7 @@ fn holds_no_command(words: &[Word<'_>]) -> bool {
     }
 }
 
-/// The text of each of [`split_command_chain_parts`]'s commands for `cmd`.
+/// The text of each command of `cmd`, as [`read_call`] cuts them.
 #[cfg(test)]
 pub(crate) fn split_command_chain(cmd: &str) -> Vec<String> {
     split_command_chain_parts(&JoinedLine::of(cmd))
@@ -578,45 +557,225 @@ pub(crate) fn split_command_chain(cmd: &str) -> Vec<String> {
         .collect()
 }
 
-/// Which commands of `line` the rewriter acts on, one flag per part of `parts`, which are
-/// `line`'s own ([`split_command_chain_parts`]).
+/// A call's commands, and which of them the rewrite acts on.
+pub(crate) struct Call<'a> {
+    pub(crate) parts: Vec<ChainPart<'a>>,
+    /// One reading per part: the command it runs, and what that classifies as.
+    pub(crate) reads: Vec<PartRead<'a>>,
+    /// One flag per part: whether the rewrite edits it ([`parts_edited`]).
+    ///
+    /// Position decides it. `tail -1` alone becomes `rtk read`, but in
+    /// `cargo test 2>&1 | tail -1` the rewriter takes the producer and leaves the
+    /// consumer alone: RTK filters what `cargo` writes, and rewriting the stage
+    /// that reads it would change what the pipeline prints. In
+    /// `cargo test | grep FAILED` it is the other way round, because `rtk grep` is
+    /// one of the rules that are safe to run at the end of a pipeline. A command
+    /// the rewriter passes over offers nothing to save.
+    pub(crate) reached: Vec<bool>,
+    /// One flag per part: whether the rewrite would edit it if the `RTK_DISABLED=`
+    /// assignments in front of it were not there. A bypassed part ([`PartRead::bypassed`]:
+    /// its walk stopped at such a run, which is the rewrite's own refusal, #345) is flagged
+    /// when an edit falls in it once the rewrite is asked again over the same lex with
+    /// every such stop read past ([`Walk::run`]), in the part's own position in the call.
+    /// The others are flagged as in [`Call::reached`].
+    pub(crate) reached_without_bypass: Vec<bool>,
+}
+
+/// The commands of `line` ([`chain_parts`]) and the ones the rewrite acts on,
+/// read off one lex of the line: the rewrite runs over the lex and the lines the commands
+/// are cut from, so each of its edits lies in the command it was made in.
 ///
-/// Put to the rewriter rather than re-derived from `PipelineSafety`, so the two
-/// cannot drift: a second copy of the rule is a second thing to keep in step.
-/// Answered for the whole line at once, because what happens to one command
-/// depends on the ones around it.
+/// The rewrite is put to the rewriter rather than re-derived from `PipelineSafety`, so the
+/// two cannot drift: a second copy of the rule is a second thing to keep in step. It is
+/// asked about the whole line at once, because what happens to one command depends on the
+/// ones around it. A line that could not be joined is not rewritten.
 ///
-/// Position decides it. `tail -1` alone becomes `rtk read`, but in
-/// `cargo test 2>&1 | tail -1` the rewriter takes the producer and leaves the
-/// consumer alone — RTK filters what `cargo` writes, and rewriting the stage
-/// that reads it would change what the pipeline prints. In
-/// `cargo test | grep FAILED` it is the other way round, because `rtk grep` is
-/// one of the rules that are safe to run at the end of a pipeline. A command
-/// the rewriter passes over offers nothing to save.
-pub(crate) fn stages_the_rewriter_reaches(
-    line: &JoinedLine<'_>,
-    parts: &[ChainPart<'_>],
+/// A call with a bypassed command ([`PartRead::bypassed`]) draws one more rewrite of the
+/// line ([`Call::reached_without_bypass`]); a call with none is rewritten
+/// once.
+pub(crate) fn read_call<'a>(
+    line: &'a JoinedLine<'_>,
     excluded: &[ExcludePattern],
     normalized_prefixes: &[String],
-) -> Vec<bool> {
-    // The rewrite emits the line with its continuations joined, which `line` already is.
-    let Some(rewritten) = rewrite_command_precompiled(&line.text, excluded, normalized_prefixes)
-    else {
-        return vec![false; parts.len()];
-    };
-    let rewritten = JoinedLine::of(&rewritten);
-    let after = split_command_chain_parts(&rewritten);
-    // A rewrite substitutes commands and keeps every separator, so the chains
-    // line up command for command. If they ever do not, nothing can be located
-    // and claiming a saving would be a guess.
-    if parts.len() != after.len() {
-        return vec![false; parts.len()];
-    }
-    parts
+) -> Call<'a> {
+    let lex = CompoundLex::new(&line.text);
+    let lines = call_lines(&lex, line);
+    let parts = chain_parts(&lex, &lines);
+    let mut rewriter = Rewriter::new(excluded, normalized_prefixes, 0);
+    let reached = parts_reached(&parts, &lex, &lines, line.joined, &mut rewriter);
+    let reads: Vec<PartRead<'a>> = parts
         .iter()
-        .zip(after)
-        .map(|(before, after)| before.text != after.text)
-        .collect()
+        .map(|part| {
+            let tokens = Slice {
+                text: lex.text,
+                tokens: &lex.tokens[part.tokens.clone()],
+            };
+            read_part(&tokens, excluded, normalized_prefixes, part.consumes_pipe)
+        })
+        .collect();
+    let mut reached_without_bypass = reached.clone();
+    if reads.iter().any(|read| read.bypassed) {
+        let mut resumed = Rewriter::new(excluded, normalized_prefixes, 0);
+        resumed.at_bypass = AtBypass::ReadPast;
+        let edited = parts_reached(&parts, &lex, &lines, line.joined, &mut resumed);
+        for (index, read) in reads.iter().enumerate() {
+            if read.bypassed {
+                reached_without_bypass[index] = edited[index];
+            }
+        }
+    }
+    Call {
+        parts,
+        reads,
+        reached,
+        reached_without_bypass,
+    }
+}
+
+/// What the report reads of one command of a call, off the rewrite's own decision about it
+/// ([`decide_segment`]), made under the same configuration.
+pub(crate) struct PartRead<'a> {
+    /// The command it runs, from its first word to the end of the part: the word the
+    /// decision settled at, which is the command under every layer the walk reads through
+    /// (`timeout 30 cargo test` runs `cargo test`), the command behind a user prefix
+    /// (`nice -n 19 ionice git status` under that prefix runs `git status`), or a routable
+    /// wrapper the fall-through matched whole (`uv run …`). Where nothing settled (no
+    /// rule, the command excluded, a bypass refused) it is the command the walk the
+    /// decision ended in stops at: the first walk's, or the one behind a user prefix the
+    /// search read, when it found a command (`nice -n 19 ionice frobnicate x` under that
+    /// prefix is `frobnicate x`). That is none where it is an option, a redirect, grammar
+    /// (`timeout 5 [[ -f x ]]`, where bash runs a program named `[[`) or an assignment
+    /// behind a wrapper (`nice FOO=1 git status`, where it names the program): the call
+    /// stays in the report's tables as the last layer's, as written, unless that layer is a
+    /// reserved word (`time -f %e cargo test`, `if -v cargo`), which is bash's grammar
+    /// and has no row. Where the walk stops at a layer with nothing after it, or at its
+    /// depth limit with the command unseen, it is the whole part. Assignments alone run
+    /// nothing.
+    pub(crate) command: &'a str,
+    /// What [`PartRead::command`] classifies as.
+    pub(crate) class: Classification,
+    /// Whether the command runs rtk, and whether that is its escape hatch.
+    pub(crate) rtk: Option<RtkInvocation>,
+    /// Whether the rewrite refuses the part at an `RTK_DISABLED=` run, in its walk of
+    /// the part or in one of a search for a fall-through. The decision is then read with
+    /// the run past ([`AtBypass::ReadPast`]): the command is the one the part would run
+    /// without the bypass. rtk does not read `RTK_DISABLED`, so a command that runs rtk is
+    /// not bypassed; `rtk bypass` behind one is.
+    pub(crate) bypassed: bool,
+}
+
+impl PartRead<'_> {
+    /// Whether the command runs rtk, and not as its escape hatch `rtk bypass`.
+    pub(crate) fn runs_rtk(&self) -> bool {
+        self.rtk.is_some_and(|rtk| !rtk.bypass)
+    }
+}
+
+/// What the report reads of the command `part`, in a call rewritten under `excluded` and
+/// the transparent `prefixes`: the word the rewrite's decision about it lands on, whether
+/// or not the rewrite ever visits it.
+fn read_part<'a>(
+    part: &Slice<'a, '_>,
+    excluded: &[ExcludePattern],
+    prefixes: &[String],
+    consumes_pipe: bool,
+) -> PartRead<'a> {
+    let words = part.words();
+    let line = part.line(&words);
+    let context = if consumes_pipe {
+        RewriteContext::PipelineFinal
+    } else {
+        RewriteContext::Normal
+    };
+    let decide = |at_bypass| decide_segment(&line, excluded, prefixes, context, 0, at_bypass);
+    let mut outcome = decide(AtBypass::Stop);
+    let bypassed = outcome.bypass;
+    if bypassed {
+        outcome = decide(AtBypass::ReadPast);
+    }
+    let at = match (outcome.word, outcome.stop) {
+        (Some(word), _) => word,
+        (None, Stop::Command(at)) => {
+            let reads_no_command = command_from(&line, at).is_some_and(|command| {
+                head_is_an_option(words[at].text)
+                    || walker::is_assignment_word(words[at].text)
+                    || command
+                        .tokens
+                        .first()
+                        .is_some_and(|tok| tok.kind == TokenKind::Redirect)
+                    || starts_with_grammar(command.tokens, true)
+            });
+            match outcome.layer {
+                Some(layer) if reads_no_command => layer,
+                _ => at,
+            }
+        }
+        (None, _) => 0,
+    };
+    let at = at.min(words.len().saturating_sub(1));
+    // Assignments with no command behind them run nothing.
+    let runs_nothing = outcome.word.is_none()
+        && matches!(outcome.stop, Stop::Nothing(layer) if layer.kind == LayerKind::Assignments);
+    let command = &words[at..];
+    let rtk = rtk_invocation(command);
+    PartRead {
+        command: &part.text[command[0].start..command[command.len() - 1].end],
+        class: if runs_nothing {
+            Classification::Ignored
+        } else {
+            classify_command_words(line.text, line.tokens, command, context.position())
+        },
+        rtk,
+        // rtk does not read `RTK_DISABLED`: an `rtk` behind one is not bypassed.
+        bypassed: bypassed && !rtk.is_some_and(|rtk| !rtk.bypass),
+    }
+}
+
+/// One flag per part of `parts`: whether `rewriter`, run over the lexed line `lex` read as
+/// `lines`, edits it. A line the rewrite makes no text of is left as written, whatever
+/// edits it recorded, and a line that could not be `joined` is not rewritten.
+fn parts_reached(
+    parts: &[ChainPart<'_>],
+    lex: &CompoundLex<'_>,
+    lines: &Lines,
+    joined: bool,
+    rewriter: &mut Rewriter<'_>,
+) -> Vec<bool> {
+    let rewritten = joined && rewrite_lex(lex, lines, rewriter).is_some();
+    parts_edited(parts, if rewritten { &rewriter.edits } else { &[] })
+}
+
+/// The part of `parts` that the offset `at` of the call's line falls in: the last one that
+/// starts at or before it (the parts come in the order of the line).
+fn part_at(parts: &[ChainPart<'_>], at: usize) -> Option<usize> {
+    let index = parts
+        .partition_point(|part| part.start <= at)
+        .checked_sub(1);
+    debug_assert!(
+        index.is_some_and(|i| at <= parts[i].start + parts[i].text.len()),
+        "the offset {at} lies in no command"
+    );
+    index
+}
+
+/// One flag per part of `parts`: whether one of `edits` falls in it.
+///
+/// An edit is a span of the call's line, and an edit made in a command lies inside the
+/// command's own words, so its part is the one it starts in ([`part_at`]). An edit's rank
+/// among the others says nothing of its part: a command the rewrite passes over has none,
+/// and neither has a stage in the middle of a pipeline.
+fn parts_edited(parts: &[ChainPart<'_>], edits: &[Edit]) -> Vec<bool> {
+    debug_assert!(
+        parts.windows(2).all(|pair| pair[0].start < pair[1].start),
+        "the parts come in the order of the line"
+    );
+    let mut edited = vec![false; parts.len()];
+    for edit in edits {
+        if let Some(index) = part_at(parts, edit.span.start) {
+            edited[index] = true;
+        }
+    }
+    edited
 }
 
 fn normalize_php_tool_command(cmd: &str) -> String {
@@ -855,10 +1014,10 @@ const RTK_DISABLED_MARKER: &str = "RTK_DISABLED=";
 /// The same assignment spelled as an append.
 const RTK_DISABLED_APPEND_MARKER: &str = "RTK_DISABLED+=";
 
-/// Whether one of `words`, a run of assignments and `env` words, assigns
+/// For each of `words`, a run of assignments and `env` words, whether it assigns
 /// `RTK_DISABLED`, by that exact name: `XRTK_DISABLED=1` and
 /// `MSG='RTK_DISABLED=1'` are not the bypass.
-fn words_set_rtk_disabled(words: &[Word<'_>]) -> bool {
+fn sets_rtk_disabled<'w>(words: &'w [Word<'_>]) -> impl Iterator<Item = bool> + 'w {
     // Behind a run word (`env`) the words are that program's operands: it sets
     // a variable named `RTK_DISABLED+`, and does not append.
     //
@@ -869,96 +1028,22 @@ fn words_set_rtk_disabled(words: &[Word<'_>]) -> bool {
     // Reading the operands unquoted would peel `env` and rewrite the command
     // behind it, which is left as written today, so the asymmetry stays.
     let mut shell_assignments = true;
-    for word in words {
-        if word.text.starts_with(RTK_DISABLED_MARKER)
-            || (shell_assignments && word.text.starts_with(RTK_DISABLED_APPEND_MARKER))
-        {
-            return true;
-        }
+    words.iter().map(move |word| {
+        let sets = word.text.starts_with(RTK_DISABLED_MARKER)
+            || (shell_assignments && word.text.starts_with(RTK_DISABLED_APPEND_MARKER));
         shell_assignments &= walker::is_assignment_word(word.text);
-    }
-    false
+        sets
+    })
 }
 
-pub fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {
+/// Whether one of `words`, a run of assignments and `env` words, assigns
+/// `RTK_DISABLED` ([`sets_rtk_disabled`]).
+fn words_set_rtk_disabled(words: &[Word<'_>]) -> bool {
+    sets_rtk_disabled(words).any(|sets| sets)
+}
+
+fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {
     words_set_rtk_disabled(&words(prefix_part, &tokenize(prefix_part)))
-}
-
-/// Whether a token is allowed in an analytics env/sudo prefix before/after
-/// `RTK_DISABLED=`. Deliberately shallow: no sudo flag-arity table — only
-/// `sudo`, `env`, `KEY=VALUE`, and `-flags`. Value-taking sudo options like
-/// `-u root` are therefore not treated as a bypass prefix (see #3808 review).
-/// `env` is read as [`is_env_word`] reads it, under any spelling bash runs.
-fn is_analytics_env_wrapper_token(value: &str) -> bool {
-    value == "sudo"
-        || walker::is_run_word(value, families::ALL)
-        || value.contains('=')
-        || value.starts_with('-')
-}
-
-/// Strip an `RTK_DISABLED=` prefix for analytics, including a shallow `sudo` /
-/// `env` / assign / `-flag` wrapper around it.
-///
-/// Unlike [`split_env_prefix`], this recognizes
-/// `sudo RTK_DISABLED=1 …` and `RTK_DISABLED=1 sudo …` so discover can find
-/// them; whether one counts as a bypass is `judge_disabled_segment`'s call. It is intentionally stricter than a full shell parse:
-/// - never looks past `|` / `&&` / other non-`Arg` tokens for `RTK_DISABLED=`
-/// - prefix before `RTK_DISABLED=` may only be wrapper tokens (above)
-/// - after `RTK_DISABLED=`, takes the first non-wrapper command word and
-///   stops — no scanning into wrapper arguments (`ssh host docker …`)
-pub fn strip_disabled_prefix_for_analytics(cmd: &str) -> (&str, &str) {
-    let trimmed = cmd.trim();
-    let tokens: Vec<Token<'_>> = tokenize(trimmed)
-        .into_iter()
-        .filter(|t| !t.is_blank())
-        .collect();
-
-    let mut disabled_index = None;
-    for (i, token) in tokens.iter().enumerate() {
-        // A non-`Arg` token (operator, redirect) ends the prefix: an
-        // `RTK_DISABLED=` after it belongs to another command.
-        if token.kind != TokenKind::Arg {
-            break;
-        }
-        if token.value.starts_with("RTK_DISABLED=") {
-            disabled_index = Some(i);
-            break;
-        }
-        if !is_analytics_env_wrapper_token(token.value) {
-            // A real command word before RTK_DISABLED= (e.g. `docker run -e
-            // RTK_DISABLED=1 …`) — not an RTK bypass prefix.
-            return split_env_prefix(trimmed);
-        }
-    }
-
-    let Some(disabled_index) = disabled_index else {
-        return split_env_prefix(trimmed);
-    };
-
-    // Walk past RTK_DISABLED= and any remaining wrapper tokens; the next Arg
-    // is the command word. If it isn't Supported, give up — do not keep
-    // searching for an inner Supported command (ssh/xargs/watch/script args).
-    let mut i = disabled_index + 1;
-    while i < tokens.len() {
-        let token = &tokens[i];
-        if token.kind != TokenKind::Arg {
-            break;
-        }
-        if is_analytics_env_wrapper_token(token.value) {
-            i += 1;
-            continue;
-        }
-        let candidate = trimmed[token.offset..].trim();
-        if matches!(
-            classify_command(candidate),
-            Classification::Supported { .. }
-        ) {
-            return (&trimmed[..token.offset], candidate);
-        }
-        break;
-    }
-
-    split_env_prefix(trimmed)
 }
 
 /// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
@@ -1051,9 +1136,9 @@ fn env_run_end(words: &[Word<'_>]) -> Option<usize> {
 /// warnings, then whatever
 /// the filter registry says about trust. Those are held back while the rewrite
 /// runs ([`deferred::capture`]), since the first needs the rewrite's answer.
-/// `rewrite_command_precompiled` also serves `rtk discover`, which asks about
-/// commands from months of history: it prints no `RTK_DISABLED` warning, and
-/// discover reads `transparent_prefixes` without the refusals.
+/// [`read_call`] serves `rtk discover`, which asks about commands from months
+/// of history: it prints no `RTK_DISABLED` warning, and discover reads
+/// `transparent_prefixes` without the refusals.
 pub fn rewrite_command(
     cmd: &str,
     excluded: &[String],
@@ -1090,24 +1175,8 @@ struct Answer {
     disabled: bool,
 }
 
-/// Core of `rewrite_command`, taking already-compiled exclude patterns and
-/// already-normalized transparent prefixes so a caller checking many commands
-/// against the same config in a loop can compile once and reuse — instead of
-/// recompiling `exclude_commands` regexes on every single call. `rewrite_command`
-/// itself is the right entry point for a one-off check (real hook invocations,
-/// `rtk rewrite`, tests); this exists for `rtk discover`'s estimate-coverage
-/// fallback, which calls this once per historical command scanned (the same
-/// compile-once-per-run pattern this PR already applies to permission rules —
-/// see `discover::PermissionRules` — and hook-install status).
-pub(crate) fn rewrite_command_precompiled(
-    cmd: &str,
-    compiled: &[ExcludePattern],
-    normalized_prefixes: &[String],
-) -> Option<String> {
-    rewrite_line(cmd, compiled, normalized_prefixes).text
-}
-
-/// The refusals every rewrite starts with, then the rewrite of the line.
+/// The refusals every rewrite starts with, then the rewrite of the line, taking
+/// already-compiled exclude patterns and already-normalized transparent prefixes.
 fn rewrite_line(cmd: &str, compiled: &[ExcludePattern], normalized_prefixes: &[String]) -> Answer {
     // The pre-pass runs before the blanks at either end are left out, so
     // nothing it leaves sits in front of the command, where it would hide the
@@ -1123,14 +1192,24 @@ fn rewrite_line(cmd: &str, compiled: &[ExcludePattern], normalized_prefixes: &[S
     }
 
     let mut rewriter = Rewriter::new(compiled, normalized_prefixes, 0);
-    let text = match read_lines(&line) {
-        Lines::Opaque | Lines::Refused => None,
-        Lines::Whole => rewrite_single(&line, &mut rewriter),
-        Lines::Units(units) => rewrite_multiline_block(&line, &units, &mut rewriter),
-    };
+    let text = rewrite_lex(&line, &read_lines(&line), &mut rewriter);
     Answer {
         text,
         disabled: rewriter.disabled,
+    }
+}
+
+/// The rewrite of the lexed line `line`, read as `lines`: its edits are recorded in
+/// `rewriter`, and the line they make comes back, if the rewrite acts on it.
+fn rewrite_lex(
+    line: &CompoundLex<'_>,
+    lines: &Lines,
+    rewriter: &mut Rewriter<'_>,
+) -> Option<String> {
+    match lines {
+        Lines::Opaque | Lines::Refused => None,
+        Lines::Whole => rewrite_single(line, rewriter),
+        Lines::Units(units) => rewrite_multiline_block(line, units, rewriter),
     }
 }
 
@@ -1144,6 +1223,8 @@ struct Rewriter<'c> {
     shell_wrapper_depth: usize,
     edits: Vec<Edit>,
     disabled: bool,
+    /// What a walk does at an `RTK_DISABLED=` run.
+    at_bypass: AtBypass,
 }
 
 impl<'c> Rewriter<'c> {
@@ -1158,6 +1239,7 @@ impl<'c> Rewriter<'c> {
             shell_wrapper_depth,
             edits: Vec::new(),
             disabled: false,
+            at_bypass: AtBypass::Stop,
         }
     }
 
@@ -1192,6 +1274,7 @@ impl<'c> Rewriter<'c> {
             self.prefixes,
             context,
             self.shell_wrapper_depth,
+            self.at_bypass,
         );
         self.disabled |= outcome.disabled;
         match outcome.edit {
@@ -2237,13 +2320,21 @@ pub(crate) fn shell_wrapper_positions<'a>(
     // rewrite walks a later stage from `Position::STAGE`, where `time` is a
     // program with options of its own: every place either walk reaches.
     for start in [Position::START, Position::STAGE] {
-        let walk = Walk::run(&line, normalized_transparent_prefixes, 0, start, 0);
+        let walk = Walk::run(
+            &line,
+            normalized_transparent_prefixes,
+            0,
+            start,
+            0,
+            AtBypass::Stop,
+        );
         let mut search = Search::new(
             &line,
             &[],
             normalized_transparent_prefixes,
             RewriteContext::Normal,
             0,
+            AtBypass::Stop,
         );
         search.reached = Some(walk.command().into_iter().collect());
         search.fall_back(walk.layers);
@@ -2362,8 +2453,8 @@ fn script_opts_out(
         };
         let words = whole.words();
         let line = whole.line(&words);
-        let walk = Walk::run(&line, prefixes, 0, Position::START, 0);
-        walk.stop == Stop::Disabled
+        let walk = Walk::run(&line, prefixes, 0, Position::START, 0, AtBypass::Stop);
+        matches!(walk.stop, Stop::Disabled(_))
             || walk.command().is_some_and(|at| {
                 decide(
                     &line,
@@ -2520,16 +2611,26 @@ fn words_before<'a>(text: &'a str, words: &[Word<'a>], end: usize) -> Vec<Word<'
 /// command's text.
 type Layer = Peel<LayerKind>;
 
+/// What a walk does at an assignment run that sets `RTK_DISABLED`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtBypass {
+    /// It stops there, and the rewrite is refused (#345).
+    Stop,
+    /// It reads past the run, for the report's question of what the rewrite would do
+    /// without the bypass.
+    ReadPast,
+}
+
 /// Why a walk ended where it did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stop {
     /// At the command word, or past every word: the word's index.
     Command(usize),
     /// At an assignment run that sets `RTK_DISABLED` and has a command behind
-    /// it: the rewrite is refused (#345).
-    Disabled,
-    /// At a layer with nothing after it.
-    Nothing,
+    /// it: the rewrite is refused (#345). The word the run starts at.
+    Disabled(usize),
+    /// At a layer with nothing after it: the layer.
+    Nothing(Layer),
     /// [`MAX_PREFIX_DEPTH`] layers deep, with the command unseen.
     Depth,
 }
@@ -2553,20 +2654,33 @@ impl Walk {
         }
     }
 
+    /// Whether the walk stopped at an `RTK_DISABLED=` run.
+    fn bypass(&self) -> bool {
+        matches!(self.stop, Stop::Disabled(_))
+    }
+
     /// Peels `line`'s layers from word `from`, each read at the position the
     /// one before it left ([`Position`]), starting at `pos`. Stops at a
     /// command word, at a layer that [`ends_the_walk`], or at
     /// [`MAX_PREFIX_DEPTH`] layers counted from `depth`.
+    ///
+    /// With [`AtBypass::ReadPast`], an `RTK_DISABLED=` run is read past instead of
+    /// stopping the walk, as the report does to ask what the rewrite would do
+    /// without the bypass ([`read_call`]). The run counts as the words that are left once its
+    /// `RTK_DISABLED=` ones are taken out: none, when it held no other, so the
+    /// walk goes on from where it stood in front of the run (`RTK_DISABLED=1 time
+    /// cargo test` reads `time` as the reserved word), and an ordinary assignment
+    /// layer, which leaves the walk inside a command, when it did.
     fn run(
         line: &Line<'_>,
         prefixes: &[String],
         from: usize,
         mut pos: Position,
         mut depth: usize,
+        at_bypass: AtBypass,
     ) -> Self {
         let mut layers = Vec::new();
         let mut at = from;
-        let stopped = |layers, stop| Walk { layers, stop };
         loop {
             if depth >= MAX_PREFIX_DEPTH {
                 // No further layer is peeled, but a quoted shell wrapper here
@@ -2577,13 +2691,23 @@ impl Walk {
                 if wrapper {
                     break;
                 }
-                return stopped(layers, Stop::Depth);
+                return Walk {
+                    layers,
+                    stop: Stop::Depth,
+                };
             }
             let Some(layer) = families::peel(line, at, families::ALL, prefixes, pos) else {
                 break;
             };
-            if let Some(stop) = ends_the_walk(line, &layer) {
-                return stopped(layers, stop);
+            match ends_the_walk(line, &layer) {
+                Some(Stop::Disabled(_)) if at_bypass == AtBypass::ReadPast => {
+                    if sets_rtk_disabled(&line.words[layer.word..layer.end]).all(|sets| sets) {
+                        at = layer.end;
+                        continue;
+                    }
+                }
+                Some(stop) => return Walk { layers, stop },
+                None => {}
             }
             layers.push(layer);
             at = layer.end;
@@ -2604,11 +2728,11 @@ impl Walk {
 /// is a statement of its own, and disables nothing.
 fn ends_the_walk(line: &Line<'_>, layer: &Layer) -> Option<Stop> {
     if layer.end >= line.words.len() {
-        return Some(Stop::Nothing);
+        return Some(Stop::Nothing(*layer));
     }
     (layer.kind == LayerKind::Assignments
         && words_set_rtk_disabled(&line.words[layer.word..layer.end]))
-    .then_some(Stop::Disabled)
+    .then_some(Stop::Disabled(layer.word))
 }
 
 /// What deciding about one command found.
@@ -2629,44 +2753,89 @@ enum Decision {
     Excluded,
 }
 
-/// The rewrite of one command: its edit, if any, and whether it was refused at
+/// What deciding about one command found: its edit, if any, and whether it was refused at
 /// `RTK_DISABLED=`: a walk stopped there without anything else deciding about
 /// the command, or the quoted script the first walk reached, or the one a
 /// fall-through settled on, refused a command of its own
 /// ([`Decision::Disabled`]).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Outcome {
     edit: Option<Edit>,
     disabled: bool,
+    /// Whether the command's first walk stopped at an `RTK_DISABLED=` run, or else a walk
+    /// of the search it fell back to. It marks the command for the report's second
+    /// rewrite, which reads the run past; a search walk that met a run counts even when
+    /// the fall-through then rewrites the command, which only costs that second rewrite.
+    bypass: bool,
+    /// The word the decision settled at: the command word of the first walk, or the
+    /// routable wrapper or the command behind a user prefix that the fall-through search
+    /// matched. `None` when nothing settled, which leaves the command as it is.
+    word: Option<usize>,
+    /// How the walk the decision ended in stopped, and the word of the last layer it
+    /// peeled: the first walk, or when nothing settled and a user prefix led the search to
+    /// a walk of its own that found a command, the one of those that stops furthest on.
+    stop: Stop,
+    layer: Option<usize>,
     /// The walks the rewrite ran (test builds only).
     #[cfg(test)]
     walks: usize,
 }
 
 /// The rewrite of the command `cmd` in `context`: its edit, if any.
-///
-/// The command's layers are walked once ([`Walk::run`]) over one [`Line`],
-/// the command under them is decided about, and when that decides nothing the
-/// layers are read again ([`Search::fall_back`]). Every rewrite is an edit
-/// against the text the command's tokens index.
 fn rewrite_segment(
     cmd: Slice<'_, '_>,
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
     context: RewriteContext,
     shell_wrapper_depth: usize,
+    at_bypass: AtBypass,
 ) -> Outcome {
     let words = cmd.words();
     let line = cmd.line(&words);
-    let walk = Walk::run(&line, transparent_prefixes, 0, context.position(), 0);
-    let mut search = Search::new(
+    decide_segment(
         &line,
         excluded,
         transparent_prefixes,
         context,
         shell_wrapper_depth,
+        at_bypass,
+    )
+}
+
+/// Decides about the command `line` in `context`: the one decision procedure of the
+/// rewrite and of the report, which reads the command it settles at.
+///
+/// The command's layers are walked once ([`Walk::run`]) over one [`Line`],
+/// the command under them is decided about, and when that decides nothing the
+/// layers are read again ([`Search::fall_back`]). Every rewrite is an edit
+/// against the text the command's tokens index.
+fn decide_segment(
+    line: &Line<'_>,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+    context: RewriteContext,
+    shell_wrapper_depth: usize,
+    at_bypass: AtBypass,
+) -> Outcome {
+    let walk = Walk::run(
+        line,
+        transparent_prefixes,
+        0,
+        context.position(),
+        0,
+        at_bypass,
     );
-    let first = walk.command().and_then(|at| search.decide(at));
+    let (stop, layer) = (walk.stop, walk.layers.last().map(|layer| layer.word));
+    let (command, walk_bypass) = (walk.command(), walk.bypass());
+    let mut search = Search::new(
+        line,
+        excluded,
+        transparent_prefixes,
+        context,
+        shell_wrapper_depth,
+        at_bypass,
+    );
+    let first = command.and_then(|at| search.decide(at));
     let edit = |decision| match decision {
         Some(Decision::Rewrite(edit)) => Some(edit),
         Some(Decision::Disabled(edit)) => edit,
@@ -2679,23 +2848,40 @@ fn rewrite_segment(
         return Outcome {
             disabled: first_disabled,
             edit: edit(Some(decision)),
+            bypass: walk_bypass,
+            word: command,
+            stop,
+            layer,
             #[cfg(test)]
             walks: search.walks,
         };
     }
-    let stopped = walk.stop == Stop::Disabled;
-    let decision = search.fall_back(walk.layers);
+    let settled = search.fall_back(walk.layers);
+    let bypass = walk_bypass || search.bypass;
+    let (word, decision) = match settled {
+        Some((word, decision)) => (Some(word), Some(decision)),
+        None => (None, None),
+    };
+    // Where nothing settled, the command is the one the search read furthest on.
+    let (stop, layer) = match search.ended {
+        Some((at, layer)) if word.is_none() => (Stop::Command(at), Some(layer)),
+        _ => (stop, layer),
+    };
     // A fall-through that wins over a walk that stopped at the prefix draws no
     // warning; the script the first walk reached, or a winning one, that
     // refused a command of its own does.
     let disabled = first_disabled
         || match &decision {
-            None => stopped || search.disabled,
+            None => bypass,
             Some(decision) => matches!(decision, Decision::Disabled(_)),
         };
     Outcome {
         edit: edit(decision),
         disabled,
+        bypass,
+        word,
+        stop,
+        layer,
         #[cfg(test)]
         walks: search.walks,
     }
@@ -2742,7 +2928,12 @@ struct Search<'l, 'a> {
     /// and the position it read from.
     refusals: HashMap<(usize, usize, Position), Refusal>,
     /// Whether a walk of the search stopped at `RTK_DISABLED=`.
-    disabled: bool,
+    bypass: bool,
+    /// The command word and last layer of the walk behind a user prefix that stopped
+    /// furthest on, among those that found a command.
+    ended: Option<(usize, usize)>,
+    /// What a walk of the search does at an `RTK_DISABLED=` run.
+    at_bypass: AtBypass,
     #[cfg(test)]
     walks: usize,
 }
@@ -2755,6 +2946,7 @@ impl<'l, 'a> Search<'l, 'a> {
         prefixes: &'l [String],
         context: RewriteContext,
         shell_wrapper_depth: usize,
+        at_bypass: AtBypass,
     ) -> Self {
         Search {
             line,
@@ -2765,7 +2957,9 @@ impl<'l, 'a> Search<'l, 'a> {
             reached: None,
             visited: HashSet::new(),
             refusals: HashMap::new(),
-            disabled: false,
+            bypass: false,
+            ended: None,
+            at_bypass,
             #[cfg(test)]
             walks: 1,
         }
@@ -2776,8 +2970,8 @@ impl<'l, 'a> Search<'l, 'a> {
         {
             self.walks += 1;
         }
-        let walk = Walk::run(self.line, self.prefixes, from, pos, depth);
-        self.disabled |= walk.stop == Stop::Disabled;
+        let walk = Walk::run(self.line, self.prefixes, from, pos, depth, self.at_bypass);
+        self.bypass |= walk.bypass();
         walk
     }
 
@@ -2841,7 +3035,7 @@ impl<'l, 'a> Search<'l, 'a> {
     /// prefix has been tried (a frame that skips it because the prefix ends
     /// inside one of its own layers leaves it for another frame), and reached
     /// a second time it is skipped, which keeps a `uv run uv run … uv run` chain linear in its depth.
-    fn fall_back(&mut self, layers: Vec<Layer>) -> Option<Decision> {
+    fn fall_back(&mut self, layers: Vec<Layer>) -> Option<(usize, Decision)> {
         let upto = layers.len();
         let mut stack = vec![Frame {
             layers,
@@ -2871,7 +3065,7 @@ impl<'l, 'a> Search<'l, 'a> {
                 let Some(user) = self.user_prefix(layer.word) else {
                     self.visited.insert((layer.word, depth));
                     if routable && let Some(decision) = decided(self.decide(layer.word)) {
-                        return Some(decision);
+                        return Some((layer.word, decision));
                     }
                     continue;
                 };
@@ -2880,8 +3074,14 @@ impl<'l, 'a> Search<'l, 'a> {
                 }
                 self.visited.insert((layer.word, depth));
                 let alt = self.walk(user.end, user.next, depth + 1);
-                if let Some(decision) = decided(alt.command().and_then(|at| self.decide(at))) {
-                    return Some(decision);
+                if let Some(at) = alt.command() {
+                    if let Some(decision) = decided(self.decide(at)) {
+                        return Some((at, decision));
+                    }
+                    if self.ended.is_none_or(|(furthest, _)| furthest < at) {
+                        let layer = alt.layers.last().map_or(user.word, |layer| layer.word);
+                        self.ended = Some((at, layer));
+                    }
                 }
                 let mut layers = vec![user];
                 layers.extend(alt.layers);
@@ -2978,7 +3178,7 @@ impl<'l, 'a> Search<'l, 'a> {
         let walk = self.walk(from, pos, depth);
         let excluding = !self.excluded.is_empty();
         let mut refused = match walk.stop {
-            Stop::Disabled => Refusal::Disabled,
+            Stop::Disabled(_) => Refusal::Disabled,
             Stop::Depth if excluding => Refusal::Refused,
             Stop::Command(at)
                 if excluding
@@ -3014,7 +3214,7 @@ impl<'l, 'a> Search<'l, 'a> {
             {
                 Refusal::Refused
             }
-            Stop::Command(_) | Stop::Depth | Stop::Nothing => Refusal::Allowed,
+            Stop::Command(_) | Stop::Depth | Stop::Nothing(_) => Refusal::Allowed,
         };
         for (idx, walked) in walk.layers.iter().enumerate() {
             if refused == Refusal::Disabled {
@@ -3127,12 +3327,12 @@ fn command_is_excluded(
         .into_iter()
         .flatten()
         .any(|class| {
-            matches!(class, Classification::Supported { rtk_equivalent, .. }
+            matches!(class, Classification::Supported { rule, .. }
                 if [typed.as_ref(), named.as_str()]
                     .into_iter()
                     .enumerate()
                     .any(|(i, text)| (i == 0 || text != typed)
-                        && is_excluded(&tool_form(text, rtk_equivalent), excluded)))
+                        && is_excluded(&tool_form(text, &RULES[*rule]), excluded)))
         })
 }
 
@@ -3283,8 +3483,8 @@ fn decide(
         return None;
     }
 
-    let rtk_equivalent = match classification {
-        Classification::Supported { rtk_equivalent, .. } => rtk_equivalent,
+    let rule = match classification {
+        Classification::Supported { rule, .. } => &RULES[rule],
         // TOML-only commands: consult the registry so the hook filters them too (#2179).
         Classification::Unsupported { .. } => {
             if context != RewriteContext::Normal || toml_disabled() {
@@ -3303,8 +3503,6 @@ fn decide(
         Classification::Ignored => return None,
     };
 
-    // Find the matching rule (rtk_cmd values are unique across all rules)
-    let rule = RULES.iter().find(|r| r.rtk_cmd == rtk_equivalent)?;
     if context == RewriteContext::PipelineFinal
         && (!rule.pipeline_safety.final_safe() || !pipeline_command_is_safe(rule.rtk_cmd, argv))
     {
@@ -3405,13 +3603,6 @@ fn tool_portion(prefix: &'static str, rule: &RtkRule) -> &'static str {
     best
 }
 
-/// Rewrite a command into the spelling `exclude_commands` is written against.
-///
-/// An entry names a tool, but the command may spell it with a wrapper
-/// (`npx playwright test`), an interpreter (`python3 -m pytest tests/`) or a path
-/// (`vendor/bin/phpunit tests/`). Peeling that spelling down to the tool lets one entry
-/// cover every form. The arguments are kept, so an anchored pattern still means what it
-/// says: `"^ls$"` excludes a bare `ls` without swallowing `ls -la`.
 /// Canonical `<tool> <args>` form of a Composer-resolved PHP tool invocation, peeling
 /// the `php` wrapper and its ini flags, a leading `./`, and a vendor/composer bin dir.
 /// `None` when `rtk_cmd` is not one of those tools.
@@ -3427,11 +3618,21 @@ fn php_tool_form(cmd: &str, rtk_cmd: &str) -> Option<String> {
     Some(normalize_php_tool_command(unwrapped))
 }
 
-fn tool_form(cmd_clean: &str, rtk_equivalent: &str) -> String {
+/// Rewrite a command into the spelling `exclude_commands` is written against.
+///
+/// An entry names a tool, but the command may spell it with a wrapper
+/// (`npx playwright test`), an interpreter (`python3 -m pytest tests/`) or a path
+/// (`vendor/bin/phpunit tests/`). Peeling that spelling down to the tool lets one entry
+/// cover every form. The arguments are kept, so an anchored pattern still means what it
+/// says: `"^ls$"` excludes a bare `ls` without swallowing `ls -la`.
+///
+/// `rule` is a rule that classified the command, in this spelling or another one of it
+/// (the words as typed or as the shell reads them): its `rewrite_prefixes` are the
+/// spellings peeled, and its `rtk_cmd` says whether the PHP tool forms apply.
+fn tool_form(cmd_clean: &str, rule: &RtkRule) -> String {
     // Same normalization the rewrite path applies, so the exclusion sees the tool
     // whichever way it was spelled — including `php vendor/bin/phpunit`.
-    let unwrapped =
-        php_tool_form(cmd_clean, rtk_equivalent).unwrap_or_else(|| cmd_clean.to_string());
+    let unwrapped = php_tool_form(cmd_clean, rule.rtk_cmd).unwrap_or_else(|| cmd_clean.to_string());
     // A quoted first word may hold a blank and a `/` in one name, which a cut
     // at the first blank would split; the caller reads it from its words.
     let first_word = unwrapped.split(is_ifs).next().unwrap_or_default();
@@ -3440,22 +3641,19 @@ fn tool_form(cmd_clean: &str, rtk_equivalent: &str) -> String {
     } else {
         strip_absolute_path(&unwrapped)
     };
-    RULES
+    rule.rewrite_prefixes
         .iter()
-        .find(|r| r.rtk_cmd == rtk_equivalent)
-        .and_then(|rule| {
-            rule.rewrite_prefixes.iter().find_map(|&prefix| {
-                // What follows the prefix is kept as spelled, an empty
-                // argument included, so `pytest ''` is not `pytest`.
-                let tail = normalized.strip_prefix(prefix)?;
-                if !tail.is_empty() && !tail.starts_with(is_ifs) {
-                    return None;
-                }
-                // No rewrite prefix carries a path outside its first token, and that
-                // token is already a basename here, so `tool_portion` needs no strip.
-                let tool = tool_portion(prefix, rule);
-                Some(format!("{tool}{tail}"))
-            })
+        .find_map(|&prefix| {
+            // What follows the prefix is kept as spelled, an empty
+            // argument included, so `pytest ''` is not `pytest`.
+            let tail = normalized.strip_prefix(prefix)?;
+            if !tail.is_empty() && !tail.starts_with(is_ifs) {
+                return None;
+            }
+            // No rewrite prefix carries a path outside its first token, and that
+            // token is already a basename here, so `tool_portion` needs no strip.
+            let tool = tool_portion(prefix, rule);
+            Some(format!("{tool}{tail}"))
         })
         .unwrap_or(normalized)
 }
@@ -3589,7 +3787,7 @@ pub(crate) struct MatchingReadings<'a> {
 /// wrong if it could arrive joining two commands. It cannot, by two separate
 /// routes, and both have to hold:
 ///
-/// - `rewrite_command_precompiled` hands anything containing a newline to
+/// - `rewrite_lex` hands anything containing a newline to
 ///   `rewrite_multiline_block`, which splits on the lexer's unquoted newline
 ///   tokens. A newline surviving that is inside an open quote span, where the
 ///   byte after a matching prefix is the quote rather than whitespace.
@@ -3618,11 +3816,9 @@ mod tests {
     use crate::core::cmdline::lexer::shell_split;
     use crate::core::test_isolation;
 
-    /// [`stages_the_rewriter_reaches`] for `cmd` read as the report reads a call.
+    /// [`Call::reached`] for `cmd` read as the report reads a call.
     fn reaches(cmd: &str) -> Vec<bool> {
-        let line = JoinedLine::of(cmd);
-        let parts = split_command_chain_parts(&line);
-        stages_the_rewriter_reaches(&line, &parts, &[], &[])
+        read_call(&JoinedLine::of(cmd), &[], &[]).reached
     }
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
@@ -5113,6 +5309,7 @@ mod tests {
         assert_eq!(
             classify_command("git status"),
             Classification::Supported {
+                rule: rule_of("rtk git"),
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
@@ -5126,6 +5323,7 @@ mod tests {
         assert_eq!(
             classify_command("yadm status"),
             Classification::Supported {
+                rule: rule_of("rtk git"),
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
@@ -5139,6 +5337,7 @@ mod tests {
         assert_eq!(
             classify_command("yadm diff"),
             Classification::Supported {
+                rule: rule_of("rtk git"),
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 80.0,
@@ -5160,6 +5359,7 @@ mod tests {
         assert_eq!(
             classify_command("git diff --cached"),
             Classification::Supported {
+                rule: rule_of("rtk git"),
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 80.0,
@@ -5173,6 +5373,7 @@ mod tests {
         assert_eq!(
             classify_command("cargo test filter::"),
             Classification::Supported {
+                rule: rule_of("rtk cargo"),
                 rtk_equivalent: "rtk cargo",
                 category: "Cargo",
                 estimated_savings_pct: 90.0,
@@ -5186,6 +5387,7 @@ mod tests {
         assert_eq!(
             classify_command("npx tsc --noEmit"),
             Classification::Supported {
+                rule: rule_of("rtk tsc"),
                 rtk_equivalent: "rtk tsc",
                 category: "Build",
                 estimated_savings_pct: 83.0,
@@ -5199,6 +5401,7 @@ mod tests {
         assert_eq!(
             classify_command("cat src/main.rs"),
             Classification::Supported {
+                rule: rule_of("rtk read"),
                 rtk_equivalent: "rtk read",
                 category: "Files",
                 estimated_savings_pct: 60.0,
@@ -5374,6 +5577,7 @@ mod tests {
             assert_eq!(
                 classify_command(cmd),
                 Classification::Supported {
+                    rule: rule_of("rtk git"),
                     rtk_equivalent: "rtk git",
                     category: "Git",
                     estimated_savings_pct: 70.0,
@@ -5402,6 +5606,7 @@ mod tests {
         assert_eq!(
             classify_command("cargo check"),
             Classification::Supported {
+                rule: rule_of("rtk cargo"),
                 rtk_equivalent: "rtk cargo",
                 category: "Cargo",
                 estimated_savings_pct: 80.0,
@@ -5415,6 +5620,7 @@ mod tests {
         assert_eq!(
             classify_command("cargo check --all-targets"),
             Classification::Supported {
+                rule: rule_of("rtk cargo"),
                 rtk_equivalent: "rtk cargo",
                 category: "Cargo",
                 estimated_savings_pct: 80.0,
@@ -5430,6 +5636,7 @@ mod tests {
         assert_eq!(
             classify_command("cargo fmt"),
             Classification::Supported {
+                rule: rule_of("rtk cargo"),
                 rtk_equivalent: "rtk cargo",
                 category: "Cargo",
                 estimated_savings_pct: 0.0,
@@ -5443,6 +5650,7 @@ mod tests {
         assert_eq!(
             classify_command("cargo clippy --all-targets"),
             Classification::Supported {
+                rule: rule_of("rtk cargo"),
                 rtk_equivalent: "rtk cargo",
                 category: "Cargo",
                 estimated_savings_pct: 80.0,
@@ -5486,6 +5694,7 @@ mod tests {
         assert_eq!(
             classify_command("find . -name foo"),
             Classification::Supported {
+                rule: rule_of("rtk find"),
                 rtk_equivalent: "rtk find",
                 category: "Files",
                 estimated_savings_pct: 70.0,
@@ -5507,12 +5716,28 @@ mod tests {
     }
 
     /// A segment whose first word is a bash reserved word is grammar around
-    /// commands, never a command of that name, whatever follows the word.
+    /// commands, never a command of that name, whatever follows the word. The words the
+    /// rewrite steps over (`if`, `then`, `do`, `time`, ...) run the command after them,
+    /// which is the command the report reads.
     #[test]
     fn test_reserved_word_segments_are_ignored() {
+        for (cmd, rtk_equivalent) in [
+            ("if git status", "rtk git"),
+            ("then\tgit log", "rtk git"),
+            ("do git status", "rtk git"),
+            ("time cargo test", "rtk cargo"),
+            ("time -p cargo test", "rtk cargo"),
+        ] {
+            assert!(
+                matches!(
+                    classify_command(cmd),
+                    Classification::Supported { rtk_equivalent: found, .. } if found == rtk_equivalent
+                ),
+                "{cmd:?}"
+            );
+            assert!(rewrite_command_no_prefixes(cmd, &[]).is_some(), "{cmd:?}");
+        }
         for cmd in [
-            "if git status",
-            "then\tgit log",
             "elif true",
             "else",
             "fi >/dev/null",
@@ -5523,11 +5748,9 @@ mod tests {
             "select x in a",
             "while true",
             "until false",
-            "do git status",
             "done < f",
             "function f",
             "coproc git status",
-            "time cargo test",
             "[[ -f x ]]",
             "[[(-f x)]]",
             "]]",
@@ -5561,7 +5784,7 @@ mod tests {
             ("(( x++ ))", true),
         ] {
             assert_eq!(
-                classify_command_at(cmd, Position::STAGE) == Classification::Ignored,
+                classify_command_from(cmd, Position::STAGE) == Classification::Ignored,
                 ignored,
                 "{cmd:?}"
             );
@@ -5665,23 +5888,532 @@ mod tests {
         }
     }
 
-    /// One flag per part, whatever the line looks like — a caller indexes this
-    /// by part, so a short answer would silently point at the wrong command.
+    /// A call is cut once, for its parts, their readings and their edits: each part of
+    /// [`read_call`] has one reading and one flag of each kind, however the line reads, a
+    /// call that could not be joined included.
     #[test]
-    fn test_every_part_gets_a_reachability_flag() {
+    fn test_a_call_has_one_flag_per_part_it_is_split_into() {
         for cmd in [
             "cargo test | grep FAILED",
             "a && b || c ; d | e",
             "cat <<EOF | wc -l",
             "echo $((1 + 2))",
             "git status",
+            "git status\ngit log\n# c\nfrobnicate",
+            "git status\na[1 # 2]=b",
+            "git status && a[1 # 2]=b",
         ] {
+            let line = JoinedLine::of(cmd);
+            let call = read_call(&line, &[], &[]);
+            let parts = call.parts.len();
+            assert_eq!(call.reads.len(), parts, "{cmd:?}");
+            assert_eq!(call.reached.len(), parts, "{cmd:?}");
+            assert_eq!(call.reached_without_bypass.len(), parts, "{cmd:?}");
+        }
+    }
+
+    /// The command a part is read at holds every edit the rewrite makes in it: the report reads
+    /// the word the rewrite's own decision settles at, behind a layer, a user prefix, a
+    /// routable wrapper or a quoted script, with the same exclusions and prefixes.
+    #[test]
+    fn test_the_command_read_holds_the_edit_of_the_rewrite() {
+        let mut edited = 0;
+        for (cmd, excluded, prefixes) in [
+            ("git status", &[][..], &[][..]),
+            ("nice -n 19 ionice git status", &[], &["nice -n 19 ionice"]),
+            ("sudo git status && sudo docker ps", &[], &["sudo"]),
+            ("chronic git status", &[], &["chronic"]),
+            ("docker exec web git status", &[], &["docker exec web"]),
+            ("timeout 5 cargo test | tail -1", &[], &[]),
+            ("FOO=1 time -p cargo test", &[], &[]),
+            ("uv run pytest", &[], &[]),
+            ("uv run python x.py", &[], &[]),
+            ("uv run env python x.py", &[], &[]),
+            ("timeout 5 uv run pytest", &[], &[]),
+            ("bash -c 'git status'", &[], &[]),
+            ("if true; then git log; fi", &[], &[]),
+            ("git status && docker ps\ncat f | grep x", &[], &[]),
+            ("cat f.log | grep ERROR", &[], &[]),
+            ("command git status; exec cat f", &[], &[]),
+            ("git status && cargo test", &["git status"], &[]),
+        ] {
+            let owned = |texts: &[&str]| texts.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+            let excluded = compile_exclude_patterns(&owned(excluded));
+            let prefixes = families::user::normalize_transparent_prefixes(&owned(prefixes));
+            let line = JoinedLine::of(cmd);
+            let call = read_call(&line, &excluded, &prefixes);
+            let lex = CompoundLex::new(&line.text);
+            let mut rewriter = Rewriter::new(&excluded, &prefixes, 0);
+            rewrite_lex(&lex, &call_lines(&lex, &line), &mut rewriter);
+            for edit in &rewriter.edits {
+                let index = part_at(&call.parts, edit.span.start).expect("a part holds the edit");
+                let part = &call.parts[index];
+                let command = call.reads[index].command;
+                let from = part.start + (command.as_ptr() as usize - part.text.as_ptr() as usize);
+                assert!(
+                    from <= edit.span.start && edit.span.end <= part.start + part.text.len(),
+                    "{cmd:?}: the part {:?} is read at {command:?}, which misses the edit {:?}",
+                    part.text,
+                    edit.span
+                );
+                edited += 1;
+            }
+        }
+        assert!(edited >= 15, "the rows make edits: {edited}");
+    }
+
+    /// Whatever the decision settles, and when it settles nothing as well (no rule, the
+    /// command excluded, a bypass the rewrite refuses), the command a part is read at lies
+    /// at or behind every user prefix it peeled: a prefix the text starts with is no
+    /// part of the command, and `RTK_DISABLED=` behind it is read as the walk behind the
+    /// prefix reads it. The one exception is a walk behind the prefix that stops at no
+    /// command (an option, a redirect, grammar): the part is then read from the layer the
+    /// prefix's own word opens, as written, like any other layer.
+    #[test]
+    fn test_the_command_read_lies_behind_every_prefix_the_decision_peeled() {
+        let mut checked = 0;
+        for prefix in [
+            "nice -n 19 ionice",
+            "timeout 5",
+            "sudo",
+            "chronic",
+            "docker exec web",
+        ] {
+            for tail in [
+                "git status",
+                "frobnicate x",
+                "RTK_DISABLED=1 git status",
+                "RTK_DISABLED=1 frobnicate x",
+                "FOO=1 git status",
+                "cat f.log | grep ERROR",
+            ] {
+                for excluded in [&[][..], &["git"][..], &["frobnicate"][..]] {
+                    let owned =
+                        |texts: &[&str]| texts.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+                    let excluded = compile_exclude_patterns(&owned(excluded));
+                    let prefixes =
+                        families::user::normalize_transparent_prefixes(&owned(&[prefix]));
+                    let cmd = format!("{prefix} {tail}");
+                    let line = JoinedLine::of(&cmd);
+                    let call = read_call(&line, &excluded, &prefixes);
+                    let part = &call.parts[0];
+                    let command = call.reads[0].command;
+                    let from = command.as_ptr() as usize - part.text.as_ptr() as usize;
+                    assert!(
+                        from >= prefix.len(),
+                        "{cmd:?}: the part is read at {command:?}, which starts in the prefix"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked >= 90, "{checked}");
+        // Several prefixes start inside one command: the read lies behind the one that
+        // reaches furthest, whichever layer hosts it.
+        for (cmd, prefixes, expected) in [
+            (
+                "timeout 5 nice -n 19 ionice frobnicate x",
+                &["nice -n 19", "timeout 5 nice -n 19 ionice"][..],
+                "frobnicate x",
+            ),
+            (
+                "nice -n 19 timeout 5 ionice frobnicate x",
+                &["nice -n 19", "timeout 5 ionice"][..],
+                "frobnicate x",
+            ),
+            (
+                "nice -n 19 ionice env -i git status",
+                &["nice -n 19 ionice"][..],
+                "env -i git status",
+            ),
+            // No command behind the prefix: the part is read as written.
+            (
+                "nice -n 19 ionice -c3 git status",
+                &["nice -n 19 ionice"][..],
+                "nice -n 19 ionice -c3 git status",
+            ),
+            (
+                "nice -n 19 ionice >f frobnicate x",
+                &["nice -n 19 ionice"][..],
+                "nice -n 19 ionice >f frobnicate x",
+            ),
+            // ... from the prefix's layer, not from the start of the part.
+            (
+                "nice -n 19 timeout 5 ionice -c3 x",
+                &["nice -n 19", "timeout 5 ionice"][..],
+                "timeout 5 ionice -c3 x",
+            ),
+        ] {
+            let prefixes = families::user::normalize_transparent_prefixes(
+                &prefixes.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+            );
+            let line = JoinedLine::of(cmd);
+            let call = read_call(&line, &[], &prefixes);
+            assert_eq!(call.reads[0].command, expected, "{cmd:?}");
+        }
+    }
+
+    /// A command is reached when the rewrite made an edit in it, wherever it stands in the
+    /// call: its edit is placed by where it falls, not by how many edits came before, so a
+    /// command the rewrite passes over, one the report does not count, and the words of a
+    /// group between two edited ones do not shift the flags.
+    #[test]
+    fn test_a_command_is_reached_by_the_edit_made_in_it() {
+        for (cmd, parts, expected) in [
+            (
+                "frobnicate && git status",
+                vec!["frobnicate", "git status"],
+                vec![false, true],
+            ),
+            (
+                "git status && frobnicate && git log",
+                vec!["git status", "frobnicate", "git log"],
+                vec![true, false, true],
+            ),
+            (
+                "FOO=1 git status; frobnicate",
+                vec!["FOO=1 git status", "frobnicate"],
+                vec![true, false],
+            ),
+            (
+                "  frobnicate   &&   git status  ",
+                vec!["frobnicate", "git status"],
+                vec![false, true],
+            ),
+            // A group's closing word is no command, and stands between two that are.
+            (
+                "if true; then git status; fi; frobnicate; git log",
+                vec!["if true", "then git status", "frobnicate", "git log"],
+                vec![false, true, false, true],
+            ),
+            (
+                "(echo a) git status; git log",
+                vec!["echo a", "git log"],
+                vec![false, true],
+            ),
+            (
+                "frobnicate\n# comment\ngit status\n\nfrobnicate\ngit log",
+                vec!["frobnicate", "git status", "frobnicate", "git log"],
+                vec![false, true, false, true],
+            ),
+            // An edit inside a quoted script is made in the command that runs it.
+            (
+                "frobnicate && bash -c 'git status' && frobnicate",
+                vec!["frobnicate", "bash -c 'git status'", "frobnicate"],
+                vec![false, true, false],
+            ),
+            // The rewrite takes the last stage of a pipeline, or else the first, and
+            // none of those between.
+            (
+                "frobnicate | frobnicate | grep x && frobnicate | frobnicate",
+                vec![
+                    "frobnicate",
+                    "frobnicate",
+                    "grep x",
+                    "frobnicate",
+                    "frobnicate",
+                ],
+                vec![false, false, true, false, false],
+            ),
+            (
+                "frobnicate | cargo test 2>&1 | tail -1 && git log",
+                vec!["frobnicate", "cargo test 2>&1", "tail -1", "git log"],
+                vec![false, false, false, true],
+            ),
+            (
+                "git status | cat | head -3",
+                vec!["git status", "cat", "head -3"],
+                vec![true, false, false],
+            ),
+        ] {
+            let line = JoinedLine::of(cmd);
+            let call = read_call(&line, &[], &[]);
+            let texts: Vec<&str> = call.parts.iter().map(|part| part.text).collect();
+            assert_eq!(texts, parts, "{cmd:?}");
             assert_eq!(
-                reaches(cmd).len(),
-                split_command_chain(cmd).len(),
-                "flag count does not match part count for {cmd:?}"
+                call.reached,
+                expected,
+                "{cmd:?} rewrites to {:?}",
+                rewrite_command_no_prefixes(cmd, &[])
             );
         }
+    }
+
+    /// A call too complex to join is not rewritten, so none of its commands is reached,
+    /// although the same command alone would be.
+    #[test]
+    fn test_a_call_that_cannot_be_joined_reaches_no_command() {
+        for (cmd, expected) in [
+            ("git status && a[1 # 2]=b", vec![false, false]),
+            ("git status\na[1 # 2]=b", vec![false]),
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+            assert_eq!(reaches(cmd), expected, "{cmd:?}");
+        }
+        assert_eq!(reaches("git status"), [true]);
+    }
+
+    /// [`Call::reached`] and [`Call::reached_without_bypass`] for `cmd`, read under
+    /// `excluded` and `prefixes`.
+    fn reaches_under(cmd: &str, excluded: &[&str], prefixes: &[&str]) -> (Vec<bool>, Vec<bool>) {
+        let owned = |texts: &[&str]| texts.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        let excluded = compile_exclude_patterns(&owned(excluded));
+        let prefixes = normalize_transparent_prefixes(&owned(prefixes));
+        let line = JoinedLine::of(cmd);
+        let call = read_call(&line, &excluded, &prefixes);
+        (call.reached, call.reached_without_bypass)
+    }
+
+    #[track_caller]
+    fn assert_reached_without_bypass(rows: &[(&str, &[bool], &[bool])]) {
+        for &(cmd, reached, without) in rows {
+            assert_eq!(
+                reaches_under(cmd, &[], &[]),
+                (reached.to_vec(), without.to_vec()),
+                "{cmd:?} (reached, reached without the bypass)"
+            );
+        }
+    }
+
+    /// A command whose walk stopped at an `RTK_DISABLED=` run is reached without the bypass
+    /// when an edit falls in it once the rewrite is asked again with every such run read
+    /// past. A command with no run to read past has nothing to ask: it is as it was.
+    #[test]
+    fn test_a_bypassed_command_is_reached_when_the_rewrite_edits_it_without_the_bypass() {
+        assert_reached_without_bypass(&[
+            ("git status", &[true], &[true]),
+            ("RTK_DISABLED=1 git status", &[false], &[true]),
+            ("RTK_DISABLED=1 frobnicate", &[false], &[false]),
+            ("RTK_DISABLED=1; git status", &[false, true], &[false, true]),
+            // Every bypassed command is asked at once; the others are as they are.
+            (
+                "RTK_DISABLED=1 git status && RTK_DISABLED=1 git log",
+                &[false, false],
+                &[true, true],
+            ),
+            (
+                "RTK_DISABLED=1 git status; git log",
+                &[false, true],
+                &[true, true],
+            ),
+            (
+                "git status\nRTK_DISABLED=1 cargo test\ngit log",
+                &[true, false, true],
+                &[true, true, true],
+            ),
+            // The run is read where the walk meets it, behind a wrapper or an `env`, however
+            // the assignment is spelled.
+            ("env RTK_DISABLED=1 git status", &[false], &[true]),
+            ("timeout 5 env RTK_DISABLED=1 git status", &[false], &[true]),
+            ("RTK_DISABLED=1 FOO=1 git status", &[false], &[true]),
+            // A rule that only the wrapper's own matches, which a search behind the run
+            // finds.
+            ("uv run env RTK_DISABLED=1 pytest", &[false], &[true]),
+            ("uv run env RTK_DISABLED=1 python x.py", &[false], &[true]),
+            ("RTK_DISABLED='1 2' git status", &[false], &[true]),
+            ("RTK_DISABLED=$CI git status", &[false], &[true]),
+            ("RTK_DISABLED+=1 git status", &[false], &[true]),
+            // The walk does not read past `sudo`: there is no run to read past.
+            ("sudo RTK_DISABLED=1 docker ps", &[false], &[false]),
+            ("RTK_DISABLED=1 sudo docker ps", &[false], &[false]),
+            // A call that could not be joined is not rewritten, bypass or no bypass.
+            (
+                "RTK_DISABLED=1 git status && a[1 # 2]=b",
+                &[false, false],
+                &[false, false],
+            ),
+        ]);
+    }
+
+    /// The rewrite is asked in the command's own place in the call: a stage at the end of a
+    /// pipeline is taken where the rewrite takes it, and a producer is taken only when the
+    /// last stage is not, so a command that alone would be rewritten is reached or not as
+    /// the call decides.
+    #[test]
+    fn test_a_bypassed_command_is_asked_in_its_place_in_the_call() {
+        assert_reached_without_bypass(&[
+            // The producer, which the rewrite takes while the consumer stays raw.
+            (
+                "RTK_DISABLED=1 cargo test | tail -1",
+                &[false, false],
+                &[true, false],
+            ),
+            // The last stage is the one the rewrite takes, so the producer stays raw
+            // whether or not it carries the bypass.
+            (
+                "RTK_DISABLED=1 cat f.log | grep ERROR",
+                &[false, true],
+                &[false, true],
+            ),
+            (
+                "RTK_DISABLED=1 docker ps | grep web",
+                &[false, true],
+                &[false, true],
+            ),
+            // The last stage, when it is one the rewrite takes there.
+            (
+                "cargo test | RTK_DISABLED=1 grep FAILED",
+                &[false, false],
+                &[false, true],
+            ),
+            // `tail` is read where a pipeline ends, and the rewrite leaves it raw.
+            (
+                "cargo test | RTK_DISABLED=1 tail -n 5 f.log",
+                &[false, false],
+                &[false, false],
+            ),
+            (
+                "ls | RTK_DISABLED=1 cat f.log",
+                &[false, false],
+                &[false, false],
+            ),
+            // A producer is taken only when every consumer is safe, and a bypassed one
+            // is not, read past its bypass or not.
+            (
+                "RTK_DISABLED=1 cargo test | RTK_DISABLED=1 tail -1",
+                &[false, false],
+                &[false, false],
+            ),
+            (
+                "RTK_DISABLED=1 git log | RTK_DISABLED=1 grep x",
+                &[false, false],
+                &[false, true],
+            ),
+            // A stage in the middle is never taken.
+            (
+                "git status | RTK_DISABLED=1 cat | head -3",
+                &[false, false, false],
+                &[false, false, false],
+            ),
+        ]);
+    }
+
+    /// With the run read past, `time` is read where the walk stood in front of the run when
+    /// the run held nothing but bypass words, and behind an assignment layer when it held
+    /// anything else. `RTK_DISABLED=1 time -f %e cargo test` is `time -f %e cargo test`, where
+    /// `time` is the reserved word and `-f` the command it runs, which the rewrite leaves
+    /// alone; `FOO=1 RTK_DISABLED=1 time -f %e cargo test` is `FOO=1 time -f %e cargo test`,
+    /// where `time` is a program with options of its own, which the rewrite takes. Such a
+    /// run takes no layer's place in the depth the walk is allowed.
+    #[test]
+    fn test_the_bypass_is_read_past_as_the_words_that_are_left() {
+        assert_reached_without_bypass(&[
+            ("RTK_DISABLED=1 time cargo test", &[false], &[true]),
+            ("RTK_DISABLED=1 time -f %e cargo test", &[false], &[false]),
+            ("RTK_DISABLED+=1 time -f %e cargo test", &[false], &[false]),
+            (
+                "RTK_DISABLED=1 RTK_DISABLED=0 time -f %e cargo test",
+                &[false],
+                &[false],
+            ),
+            (
+                "FOO=1 RTK_DISABLED=1 time -f %e cargo test",
+                &[false],
+                &[true],
+            ),
+            (
+                "RTK_DISABLED=1 FOO=1 time -f %e cargo test",
+                &[false],
+                &[true],
+            ),
+            (
+                "env RTK_DISABLED=1 time -f %e cargo test",
+                &[false],
+                &[true],
+            ),
+        ]);
+        let deep = format!(
+            "{}RTK_DISABLED=1 git status",
+            "time ".repeat(MAX_PREFIX_DEPTH - 1)
+        );
+        assert_eq!(reaches_under(&deep, &[], &[]).1, [true], "{deep:?}");
+    }
+
+    /// A configured exclusion and a transparent prefix are the rewrite's own: the command
+    /// is reached without the bypass as it would be without it.
+    #[test]
+    fn test_a_bypassed_command_is_asked_under_the_users_configuration() {
+        let reached =
+            |cmd, excluded: &[&str], prefixes: &[&str]| reaches_under(cmd, excluded, prefixes).1;
+        assert_eq!(reached("RTK_DISABLED=1 git status", &[], &[]), [true]);
+        assert_eq!(
+            reached("RTK_DISABLED=1 git status", &["git status"], &[]),
+            [false]
+        );
+        assert_eq!(
+            reached("RTK_DISABLED=1 git status", &["^cargo"], &[]),
+            [true]
+        );
+        assert_eq!(
+            reached("sudo RTK_DISABLED=1 docker ps", &[], &["sudo"]),
+            [true]
+        );
+        assert_eq!(
+            reached("RTK_DISABLED=1 sudo docker ps", &[], &["sudo"]),
+            [true]
+        );
+        assert_eq!(reached("RTK_DISABLED=1 sudo docker ps", &[], &[]), [false]);
+        assert_eq!(
+            reached("sudo RTK_DISABLED=1 docker ps", &["docker"], &["sudo"]),
+            [false]
+        );
+        // The refusal is a fall-through search's: the first walk stops at `nohup`'s
+        // operand, and a walk from the user's prefix meets the run. The bypass is the
+        // same, and so is the rewrite without it (`nohup git status`).
+        for (cmd, prefix) in [
+            ("nohup RTK_DISABLED=1 git status", "nohup"),
+            ("docker exec c RTK_DISABLED=1 git status", "docker exec c"),
+            ("nice -n 19 nohup RTK_DISABLED=1 git status", "nohup"),
+        ] {
+            assert!(refused_on_disabled_under(cmd, &[prefix]), "{cmd:?}");
+            assert_eq!(reached(cmd, &[], &[prefix]), [true], "{cmd:?}");
+        }
+    }
+
+    /// Whether the rewrite of `cmd`, under the transparent `prefixes`, refused a command on
+    /// `RTK_DISABLED=`.
+    fn refused_on_disabled_under(cmd: &str, prefixes: &[&str]) -> bool {
+        let prefixes: Vec<String> = prefixes.iter().map(|p| p.to_string()).collect();
+        let prefixes = normalize_transparent_prefixes(&prefixes);
+        rewrite_line(cmd, &[], &prefixes).disabled
+    }
+
+    /// A walk that stops at an `RTK_DISABLED=` run says where the run starts, and one told
+    /// to read past it goes on from where the run left it.
+    #[test]
+    fn test_the_walk_that_stops_at_the_bypass_says_where_the_run_is() {
+        let at = |text: &str, at_bypass: AtBypass| {
+            let tokens = tokenize(text);
+            let words = words(text, &tokens);
+            let line = Line {
+                text,
+                words: &words,
+                tokens: &tokens,
+            };
+            let walk = Walk::run(&line, &[], 0, Position::START, 0, at_bypass);
+            let kinds: Vec<LayerKind> = walk.layers.iter().map(|layer| layer.kind).collect();
+            (walk.stop, kinds)
+        };
+        let text = "timeout 5 env RTK_DISABLED=1 git status";
+        assert_eq!(
+            at(text, AtBypass::Stop),
+            (Stop::Disabled(2), vec![LayerKind::ProcessWrapper])
+        );
+        // Read past it, the run is a layer of its own, and the command is behind it.
+        assert_eq!(
+            at(text, AtBypass::ReadPast),
+            (
+                Stop::Command(4),
+                vec![LayerKind::ProcessWrapper, LayerKind::Assignments]
+            )
+        );
+        // A run of bypass words alone leaves no layer.
+        let text = "RTK_DISABLED=1 time cargo test";
+        assert_eq!(at(text, AtBypass::Stop), (Stop::Disabled(0), vec![]));
+        assert_eq!(
+            at(text, AtBypass::ReadPast),
+            (Stop::Command(2), vec![LayerKind::ReservedWord])
+        );
     }
 
     /// Whether the rewrite of `cmd` refused a command on `RTK_DISABLED=`,
@@ -5767,6 +6499,7 @@ mod tests {
         assert_eq!(
             classify_command("mypy src/"),
             Classification::Supported {
+                rule: rule_of("rtk mypy"),
                 rtk_equivalent: "rtk mypy",
                 category: "Build",
                 estimated_savings_pct: 80.0,
@@ -5780,6 +6513,7 @@ mod tests {
         assert_eq!(
             classify_command("python3 -m mypy --strict"),
             Classification::Supported {
+                rule: rule_of("rtk mypy"),
                 rtk_equivalent: "rtk mypy",
                 category: "Build",
                 estimated_savings_pct: 80.0,
@@ -6047,6 +6781,7 @@ mod tests {
         assert_eq!(
             classify_command("ctest -R smoke --output-on-failure"),
             Classification::Supported {
+                rule: rule_of("rtk ctest"),
                 rtk_equivalent: "rtk ctest",
                 category: "Tests",
                 estimated_savings_pct: 80.0,
@@ -7470,6 +8205,7 @@ mod tests {
         assert_eq!(
             classify_command(r#"GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" git push"#),
             Classification::Supported {
+                rule: rule_of("rtk git"),
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
@@ -8507,6 +9243,7 @@ mod tests {
                 category: "Build",
                 estimated_savings_pct: 90.0,
                 status: RtkStatus::Existing,
+                ..
             }
         ));
     }
@@ -9740,6 +10477,7 @@ mod tests {
         assert_eq!(
             classify_command("./gradlew test"),
             Classification::Supported {
+                rule: rule_of("rtk gradlew"),
                 rtk_equivalent: "rtk gradlew",
                 category: "Build",
                 estimated_savings_pct: 90.0,
@@ -10403,35 +11141,51 @@ mod tests {
         );
     }
 
-    /// `classify_command` picks a rule by index, then `decide` looks one up
-    /// again by `rtk_cmd` with `find` — which takes the first of a duplicate
-    /// pair, not necessarily the one that classified.
-    ///
-    /// `rtk php` and `rtk uv` are each two rules, so that lookup already
-    /// returns a sibling. It is harmless only because every field it reads
-    /// matches across the pair; an edit to one sibling's `pipeline_safety` or
-    /// `rewrite_prefixes` would silently apply to the other's commands.
+    /// A classification names the rule that matched, the last of the rules that do, and
+    /// the rewrite acts on that rule: of the two rules that route to `rtk uv` or `rtk php`,
+    /// each command is matched by its own, and a command several rules match is the last's.
     #[test]
-    fn test_duplicate_rtk_cmds_agree_on_what_the_rewrite_reads() {
-        for rule in RULES {
-            let siblings: Vec<&RtkRule> =
-                RULES.iter().filter(|r| r.rtk_cmd == rule.rtk_cmd).collect();
-            let first = siblings[0];
-            for sibling in &siblings[1..] {
-                assert_eq!(
-                    sibling.rewrite_prefixes, first.rewrite_prefixes,
-                    "{} is several rules with different rewrite_prefixes, and the \
-                     rewrite reads whichever comes first",
-                    rule.rtk_cmd
-                );
-                assert_eq!(
-                    sibling.pipeline_safety, first.pipeline_safety,
-                    "{} is several rules with different pipeline_safety, and the \
-                     rewrite reads whichever comes first",
-                    rule.rtk_cmd
-                );
+    fn test_the_classification_names_the_rule_that_matched() {
+        let rule_of_command = |command: &str| match classify_command(command) {
+            Classification::Supported {
+                rule,
+                rtk_equivalent,
+                category,
+                ..
+            } => {
+                assert_eq!(RULES[rule].rtk_cmd, rtk_equivalent, "{command}");
+                assert_eq!(RULES[rule].category, category, "{command}");
+                assert!(COMPILED[rule].is_match(command), "{command}");
+                rule
             }
-        }
+            other => panic!("{command}: {other:?}"),
+        };
+        let (run, sync) = (rule_of_command("uv run pytest"), rule_of_command("uv sync"));
+        assert_ne!(run, sync);
+        assert_eq!(RULES[run].rtk_cmd, RULES[sync].rtk_cmd);
+        let (artisan, lint) = (
+            rule_of_command("php artisan migrate"),
+            rule_of_command("php -l x.php"),
+        );
+        assert_ne!(artisan, lint);
+        assert_eq!(RULES[artisan].rtk_cmd, RULES[lint].rtk_cmd);
+        // `pnpm exec vitest` matches the `pnpm` rule and the `vitest` rule, which comes later.
+        let vitest = rule_of_command("pnpm exec vitest");
+        assert_eq!(RULES[vitest].rtk_cmd, "rtk vitest");
+        let matching: Vec<usize> = REGEX_SET.matches("pnpm exec vitest").into_iter().collect();
+        assert!(matching.len() > 1);
+        assert_eq!(matching.last(), Some(&vitest));
+    }
+
+    /// The index of the one rule that routes to `rtk_cmd`.
+    fn rule_of(rtk_cmd: &str) -> usize {
+        let mut routed = RULES
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| rule.rtk_cmd == rtk_cmd);
+        let (index, _) = routed.next().expect("a rule routes to the command");
+        assert!(routed.next().is_none(), "{rtk_cmd} is several rules");
+        index
     }
 
     #[test]
@@ -10573,83 +11327,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_strip_disabled_prefix_for_analytics() {
-        assert_eq!(
-            strip_disabled_prefix_for_analytics("sudo RTK_DISABLED=1 docker ps"),
-            ("sudo RTK_DISABLED=1 ", "docker ps")
-        );
-        assert_eq!(
-            strip_disabled_prefix_for_analytics("sudo -E RTK_DISABLED=1 docker ps"),
-            ("sudo -E RTK_DISABLED=1 ", "docker ps")
-        );
-        assert_eq!(
-            strip_disabled_prefix_for_analytics("RTK_DISABLED=1 sudo docker ps"),
-            ("RTK_DISABLED=1 sudo ", "docker ps")
-        );
-        assert_eq!(
-            strip_disabled_prefix_for_analytics("RTK_DISABLED=1 sudo -E docker ps"),
-            ("RTK_DISABLED=1 sudo -E ", "docker ps")
-        );
-
-        // Wrapper commands: do not peel into arguments / inner Supported cmds.
-        for cmd in [
-            "RTK_DISABLED=1 ssh host docker ps",
-            "RTK_DISABLED=1 xargs -n1 git show",
-            "RTK_DISABLED=1 watch -n1 git status",
-            "sudo -E RTK_DISABLED=1 ./deploy.sh docker ps",
-        ] {
-            let (prefix, actual) = strip_disabled_prefix_for_analytics(cmd);
-            assert_eq!((prefix, actual), split_env_prefix(cmd), "{cmd}");
-            assert!(
-                !actual.starts_with("docker") && !actual.starts_with("git "),
-                "must not attribute inner command for {cmd}: {actual}"
-            );
-        }
-
-        // Every wrapper class is peeled: an assignment after `sudo`, and `env`.
-        assert_eq!(
-            strip_disabled_prefix_for_analytics("sudo FOO=1 RTK_DISABLED=1 docker ps"),
-            ("sudo FOO=1 RTK_DISABLED=1 ", "docker ps")
-        );
-        assert_eq!(
-            strip_disabled_prefix_for_analytics("sudo env RTK_DISABLED=1 docker ps"),
-            ("sudo env RTK_DISABLED=1 ", "docker ps")
-        );
-        // Wrapper words after `RTK_DISABLED=` are skipped the same way.
-        assert_eq!(
-            strip_disabled_prefix_for_analytics("RTK_DISABLED=1 'env' -i git status"),
-            ("RTK_DISABLED=1 'env' -i ", "git status")
-        );
-        assert_eq!(
-            strip_disabled_prefix_for_analytics("RTK_DISABLED=1 'env' git status"),
-            ("RTK_DISABLED=1 'env' ", "git status")
-        );
-        assert_eq!(
-            strip_disabled_prefix_for_analytics("sudo 'env' RTK_DISABLED=1 docker ps"),
-            ("sudo 'env' RTK_DISABLED=1 ", "docker ps")
-        );
-        // An operator ends the prefix even when only wrapper words precede it.
-        assert_eq!(
-            strip_disabled_prefix_for_analytics("sudo -v && RTK_DISABLED=1 docker ps"),
-            ("", "sudo -v && RTK_DISABLED=1 docker ps")
-        );
-
-        // Buried -e / && cases fall back to the rewrite stripper (no sudo peel).
-        assert_eq!(
-            strip_disabled_prefix_for_analytics(
-                "sudo -E docker run -e RTK_DISABLED=1 myimage npm run build"
-            ),
-            split_env_prefix("sudo -E docker run -e RTK_DISABLED=1 myimage npm run build")
-        );
-        assert_eq!(
-            strip_disabled_prefix_for_analytics(
-                "sudo -E ls && docker run -e RTK_DISABLED=1 img git status"
-            ),
-            split_env_prefix("sudo -E ls && docker run -e RTK_DISABLED=1 img git status")
-        );
-    }
-
     /// A quoted value is one word however many blanks it holds. Reading it with
     /// a pattern let the value alternation backtrack into the quotes whenever
     /// the quoted form was not followed by a blank — at the end of a line, or
@@ -10782,6 +11459,7 @@ mod tests {
         assert_eq!(
             classify_command("/usr/bin/grep -rni pattern"),
             Classification::Supported {
+                rule: rule_of("rtk grep"),
                 rtk_equivalent: "rtk grep",
                 category: "Files",
                 estimated_savings_pct: 75.0,
@@ -10795,6 +11473,7 @@ mod tests {
         assert_eq!(
             classify_command("/bin/ls -la"),
             Classification::Supported {
+                rule: rule_of("rtk ls"),
                 rtk_equivalent: "rtk ls",
                 category: "Files",
                 estimated_savings_pct: 65.0,
@@ -10808,6 +11487,7 @@ mod tests {
         assert_eq!(
             classify_command("/usr/local/bin/git status"),
             Classification::Supported {
+                rule: rule_of("rtk git"),
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
@@ -10822,6 +11502,7 @@ mod tests {
         assert_eq!(
             classify_command("/usr/bin/find ."),
             Classification::Supported {
+                rule: rule_of("rtk find"),
                 rtk_equivalent: "rtk find",
                 category: "Files",
                 estimated_savings_pct: 70.0,
@@ -10845,6 +11526,7 @@ mod tests {
         assert_eq!(
             classify_command("git -C /tmp status"),
             Classification::Supported {
+                rule: rule_of("rtk git"),
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
@@ -10858,6 +11540,7 @@ mod tests {
         assert_eq!(
             classify_command("git --no-pager log -5"),
             Classification::Supported {
+                rule: rule_of("rtk git"),
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
@@ -10871,6 +11554,7 @@ mod tests {
         assert_eq!(
             classify_command("git --git-dir /tmp/.git status"),
             Classification::Supported {
+                rule: rule_of("rtk git"),
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
@@ -10937,6 +11621,7 @@ mod tests {
         assert_eq!(
             classify_command("wc -l src/main.rs"),
             Classification::Supported {
+                rule: rule_of("rtk wc"),
                 rtk_equivalent: "rtk wc",
                 category: "Files",
                 estimated_savings_pct: 60.0,
@@ -10950,6 +11635,7 @@ mod tests {
         assert_eq!(
             classify_command("wc src/*.rs"),
             Classification::Supported {
+                rule: rule_of("rtk wc"),
                 rtk_equivalent: "rtk wc",
                 category: "Files",
                 estimated_savings_pct: 60.0,
@@ -10979,6 +11665,7 @@ mod tests {
         assert_eq!(
             classify_command("git log $(git rev-parse HEAD~1)"),
             Classification::Supported {
+                rule: rule_of("rtk git"),
                 rtk_equivalent: "rtk git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
@@ -11243,7 +11930,14 @@ mod tests {
         let chain = "uv run ".repeat(20) + "xyz";
         let line = CompoundLex::new(&chain);
         let segment = line.whole().expect("a command");
-        let outcome = rewrite_segment(segment, &[], &prefixes, RewriteContext::Normal, 0);
+        let outcome = rewrite_segment(
+            segment,
+            &[],
+            &prefixes,
+            RewriteContext::Normal,
+            0,
+            AtBypass::Stop,
+        );
         let walks = outcome.walks;
         // The chain is deeper than `MAX_PREFIX_DEPTH`, so no walk reaches `xyz`
         // and nothing is decided. An exponential search over it would run into
@@ -11299,7 +11993,7 @@ mod tests {
             words: &words,
             tokens: &tokens,
         };
-        let walk = Walk::run(&line, prefixes, 0, Position::START, 0);
+        let walk = Walk::run(&line, prefixes, 0, Position::START, 0, AtBypass::Stop);
         let span = |from: usize, to: usize| text[words[from].start..words[to - 1].end].to_string();
         let layers = walk
             .layers
