@@ -1,417 +1,254 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
+use serde_json::{Value, json};
 use std::{
     fs,
     path::{Path, PathBuf},
 };
 
 use super::{
-    AGENTS_MD, InitContext, RTK_MD, RTK_MD_REF, agents_md::patch_agents_md, atomic_write,
-    print_dry_run_footer, resolve_home_subdir, write_if_changed,
+    AGENTS_MD, HookEntries, InitContext, RTK_MD, RTK_MD_REF,
+    agents_md::{patch_agents_md, remove_rtk_reference_from_agents},
+    append_hook_entry, atomic_write, group_covers_tool, hook_present, is_command_hook,
+    print_dry_run_footer, read_json_file, remove_hook_entries, resolve_home_subdir,
 };
+use crate::core::user_dirs;
 use crate::hooks::constants::{PRE_TOOL_USE_KEY, QODER_DIR, SETTINGS_JSON};
 
-/// Embedded Qoder RTK awareness instructions
-const RTK_SLIM_QODER: &str = include_str!("../../../hooks/qoder/rtk-awareness.md");
+const QODER_AWARENESS: &str = include_str!("../../../hooks/qoder/rtk-awareness.md");
+const QODER_HOOK_COMMAND: &str = "rtk hook qoder";
+const QODER_LEGACY_HOOK: &str = "rtk-qoder-hook.sh";
+const BASH_TOOL: &str = "Bash";
 
-fn resolve_qoder_dir() -> Result<PathBuf> {
-    resolve_home_subdir(QODER_DIR)
+fn qoder_dir(global: bool) -> Result<PathBuf> {
+    if global {
+        resolve_home_subdir(QODER_DIR)
+    } else {
+        Ok(user_dirs::in_working_dir(QODER_DIR))
+    }
 }
 
-/// Entry point for `rtk init --agent qoder`
-pub fn run_qoder_mode(global: bool, ctx: InitContext) -> Result<()> {
-    let InitContext { dry_run, .. } = ctx;
-
+fn awareness_path(qoder_dir: &Path, global: bool) -> PathBuf {
     if global {
-        let qoder_dir = resolve_qoder_dir()?;
-        if !dry_run {
-            fs::create_dir_all(&qoder_dir).with_context(|| {
-                format!("Failed to create Qoder config dir: {}", qoder_dir.display())
-            })?;
-        }
-
-        // 1. Write RTK awareness instructions
-        let rtk_md_path = qoder_dir.join(RTK_MD);
-        write_if_changed(&rtk_md_path, RTK_SLIM_QODER, RTK_MD, ctx)?;
-
-        // 2. Patch ~/.qoder/settings.json with PreToolUse hook
-        let hook_status = patch_qoder_settings(&qoder_dir, ctx)?;
-
-        if dry_run {
-            print_dry_run_footer();
-            return Ok(());
-        }
-
-        println!("\nRTK configured for Qoder CLI (global).\n");
-        println!("  RTK.md:        {}", rtk_md_path.display());
-        match hook_status {
-            QoderHookStatus::AlreadyInstalled => {
-                println!("  Hook:          Already installed (`rtk hook qoder` in settings.json)");
-            }
-            QoderHookStatus::Upgraded(ref old) => {
-                println!(
-                    "  Hook:          Upgraded to `rtk hook qoder` (replaced `{}`)",
-                    old
-                );
-            }
-            QoderHookStatus::Installed => {
-                println!("  Hook:          Added `rtk hook qoder` to settings.json");
-            }
-        }
-        println!("\n  Restart Qoder CLI. Test with: git status\n");
+        qoder_dir.join(RTK_MD)
     } else {
-        // Project-scoped: write RTK.md to CWD and patch AGENTS.md
-        let rtk_md_path = PathBuf::from(RTK_MD);
-        write_if_changed(&rtk_md_path, RTK_SLIM_QODER, RTK_MD, ctx)?;
-
-        let agents_md_path = PathBuf::from(AGENTS_MD);
-        let added_ref = patch_agents_md(&agents_md_path, RTK_MD_REF, ctx)?;
-
-        // Write project-scoped hook config
-        let project_qoder_dir = PathBuf::from(QODER_DIR);
-        if !dry_run {
-            fs::create_dir_all(&project_qoder_dir).with_context(|| {
-                format!(
-                    "Failed to create Qoder config dir: {}",
-                    project_qoder_dir.display()
-                )
-            })?;
-        }
-        let hook_status = patch_qoder_settings(&project_qoder_dir, ctx)?;
-
-        if dry_run {
-            print_dry_run_footer();
-            return Ok(());
-        }
-
-        println!("\nRTK configured for Qoder CLI (project-scoped).\n");
-        println!("  RTK.md:    {}", rtk_md_path.display());
-        if added_ref {
-            println!("  AGENTS.md: @RTK.md reference added");
-        } else {
-            println!("  AGENTS.md: @RTK.md reference already present");
-        }
-        match hook_status {
-            QoderHookStatus::AlreadyInstalled => {
-                println!(
-                    "  Hook:      Already installed (`rtk hook qoder` in .qoder/settings.json)"
-                );
-            }
-            QoderHookStatus::Upgraded(ref old) => {
-                println!(
-                    "  Hook:      Upgraded to `rtk hook qoder` (replaced `{}`)",
-                    old
-                );
-            }
-            QoderHookStatus::Installed => {
-                println!("  Hook:      Added `rtk hook qoder` to .qoder/settings.json");
-            }
-        }
-        println!("\n  Restart Qoder CLI. Test with: git status\n");
+        user_dirs::in_working_dir(RTK_MD)
     }
+}
 
+fn read_qoder_settings(path: &Path) -> Result<Option<Value>> {
+    let settings = read_json_file(path)?;
+    if let Some(root) = &settings {
+        ensure!(
+            root.is_object(),
+            "{} must contain an object",
+            path.display()
+        );
+        ensure!(
+            root.get("hooks").is_none_or(Value::is_object),
+            "{}: hooks must be an object",
+            path.display()
+        );
+        ensure!(
+            root.pointer("/hooks/PreToolUse")
+                .is_none_or(Value::is_array),
+            "{}: hooks.PreToolUse must be an array",
+            path.display()
+        );
+    }
+    Ok(settings)
+}
+
+fn is_native_hook(hook: &Value) -> bool {
+    is_command_hook(hook, |command| {
+        super::super::is_rtk_hook_command(command, "qoder")
+    })
+}
+
+fn is_legacy_hook(hook: &Value) -> bool {
+    is_command_hook(hook, |command| {
+        let parts = crate::discover::lexer::shell_split(command);
+        matches!(parts.as_slice(), [script]
+            if script.rsplit(['/', '\\']).next() == Some(QODER_LEGACY_HOOK))
+    })
+}
+
+fn covers_bash(group: &Value) -> bool {
+    group_covers_tool(group, BASH_TOOL)
+}
+
+fn settings_have_hook(settings: &Value, owns: impl Fn(&Value) -> bool) -> bool {
+    hook_present(
+        settings,
+        PRE_TOOL_USE_KEY,
+        HookEntries::Grouped,
+        covers_bash,
+        owns,
+    )
+}
+
+fn active_hook_at(path: &Path) -> Result<bool> {
+    Ok(read_qoder_settings(path)?
+        .is_some_and(|settings| settings_have_hook(&settings, is_native_hook)))
+}
+
+fn save_settings(path: &Path, settings: &Value, action: &str, ctx: InitContext) -> Result<()> {
+    let content = serde_json::to_string_pretty(settings)?;
+    if ctx.dry_run {
+        println!("[dry-run] would {action}: {}", path.display());
+        if ctx.verbose > 0 {
+            println!("[dry-run] content:\n{content}");
+        }
+    } else {
+        atomic_write(path, &content)
+            .with_context(|| format!("Failed to update {}", path.display()))?;
+    }
     Ok(())
 }
 
-/// Outcome of patching Qoder settings.json
-#[derive(Debug)]
-enum QoderHookStatus {
-    /// `rtk hook qoder` is already the active hook — nothing to do
-    AlreadyInstalled,
-    /// Upgraded from a workaround hook (e.g. shell script) to the native binary
-    Upgraded(String),
-    /// Fresh install — no previous RTK hook existed
-    Installed,
+/// Install the hook and instructions in the selected scope.
+pub fn run_qoder_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let dir = qoder_dir(global)?;
+    let settings_path = dir.join(SETTINGS_JSON);
+    let mut settings = read_qoder_settings(&settings_path)?.unwrap_or_else(|| json!({}));
+    let hook_change = install_hook(&mut settings)?;
+
+    if !ctx.dry_run {
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("Failed to create Qoder config dir: {}", dir.display()))?;
+    }
+    let rtk_md = awareness_path(&dir, global);
+    if !rtk_md.exists() {
+        super::write_if_changed(&rtk_md, QODER_AWARENESS, RTK_MD, ctx)?;
+    }
+    if !global {
+        patch_agents_md(&user_dirs::in_working_dir(AGENTS_MD), RTK_MD_REF, ctx)?;
+    }
+    if let Some(action) = hook_change {
+        save_settings(&settings_path, &settings, action, ctx)?;
+    }
+
+    if ctx.dry_run {
+        print_dry_run_footer();
+    } else {
+        let scope = if global { "global" } else { "project-scoped" };
+        println!("RTK configured for Qoder CLI ({scope}).");
+        println!("  RTK.md: {}", rtk_md.display());
+        println!(
+            "  Hook: {QODER_HOOK_COMMAND} in {}",
+            settings_path.display()
+        );
+    }
+    Ok(())
 }
 
-/// Patch Qoder settings.json with the PreToolUse hook for rtk
-fn patch_qoder_settings(qoder_dir: &Path, ctx: InitContext) -> Result<QoderHookStatus> {
-    let InitContext { verbose, .. } = ctx;
-    let settings_path = qoder_dir.join(SETTINGS_JSON);
-    let target_command = "rtk hook qoder";
+fn install_hook(settings: &mut Value) -> Result<Option<&'static str>> {
+    if settings_have_hook(settings, is_native_hook) {
+        return Ok(None);
+    }
 
-    // Read or create settings.json
-    let mut settings: serde_json::Value = if settings_path.exists() {
-        let content = fs::read_to_string(&settings_path)
-            .with_context(|| format!("Failed to read {}", settings_path.display()))?;
-        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    if let Some(groups) = settings
+        .pointer_mut("/hooks/PreToolUse")
+        .and_then(Value::as_array_mut)
+    {
+        for group in groups.iter_mut().filter(|group| covers_bash(group)) {
+            if let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut)
+                && let Some(hook) = hooks.iter_mut().find(|hook| is_legacy_hook(hook))
+            {
+                hook["command"] = json!(QODER_HOOK_COMMAND);
+                return Ok(Some("upgrade the Qoder hook in"));
+            }
+        }
+    }
+
+    append_hook_entry(
+        settings,
+        PRE_TOOL_USE_KEY,
+        json!({
+            "matcher": BASH_TOOL,
+            "hooks": [{"type": "command", "command": QODER_HOOK_COMMAND}]
+        }),
+    )?;
+    Ok(Some("install the Qoder hook in"))
+}
+
+pub fn show_qoder_config(global: bool) -> Result<()> {
+    let dir = qoder_dir(global)?;
+    let path = dir.join(SETTINGS_JSON);
+    let settings = read_qoder_settings(&path)?;
+    let status = match settings {
+        Some(ref root) if settings_have_hook(root, is_native_hook) => QODER_HOOK_COMMAND,
+        Some(ref root) if settings_have_hook(root, is_legacy_hook) => "legacy RTK shell hook",
+        _ => "not installed",
+    };
+    println!("Qoder CLI configuration");
+    println!("  Hook: {status}");
+    println!("  Settings: {}", path.display());
+    let rtk_md = awareness_path(&dir, global);
+    if rtk_md.is_file() {
+        println!("  RTK.md: {}", rtk_md.display());
+    }
+    Ok(())
+}
+
+/// Remove RTK's Qoder entries and generated instructions from the selected scope.
+pub fn uninstall_qoder_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let dir = qoder_dir(global)?;
+    let path = dir.join(SETTINGS_JSON);
+    let removed = if let Some(mut settings) = read_qoder_settings(&path)? {
+        let removed = remove_hook_entries(
+            &mut settings,
+            PRE_TOOL_USE_KEY,
+            HookEntries::Grouped,
+            |hook| is_native_hook(hook) || is_legacy_hook(hook),
+        );
+        if removed {
+            save_settings(&path, &settings, "remove the Qoder hook from", ctx)?;
+        }
+        removed
     } else {
-        serde_json::json!({})
+        false
     };
 
-    // Check existing hooks
-    let pre_tool_use_pointer = format!("/hooks/{}", PRE_TOOL_USE_KEY);
-    if let Some(hooks) = settings.pointer(&pre_tool_use_pointer) {
-        if let Some(arr) = hooks.as_array() {
-            for entry in arr {
-                if let Some(cmd) = entry.pointer("/hooks/0/command").and_then(|c| c.as_str()) {
-                    if cmd == target_command {
-                        if verbose > 0 {
-                            eprintln!("Qoder settings.json already has `rtk hook qoder`");
-                        }
-                        return Ok(QoderHookStatus::AlreadyInstalled);
-                    }
-                    if cmd.contains("rtk") {
-                        // Found a workaround hook — upgrade it to the native binary
-                        let old_cmd = cmd.to_string();
-                        return upgrade_existing_hook(
-                            &settings_path,
-                            &mut settings,
-                            &pre_tool_use_pointer,
-                            old_cmd,
-                            ctx,
-                        );
-                    }
-                }
-            }
+    let rtk_md = awareness_path(&dir, global);
+    let owned_awareness = match fs::read_to_string(&rtk_md) {
+        Ok(content) => content.replace("\r\n", "\n") == QODER_AWARENESS.replace("\r\n", "\n"),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => {
+            return Err(err).with_context(|| format!("Failed to read {}", rtk_md.display()));
+        }
+    };
+    if owned_awareness {
+        if !global {
+            remove_rtk_reference_from_agents(
+                &user_dirs::in_working_dir(AGENTS_MD),
+                &[RTK_MD_REF],
+                ctx,
+            )?;
+        }
+        if ctx.dry_run {
+            println!("[dry-run] would remove {}", rtk_md.display());
+        } else {
+            fs::remove_file(&rtk_md)
+                .with_context(|| format!("Failed to remove {}", rtk_md.display()))?;
         }
     }
 
-    // No existing RTK hook — add new entry
-    install_fresh_hook(&settings_path, &mut settings, ctx)?;
-    Ok(QoderHookStatus::Installed)
-}
-
-/// Replace an existing workaround hook command with the native binary
-fn upgrade_existing_hook(
-    settings_path: &Path,
-    settings: &mut serde_json::Value,
-    pre_tool_use_pointer: &str,
-    old_command: String,
-    ctx: InitContext,
-) -> Result<QoderHookStatus> {
-    let InitContext {
-        verbose, dry_run, ..
-    } = ctx;
-    // Navigate to the hooks array and replace the command
-    if let Some(arr) = settings
-        .pointer_mut(pre_tool_use_pointer)
-        .and_then(|v| v.as_array_mut())
-    {
-        for entry in arr.iter_mut() {
-            let needs_upgrade = entry
-                .pointer("/hooks/0/command")
-                .and_then(|c| c.as_str())
-                .is_some_and(|c| c == old_command);
-            if needs_upgrade {
-                if let Some(hook) = entry.pointer_mut("/hooks/0") {
-                    if let Some(obj) = hook.as_object_mut() {
-                        obj.insert(
-                            "command".to_string(),
-                            serde_json::Value::String("rtk hook qoder".to_string()),
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    let serialized = serde_json::to_string_pretty(&settings)?;
-    if dry_run {
-        println!(
-            "[dry-run] would upgrade Qoder hook in: {}",
-            settings_path.display()
-        );
-        if verbose > 0 {
-            println!("[dry-run] content:\n{}", serialized);
-        }
+    if ctx.dry_run {
+        print_dry_run_footer();
+    } else if removed || owned_awareness {
+        println!("RTK uninstalled for Qoder CLI ({})", path.display());
     } else {
-        atomic_write(settings_path, &serialized)
-            .with_context(|| format!("Failed to write {}", settings_path.display()))?;
+        println!("No RTK hook or generated instructions found for Qoder CLI.");
     }
-
-    if verbose > 0 && !dry_run {
-        eprintln!(
-            "Upgraded Qoder hook from `{}` to `rtk hook qoder`",
-            old_command
-        );
-    }
-
-    Ok(QoderHookStatus::Upgraded(old_command))
-}
-
-/// Install a fresh RTK hook entry into settings.json
-fn install_fresh_hook(
-    settings_path: &Path,
-    settings: &mut serde_json::Value,
-    ctx: InitContext,
-) -> Result<()> {
-    let InitContext {
-        verbose, dry_run, ..
-    } = ctx;
-    let hook_entry = serde_json::json!({
-        "matcher": "Bash",
-        "hooks": [{
-            "type": "command",
-            "command": "rtk hook qoder"
-        }]
-    });
-
-    // Insert into settings
-    let hooks = settings
-        .as_object_mut()
-        .context("settings.json is not an object")?
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}));
-
-    let entry_for_fallback = hook_entry.clone();
-    hooks[PRE_TOOL_USE_KEY] = serde_json::Value::Array(
-        hooks
-            .get(PRE_TOOL_USE_KEY)
-            .and_then(|v| v.as_array())
-            .map(|existing| {
-                let mut arr = existing.clone();
-                // Check for duplicate
-                if !arr.iter().any(|entry| {
-                    entry.get("matcher").and_then(|m| m.as_str()) == Some("Bash")
-                        && entry
-                            .pointer("/hooks/0/command")
-                            .and_then(|c| c.as_str())
-                            .is_some_and(|c| c == "rtk hook qoder")
-                }) {
-                    arr.push(hook_entry);
-                }
-                arr
-            })
-            .unwrap_or_else(|| vec![entry_for_fallback]),
-    );
-
-    let serialized = serde_json::to_string_pretty(&settings)?;
-    if dry_run {
-        println!(
-            "[dry-run] would patch Qoder settings.json: {}",
-            settings_path.display()
-        );
-        if verbose > 0 {
-            println!("[dry-run] content:\n{}", serialized);
-        }
-        return Ok(());
-    }
-
-    atomic_write(settings_path, &serialized)
-        .with_context(|| format!("Failed to write {}", settings_path.display()))?;
-
-    if verbose > 0 {
-        eprintln!("Patched {} with RTK hook", settings_path.display());
-    }
-
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    fn settings_has_qoder_hook(path: &Path) -> bool {
-        let content = fs::read_to_string(path).unwrap();
-        content.contains("rtk hook qoder")
-    }
-
-    #[test]
-    fn test_qoder_patch_creates_new() {
-        let dir = TempDir::new().unwrap();
-        let status = patch_qoder_settings(dir.path(), InitContext::default()).unwrap();
-        assert!(
-            matches!(status, QoderHookStatus::Installed),
-            "Fresh init should return Installed"
-        );
-        assert!(
-            settings_has_qoder_hook(&dir.path().join("settings.json")),
-            "settings.json should contain rtk hook qoder"
-        );
-    }
-
-    #[test]
-    fn test_qoder_patch_upgrades_shell_script() {
-        let dir = TempDir::new().unwrap();
-        let settings = serde_json::json!({
-            "hooks": {
-                "PreToolUse": [{
-                    "matcher": "Bash",
-                    "hooks": [{
-                        "type": "command",
-                        "command": "~/.qoder/hooks/rtk-qoder-hook.sh"
-                    }]
-                }]
-            }
-        });
-        fs::write(
-            dir.path().join("settings.json"),
-            serde_json::to_string_pretty(&settings).unwrap(),
-        )
-        .unwrap();
-
-        let status = patch_qoder_settings(dir.path(), InitContext::default()).unwrap();
-        match &status {
-            QoderHookStatus::Upgraded(old) => {
-                assert!(
-                    old.contains("rtk-qoder-hook.sh"),
-                    "Should detect shell script"
-                );
-            }
-            other => panic!("Expected Upgraded, got {:?}", other),
-        }
-        assert!(
-            settings_has_qoder_hook(&dir.path().join("settings.json")),
-            "Shell script should be upgraded to rtk hook qoder"
-        );
-    }
-
-    #[test]
-    fn test_qoder_patch_idempotent() {
-        let dir = TempDir::new().unwrap();
-        let s1 = patch_qoder_settings(dir.path(), InitContext::default()).unwrap();
-        assert!(matches!(s1, QoderHookStatus::Installed));
-        let s2 = patch_qoder_settings(dir.path(), InitContext::default()).unwrap();
-        assert!(
-            matches!(s2, QoderHookStatus::AlreadyInstalled),
-            "Second call should return AlreadyInstalled"
-        );
-    }
-
-    #[test]
-    fn test_qoder_patch_preserves_existing() {
-        let dir = TempDir::new().unwrap();
-        let settings = serde_json::json!({
-            "model": {"name": "custom-model"},
-            "permissions": {"trustDirectories": ["/tmp/test"]}
-        });
-        fs::write(
-            dir.path().join("settings.json"),
-            serde_json::to_string_pretty(&settings).unwrap(),
-        )
-        .unwrap();
-
-        patch_qoder_settings(dir.path(), InitContext::default()).unwrap();
-        let content = fs::read_to_string(dir.path().join("settings.json")).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
-
-        assert_eq!(
-            v.pointer("/model/name").and_then(|v| v.as_str()),
-            Some("custom-model"),
-            "Existing model config must be preserved"
-        );
-        assert!(
-            v.pointer("/hooks/PreToolUse").is_some(),
-            "Hook must be added alongside existing config"
-        );
-    }
-
-    #[test]
-    fn test_qoder_patch_dry_run_writes_nothing() {
-        let dir = TempDir::new().unwrap();
-        let settings_path = dir.path().join("settings.json");
-
-        let status = patch_qoder_settings(
-            dir.path(),
-            InitContext {
-                dry_run: true,
-                ..InitContext::default()
-            },
-        )
-        .unwrap();
-
-        assert!(matches!(status, QoderHookStatus::Installed));
-        assert!(!settings_path.exists());
-    }
+pub fn is_configured() -> bool {
+    let project = user_dirs::project_root(QODER_DIR).map(|root| root.join(QODER_DIR));
+    let global = qoder_dir(true).ok();
+    project.is_some_and(|dir| {
+        [SETTINGS_JSON, "settings.local.json"]
+            .iter()
+            .any(|file| active_hook_at(&dir.join(file)).unwrap_or(false))
+    }) || global.is_some_and(|dir| active_hook_at(&dir.join(SETTINGS_JSON)).unwrap_or(false))
 }

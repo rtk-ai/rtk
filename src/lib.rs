@@ -2414,6 +2414,9 @@ where
     } else if agent == Some(AgentTarget::Droid) {
         hooks::init::uninstall_droid(global, ctx)?;
         Ok(0)
+    } else if agent == Some(AgentTarget::Qoder) {
+        hooks::init::uninstall_qoder_mode(global, ctx)?;
+        Ok(0)
     } else if agent == Some(AgentTarget::Vibe) {
         hooks::init::uninstall_vibe(ctx)?;
         Ok(0)
@@ -3070,7 +3073,9 @@ fn run_cli() -> Result<i32> {
             } else {
                 hooks::init::PatchMode::Ask
             };
-            if show {
+            if show && agent == Some(AgentTarget::Qoder) {
+                hooks::init::show_qoder_config(global)?;
+            } else if show {
                 hooks::init::show_config(codex, agent == Some(AgentTarget::Omp))?;
             } else if uninstall && copilot {
                 if global {

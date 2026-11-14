@@ -7,7 +7,8 @@
 - Uses the `rtk hook qoder` Rust binary (not a shell script) — no `jq` dependency
 - Qoder CLI uses the same `PreToolUse` JSON protocol as Claude Code (`tool_name`/`tool_input` + `updatedInput`)
 - Hook config written to `~/.qoder/settings.json` (global) or `.qoder/settings.json` (project)
-- Transparent rewrite via `updatedInput` — no denial, no retry
+- Rewrites Bash commands via `updatedInput`. Qoder applies its own command permissions.
+- Use `rtk init --agent qoder --show` to inspect the project config or `--uninstall` to remove the RTK hook. Add `-g` for the global config.
 
 ## How it works
 

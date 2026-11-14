@@ -491,7 +491,8 @@ impl AgentPath {
             // (see `hook_cmd`'s `vscode_response` and `copilot_cli_response`).
             "antigravity" => Some(Self::InProcess(Host::Antigravity)),
             "cline" | "kilocode" | "kimi" | "windsurf" => Some(Self::RulesOnly),
-            "claude" | "qoder" => Some(Self::ClaudeHook),
+            "claude" => Some(Self::ClaudeHook),
+            "qoder" => Some(Self::InProcess(Host::Qoder)),
             "copilot" => Some(Self::InProcess(Host::Claude)),
             "codex" => Some(Self::InProcess(Host::Codex)),
             "trae" => Some(Self::InProcess(Host::Trae)),
