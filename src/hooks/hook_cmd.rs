@@ -700,25 +700,23 @@ fn pre_tool_use_rewrite_output(
     json!({ "hookSpecificOutput": hook_output })
 }
 
+fn pre_tool_use_command(v: &Value) -> Option<&str> {
+    v.pointer("/tool_input/command")
+        .and_then(Value::as_str)
+        .filter(|command| !command.is_empty())
+}
+
 fn process_claude_payload(v: &Value) -> PayloadAction {
-    let cmd = match v
-        .pointer("/tool_input/command")
-        .and_then(|c| c.as_str())
-        .filter(|c| !c.is_empty())
-    {
-        Some(c) => c,
-        None => return PayloadAction::Ignore,
+    let Some(cmd) = pre_tool_use_command(v) else {
+        return PayloadAction::Ignore;
     };
 
     let cwd = v.get("cwd").and_then(Value::as_str);
-    process_claude_payload_from_decision(v, cmd, decide_claude_hook_action(cmd, cwd))
+    pre_tool_use_action_from_decision(v, cmd, decide_claude_hook_action(cmd, cwd))
 }
 
-/// Pure core of `process_claude_payload`, taking the hook decision directly so the
-/// full Allow/Ask/Deny/Defer matrix is unit-testable without depending on real
-/// permission config files — mirrors the `copilot_cli_response_from_decision`/
-/// `droid_response_from_decision` split already used elsewhere in this file.
-fn process_claude_payload_from_decision(
+/// Translate a decision to the PreToolUse protocol shared by Claude and Qoder.
+fn pre_tool_use_action_from_decision(
     v: &Value,
     cmd: &str,
     decision: HookDecision,
@@ -873,6 +871,56 @@ fn run_claude_inner(input: &str) -> Option<String> {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
         _ => None,
     }
+}
+
+fn process_qoder_payload(v: &Value) -> PayloadAction {
+    if v.get("tool_name").and_then(Value::as_str) != Some("Bash") {
+        return PayloadAction::Ignore;
+    }
+    let Some(cmd) = pre_tool_use_command(v) else {
+        return PayloadAction::Ignore;
+    };
+    pre_tool_use_action_from_decision(
+        v,
+        cmd,
+        decide_hook_action(cmd, permissions::Host::Qoder, None),
+    )
+}
+
+/// Run the Qoder CLI PreToolUse hook. Qoder applies its own permission rules.
+pub fn run_qoder() -> Result<()> {
+    let input = read_stdin_limited()?;
+
+    let input = strip_leading_bom(&input).trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    match process_qoder_payload(&v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            output,
+            ..
+        } => {
+            audit_log("rewrite", &cmd, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Skip { reason, cmd, .. } => {
+            audit_log(reason, &cmd, "");
+        }
+        PayloadAction::Ignore => {}
+    }
+
+    Ok(())
 }
 
 // ── Trae native hook ───────────────────────────────────────────
@@ -2019,12 +2067,12 @@ mod tests {
 
     // The decision field on PayloadAction feeds directly into hook_decisions —
     // exercise the full Allow/Ask/Deny/Defer matrix against the pure
-    // process_claude_payload_from_decision (no real permission config needed).
+    // pre_tool_use_action_from_decision (no real permission config needed).
 
     #[test]
     fn test_process_claude_payload_decision_allow() {
         let v = claude_input_value("git status");
-        match process_claude_payload_from_decision(
+        match pre_tool_use_action_from_decision(
             &v,
             "git status",
             HookDecision::AllowRewrite("rtk git status".to_string()),
@@ -2046,7 +2094,7 @@ mod tests {
     #[test]
     fn test_process_claude_payload_decision_ask() {
         let v = claude_input_value("git status");
-        match process_claude_payload_from_decision(
+        match pre_tool_use_action_from_decision(
             &v,
             "git status",
             HookDecision::AskRewrite("rtk git status".to_string(), AskOwner::Host),
@@ -2076,7 +2124,7 @@ mod tests {
                 None,
             ),
         ] {
-            match process_claude_payload_from_decision(&v, cmd, decision) {
+            match pre_tool_use_action_from_decision(&v, cmd, decision) {
                 PayloadAction::Rewrite {
                     decision,
                     output,
@@ -2106,7 +2154,7 @@ mod tests {
     #[test]
     fn test_process_claude_payload_decision_deny() {
         let v = claude_input_value("rm -rf /");
-        match process_claude_payload_from_decision(&v, "rm -rf /", HookDecision::Deny) {
+        match pre_tool_use_action_from_decision(&v, "rm -rf /", HookDecision::Deny) {
             PayloadAction::Skip { decision, .. } => assert_eq!(decision, HookOutcome::Deny),
             other => {
                 panic!("expected Skip, got a different PayloadAction variant instead: {other:?}")
@@ -2117,7 +2165,7 @@ mod tests {
     #[test]
     fn test_process_claude_payload_decision_defer() {
         let v = claude_input_value("git status $(rm -rf /tmp/x)");
-        match process_claude_payload_from_decision(
+        match pre_tool_use_action_from_decision(
             &v,
             "git status $(rm -rf /tmp/x)",
             HookDecision::Defer,
