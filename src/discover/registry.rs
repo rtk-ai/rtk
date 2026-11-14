@@ -57,6 +57,9 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
 static REGEX_SET: LazyLock<RegexSet> = LazyLock::new(|| {
     RegexSet::new(RULES.iter().map(|r| r.pattern)).expect("invalid regex patterns")
 });
+static PYTHON_INTERPRETER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^python(?:[0-9]+(?:\.[0-9]+)*)?$").expect("valid Python interpreter name")
+});
 static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     RULES
         .iter()
@@ -209,6 +212,8 @@ pub fn classify_command(cmd: &str) -> Classification {
         return Classification::Ignored;
     }
 
+    let python_form = python_pytest_tool_form(cmd_clean);
+    let cmd_clean = python_form.as_deref().unwrap_or(cmd_clean);
     // Normalize absolute binary paths: /usr/bin/grep → grep (#485)
     let cmd_normalized = strip_absolute_path(cmd_clean);
     // Strip git global options: git -C /tmp status → git status (#163)
@@ -2093,6 +2098,10 @@ fn rewrite_segment_inner(
 /// Rewrite the command part of a segment (trailing redirects already split
 /// off) with `rule`, or `None` when this rule does not rewrite it.
 fn rewrite_command_part(rule: &RtkRule, cmd_part: &str) -> Option<String> {
+    if rule.rtk_cmd == "rtk pytest" && python_pytest_tool_form(cmd_part).is_some() {
+        // Keep the shell's spelling, quotes and expansions in the argument tail.
+        return Some(format!("rtk run --filter pytest -- {cmd_part}"));
+    }
     if rule.rtk_cmd == "rtk golangci-lint run"
         && let Some(parts) = parse_golangci_run_parts(cmd_part)
     {
@@ -2187,6 +2196,11 @@ fn php_tool_form(cmd: &str, rtk_cmd: &str) -> Option<String> {
 }
 
 fn tool_form(cmd_clean: &str, rtk_equivalent: &str) -> String {
+    if rtk_equivalent == "rtk pytest"
+        && let Some(form) = python_pytest_tool_form(cmd_clean)
+    {
+        return form;
+    }
     // Same normalization the rewrite path applies, so the exclusion sees the tool
     // whichever way it was spelled — including `php vendor/bin/phpunit`.
     let normalized = strip_absolute_path(
@@ -2209,6 +2223,49 @@ fn tool_form(cmd_clean: &str, rtk_equivalent: &str) -> String {
             })
         })
         .unwrap_or(normalized)
+}
+
+/// A deliberately narrow recognition rule: a literal Python executable followed
+/// immediately by `-m pytest`. Interpreter options and dynamic program names are
+/// left to the existing passthrough path. Classification never rewrites the argv.
+fn python_pytest_tool_form(cmd: &str) -> Option<String> {
+    use crate::core::arg_tokenizer::{Dialect, TokenKind as ArgKind, ValueSpec, tokenize_grammar};
+
+    if !cmd.contains("pytest") {
+        return None;
+    }
+    let words = coalesce_words(cmd, &tokenize(cmd));
+    let third = words.get(2)?;
+    if words
+        .iter()
+        .take(3)
+        .any(|(word, _)| word.contains(['$', '`']))
+    {
+        return None;
+    }
+    let argv = shell_split(&cmd[..third.1 + third.0.len()]);
+    if argv.len() != 3 {
+        return None;
+    }
+    let name = Path::new(&argv[0]).file_name()?.to_str()?;
+    if !PYTHON_INTERPRETER.is_match(name) {
+        return None;
+    }
+    let tokens = tokenize_grammar(
+        &argv[1..],
+        &|kind, name| (kind == ArgKind::Short && name == "m").then(ValueSpec::value),
+        Dialect::Posix,
+    );
+    let module = tokens.first()?;
+    if module.kind != ArgKind::Short
+        || module.text != "m"
+        || module.attached.is_some()
+        || module.linked != Some(1)
+        || module.value(&tokens) != Some("pytest")
+    {
+        return None;
+    }
+    Some(format!("pytest{}", &cmd[third.1 + third.0.len()..]))
 }
 
 fn strip_process_wrapper_prefix(cmd: &str) -> Option<(&str, &str)> {
@@ -5991,7 +6048,36 @@ mod tests {
     fn test_rewrite_python_m_pytest() {
         assert_eq!(
             rewrite_command_no_prefixes("python -m pytest -x tests/", &[]),
-            Some("rtk pytest -x tests/".into())
+            Some("rtk run --filter pytest -- python -m pytest -x tests/".into())
+        );
+    }
+
+    #[test]
+    fn python_pytest_rewrite_preserves_literal_invocation_and_exclusions() {
+        for cmd in [
+            "python3.11 -m pytest -k 'a or b' -- '-name.py'",
+            "/tmp/venv/bin/python -m pytest tests/",
+            "'./venv with spaces/bin/python3' '-m' 'pytest' -q",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(format!("rtk run --filter pytest -- {cmd}"))
+            );
+            assert_eq!(rewrite_command_no_prefixes(cmd, &["pytest".into()]), None);
+        }
+        for cmd in [
+            "python -I -m pytest",
+            "python -m unittest",
+            "python test.py",
+            "$PYTHON -m pytest",
+            "python -c 'import pytest'",
+            "notpython -m pytest",
+        ] {
+            assert!(python_pytest_tool_form(cmd).is_none(), "{cmd}");
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("RTK_DISABLED=1 python -m pytest", &[]),
+            None
         );
     }
 
@@ -6015,7 +6101,7 @@ mod tests {
     fn test_rewrite_uv_run_python_m_pytest() {
         assert_eq!(
             rewrite_command_no_prefixes("uv run python -m pytest -q", &[]),
-            Some("uv run rtk pytest -q".into())
+            Some("uv run rtk run --filter pytest -- python -m pytest -q".into())
         );
     }
 
@@ -8375,7 +8461,7 @@ mod tests {
     fn test_python3_m_pytest() {
         assert_eq!(
             rewrite_command_no_prefixes("python3 -m pytest tests/", &[]),
-            Some("rtk pytest tests/".into())
+            Some("rtk run --filter pytest -- python3 -m pytest tests/".into())
         );
     }
 

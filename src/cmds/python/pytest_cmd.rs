@@ -8,6 +8,7 @@ use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
+use std::process::Command;
 use std::sync::LazyLock;
 
 const MAX_XFAIL: usize = CAP_WARNINGS;
@@ -111,6 +112,28 @@ fn injected_args(args: &[String]) -> Vec<&'static str> {
 
 const PYTEST_NO_TESTS: &str = "Pytest: No tests collected";
 const PYTEST_EXIT_NO_TESTS: i32 = 5;
+
+/// The caller already chose its interpreter, module invocation and arguments.
+/// In particular, never canonicalize a venv interpreter or inject pytest flags.
+pub fn run_original(cmd: Command, description: &str) -> Result<i32> {
+    runner::run_filtered_with_exit(
+        cmd,
+        "run",
+        description,
+        |raw, _exit_code| {
+            let filtered = filter_pytest_output(raw);
+            if filtered == PYTEST_NO_TESTS {
+                // Help, missing modules and unknown report formats retain their output.
+                raw.to_string()
+            } else {
+                filtered
+            }
+        },
+        runner::RunOptions::stdout_only()
+            .inherit_stdin()
+            .tee("pytest"),
+    )
+}
 
 pub(crate) fn filter_pytest_output(output: &str) -> String {
     // pytest colors its summary even when piped (force-color CI/venv setups), and the
