@@ -503,6 +503,7 @@ impl Tally {
                     category,
                     estimated_savings_pct,
                     status,
+                    ..
                 } => {
                     // A bypassed command ran raw, whatever a measured row says of the call.
                     let coverage = if bypassed {
