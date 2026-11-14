@@ -595,6 +595,30 @@ mod tests {
     }
 
     #[test]
+    fn line_after_a_comment_ending_in_a_backslash_is_never_allowed_by_the_rewrite() {
+        // Bash ends the comment at the newline and runs `git push`, but the
+        // permission segments join it into the comment (#5090). Even under an
+        // allow verdict the hook must hand the command back, not allow a
+        // rewrite of it.
+        let verdict = super::super::permissions::check_command_with_rules(
+            "ls # note \\\ngit push --force",
+            &["git push:*".to_string()],
+            &[],
+            &["*".to_string()],
+        );
+        assert_eq!(
+            decide_with_params(
+                "ls # note \\\ngit push --force",
+                verdict,
+                &[],
+                &[],
+                DenyRules::Unattested
+            ),
+            HookDecision::Defer
+        );
+    }
+
+    #[test]
     fn claude_worktree_leaves_git_plain_but_rewrites_the_rest() {
         let wt = Some("/repo/.claude/worktrees/feat-x");
         assert_eq!(

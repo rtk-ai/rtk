@@ -292,7 +292,7 @@ pub(crate) fn check_command_with_rules_and_prefixes(
     }
 
     let transparent_prefixes = registry::normalize_transparent_prefixes(transparent_prefixes);
-    let joined = registry::collapse_line_continuations(cmd);
+    let joined = registry::join_all_line_continuations(cmd);
     let wrapper_segments = split_for_wrappers(&joined);
     if let Some(verdict) =
         check_shell_wrapper_permissions(&wrapper_segments, deny_rules, &transparent_prefixes)
