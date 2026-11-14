@@ -1417,6 +1417,24 @@ mod tests {
         }
     }
 
+    /// The first command of a loop body sits behind `do` once the line is
+    /// split on `;`, and the rewrite reads past that keyword (#5110), so a deny
+    /// rule has to as well.
+    #[test]
+    fn test_deny_matches_first_command_of_loop_body() {
+        let deny = vec!["git push *".to_string()];
+        for cmd in [
+            "for r in a b; do git push \"$r\"; done",
+            "while true; do git push origin main; sleep 1; done",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &[]),
+                PermissionVerdict::Deny,
+                "a deny rule for the loop body did not fire: {cmd}"
+            );
+        }
+    }
+
     /// Words bash does not treat as assignments are the command, so peeling
     /// them would put a denied command where none runs. Each of these runs
     /// something other than `git push`. The quoted rows carry the denied text
