@@ -1,22 +1,75 @@
 //! Shared command execution skeleton for filter modules.
 
+use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
 use anyhow::{Context, Result};
+use regex::Regex;
+use std::borrow::Cow;
 use std::process::Command;
+use std::sync::LazyLock;
 
 use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
 use crate::core::tracking;
+use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 
-/// Compose `filtered` with an optional recovery `hint`, cap the total at `raw`
-/// (never emit more tokens than the command), print it, and return what was
-/// emitted so the caller tracks exactly that.
+/// Compose `filtered` with an optional recovery `hint` and print it, or print `raw`
+/// instead when the command's own output is estimated to cost fewer tokens. Both
+/// sides are weighed as printed, each under its terminator, and a tie goes to the
+/// composed form. Returns what was emitted so the caller tracks exactly that.
 pub fn emit_guarded(filtered: &str, hint: Option<&str>, raw: &str) -> String {
-    let body = match hint {
-        Some(h) => format!("{}\n{}", filtered, h),
-        None => filtered.to_string(),
-    };
-    let shown = crate::core::guard::never_worse(raw, &body).to_string();
-    println!("{}", shown);
+    emit(filtered, hint, raw, &[])
+}
+
+/// [`emit_guarded`], with the guard waived when `raw` is one of `clean_outputs`
+/// (see [`guard_stdout`]).
+fn emit(filtered: &str, hint: Option<&str>, raw: &str, clean_outputs: &[&str]) -> String {
+    let shown = guarded_output(filtered, hint, raw, clean_outputs);
+    print!("{}", shown);
     shown
+}
+
+/// The exact bytes `emit` writes: the guarded body, terminated.
+///
+/// Filters disagree on whether their last line already carries its terminator,
+/// so it is supplied rather than assumed. Supplying one unconditionally costs a
+/// byte the command never emitted whenever the body ends in a newline of its
+/// own -- the shape every guard fallback takes, a command's output being
+/// newline-terminated in the ordinary case. A command whose own output is
+/// unterminated still gets the one newline a printed line needs; that byte is
+/// the price of not gluing the next prompt to the output.
+///
+/// A body that is the empty string prints nothing at all. A filter with nothing
+/// to report, like a command with nothing to say, should not cost a blank line.
+fn guarded_output(filtered: &str, hint: Option<&str>, raw: &str, clean_outputs: &[&str]) -> String {
+    let body = with_hint(filtered, hint);
+    // Both sides weighed as they will be printed. The printer's terminator is paid by
+    // whichever form wins, so charging it to one side only decides close calls on a
+    // byte that is not the difference between them.
+    let body = terminated(&body);
+    let raw = terminated(raw);
+    guard_stdout(&raw, &body, clean_outputs).to_string()
+}
+
+/// `filtered` followed by the recovery `hint`, as [`emit_guarded`] composes them.
+///
+/// The hint goes on the line after the filtered text, whose own terminator is
+/// reused rather than doubled; with no filtered text, the hint is the whole body.
+pub fn with_hint<'a>(filtered: &'a str, hint: Option<&str>) -> Cow<'a, str> {
+    match hint {
+        Some(h) => Cow::Owned(format!("{}{}", terminated(filtered), h)),
+        None => Cow::Borrowed(filtered),
+    }
+}
+
+/// `text` under a trailing newline, and none at all when it is empty.
+///
+/// Only ever adds the missing one: a text that ends in a blank line keeps it,
+/// since the blank line is the command's output and not a stray terminator.
+fn terminated(text: &str) -> Cow<'_, str> {
+    if text.is_empty() || text.ends_with('\n') {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(format!("{}\n", text))
+    }
 }
 
 pub fn print_with_hint(
@@ -30,6 +83,127 @@ pub fn print_with_hint(
     emit_guarded(filtered, hint.as_deref(), guard_raw)
 }
 
+#[cfg(test)]
+mod guarded_output_tests {
+    use super::*;
+
+    const HINT: &str = "[full output: ~/.local/share/rtk/tee/1_go_test.log]";
+
+    /// Long enough that the guard keeps the filtered form, so a test about the
+    /// terminator is not really a test about the fallback.
+    fn bulky_raw() -> String {
+        "go: downloading example.com/module v1.2.3\n".repeat(20)
+    }
+
+    /// The guard hands back the command's own output when the filtered form would cost
+    /// more, and that output is already newline-terminated: terminating it again is a
+    /// byte the command never emitted.
+    #[test]
+    fn terminated_fallback_costs_exactly_the_command() {
+        for raw in ["ok\n", "ok  ex\n", "PASS\n", "a\nb\n"] {
+            let out = guarded_output(
+                "a summary longer than the output it summarises",
+                None,
+                raw,
+                &[],
+            );
+            assert_eq!(out, raw, "guard fallback must emit the raw bytes unchanged");
+        }
+    }
+
+    /// Most filters leave their last line unterminated and count on the printer for it.
+    #[test]
+    fn unterminated_body_gains_one_newline() {
+        assert_eq!(
+            guarded_output("3 passed", None, &bulky_raw(), &[]),
+            "3 passed\n"
+        );
+    }
+
+    #[test]
+    fn hint_is_terminated_once() {
+        let out = guarded_output("3 passed", Some(HINT), &bulky_raw(), &[]);
+        assert_eq!(out, format!("3 passed\n{}\n", HINT));
+    }
+
+    #[test]
+    fn already_terminated_hint_gains_nothing() {
+        let out = guarded_output("3 passed", Some(&format!("{}\n", HINT)), &bulky_raw(), &[]);
+        assert_eq!(out, format!("3 passed\n{}\n", HINT));
+    }
+
+    /// A filtered text that brings its own terminator is not given a blank line
+    /// before the hint.
+    #[test]
+    fn terminated_body_and_hint_gain_no_blank_line() {
+        let out = guarded_output("3 passed\n", Some(HINT), &bulky_raw(), &[]);
+        assert_eq!(out, format!("3 passed\n{}\n", HINT));
+    }
+
+    /// The join itself, on every shape a filtered text and a hint come in.
+    #[test]
+    fn with_hint_joins_on_the_next_line() {
+        assert_eq!(
+            with_hint("3 passed\n", Some(HINT)),
+            format!("3 passed\n{}", HINT)
+        );
+        assert_eq!(
+            with_hint("3 passed", Some(HINT)),
+            format!("3 passed\n{}", HINT)
+        );
+        assert_eq!(with_hint("", Some(HINT)), HINT);
+        assert_eq!(with_hint("3 passed", None), "3 passed");
+        assert_eq!(with_hint("3 passed\n", None), "3 passed\n");
+    }
+
+    /// With nothing filtered to show, the hint alone is printed, without a blank line
+    /// above it.
+    #[test]
+    fn empty_body_with_hint_prints_the_hint_alone() {
+        let out = guarded_output("", Some(HINT), &bulky_raw(), &[]);
+        assert_eq!(out, format!("{}\n", HINT));
+    }
+
+    /// A body that ties with the command's output only because its terminator has not
+    /// been added yet outgrows that output the moment it is printed.
+    #[test]
+    fn the_terminator_counts_toward_the_guard() {
+        assert_eq!(
+            guarded_output("abcdefgh", None, "abc\ndef\n", &[]),
+            "abc\ndef\n"
+        );
+    }
+
+    /// The other side of the same scale: a command that left its own output unterminated
+    /// owes the printer the same byte, so it must not win a tie the filtered form loses
+    /// only for having been charged it alone.
+    #[test]
+    fn an_unterminated_raw_is_weighed_terminated_too() {
+        assert_eq!(
+            guarded_output("abcdefgh", None, "12345678", &[]),
+            "abcdefgh\n"
+        );
+    }
+
+    /// The empty form of a format rtk injected, like ruff's `[]`, is not what the user
+    /// asked for: the summary replaces it, terminated once.
+    #[test]
+    fn an_injected_clean_output_shows_the_summary_terminated() {
+        let summary = "Ruff: No issues found";
+        assert_eq!(
+            guarded_output(summary, None, "[]\n", &["[]"]),
+            format!("{}\n", summary)
+        );
+    }
+
+    /// A command that printed nothing must not gain a blank line.
+    #[test]
+    fn empty_stays_empty() {
+        assert_eq!(guarded_output("", None, "", &[]), "");
+        assert_eq!(guarded_output("", None, &bulky_raw(), &[]), "");
+    }
+}
+
 #[derive(Default)]
 pub struct RunOptions<'a> {
     pub tee_label: Option<&'a str>,
@@ -40,6 +214,10 @@ pub struct RunOptions<'a> {
     /// can read from a pipe (e.g. `cat file | rtk wc`); without it the child
     /// gets an empty stdin and reports zero.
     pub inherit_stdin: bool,
+    /// What the tool prints on a clean run in the output format rtk injected, e.g. ruff's
+    /// `[]`. See [`guard_stdout`]. Not consulted when `tee_label` is set.
+    pub clean_outputs: &'a [&'a str],
+    pub unguarded_help: bool,
 }
 
 impl<'a> RunOptions<'a> {
@@ -48,6 +226,11 @@ impl<'a> RunOptions<'a> {
             tee_label: Some(label),
             ..Default::default()
         }
+    }
+
+    pub fn unguarded_help(mut self) -> Self {
+        self.unguarded_help = true;
+        self
     }
 
     pub fn stdout_only() -> Self {
@@ -75,6 +258,23 @@ impl<'a> RunOptions<'a> {
     pub fn inherit_stdin(mut self) -> Self {
         self.inherit_stdin = true;
         self
+    }
+
+    pub fn clean_outputs(mut self, outputs: &'a [&'a str]) -> Self {
+        self.clean_outputs = outputs;
+        self
+    }
+}
+
+/// The stdout to show: `filtered`, unless it costs more tokens than `raw`.
+///
+/// A `raw` that is exactly one of `clean_outputs` is the empty form of a format rtk injected,
+/// not output the user asked for, so the filter's summary is shown even though it is longer.
+fn guard_stdout<'a>(raw: &'a str, filtered: &'a str, clean_outputs: &[&str]) -> &'a str {
+    if clean_outputs.contains(&raw.trim()) {
+        filtered
+    } else {
+        crate::core::guard::never_worse(raw, filtered)
     }
 }
 
@@ -135,28 +335,261 @@ where
         raw
     };
 
+    // The guard governs the stdout rtk replaces. stderr is forwarded separately below, and
+    // only ever shrinks there, so it cannot push the total past what the command emitted.
     let shown = if let Some(label) = opts.tee_label {
         print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
-    } else {
-        let guarded = crate::core::guard::never_worse(raw_for_tracking, &filtered).to_string();
-        if opts.no_trailing_newline {
-            print!("{}", guarded);
-        } else {
-            println!("{}", guarded);
-        }
+    } else if opts.no_trailing_newline {
+        // The filters that opt out own their line endings: what they return is already
+        // exactly what the command would have printed, terminator included.
+        let guarded = guard_stdout(raw_for_tracking, &filtered, opts.clean_outputs).to_string();
+        print!("{}", guarded);
         guarded
+    } else {
+        emit(&filtered, None, raw_for_tracking, opts.clean_outputs)
     };
 
-    timer.track(
-        cmd_label,
-        &format!("rtk {}", cmd_label),
-        raw_for_tracking,
-        &shown,
-    );
+    // Stdout-only filters parse structured stdout; stderr still carries diagnostics
+    // (config errors, missing linters) that the user needs.
+    let forwarded = (opts.filter_stdout_only && !result.raw_stderr.trim().is_empty()).then(|| {
+        forwarded_stderr(&result.raw_stderr, exit_code, &shown, |stderr| {
+            crate::core::tee::force_tee_hint(
+                stderr,
+                &format!("{}-stderr", opts.tee_label.unwrap_or(tool_name)),
+            )
+        })
+    });
+    if let Some(text) = &forwarded {
+        eprint!("{}", text);
+    }
+
+    // Forwarded stderr reaches the user just as much as stdout does, so counting only
+    // stdout would book a passed-through stream as if the filter had removed it.
+    let emitted = match &forwarded {
+        Some(text) => Cow::Owned(format!("{}{}", shown, text)),
+        None => Cow::Borrowed(shown.as_str()),
+    };
+    timer.track(cmd_label, &format!("rtk {}", cmd_label), raw, &emitted);
     Ok(exit_code)
 }
 
+/// How many stderr lines survive the cap. Warning-shaped data, so the warnings cap.
+const MAX_FORWARDED_STDERR_LINES: usize = CAP_WARNINGS;
+
+/// The stderr a stdout-only filter forwards.
+///
+/// Whole, whenever stderr is the report: the command failed, or the filter had nothing to show
+/// for stdout. Those are the cases stderr forwarding exists for -- a golangci-lint config
+/// error leaves stdout empty, and dropping its stderr left the user with no output at all.
+///
+/// Capped otherwise, because on a run that succeeded and reported on stdout, stderr is as
+/// often progress chatter -- `go: downloading …` once per module on a cold cache -- and
+/// forwarding all of it verbatim leaves rtk emitting as much as the command it stands in
+/// front of.
+///
+/// The cap keeps the END. A tool resolves and downloads before it builds, so its chatter comes
+/// first and anything it has to say -- a deprecation warning, "matched no packages" -- comes
+/// after: a cap on the head keeps the noise and drops exactly the lines worth forwarding.
+///
+/// Three things make it give up and forward the lot. A stderr below the recovery store's own
+/// floor, which is not worth a stored file and the eviction that comes with it. `recovery_hint`
+/// returning `None`, meaning there is no store to point at, and a count of lines nobody can
+/// read is worse than the lines (`curl_cmd` declines the same way). And a result that is not
+/// actually smaller, since the note and the hint cost bytes of their own -- rtk emits no more
+/// than the command it stands in front of, on either stream.
+fn forwarded_stderr<'a>(
+    stderr: &'a str,
+    exit_code: i32,
+    shown_stdout: &str,
+    recovery_hint: impl FnOnce(&str) -> Option<String>,
+) -> Cow<'a, str> {
+    if exit_code != 0 || shown_stdout.trim().is_empty() {
+        return Cow::Borrowed(stderr);
+    }
+    // Below the recovery store's own floor there is nothing to gain and a file to write for
+    // it: the store would hold a stderr smaller than the note and hint that point at it, and
+    // every write evicts an older entry. `tsc_cmd` declines on the same threshold.
+    if stderr.len() < crate::core::tee::MIN_TEE_SIZE {
+        return Cow::Borrowed(stderr);
+    }
+    let Some((offset, held_back)) = last_lines_offset(stderr, MAX_FORWARDED_STDERR_LINES) else {
+        return Cow::Borrowed(stderr);
+    };
+    let Some(hint) = recovery_hint(stderr) else {
+        return Cow::Borrowed(stderr);
+    };
+    let capped = format!(
+        "... (+{} earlier stderr {} not shown)\n{}{}\n",
+        held_back,
+        if held_back == 1 { "line" } else { "lines" },
+        &stderr[offset..],
+        hint
+    );
+    if capped.len() >= stderr.len() {
+        return Cow::Borrowed(stderr);
+    }
+    Cow::Owned(capped)
+}
+
+/// Where `text`'s last `n` lines begin, as a byte offset, and how many lines that skips.
+/// `None` when it has no more than `n`.
+///
+/// A byte offset rather than `lines().collect()` and a re-join: `str::lines` drops the `\r` of
+/// a CRLF ending and nothing puts it back, so re-joining would rewrite the line endings of a
+/// stderr that happened to be long enough to cap. It also reads none of the lines it skips.
+/// `\n` is ASCII, so the offset is always a char boundary.
+fn last_lines_offset(text: &str, n: usize) -> Option<(usize, usize)> {
+    let skipped = text.lines().count().checked_sub(n).filter(|&s| s > 0)?;
+    text.match_indices('\n')
+        .nth(skipped - 1)
+        .map(|(index, _)| (index + 1, skipped))
+}
+
+/// How one tool spells a request for its own usage.
+struct HelpSpelling {
+    short_h: bool,
+    dialect: Dialect,
+    past_boundary: bool,
+    whole_arg: &'static [&'static str],
+}
+
+fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
+    HelpSpelling {
+        short_h: !matches!(stem, "psql" | "ls" | "tree" | "grep"),
+        dialect: if stem == "dotnet" {
+            Dialect::Msbuild
+        } else {
+            Dialect::Posix
+        },
+        past_boundary: stem == "npx"
+            || matches!(
+                (stem, first.unwrap_or_default()),
+                ("cargo", "test" | "bench" | "run" | "nextest")
+                    | ("go", "test" | "run")
+                    | ("uv", "run")
+                    | ("npm" | "pnpm" | "yarn" | "bun", "run" | "exec" | "test")
+            ),
+        whole_arg: if stem == "go" { &["-help"] } else { &[] },
+    }
+}
+
+fn asks_for_usage(stem: &str, args: &[String]) -> bool {
+    let first = args.first().map(String::as_str);
+    let spelling = help_spelling(stem, first);
+    let takes_value = |kind: TokenKind, name: &str| {
+        let cargo_install_version = stem == "cargo"
+            && first == Some("install")
+            && kind == TokenKind::Long
+            && name == "version";
+        let git_message = stem == "git"
+            && match kind {
+                TokenKind::Short => matches!(name, "m" | "F"),
+                TokenKind::Long => matches!(name, "message" | "file"),
+                _ => false,
+            };
+        (cargo_install_version || git_message).then(ValueSpec::value)
+    };
+    let tokens = arg_tokenizer::tokenize_grammar(args, &takes_value, spelling.dialect);
+    if names_usage(
+        arg_tokenizer::before_dashdash(&tokens),
+        args,
+        &spelling,
+        &takes_value,
+    ) {
+        return true;
+    }
+    if !spelling.past_boundary {
+        return false;
+    }
+    let Some(boundary) = tokens
+        .iter()
+        .find(|t| t.kind == TokenKind::DashDash)
+        .map(|t| t.source_index)
+    else {
+        return false;
+    };
+    let forwarded = &args[boundary + 1..];
+    let no_values = |_: TokenKind, _: &str| None::<ValueSpec>;
+    let inner = arg_tokenizer::tokenize_grammar(forwarded, &no_values, Dialect::Posix);
+    names_usage(
+        arg_tokenizer::before_dashdash(&inner),
+        forwarded,
+        &HelpSpelling {
+            short_h: true,
+            dialect: Dialect::Posix,
+            past_boundary: false,
+            whole_arg: &[],
+        },
+        &no_values,
+    )
+}
+
+fn names_usage(
+    tokens: &[arg_tokenizer::Token<'_>],
+    args: &[String],
+    spelling: &HelpSpelling,
+    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+) -> bool {
+    tokens.iter().any(|t| {
+        let arg = args.get(t.source_index).map(String::as_str);
+        if spelling.whole_arg.iter().any(|w| arg == Some(*w)) {
+            return true;
+        }
+        match t.kind {
+            TokenKind::Long => {
+                (matches!(t.text, "help" | "version" | "?") || (spelling.short_h && t.text == "h"))
+                    && t.linked.is_none()
+                    // `--version=1.2.3` on a flag that carries a value names a version too.
+                    && (t.attached.is_none() || takes_value(t.kind, t.text).is_none())
+            }
+            TokenKind::Short => spelling.short_h && t.text == "h" && arg == Some("-h"),
+            _ => false,
+        }
+    })
+}
+
+/// True when `cmd` asks the tool for its usage. Reads the program's stem and its argv; it
+/// never runs anything.
+pub fn requests_help(cmd: &Command) -> bool {
+    let stem = std::path::Path::new(cmd.get_program())
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    asks_for_usage(stem, &args)
+}
+
+/// Same rule, for a filter that runs the child itself rather than through [`run`].
+pub fn requests_help_args(tool: &str, args: &[String]) -> bool {
+    let stem = std::path::Path::new(tool)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(tool);
+    asks_for_usage(stem, args)
+}
+
 pub fn run(
+    cmd: Command,
+    tool_name: &str,
+    args_display: &str,
+    mode: RunMode<'_>,
+    opts: RunOptions<'_>,
+) -> Result<i32> {
+    let mode = if !opts.unguarded_help && requests_help(&cmd) {
+        RunMode::Passthrough
+    } else {
+        mode
+    };
+    let result = run_inner(cmd, tool_name, args_display, mode, opts);
+    // #2375
+    stream::die_by_relayed_signal();
+    result
+}
+
+fn run_inner(
     mut cmd: Command,
     tool_name: &str,
     args_display: &str,
@@ -164,7 +597,7 @@ pub fn run(
     opts: RunOptions<'_>,
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
-    let cmd_label = format!("{} {}", tool_name, args_display);
+    let cmd_label = crate::core::shell::with_args(tool_name, args_display);
 
     match mode {
         RunMode::Filtered(filter_fn) => run_captured_filter(
@@ -188,12 +621,11 @@ pub fn run(
                 stream::run_streaming(&mut cmd, StdinMode::Null, FilterMode::Streaming(filter))
                     .with_context(|| format!("Failed to run {}", tool_name))?;
 
-            if let Some(label) = opts.tee_label {
-                if let Some(hint) =
+            if let Some(label) = opts.tee_label
+                && let Some(hint) =
                     crate::core::tee::tee_and_hint(&result.raw, label, result.exit_code)
-                {
-                    println!("{}", hint);
-                }
+            {
+                println!("{}", hint);
             }
 
             timer.track(
@@ -209,7 +641,7 @@ pub fn run(
                 stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
                     .with_context(|| format!("Failed to run {}", tool_name))?;
 
-            timer.track_passthrough(&cmd_label, &format!("rtk {} (passthrough)", cmd_label));
+            timer.track_passthrough(&cmd_label, &tracking::passthrough_label(&cmd_label));
             Ok(result.exit_code)
         }
     }
@@ -258,7 +690,7 @@ pub fn run_passthrough(tool: &str, args: &[std::ffi::OsString], verbose: u8) -> 
         eprintln!("{} passthrough: {:?}", tool, args);
     }
     let mut cmd = crate::core::utils::resolved_command(tool);
-    cmd.args(args);
+    crate::core::utils::ChildArgExt::child_args(&mut cmd, args);
     let args_str = tracking::args_display(args);
     run(
         cmd,
@@ -283,4 +715,1825 @@ pub fn run_streamed(
         RunMode::Streamed(filter),
         opts,
     )
+}
+
+// Ecosystem-agnostic err/test command runners. Used by cargo, bun, deno, and the
+// shell-string wrappers in cmds::rust::runner.
+
+const MAX_RUNNER_FAILURES: usize = CAP_WARNINGS;
+const MAX_RUNNER_LINES: usize = CAP_LIST;
+/// Rows of bun's `--coverage` table. A wide repo prints one per file, so the
+/// table is the one part of the summary that grows without bound.
+const MAX_BUN_COVERAGE_ROWS: usize = CAP_LIST;
+
+static ERROR_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![
+        // Generic errors
+        Regex::new(r"(?i)^.*error[\s:\[].*$").unwrap(),
+        Regex::new(r"(?i)^.*\berr\b.*$").unwrap(),
+        Regex::new(r"(?i)^.*warning[\s:\[].*$").unwrap(),
+        Regex::new(r"(?i)^.*\bwarn\b.*$").unwrap(),
+        Regex::new(r"(?i)^.*failed.*$").unwrap(),
+        Regex::new(r"(?i)^.*failure.*$").unwrap(),
+        Regex::new(r"(?i)^.*exception.*$").unwrap(),
+        Regex::new(r"(?i)^.*panic.*$").unwrap(),
+        // Rust specific
+        Regex::new(r"^error\[E\d+\]:.*$").unwrap(),
+        Regex::new(r"^\s*--> .*:\d+:\d+$").unwrap(),
+        // Python
+        Regex::new(r"^Traceback.*$").unwrap(),
+        Regex::new(r#"^\s*File ".*", line \d+.*$"#).unwrap(),
+        // JavaScript/TypeScript
+        Regex::new(r"^\s*at .*:\d+:\d+.*$").unwrap(),
+        // Go
+        Regex::new(r"^.*\.go:\d+:.*$").unwrap(),
+    ]
+});
+
+struct ErrorStreamFilter {
+    in_error_block: bool,
+    blank_count: usize,
+    emitted_any: bool,
+}
+
+impl ErrorStreamFilter {
+    fn new() -> Self {
+        Self {
+            in_error_block: false,
+            blank_count: 0,
+            emitted_any: false,
+        }
+    }
+}
+
+impl StreamFilter for ErrorStreamFilter {
+    fn feed_line(&mut self, line: &str) -> Option<String> {
+        let is_error = ERROR_PATTERNS.iter().any(|p| p.is_match(line));
+        if is_error {
+            self.in_error_block = true;
+            self.blank_count = 0;
+            self.emitted_any = true;
+            Some(format!("{}\n", line))
+        } else if self.in_error_block {
+            if line.trim().is_empty() {
+                self.blank_count += 1;
+                if self.blank_count >= 2 {
+                    self.in_error_block = false;
+                    None
+                } else {
+                    self.emitted_any = true;
+                    Some(format!("{}\n", line))
+                }
+            } else if line.starts_with(' ') || line.starts_with('\t') {
+                self.blank_count = 0;
+                self.emitted_any = true;
+                Some(format!("{}\n", line))
+            } else {
+                self.in_error_block = false;
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    fn flush(&mut self) -> String {
+        String::new()
+    }
+
+    fn on_exit(&mut self, exit_code: i32, raw: &str) -> Option<String> {
+        if self.emitted_any {
+            return None;
+        }
+        if exit_code == 0 {
+            Some("[ok] Command completed successfully (no errors)".to_string())
+        } else {
+            let mut msg = format!("[FAIL] Command failed (exit code: {})\n", exit_code);
+            let lines: Vec<&str> = raw.lines().collect();
+            for line in lines.iter().rev().take(10).rev() {
+                msg.push_str(&format!("  {}\n", line));
+            }
+            Some(msg)
+        }
+    }
+}
+
+/// Run a prebuilt command (no shell) and filter output to show only errors/warnings.
+/// `display` is used only for logging, tee keys, and tracking, never executed.
+///
+/// `tool` is the command the user actually ran. It keys tracking and the tee
+/// slug, so passing a real name keeps `rtk gain --history` showing invocations
+/// that exist and stops recovery files colliding across ecosystems.
+pub fn run_err_cmd(
+    cmd: Command,
+    tool: &str,
+    display: &str,
+    tee_label: &str,
+    verbose: u8,
+) -> Result<i32> {
+    if verbose > 0 {
+        eprintln!("Running: {}", display);
+    }
+    run_streamed(
+        cmd,
+        tool,
+        display,
+        Box::new(ErrorStreamFilter::new()),
+        RunOptions::with_tee(tee_label).unguarded_help(),
+    )
+}
+
+/// Render a program that could not be run through the err filter's own failure
+/// path.
+///
+/// The interposed shell used to produce this: `[FAIL] Command failed (exit
+/// code: 127)` over its `command not found` line, or 126 over `Permission
+/// denied`. Direct execution answers for the program itself, so RTK renders it
+/// instead of bailing out with an `anyhow` chain on stderr.
+pub fn run_err_unrunnable(
+    tool: &str,
+    display: &str,
+    outcome: &crate::core::shell::Unrunnable,
+    verbose: u8,
+) -> i32 {
+    report_unrunnable(tool, display, outcome, verbose, |raw, code| {
+        ErrorStreamFilter::new()
+            .on_exit(code, raw)
+            .unwrap_or_default()
+    })
+}
+
+/// [`run_err_unrunnable`] for the test runner, rendered by the test summarizer.
+pub fn run_test_unrunnable(
+    tool: &str,
+    display: &str,
+    outcome: &crate::core::shell::Unrunnable,
+    eco: TestEcosystem,
+    verbose: u8,
+) -> i32 {
+    report_unrunnable(tool, display, outcome, verbose, |raw, _| {
+        extract_test_summary(raw, eco)
+    })
+}
+
+fn report_unrunnable(
+    tool: &str,
+    display: &str,
+    outcome: &crate::core::shell::Unrunnable,
+    verbose: u8,
+    render: impl FnOnce(&str, i32) -> String,
+) -> i32 {
+    if verbose > 0 {
+        eprintln!("Running: {}", display);
+    }
+    let timer = tracking::TimedExecution::start();
+    let rendered = render(&outcome.message, outcome.code);
+    println!("{}", rendered.trim_end());
+
+    let label = format!("{} {}", tool, display);
+    timer.track(
+        &label,
+        &format!("rtk {}", label),
+        &outcome.message,
+        &rendered,
+    );
+    outcome.code
+}
+
+/// Test-output ecosystem, chosen once at the boundary. Modules that know
+/// their runner statically pass the variant directly; shell-string entry
+/// points convert once via `detect`. Matching on the enum makes substring
+/// co-firing ("cargo test" contains "go test") unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestEcosystem {
+    Cargo,
+    Pytest,
+    Jest,
+    Go,
+    Bun,
+    Deno,
+    Unknown,
+}
+
+impl TestEcosystem {
+    /// Detect from a display or shell string. First match wins; Cargo is
+    /// checked before Go because "cargo test" contains "go test".
+    pub fn detect(command: &str) -> Self {
+        if command.contains("cargo test") {
+            Self::Cargo
+        } else if command.contains("pytest") {
+            Self::Pytest
+        } else if command.contains("jest")
+            || command.contains("npm test")
+            || command.contains("yarn test")
+        {
+            Self::Jest
+        } else if command.contains("bun test") {
+            Self::Bun
+        } else if command.contains("deno test") {
+            Self::Deno
+        } else if command.contains("go test") {
+            Self::Go
+        } else {
+            Self::Unknown
+        }
+    }
+}
+
+/// Watch mode never exits, and the filtered runners buffer the whole stream
+/// until the child does, so a watched run prints nothing at all and loses the
+/// buffer on Ctrl-C. Callers send these through unfiltered instead.
+pub fn is_watch_mode(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| a == "--watch" || a.starts_with("--watch="))
+}
+
+/// Run a prebuilt test command (no shell), showing only failures.
+/// `display` is used only for logging and tracking, never executed.
+pub fn run_test_cmd(
+    cmd: Command,
+    tool: &str,
+    display: &str,
+    tee_label: &str,
+    eco: TestEcosystem,
+    verbose: u8,
+    caller_named_command: bool,
+) -> Result<i32> {
+    if verbose > 0 {
+        eprintln!("Running tests: {}", display);
+    }
+    run_filtered(
+        cmd,
+        tool,
+        display,
+        move |raw| extract_test_summary(raw, eco),
+        if caller_named_command {
+            RunOptions::with_tee(tee_label).unguarded_help()
+        } else {
+            RunOptions::with_tee(tee_label)
+        },
+    )
+}
+
+#[cfg(test)]
+fn filter_errors(output: &str) -> String {
+    let mut result = Vec::new();
+    let mut in_error_block = false;
+    let mut blank_count = 0;
+
+    for line in output.lines() {
+        let is_error_line = ERROR_PATTERNS.iter().any(|p| p.is_match(line));
+
+        if is_error_line {
+            in_error_block = true;
+            blank_count = 0;
+            result.push(line.to_string());
+        } else if in_error_block {
+            if line.trim().is_empty() {
+                blank_count += 1;
+                if blank_count >= 2 {
+                    in_error_block = false;
+                } else {
+                    result.push(line.to_string());
+                }
+            } else if line.starts_with(' ') || line.starts_with('\t') {
+                result.push(line.to_string());
+                blank_count = 0;
+            } else {
+                in_error_block = false;
+            }
+        }
+    }
+
+    result.join("\n")
+}
+
+/// Whether a block's ending vouches for it. `Vouched` means the ending itself
+/// attributes the block to a real failure (bun's `(fail)` marker).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Close {
+    Vouched,
+    Plain,
+}
+
+/// Whether the runner is currently printing its own diagnostics or relaying the
+/// test's stdout.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Trusted,
+    Untrusted,
+}
+
+/// Which lines belong to a real failure rather than to the test's own stdout.
+///
+/// Bun and deno answer the same questions (what opens a diagnostic block, what
+/// closes it and whether that ending vouches for it, and where the runner's own
+/// output begins and ends), so they share one engine
+/// and differ only in this table. As two separate state machines they drifted:
+/// a guard added on one side had to be rediscovered on the other, and deno had
+/// no proof rule at all, reporting passing suites as failed.
+struct BlockPolicy {
+    /// Opens a diagnostic block. Opening also closes any block already open.
+    opens: fn(&str) -> bool,
+    /// Ends the current block. A vouched close is the runner's own marker
+    /// claiming what came before it.
+    closes: fn(&str) -> Option<Close>,
+    /// Keeps a line inside the block. Separator rules are noise.
+    keeps: fn(&str) -> bool,
+    /// Moves in and out of the region where the runner prints its own
+    /// diagnostics. A block opened outside it needs a vouched close to count.
+    section: fn(&str) -> Option<Section>,
+}
+
+/// Buffers a diagnostic block until something decides whether the runner wrote
+/// it. Kept when it opened inside a trusted section, or when the runner's own
+/// marker vouches for it. Anything else is the test's own stdout and is dropped.
+#[derive(Default)]
+struct FailureBlocks {
+    pending: Vec<String>,
+    open: bool,
+    opened_trusted: bool,
+    trusted: bool,
+    kept: Vec<String>,
+}
+
+impl FailureBlocks {
+    fn feed(&mut self, line: &str, trimmed: &str, policy: &BlockPolicy) {
+        if let Some(section) = (policy.section)(trimmed) {
+            self.close(None);
+            self.trusted = section == Section::Trusted;
+        }
+        if let Some(close) = (policy.closes)(trimmed) {
+            self.close(Some(close));
+            return;
+        }
+        if (policy.opens)(trimmed) {
+            self.close(None);
+            self.open = true;
+            self.opened_trusted = self.trusted;
+            self.pending.push(line.to_string());
+            return;
+        }
+        if self.open && (policy.keeps)(trimmed) {
+            self.pending.push(line.to_string());
+        }
+    }
+
+    fn close(&mut self, close: Option<Close>) {
+        if !self.open {
+            self.pending.clear();
+            return;
+        }
+        if self.opened_trusted || close == Some(Close::Vouched) {
+            self.kept.append(&mut self.pending);
+        } else {
+            self.pending.clear();
+        }
+        self.open = false;
+    }
+}
+
+/// Bun writes a diagnostic before the marker it belongs to, so a block only
+/// counts once a `(fail)` marker claims it. A test logging its own `error:`,
+/// even with a stack, gets claimed by `(pass)` or by the counts instead.
+/// Module-level failures carry no marker at all, which is what the
+/// unhandled-error banner is for.
+const BUN_POLICY: BlockPolicy = BlockPolicy {
+    opens: |t| t.starts_with("error:"),
+    closes: |t| {
+        if BUN_FAILURE_MARKER.is_match(t) {
+            Some(Close::Vouched)
+        } else if t.starts_with("(pass)") || is_bun_count_line(t) || BUN_RAN_FOOTER.is_match(t) {
+            Some(Close::Plain)
+        } else {
+            None
+        }
+    },
+    // The frame carries the file and line. Without it two failing tests that
+    // share a name, or a module error that has no marker at all, cannot be
+    // located. Bun prints one frame per failure, so this costs a line each.
+    keeps: |t| !t.is_empty() && !t.chars().all(|c| c == '-'),
+    section: |t| {
+        if t == "# Unhandled error between tests" {
+            Some(Section::Trusted)
+        } else if is_bun_count_line(t) || BUN_RAN_FOOTER.is_match(t) {
+            Some(Section::Untrusted)
+        } else {
+            None
+        }
+    },
+};
+
+/// Deno's type-check diagnostics, "TS2322 `[ERROR]`: Type 'string' is not
+/// assignable to type 'number'." They are not introduced by an `error:` line and
+/// carry no ERRORS section, so nothing else in the deno policy would keep them.
+static DENO_TS_ERROR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^TS\d+ \[ERROR\]:").unwrap());
+
+/// Deno fences output it did not write between rules: "------- output -------"
+/// around a test's own stdout, "------- pre-test output -------" around what a
+/// module printed while loading. Returns whether the rule opens a fence.
+fn deno_output_fence(trimmed: &str) -> Option<bool> {
+    if !trimmed.starts_with("-----") || !trimmed.contains("output") {
+        return None;
+    }
+    Some(!trimmed.contains("output end"))
+}
+
+/// Bun's run footer, "Ran 4 tests across 1 file. [12.00ms]". Unanchored, the
+/// prefix also matches anything a test logs starting with those characters.
+static BUN_RAN_FOOTER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Ran \d+ test").unwrap());
+
+/// Bun's `--bail` abort notice, "Bailed out after 1 failure". Without it the
+/// run reads as a complete pass of however many tests ran before the abort,
+/// since bun prints no count lines when it bails.
+static BUN_BAILED_OUT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^Bailed out after \d+ failure").unwrap());
+
+/// Snapshot reporting: "snapshots: +1 added", and the "1 snapshots, 4 expect()
+/// calls" variant bun prints in place of the plain expect() line.
+static BUN_SNAPSHOT_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?:snapshots:\s|\d+ snapshots?,)").unwrap());
+
+/// Header of the `--coverage` table, "File | % Funcs | % Lines | Uncovered Line #s".
+/// The table is tracked from this fixed header rather than by counting column
+/// separators: a source frame containing `||` would read as a row otherwise.
+static BUN_COVERAGE_HEADER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^File\s*\|.*%\s*Funcs").unwrap());
+
+/// Bun's failure markers carry the test's duration: "(fail) name [1.86ms]",
+/// "✗ name [200.27ms]". Without that suffix a line a test merely logged
+/// would read as a marker, manufacturing a failure on a green run.
+static BUN_FAILURE_MARKER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?:\(fail\)|✗)\s.*\[[\d.]+(?:µ|m)?s\]$").unwrap());
+
+/// Deno's FAILURES entries are "name => file:line:col". Matching a bare
+/// " => " would also match an arrow function or an arrow inside an assertion
+/// message, closing the diagnostic that line belongs to.
+static DENO_FAILURE_ENTRY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\S.* => \S+:\d+:\d+$").unwrap());
+
+/// Deno groups every diagnostic it writes under an ERRORS section, and fences
+/// the test's own stdout between output rules. That section is the proof: deno
+/// prints no per-failure marker that could vouch for a block, so one opened
+/// anywhere else is the test talking.
+const DENO_POLICY: BlockPolicy = BlockPolicy {
+    opens: |t| t.starts_with("error:") && t != "error: Test failed",
+    closes: |t| {
+        // A frame ends a block, and so does the next entry's "name => file:line"
+        // header: consecutive leak failures carry no frames at all.
+        if t.starts_with("at ") || DENO_FAILURE_ENTRY.is_match(t) {
+            Some(Close::Plain)
+        } else {
+            None
+        }
+    },
+    keeps: |t| !t.is_empty() && t != "^" && !t.starts_with("throw "),
+    section: |t| {
+        if t == "ERRORS" {
+            Some(Section::Trusted)
+        } else if t == "FAILURES"
+            || t.starts_with("FAILED |")
+            || t.starts_with("ok |")
+            || t.contains("test result:")
+            || t.starts_with("failures:")
+            || deno_output_fence(t).is_some()
+        {
+            Some(Section::Untrusted)
+        } else {
+            None
+        }
+    },
+};
+
+fn extract_test_summary(output: &str, eco: TestEcosystem) -> String {
+    // Test runners colorize even when piped (deno does), so anchor on clean text.
+    let cleaned = crate::core::utils::strip_ansi(output);
+    let lines: Vec<&str> = cleaned.lines().collect();
+
+    let mut result = Vec::new();
+    let mut failures = Vec::new();
+    let mut failure_lines = Vec::new();
+    let mut in_failure = false;
+    let mut in_failures_list = false;
+    let mut in_test_output = false;
+    let mut in_ts_error = false;
+    let mut in_bun_coverage = false;
+    let mut bun_coverage: Vec<String> = Vec::new();
+    let mut blocks = FailureBlocks::default();
+
+    for line in lines.iter() {
+        match eco {
+            TestEcosystem::Cargo => {
+                if line.contains("test result:") {
+                    result.push(line.to_string());
+                }
+                if line.contains("FAILED") && !line.contains("test result") {
+                    failures.push(line.to_string());
+                }
+                if line.starts_with("failures:") {
+                    in_failure = true;
+                }
+                if in_failure && line.starts_with("    ") {
+                    failure_lines.push(line.to_string());
+                }
+            }
+
+            TestEcosystem::Pytest => {
+                if line.contains(" passed") || line.contains(" failed") || line.contains(" error") {
+                    result.push(line.to_string());
+                }
+                if line.contains("FAILED") {
+                    failures.push(line.to_string());
+                }
+            }
+
+            TestEcosystem::Jest => {
+                if line.contains("Tests:") || line.contains("Test Suites:") {
+                    result.push(line.to_string());
+                }
+                if line.contains("✕") || line.contains("FAIL") {
+                    failures.push(line.to_string());
+                }
+            }
+
+            TestEcosystem::Go => {
+                if line.starts_with("ok") || line.starts_with("FAIL") || line.starts_with("---") {
+                    result.push(line.to_string());
+                }
+                if line.contains("FAIL") {
+                    failures.push(line.to_string());
+                }
+            }
+
+            TestEcosystem::Bun => {
+                let trimmed = line.trim_start();
+                // The `--coverage` table was asked for by name, so it survives
+                // up to the row cap. It runs from its header to the next blank
+                // line, and is buffered whole because which rows to keep is a
+                // decision about the table, not about one line.
+                if BUN_COVERAGE_HEADER.is_match(trimmed) {
+                    in_bun_coverage = true;
+                }
+                if in_bun_coverage {
+                    if trimmed.is_empty() {
+                        in_bun_coverage = false;
+                        push_coverage_table(&mut result, &mut bun_coverage);
+                    } else {
+                        bun_coverage.push(line.to_string());
+                        continue;
+                    }
+                }
+                // Anchored count lines (" 6 pass", " 4 fail") and the "Ran N tests"
+                // footer. A loose `contains(" fail")` also matches bun's echoed
+                // source context when a test NAME contains "fails".
+                if is_bun_count_line(trimmed)
+                    || BUN_RAN_FOOTER.is_match(trimmed)
+                    || BUN_BAILED_OUT.is_match(trimmed)
+                    || BUN_SNAPSHOT_LINE.is_match(trimmed)
+                {
+                    result.push(line.to_string());
+                }
+                if BUN_FAILURE_MARKER.is_match(trimmed) {
+                    failures.push(line.to_string());
+                }
+                blocks.feed(line, trimmed, &BUN_POLICY);
+            }
+
+            TestEcosystem::Deno => {
+                // Full trim: ANSI background padding leaves " FAILURES " with
+                // trailing whitespace after stripping.
+                let trimmed = line.trim();
+                // Current deno (2.x): "FAILED | 3 passed | 2 failed (17ms)" footer,
+                // " FAILURES " section listing "name => file:line:col".
+                // Legacy deno mimicked cargo ("test result:", "failures:").
+                // Deno fences a test's own stdout between output rules. A
+                // test is free to log "FAILURES" in there, so nothing inside
+                // the fence is read as deno's own bookkeeping.
+                let fence = deno_output_fence(trimmed);
+                if let Some(opening) = fence {
+                    in_test_output = opening;
+                }
+                // Inside the fence the test is talking, so neither the failures
+                // list nor the block engine reads it as deno's own output. The
+                // rules themselves are fed, so they close anything still open.
+                if fence.is_some() || !in_test_output {
+                    // A type error aborts the run before any test executes, so
+                    // the diagnostic and the frame under it are the only things
+                    // naming what broke and where. The echoed source line and
+                    // its caret are dropped like bun's.
+                    if DENO_TS_ERROR.is_match(trimmed) {
+                        failures.push(line.to_string());
+                        in_ts_error = true;
+                        continue;
+                    }
+                    if in_ts_error {
+                        if trimmed.starts_with("at ") {
+                            failures.push(line.to_string());
+                            in_ts_error = false;
+                            continue;
+                        }
+                        if trimmed.is_empty() {
+                            in_ts_error = false;
+                        }
+                        continue;
+                    }
+                    if trimmed.starts_with("FAILED |")
+                        || trimmed.starts_with("ok |")
+                        || line.contains("test result:")
+                    {
+                        result.push(line.to_string());
+                        in_failures_list = false;
+                    } else if trimmed == "FAILURES" || line.starts_with("failures:") {
+                        in_failures_list = true;
+                    } else if in_failures_list && !trimmed.is_empty() {
+                        failures.push(line.to_string());
+                    }
+                    blocks.feed(line, trimmed, &DENO_POLICY);
+                }
+            }
+
+            TestEcosystem::Unknown => {}
+        }
+    }
+
+    // A table that ran to EOF never saw its closing blank line. Bun always
+    // prints the counts after it, so this only catches a truncated capture.
+    push_coverage_table(&mut result, &mut bun_coverage);
+
+    blocks.close(None);
+    failure_lines.append(&mut blocks.kept);
+
+    let mut output = String::new();
+
+    // failure_lines can carry the only diagnostic there is: bun prints no
+    // "(fail)" marker when a test file fails to load, and the count lines it
+    // still prints keep the raw-tail fallback below from firing.
+    if !failures.is_empty() || !failure_lines.is_empty() {
+        if failures.is_empty() {
+            output.push_str("[FAIL] ERRORS:\n");
+        } else {
+            output.push_str("[FAIL] FAILURES:\n");
+        }
+        for f in failures.iter().take(MAX_RUNNER_FAILURES) {
+            output.push_str(&format!("  {}\n", f.trim()));
+        }
+        if failures.len() > MAX_RUNNER_FAILURES {
+            output.push_str(&format!(
+                "  ... +{} more failures\n",
+                failures.len() - MAX_RUNNER_FAILURES
+            ));
+        }
+        for f in failure_lines.iter().take(MAX_RUNNER_LINES) {
+            output.push_str(&format!("  {}\n", f.trim()));
+        }
+        if failure_lines.len() > MAX_RUNNER_LINES {
+            output.push_str(&format!(
+                "  ... +{} more\n",
+                failure_lines.len() - MAX_RUNNER_LINES
+            ));
+        }
+        output.push('\n');
+    }
+
+    if !result.is_empty() {
+        output.push_str("SUMMARY:\n");
+        for r in &result {
+            output.push_str(&format!("  {}\n", r));
+        }
+    } else {
+        output.push_str("OUTPUT (last 5 lines):\n");
+        let start = lines.len().saturating_sub(5);
+        for line in &lines[start..] {
+            if !line.trim().is_empty() {
+                output.push_str(&format!("  {}\n", line));
+            }
+        }
+    }
+
+    output
+}
+
+/// A line of bun's coverage table that is not a per-file row: the header, the
+/// rules around it, and the `All files` aggregate. These carry the repo-wide
+/// numbers and the columns, so they are never what the cap drops.
+fn is_coverage_structure(line: &str) -> bool {
+    let trimmed = line.trim();
+    BUN_COVERAGE_HEADER.is_match(trimmed)
+        || trimmed.starts_with("All files")
+        || (!trimmed.is_empty() && trimmed.chars().all(|c| c == '-' || c == '|'))
+}
+
+/// True when a coverage row reports less than full coverage. The two numeric
+/// columns are `% Funcs` and `% Lines`; a row whose numbers will not parse is
+/// treated as a gap, since dropping it is the one outcome that loses a finding.
+fn coverage_row_has_gap(line: &str) -> bool {
+    let mut cols = line.split('|').skip(1);
+    let mut full = 0;
+    for _ in 0..2 {
+        match cols.next().map(|c| c.trim().parse::<f64>()) {
+            Some(Ok(pct)) if pct >= 100.0 => full += 1,
+            Some(Ok(_)) => return true,
+            _ => return true,
+        }
+    }
+    full != 2
+}
+
+/// Emit the buffered coverage table under the row cap and clear the buffer.
+///
+/// Bun sorts the table by path, so a plain head of it keeps whichever files
+/// come first alphabetically. Nobody passes `--coverage` to read the files that
+/// are already covered, so past the cap the rows that keep their place are the
+/// ones reporting a gap, in bun's own order. What is dropped is announced and
+/// written out, so it stays reachable instead of being lost.
+fn push_coverage_table(result: &mut Vec<String>, table: &mut Vec<String>) {
+    if table.is_empty() {
+        return;
+    }
+    if table.len() <= MAX_BUN_COVERAGE_ROWS {
+        result.append(table);
+        return;
+    }
+
+    // Three passes in priority order: the table's own structure, then the rows
+    // reporting a gap, then whatever still fits, each in bun's order.
+    let mut keep = vec![false; table.len()];
+    let mut budget = MAX_BUN_COVERAGE_ROWS;
+    for pass in 0..3 {
+        for (i, line) in table.iter().enumerate() {
+            if budget == 0 {
+                break;
+            }
+            if keep[i] {
+                continue;
+            }
+            let wanted = match pass {
+                0 => is_coverage_structure(line),
+                1 => coverage_row_has_gap(line),
+                _ => true,
+            };
+            if wanted {
+                keep[i] = true;
+                budget -= 1;
+            }
+        }
+    }
+
+    // Draining leaves the buffer empty, so a second call cannot repeat a table.
+    let mut hidden: Vec<String> = Vec::new();
+    for (i, line) in table.drain(..).enumerate() {
+        if keep[i] {
+            result.push(line);
+        } else {
+            hidden.push(line);
+        }
+    }
+
+    result.push(format!("... +{} more files", hidden.len()));
+    // Offset 1: what is written is exactly what was dropped, not the whole
+    // table, so "the remaining lines" is the literal truth in both modes.
+    if let Some(hint) = crate::core::tee::force_tee_tail_hint(&hidden.join("\n"), "bun-coverage", 1)
+    {
+        result.push(hint);
+    }
+}
+
+/// True for bun's summary count lines: " 6 pass", " 4 fail", " 2 skip", " 1 todo",
+/// " 1 error".
+/// Anchored on the exact two-token shape so echoed source lines never match.
+fn is_bun_count_line(trimmed: &str) -> bool {
+    let mut parts = trimmed.split_whitespace();
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(count), Some("pass" | "fail" | "skip" | "todo" | "error"), None)
+            if count.chars().all(|c| c.is_ascii_digit())
+    )
+}
+
+#[cfg(test)]
+mod guard_stdout_tests {
+    use super::*;
+
+    const SUMMARY: &str = "Ruff: No issues found";
+
+    #[test]
+    fn an_injected_clean_output_shows_the_summary() {
+        assert_eq!(guard_stdout("[]\n", SUMMARY, &["[]"]), SUMMARY);
+        assert_eq!(guard_stdout("[]\r\n", SUMMARY, &["[]"]), SUMMARY);
+    }
+
+    #[test]
+    fn any_other_short_output_still_goes_through_never_worse() {
+        assert_eq!(guard_stdout("{}\n", SUMMARY, &["[]"]), "{}\n");
+        assert_eq!(guard_stdout("[ ]\n", SUMMARY, &["[]"]), "[ ]\n");
+        assert_eq!(guard_stdout("[]\n", SUMMARY, &[]), "[]\n");
+    }
+}
+
+#[cfg(test)]
+mod forwarded_stderr_tests {
+    use super::*;
+
+    const HINT: &str = "[full output: ~/.local/share/rtk/tee/1_go_test-stderr.log]";
+
+    fn forward(stderr: &str, exit_code: i32, shown: &str) -> String {
+        forwarded_stderr(stderr, exit_code, shown, |_| Some(HINT.to_string())).into_owned()
+    }
+
+    fn chatter(lines: usize) -> String {
+        (0..lines)
+            .map(|i| format!("go: downloading example.com/module-{i} v1.2.3\n"))
+            .collect()
+    }
+
+    /// Long enough to clear the recovery store's floor, so a test about the cap is about the
+    /// cap rather than about that threshold.
+    fn over_the_floor(lines: usize) -> String {
+        let raw = chatter(lines);
+        assert!(raw.len() >= crate::core::tee::MIN_TEE_SIZE, "{lines} lines");
+        raw
+    }
+
+    #[test]
+    fn a_successful_run_with_output_keeps_the_end_of_stderr() {
+        // The signal in a chatty stderr sits after the chatter: resolution and downloads come
+        // first, and what the tool has to say comes last.
+        let mut raw = over_the_floor(150);
+        raw.push_str("go: warning: \"./...\" matched no packages\n");
+        raw.push_str("go: WARNING: module example.com/legacy is deprecated\n");
+
+        let out = forward(&raw, 0, "ok  example.com/pkg  0.012s");
+        assert!(out.contains("matched no packages"), "{out}");
+        assert!(out.contains("is deprecated"), "{out}");
+        assert!(
+            out.starts_with("... (+142 earlier stderr lines not shown)\n"),
+            "the elision note comes before what it stands for: {out}"
+        );
+        assert!(
+            out.contains(HINT),
+            "the held-back lines must stay reachable: {out}"
+        );
+        assert_eq!(
+            out.lines().count(),
+            MAX_FORWARDED_STDERR_LINES + 2,
+            "note, kept lines, hint: {out}"
+        );
+        assert!(out.len() < raw.len() / 2, "the cap must actually compress");
+    }
+
+    #[test]
+    fn a_failing_run_forwards_stderr_whole() {
+        let raw = over_the_floor(150);
+        assert_eq!(forward(&raw, 1, "some stdout"), raw);
+    }
+
+    #[test]
+    fn an_empty_filtered_stdout_forwards_stderr_whole() {
+        // golangci-lint's config errors land here: stdout is empty, so stderr IS the report.
+        let raw = over_the_floor(150);
+        assert_eq!(forward(&raw, 0, ""), raw);
+        assert_eq!(forward(&raw, 0, "   \n"), raw);
+    }
+
+    #[test]
+    fn a_short_stderr_is_forwarded_whole() {
+        let raw = chatter(MAX_FORWARDED_STDERR_LINES);
+        assert_eq!(forward(&raw, 0, "stdout"), raw);
+        let one = "one warning\n";
+        assert_eq!(forward(one, 0, "stdout"), one);
+        assert_eq!(forward("", 0, "stdout"), "");
+    }
+
+    /// Under the recovery store's floor nothing is stored and nothing is capped, however many
+    /// lines it runs to.
+    #[test]
+    fn a_stderr_under_the_recovery_floor_is_forwarded_whole() {
+        let raw: String = (0..40).map(|i| format!("w{i}\n")).collect();
+        assert!(raw.len() < crate::core::tee::MIN_TEE_SIZE);
+        let mut asked = false;
+        let out = forwarded_stderr(&raw, 0, "stdout", |_| {
+            asked = true;
+            Some(HINT.to_string())
+        });
+        assert_eq!(out, raw);
+        assert!(!asked, "nothing may be written to the store for it");
+    }
+
+    /// A note and a hint cost bytes of their own. On a stderr just over the line cap they cost
+    /// more than the lines they replace, and rtk would emit more than the command it replaces.
+    #[test]
+    fn a_cap_that_would_not_shrink_the_output_is_not_applied() {
+        for lines in (MAX_FORWARDED_STDERR_LINES + 1)..=30 {
+            let raw: String = (0..lines).map(|i| format!("w{i}\n")).collect();
+            let out = forward(&raw, 0, "stdout");
+            assert!(
+                out.len() <= raw.len(),
+                "{lines} short lines: rtk emitted {} bytes for {} of stderr",
+                out.len(),
+                raw.len()
+            );
+        }
+        // And it still caps once the lines are worth removing.
+        let raw = over_the_floor(40);
+        assert!(forward(&raw, 0, "stdout").len() < raw.len());
+    }
+
+    /// No recovery store means no way to read what the cap held back, and a count of
+    /// unreachable lines is worse than the lines.
+    #[test]
+    fn without_a_recovery_hint_stderr_is_forwarded_whole() {
+        let raw = over_the_floor(150);
+        assert_eq!(
+            forwarded_stderr(&raw, 0, "stdout", |_| None).into_owned(),
+            raw
+        );
+    }
+
+    #[test]
+    fn the_note_is_singular_for_one_held_back_line() {
+        let mut raw = chatter(MAX_FORWARDED_STDERR_LINES + 1);
+        raw.push_str(&"go: a long trailing warning that makes the cap worth applying\n".repeat(4));
+        let out = forward(&raw, 0, "stdout");
+        assert!(
+            out.contains("... (+5 earlier stderr lines not shown)"),
+            "{out}"
+        );
+
+        let raw = chatter(MAX_FORWARDED_STDERR_LINES).replace("module-0 v1.2.3", &"x".repeat(400))
+            + "go: one more\n";
+        let out = forward(&raw, 0, "stdout");
+        assert!(
+            out.contains("... (+1 earlier stderr line not shown)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn capping_does_not_rewrite_crlf_line_endings() {
+        // `str::lines()` drops the `\r` and nothing puts it back, so a re-joined cap would
+        // change line endings for exactly the stderr that was long enough to cap.
+        let raw: String = (0..60)
+            .map(|i| format!("line {i} with enough text to make capping worthwhile\r\n"))
+            .collect();
+        let out = forward(&raw, 0, "stdout");
+        assert_eq!(
+            out.matches('\r').count(),
+            MAX_FORWARDED_STDERR_LINES,
+            "every forwarded line must keep its CRLF: {out:?}"
+        );
+    }
+
+    #[test]
+    fn last_lines_offset_slices_on_a_line_boundary() {
+        assert_eq!(last_lines_offset("a\nb\nc\n", 1), Some((4, 2)));
+        assert_eq!(&"a\nb\nc\n"[4..], "c\n");
+        // An unterminated last line is still a line.
+        assert_eq!(last_lines_offset("a\nb\nc", 1), Some((4, 2)));
+        assert_eq!(&"a\nb\nc"[4..], "c");
+        // Nothing to skip.
+        assert_eq!(last_lines_offset("a\nb\n", 2), None);
+        assert_eq!(last_lines_offset("a\nb\n", 5), None);
+        assert_eq!(last_lines_offset("", 1), None);
+    }
+
+    /// `\n` is ASCII, so the offset lands on a char boundary whatever the bytes around it.
+    #[test]
+    fn a_non_ascii_stderr_is_sliced_without_panicking() {
+        let raw: String = (0..60)
+            .map(|i| format!("警告 {i}: «déprécié» 🎌 with enough text to be worth capping\n"))
+            .collect();
+        let out = forward(&raw, 0, "stdout");
+        assert!(out.contains("警告 59"), "{out}");
+        assert!(out.len() < raw.len());
+    }
+}
+
+#[cfg(test)]
+mod requests_help_tests {
+    use super::*;
+
+    /// The rule itself, without a `Command`: `.semgrep.yml` forbids
+    /// `Command::new(<variable>)`, and the logic is the pure part anyway.
+    fn asks(tool: &str, args: &[&str]) -> bool {
+        requests_help_args(
+            tool,
+            &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn long_spellings_are_a_usage_request() {
+        assert!(asks("cargo", &["build", "--help"]));
+        assert!(asks("cargo", &["--version"]));
+        assert!(!asks("cargo", &["build", "--release"]));
+        assert!(!asks("cargo", &[]));
+    }
+
+    #[test]
+    fn short_h_is_a_request_except_where_the_tool_defines_it() {
+        assert!(asks("cargo", &["build", "-h"]));
+        assert!(asks("go", &["vet", "-h"]));
+        for tool in ["ls", "tree", "grep", "psql"] {
+            assert!(!asks(tool, &["-h"]), "{tool} -h is its own flag");
+        }
+        assert!(
+            asks("ls", &["--help"]),
+            "the long form is still help everywhere"
+        );
+    }
+
+    /// The adapter, once, with literal programs: `requests_help` must read the stem off
+    /// the program's path and the args off the `Command`.
+    #[test]
+    fn the_command_form_reads_the_program_stem_and_args() {
+        let mut cargo = Command::new("/usr/bin/cargo");
+        cargo.arg("-h");
+        assert!(requests_help(&cargo));
+
+        let mut ls = Command::new("/bin/ls");
+        ls.arg("-h");
+        assert!(!requests_help(&ls), "-h belongs to ls");
+
+        let mut ls_long = Command::new("/bin/ls");
+        ls_long.arg("--help");
+        assert!(requests_help(&ls_long));
+    }
+
+    #[test]
+    fn past_the_boundary_it_is_an_operand() {
+        assert!(!asks("grep", &["--", "--help", "f.txt"]));
+        assert!(asks("grep", &["--help", "--", "f.txt"]));
+    }
+
+    #[test]
+    fn rtks_own_package_runner_prefix_is_not_the_boundary() {
+        assert!(asks("pnpm", &["exec", "--", "vitest", "--help"]));
+        assert!(asks("npx", &["--", "tsc", "--help"]));
+        assert!(asks("npx", &["--no-install", "--", "tsc", "-h"]));
+        assert!(!asks("pnpm", &["exec", "--", "vitest", "run"]));
+    }
+
+    /// Every tool RTK wraps, crossed with every position a meta token can take. The
+    /// property is the boundary, not a table of answers: before `--` the token is a
+    /// request, past it the tool is being asked to match on it.
+    #[test]
+    fn fuzz_the_boundary_decides_and_position_does_not() {
+        const TOOLS: &[&str] = &[
+            "cargo", "git", "go", "npm", "pnpm", "docker", "kubectl", "gh", "mvn", "tsc", "pip",
+            "uv", "dotnet", "rg", "psql", "ls", "tree", "grep", "find", "wc",
+        ];
+        const BASES: &[&[&str]] = &[
+            &[],
+            &["build"],
+            &["-n", "1"],
+            &["log", "--oneline", "-5"],
+            &["a", "b", "c", "d"],
+        ];
+        let mut checked = 0usize;
+        for tool in TOOLS {
+            let short_is_help = help_spelling(tool, None).short_h;
+            for meta in ["--help", "--version", "-h"] {
+                let expected = meta != "-h" || short_is_help;
+                for base in BASES {
+                    for at in 0..=base.len() {
+                        let mut argv: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+                        argv.insert(at, meta.to_string());
+                        checked += 1;
+                        assert_eq!(requests_help_args(tool, &argv), expected, "{tool} {argv:?}");
+
+                        // The same tokens past the boundary are operands, never a request.
+                        let mut guarded = vec!["--".to_string()];
+                        guarded.extend(argv.iter().cloned());
+                        assert!(
+                            !requests_help_args(tool, &guarded),
+                            "{tool} {guarded:?} is past the boundary"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(checked > 500, "fuzz did not cover enough, got {checked}");
+    }
+
+    #[test]
+    fn a_forwarded_boundary_is_another_programs_argv() {
+        // `cargo test -- --help` is libtest's usage; an integration case for it would
+        // rebuild this crate's test binaries, so it is pinned here.
+        assert!(asks("cargo", &["test", "--", "--help"]));
+        assert!(asks("cargo", &["test", "--", "-h"]));
+        assert!(asks("uv", &["run", "--", "pytest", "--help"]));
+        assert!(asks("go", &["test", "--", "-h"]));
+        assert!(asks("npx", &["--no-install", "--", "tsc", "--help"]));
+
+        // cargo build does not forward, so there the boundary still ends the scan.
+        assert!(!asks("cargo", &["build", "--", "--help"]));
+        assert!(!asks("grep", &["--", "--help", "f.txt"]));
+        assert!(!asks("git", &["log", "--", "--help"]));
+    }
+
+    /// A flag that carries a value is naming something, not asking for usage.
+    #[test]
+    fn a_flags_value_names_something_a_value_on_help_still_asks() {
+        assert!(!asks(
+            "cargo",
+            &["install", "ripgrep", "--version", "1.2.3"]
+        ));
+        assert!(!asks("cargo", &["install", "ripgrep", "--version=1.2.3"]));
+        assert!(
+            asks("cargo", &["install", "--version"]),
+            "alone it still asks"
+        );
+        assert!(asks("cargo", &["build", "--help=never"]));
+        assert!(asks("prettier", &["--help=x"]));
+        assert!(asks("go", &["build", "--help=x"]));
+    }
+
+    /// Shapes that have made argument scanners panic: nothing, a bare boundary, repeated
+    /// boundaries, a lone dash, empty strings and non-UTF8.
+    #[test]
+    fn fuzz_odd_argv_never_panics() {
+        const ODD: &[&[&str]] = &[
+            &[],
+            &["--"],
+            &["--", "--"],
+            &["-"],
+            &[""],
+            &["", "--help"],
+            &["--help="],
+            &["-hh"],
+            &["--HELP"],
+            &["\u{1f600}", "--help"],
+        ];
+        for tool in ["cargo", "ls", "grep", ""] {
+            for argv in ODD {
+                let owned: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
+                let _ = requests_help_args(tool, &owned);
+            }
+        }
+        assert!(!requests_help_args("cargo", &["-hh".to_string()]));
+        // Case matters; tools spell it lowercase.
+        assert!(!requests_help_args("cargo", &["--HELP".to_string()]));
+    }
+
+    /// The regression this rule exists for: a single-dash long name and a `-D` property
+    /// both carry an `h`, and reading either as a request runs the command unfiltered.
+    #[test]
+    fn a_go_value_that_starts_with_a_slash_is_not_a_switch() {
+        assert!(!asks("go", &["test", "-run", "/version"]));
+        assert!(!asks("go", &["test", "-run", "/help", "./..."]));
+        assert!(!asks("go", &["build", "-o", "/tmp/help"]));
+        assert!(asks("go", &["vet", "-help"]));
+        assert!(asks("go", &["test", "-h"]));
+        assert!(asks("dotnet", &["build", "/?"]));
+    }
+
+    #[test]
+    fn deno_hands_the_forwarded_region_to_the_test_scripts() {
+        assert!(!asks("deno", &["test", "--", "--help"]));
+        assert!(!asks("deno", &["run", "x.ts", "--", "--help"]));
+        assert!(asks("deno", &["test", "--help"]));
+        assert!(asks("deno", &["--version"]));
+    }
+
+    #[test]
+    fn a_letter_inside_another_flag_is_not_a_request() {
+        assert!(!asks("find", &["src", "-maxdepth", "2", "-name", "mod.rs"]));
+        assert!(!asks("find", &["src", "-ipath", "x"]));
+        assert!(!asks("mvn", &["-Dhttp.proxyHost=proxy", "test"]));
+        assert!(!asks("gradlew", &["-Dhttp.x=1", "tasks"]));
+        assert!(!asks("cargo", &["build", "--features", "graph"]));
+        // Still found when it is the argument.
+        assert!(asks("find", &["-h"]));
+        assert!(asks("cargo", &["build", "-h"]));
+    }
+
+    /// git's message and file flags carry a value: `git commit -m "--help"` is a message.
+    /// The git handler passes the arguments after the subcommand, as these do, so the rule
+    /// reads `-m` and `-F` this way on every subcommand.
+    #[test]
+    fn a_git_message_is_not_a_request() {
+        assert!(!asks("git", &["-m", "--help"]));
+        assert!(!asks("git", &["-am", "--help"]));
+        assert!(!asks("git", &["-F", "--help"]));
+        assert!(!asks("git", &["--message", "--help"]));
+        assert!(!asks("git", &["--file", "--version"]));
+        assert!(asks("git", &["--help"]));
+        assert!(asks("git", &["-m", "x", "--help"]));
+    }
+
+    #[test]
+    fn a_cluster_is_not_the_flag() {
+        assert!(!asks("ls", &["-lh"]), "but -h is ls's own");
+        assert!(
+            !asks("cargo", &["-qh"]),
+            "inside a cluster the h is not the flag"
+        );
+        assert!(asks("git", &["log", "--help"]));
+        assert!(!asks("git", &["log", "-5"]));
+    }
+}
+
+#[cfg(test)]
+mod err_test_runner_tests {
+    use super::*;
+
+    #[test]
+    fn test_filter_errors() {
+        let output = "info: compiling\nerror: something failed\n  at line 10\ninfo: done";
+        let filtered = filter_errors(output);
+        assert!(filtered.contains("error"));
+        assert!(!filtered.contains("info"));
+    }
+
+    #[test]
+    fn test_extract_bun_test_failures() {
+        let raw = "bun test v1.1.0\nsrc/math.test.ts:\n✗ adds numbers [1ms]\n 3 pass\n 1 fail\nRan 4 tests across 1 file.";
+        let out = extract_test_summary(raw, TestEcosystem::Bun);
+        assert!(out.contains("[FAIL]"), "expected failure block, got: {out}");
+        assert!(out.contains("adds numbers"));
+        assert!(out.contains("1 fail"));
+    }
+
+    #[test]
+    fn test_extract_deno_test_failures() {
+        let raw = "running 2 tests\ntest add ... ok\ntest sub ... FAILED\nfailures:\n    sub\ntest result: FAILED. 1 passed; 1 failed; 0 ignored";
+        let out = extract_test_summary(raw, TestEcosystem::Deno);
+        assert!(out.contains("[FAIL]"), "expected failure block, got: {out}");
+        assert!(out.contains("test result:"));
+    }
+
+    fn count_tokens(s: &str) -> usize {
+        s.split_whitespace().count()
+    }
+
+    #[test]
+    fn test_bun_module_load_error_survives_with_no_fail_marker() {
+        // Bun prints no "(fail)" line when a test file cannot load, so the
+        // diagnostic is the only thing that says why rtk is exiting non-zero.
+        let raw = include_str!("../../tests/fixtures/bun_test_load_error_raw.txt");
+        let out = extract_test_summary(raw, TestEcosystem::Bun);
+        assert!(out.contains("[FAIL]"), "{out}");
+        assert!(out.contains("Cannot find module"), "{out}");
+        assert!(out.contains("0 pass"), "{out}");
+        assert!(out.contains("1 fail"), "{out}");
+    }
+
+    #[test]
+    fn test_is_watch_mode_detects_the_forms_that_never_exit() {
+        let watched: Vec<String> = ["--watch"].iter().map(|s| s.to_string()).collect();
+        assert!(is_watch_mode(&watched));
+
+        let valued: Vec<String> = ["--watch=src"].iter().map(|s| s.to_string()).collect();
+        assert!(is_watch_mode(&valued));
+
+        // A path or flag that merely starts with the same letters is not it.
+        let plain: Vec<String> = ["--watchdog", "./watch", "-w"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(!is_watch_mode(&plain));
+
+        assert!(!is_watch_mode(&[]));
+    }
+
+    #[test]
+    fn test_deno_output_fence_matches_every_variant() {
+        assert_eq!(deno_output_fence("------- output -------"), Some(true));
+        assert_eq!(deno_output_fence("----- output end -----"), Some(false));
+        assert_eq!(
+            deno_output_fence("------- post-test output -------"),
+            Some(true)
+        );
+        assert_eq!(
+            deno_output_fence("----- post-test output end -----"),
+            Some(false)
+        );
+        assert_eq!(
+            deno_output_fence("------- pre-test output -------"),
+            Some(true)
+        );
+        assert_eq!(deno_output_fence("error: nope"), None);
+        assert_eq!(deno_output_fence("-------"), None);
+    }
+
+    /// One green run per runtime whose tests log the vocabulary the runner uses
+    /// for failures: bun's cross and an "error:" line with a stack, deno's
+    /// FAILURES and ERRORS headers inside its output fences. None of it is the
+    /// runner speaking, so none of it may reach the summary.
+    /// Exact output for each consolidated capture. The targeted assertions
+    /// above say why each element matters; this catches anything else moving.
+    #[test]
+    fn test_golden_output_for_each_runtime() {
+        let cases: [(TestEcosystem, &str, &str); 4] = [
+            (
+                TestEcosystem::Bun,
+                include_str!("../../tests/fixtures/bun_test_green_raw.txt"),
+                "SUMMARY:\n   3 pass\n   0 fail\n  Ran 3 tests across 1 file. [5.00ms]\n",
+            ),
+            (
+                TestEcosystem::Bun,
+                include_str!("../../tests/fixtures/bun_test_failures_raw.txt"),
+                concat!(
+                    "[FAIL] FAILURES:\n",
+                    "  \u{2717} t2 fails [0.13ms]\n",
+                    "  \u{2717} t4 fails too [0.03ms]\n",
+                    "  \u{2717} t5 throws [0.02ms]\n",
+                    "  \u{2717} t6 times out [150.10ms]\n",
+                    "  error: expect(received).toBe(expected)\n",
+                    "  Expected: 3\n",
+                    "  Received: 2\n",
+                    "  at <anonymous> (/home/user/project/fails.test.ts:3:40)\n",
+                    "  error: expect(received).toBe(expected)\n",
+                    "  Expected: 4\n",
+                    "  Received: 3\n",
+                    "  at <anonymous> (/home/user/project/fails.test.ts:8:55)\n",
+                    "  error: boom: connection refused\n",
+                    "  at <anonymous> (/home/user/project/fails.test.ts:9:69)\n",
+                    "  error: Test \"t6 times out\" timed out after 150ms\n",
+                    "\n",
+                    "SUMMARY:\n",
+                    "   2 pass\n",
+                    "   1 skip\n",
+                    "   1 todo\n",
+                    "   4 fail\n",
+                    "  Ran 8 tests across 1 file. [157.00ms]\n",
+                ),
+            ),
+            (
+                TestEcosystem::Deno,
+                include_str!("../../tests/fixtures/deno_test_green_raw.txt"),
+                "SUMMARY:\n  ok | 2 passed | 0 failed (1ms)\n",
+            ),
+            (
+                TestEcosystem::Deno,
+                include_str!("../../tests/fixtures/deno_test_failures_raw.txt"),
+                concat!(
+                    "[FAIL] FAILURES:\n",
+                    "  plain assertion => ./fails_test.ts:2:6\n",
+                    "  arrow in message => ./fails_test.ts:3:6\n",
+                    "  error: AssertionError: Values are not equal.\n",
+                    "  [Diff] Actual / Expected\n",
+                    "  -   1\n",
+                    "  +   2\n",
+                    "  error: AssertionError: Values are not equal: handler (a) => b must match\n",
+                    "  [Diff] Actual / Expected\n",
+                    "  -   x\n",
+                    "  +   y\n",
+                    "\n",
+                    "SUMMARY:\n",
+                    "  FAILED | 3 passed | 2 failed (15ms)\n",
+                ),
+            ),
+        ];
+        for (eco, raw, expected) in cases {
+            assert_eq!(extract_test_summary(raw, eco), expected, "{eco:?}");
+        }
+    }
+
+    #[test]
+    fn test_a_green_run_is_never_reported_red() {
+        for (eco, raw, ok_marker) in [
+            (
+                TestEcosystem::Bun,
+                include_str!("../../tests/fixtures/bun_test_green_raw.txt"),
+                "0 fail",
+            ),
+            (
+                TestEcosystem::Deno,
+                include_str!("../../tests/fixtures/deno_test_green_raw.txt"),
+                "0 failed",
+            ),
+        ] {
+            let out = extract_test_summary(raw, eco);
+            assert!(!out.contains("[FAIL]"), "{eco:?}: {out}");
+            assert!(out.contains(ok_marker), "{eco:?}: {out}");
+            // Nothing a test logged may be quoted back as a diagnostic.
+            for logged in ["optional dep", "legacy fixture header", "only a log line"] {
+                assert!(!out.contains(logged), "{eco:?} leaked {logged}: {out}");
+            }
+        }
+    }
+
+    /// Lines of the coverage table in a raw bun run: from the header to the
+    /// blank line that closes it.
+    fn coverage_table_lines(raw: &str) -> usize {
+        raw.lines()
+            .skip_while(|l| !BUN_COVERAGE_HEADER.is_match(l.trim()))
+            .take_while(|l| !l.trim().is_empty())
+            .count()
+    }
+
+    /// Table lines in a filtered summary: the rows carry the column rule, and
+    /// the overflow notice and the counts never do.
+    fn shown_table_lines(out: &str) -> usize {
+        out.lines().filter(|l| l.contains('|')).count()
+    }
+
+    /// The coverage table of a raw bun run, header to closing rule.
+    fn coverage_table_of(raw: &str) -> Vec<&str> {
+        raw.lines()
+            .skip_while(|l| !BUN_COVERAGE_HEADER.is_match(l.trim()))
+            .take_while(|l| !l.trim().is_empty())
+            .collect()
+    }
+
+    /// The table lines of a filtered summary, with the two-space indent the
+    /// summary adds stripped back off, ready to compare with bun's own.
+    fn shown_table_of(out: &str) -> Vec<&str> {
+        out.lines()
+            .filter(|l| l.contains('|'))
+            .map(|l| l.strip_prefix("  ").unwrap_or(l))
+            .collect()
+    }
+
+    /// `--bail` aborts the run, and bun prints no count lines when it does.
+    /// Without the notice the summary reads as a complete run of however many
+    /// tests happened to execute before the abort.
+    #[test]
+    fn test_bun_bail_notice_survives() {
+        let out = extract_test_summary(
+            include_str!("../../tests/fixtures/bun_test_bail_raw.txt"),
+            TestEcosystem::Bun,
+        );
+        assert!(out.contains("Bailed out after 1 failure"), "{out}");
+        assert!(out.contains("Ran 2 tests"), "{out}");
+        assert!(out.contains("wrong sum"), "{out}");
+    }
+
+    /// The coverage table is the answer to `--coverage`; dropping it means the
+    /// flag silently does nothing.
+    #[test]
+    fn test_bun_coverage_table_survives() {
+        let out = extract_test_summary(
+            include_str!("../../tests/fixtures/bun_test_coverage_raw.txt"),
+            TestEcosystem::Bun,
+        );
+        assert!(out.contains("% Funcs") && out.contains("% Lines"), "{out}");
+        assert!(out.contains("All files"), "{out}");
+        assert!(out.contains("src/math.ts"), "{out}");
+        // Column alignment is the table; the rows go through untrimmed.
+        assert!(out.contains("-------------|---------|"), "{out}");
+        // The counts still come through alongside it
+        assert!(out.contains("2 fail"), "{out}");
+        // A table this small is under the cap, so nothing is announced as dropped.
+        assert!(!out.contains("more files"), "{out}");
+    }
+
+    /// Bun sorts the table by path, so a plain head of it keeps whichever files
+    /// come first alphabetically. This run is 40 covered files plus `src/zeta.ts`
+    /// at 50% funcs, last in the sort: the row the flag was passed for.
+    #[test]
+    fn test_bun_coverage_table_is_capped_and_keeps_the_gap() {
+        let raw = include_str!("../../tests/fixtures/bun_test_coverage_wide_raw.txt");
+        let out = extract_test_summary(raw, TestEcosystem::Bun);
+
+        let table_lines = coverage_table_lines(raw);
+        assert!(table_lines > MAX_BUN_COVERAGE_ROWS, "fixture under the cap");
+
+        // Exactly the cap is shown: one fewer or three more both have to fail.
+        assert_eq!(
+            shown_table_lines(&out),
+            MAX_BUN_COVERAGE_ROWS,
+            "cap not held:\n{out}"
+        );
+        // The notice appears once, and accounts for every line not shown.
+        assert_eq!(out.matches("more files").count(), 1, "{out}");
+        assert!(
+            out.contains(&format!(
+                "... +{} more files",
+                table_lines - MAX_BUN_COVERAGE_ROWS
+            )),
+            "{out}"
+        );
+        // The structure and the gap row survive; covered files give way to it.
+        assert!(out.contains("% Funcs"), "{out}");
+        assert!(out.contains("All files    |   98.78"), "{out}");
+        assert!(
+            out.contains("src/zeta.ts |   50.00 |   33.33 | 5-8"),
+            "{out}"
+        );
+        assert!(!out.contains("src/f39.ts"), "{out}");
+        // And the counts outside the table are untouched by any of it.
+        assert!(out.contains("41 pass"), "{out}");
+        assert!(out.contains("Ran 41 tests"), "{out}");
+    }
+
+    /// A 16-file project is exactly 20 table lines, which is the cap: the
+    /// table is whole, so there is nothing to announce.
+    #[test]
+    fn test_bun_coverage_table_at_the_cap_announces_nothing() {
+        let raw = include_str!("../../tests/fixtures/bun_test_coverage_at_cap_raw.txt");
+        assert_eq!(coverage_table_lines(raw), MAX_BUN_COVERAGE_ROWS, "fixture");
+
+        let out = extract_test_summary(raw, TestEcosystem::Bun);
+        assert_eq!(shown_table_of(&out), coverage_table_of(raw), "{out}");
+        assert!(!out.contains("more files"), "nothing was dropped:\n{out}");
+    }
+
+    /// When every row reports a gap there is nothing cheaper to drop, so the
+    /// cap falls back to bun's own order. The structure still comes first:
+    /// both rules and the aggregate are what make the rest readable.
+    #[test]
+    fn test_bun_coverage_cap_keeps_bun_order_when_every_row_has_a_gap() {
+        let raw = include_str!("../../tests/fixtures/bun_test_coverage_all_partial_raw.txt");
+        let table = coverage_table_of(raw);
+        assert!(table.len() > MAX_BUN_COVERAGE_ROWS, "fixture under the cap");
+
+        let out = extract_test_summary(raw, TestEcosystem::Bun);
+
+        // Bun's first 19 lines, then the closing rule it printed last.
+        let mut expected: Vec<&str> = table[..MAX_BUN_COVERAGE_ROWS - 1].to_vec();
+        expected.push(table[table.len() - 1]);
+        assert_eq!(shown_table_of(&out), expected, "{out}");
+
+        assert_eq!(out.matches("more files").count(), 1, "{out}");
+        assert!(
+            out.contains(&format!(
+                "... +{} more files",
+                table.len() - MAX_BUN_COVERAGE_ROWS
+            )),
+            "{out}"
+        );
+    }
+
+    /// Following the hint has to return the dropped rows themselves, all of
+    /// them and in order. Which mode is active decides what the hint names, so
+    /// the test follows whichever one it got.
+    #[test]
+    fn test_bun_hidden_coverage_rows_are_recoverable() {
+        let raw = include_str!("../../tests/fixtures/bun_test_coverage_wide_raw.txt");
+        let table = coverage_table_of(raw);
+
+        // A root of its own: the entry this writes is the one it reads back.
+        let home = crate::core::test_isolation::tempdir();
+        let (out, recovered) = crate::core::test_isolation::with_root(home.path(), || {
+            let out = extract_test_summary(raw, TestEcosystem::Bun);
+            let recovered = follow_recovery_hint(&out);
+            (out, recovered)
+        });
+
+        let shown = shown_table_of(&out);
+        let hidden: Vec<&str> = table
+            .iter()
+            .filter(|l| !shown.contains(*l))
+            .copied()
+            .collect();
+        assert_eq!(
+            hidden.len(),
+            table.len() - MAX_BUN_COVERAGE_ROWS,
+            "the cap dropped something other than what it announced:\n{out}"
+        );
+
+        assert_eq!(
+            recovered.lines().collect::<Vec<_>>(),
+            hidden,
+            "what the hint returns is not the rows that were dropped"
+        );
+    }
+
+    /// Reads back what a recovery hint names, the way a caller following it
+    /// would: the recall entry, or the file the tee branch wrote.
+    fn follow_recovery_hint(out: &str) -> String {
+        let hint = out
+            .lines()
+            .find(|l| l.contains("rtk recall ") || l.contains("tail -n +1 "))
+            .unwrap_or_else(|| panic!("no recovery hint for the hidden rows:\n{out}"));
+
+        if let Some(rest) = hint.split("rtk recall ").nth(1) {
+            let hash = rest.trim_end_matches(']').trim();
+            return crate::core::retriever::recalled_content(hash)
+                .unwrap_or_else(|| panic!("the hint names recall entry {hash}, which is gone"));
+        }
+
+        let rest = hint
+            .split("tail -n +1 ")
+            .nth(1)
+            .unwrap_or_else(|| panic!("unreadable hint: {hint}"));
+        // Tee mode prints the path under `~`, which is the test's own root here.
+        let shown = rest.trim_end_matches(']').trim().trim_matches('"');
+        let path = match shown
+            .strip_prefix("~/")
+            .or_else(|| shown.strip_prefix("$HOME/"))
+        {
+            Some(tail) => crate::core::user_dirs::home()
+                .unwrap_or_else(|| panic!("no home to resolve {shown} against"))
+                .join(tail),
+            None => std::path::PathBuf::from(shown),
+        };
+        std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("the hint names {}, which did not open: {e}", path.display())
+        })
+    }
+
+    /// A source frame with `||` in it must not read as a table row: that is
+    /// what tracking the table by header rather than by column count buys.
+    #[test]
+    fn test_bun_source_frame_with_pipes_is_not_coverage() {
+        let raw = concat!(
+            "bun test v1.3.14 (0d9b296a)\n",
+            "\n",
+            "app.test.ts:\n",
+            "3 | const name = user.name || user.nick || \"anon\";\n",
+            "                            ^\n",
+            "error: expect(received).toBe(expected)\n",
+            "Expected: \"anon\"\n",
+            "Received: \"nick\"\n",
+            "      at <anonymous> (/home/user/project/app.test.ts:3:20)\n",
+            "(fail) resolves the name [0.21ms]\n",
+            "\n",
+            " 0 pass\n",
+            " 1 fail\n",
+            "Ran 1 tests across 1 file. [8.00ms]\n",
+        );
+        let out = extract_test_summary(raw, TestEcosystem::Bun);
+        assert!(out.contains("resolves the name"), "{out}");
+        assert!(out.contains("Expected: \"anon\""), "{out}");
+        assert!(out.contains("Received: \"nick\""), "{out}");
+        assert!(!out.contains("% Funcs"), "no table here:\n{out}");
+    }
+
+    /// Snapshot reporting: the "+1 added" line and the count variant that
+    /// replaces the plain expect() line.
+    #[test]
+    fn test_bun_snapshot_lines_survive() {
+        let added = extract_test_summary(
+            include_str!("../../tests/fixtures/bun_test_snapshot_raw.txt"),
+            TestEcosystem::Bun,
+        );
+        assert!(added.contains("snapshots: +1 added"), "{added}");
+
+        let counted = extract_test_summary(
+            include_str!("../../tests/fixtures/bun_test_coverage_raw.txt"),
+            TestEcosystem::Bun,
+        );
+        assert!(counted.contains("1 snapshots,"), "{counted}");
+        // The same mixed run carries skip and todo alongside the snapshot line.
+        assert!(added.contains("1 skip"), "{added}");
+        assert!(added.contains("1 todo"), "{added}");
+    }
+
+    /// A run killed mid-flight (SIGKILL) prints the banner and nothing else:
+    /// no counts, no markers. The raw-tail fallback has to surface that, or an
+    /// aborted run reads as a silent success.
+    #[test]
+    fn test_bun_killed_run_is_not_reported_as_a_pass() {
+        let out = extract_test_summary(
+            include_str!("../../tests/fixtures/bun_test_crash_raw.txt"),
+            TestEcosystem::Bun,
+        );
+        assert!(out.contains("bun test v1.3.14"), "{out}");
+        assert!(!out.contains("pass"), "{out}");
+        assert!(!out.contains("SUMMARY:"), "{out}");
+    }
+
+    /// 40 failures in one run: the cap keeps ten and counts the rest, and the
+    /// footer still says how many tests actually ran.
+    #[test]
+    fn test_bun_failure_cap_counts_what_it_drops() {
+        let raw = include_str!("../../tests/fixtures/bun_test_many_failures_raw.txt");
+        let out = extract_test_summary(raw, TestEcosystem::Bun);
+        assert!(out.contains("(fail) case 0"), "{out}");
+        assert!(
+            out.contains(&format!("+{} more failures", 40 - MAX_RUNNER_FAILURES)),
+            "{out}"
+        );
+        assert!(out.contains("40 fail"), "{out}");
+        assert!(out.contains("Ran 40 tests"), "{out}");
+
+        let savings = 100.0 - (count_tokens(&out) as f64 / count_tokens(raw) as f64 * 100.0);
+        assert!(savings >= 60.0, "got {savings:.1}%");
+    }
+
+    /// One red run per runtime carrying every failure shape at once.
+    #[test]
+    fn test_a_red_run_keeps_each_failure_and_its_reason() {
+        let bun = extract_test_summary(
+            include_str!("../../tests/fixtures/bun_test_failures_raw.txt"),
+            TestEcosystem::Bun,
+        );
+        assert!(bun.contains("[FAIL]"), "{bun}");
+        // Assertion failures: marker, expected/received, and the frame locating it.
+        assert!(bun.contains("t2 fails"), "{bun}");
+        assert!(bun.contains("Expected: 3"), "{bun}");
+        assert!(bun.contains("Received: 2"), "{bun}");
+        assert!(bun.contains("fails.test.ts:3:40"), "{bun}");
+        // A thrown error, and a timeout, which carries no frame at all.
+        assert!(bun.contains("boom: connection refused"), "{bun}");
+        assert!(bun.contains("timed out after 150ms"), "{bun}");
+        // Counts, including skip and todo.
+        assert!(bun.contains("4 fail"), "{bun}");
+        assert!(bun.contains("1 skip"), "{bun}");
+        assert!(bun.contains("1 todo"), "{bun}");
+        // Echoed source context, and a line a passing test logged between two
+        // real failures, both stay out.
+        assert!(!bun.contains("test(\"t1 passes\""), "{bun}");
+        assert!(!bun.contains("logged between real failures"), "{bun}");
+
+        let deno = extract_test_summary(
+            include_str!("../../tests/fixtures/deno_test_failures_raw.txt"),
+            TestEcosystem::Deno,
+        );
+        assert!(deno.contains("[FAIL]"), "{deno}");
+        assert!(deno.contains("AssertionError"), "{deno}");
+        assert!(deno.contains("[Diff]"), "{deno}");
+        // An arrow inside an assertion message must not read as an entry header
+        // and end the diagnostic it belongs to.
+        assert!(deno.contains("handler (a) => b must match"), "{deno}");
+        assert!(deno.contains("-   x"), "{deno}");
+        assert!(deno.contains("+   y"), "{deno}");
+        assert!(deno.contains("2 failed"), "{deno}");
+    }
+
+    #[test]
+    fn test_red_run_savings_on_either_runtime() {
+        for (eco, raw) in [
+            (
+                TestEcosystem::Bun,
+                include_str!("../../tests/fixtures/bun_test_failures_raw.txt"),
+            ),
+            (
+                TestEcosystem::Deno,
+                include_str!("../../tests/fixtures/deno_test_failures_raw.txt"),
+            ),
+        ] {
+            let out = extract_test_summary(raw, eco);
+            let savings = 100.0 - (count_tokens(&out) as f64 / count_tokens(raw) as f64 * 100.0);
+            assert!(savings >= 20.0, "{eco:?}: got {savings:.1}%");
+        }
+    }
+
+    #[test]
+    fn test_deno_typecheck_error_keeps_its_code_and_location() {
+        // A type error aborts the run before any test executes: deno prints no
+        // FAILURES section and no "error:"-introduced diagnostic, so the TS code
+        // and the frame under it are all there is to report.
+        let raw = include_str!("../../tests/fixtures/deno_test_typecheck_raw.txt");
+        let out = extract_test_summary(raw, TestEcosystem::Deno);
+        assert!(out.contains("TS2322 [ERROR]"), "{out}");
+        assert!(out.contains("typ_test.ts:1:7"), "{out}");
+        // The echoed source and its caret stay out, as they do for bun.
+        assert!(!out.contains("const n: number"), "{out}");
+    }
+
+    #[test]
+    fn test_consecutive_stack_free_failures_do_not_merge() {
+        // Deno leak failures carry no "at " frame, so nothing but the next
+        // entry header closes the block.
+        let raw = include_str!("../../tests/fixtures/deno_test_twoleak_raw.txt");
+        let out = extract_test_summary(raw, TestEcosystem::Deno);
+        assert_eq!(out.matches("t3 leaks =>").count(), 1, "{out}");
+        assert!(out.contains("FAILED | 1 passed | 2 failed"), "{out}");
+        assert!(!out.contains("error: Test failed"), "{out}");
+    }
+
+    #[test]
+    fn test_module_load_error_survives_on_either_runtime() {
+        // Bun reports counts and no failure marker, deno reports neither, so
+        // the two reach the user by different paths. Both must say why.
+        let bun = extract_test_summary(
+            include_str!("../../tests/fixtures/bun_test_load_error_raw.txt"),
+            TestEcosystem::Bun,
+        );
+        assert!(bun.contains("Cannot find module"), "{bun}");
+        let deno = extract_test_summary(
+            include_str!("../../tests/fixtures/deno_test_load_error_raw.txt"),
+            TestEcosystem::Deno,
+        );
+        assert!(deno.contains("Module not found"), "{deno}");
+    }
+
+    #[test]
+    fn test_ecosystem_detect_first_match_wins() {
+        // "cargo test" contains "go test" as a substring; the enum makes
+        // that co-firing unrepresentable.
+        assert_eq!(
+            TestEcosystem::detect("cargo test --all"),
+            TestEcosystem::Cargo
+        );
+        assert_eq!(TestEcosystem::detect("go test ./..."), TestEcosystem::Go);
+        assert_eq!(TestEcosystem::detect("bun test"), TestEcosystem::Bun);
+        assert_eq!(
+            TestEcosystem::detect("deno test --allow-read"),
+            TestEcosystem::Deno
+        );
+        assert_eq!(TestEcosystem::detect("pytest -x"), TestEcosystem::Pytest);
+        assert_eq!(TestEcosystem::detect("npm test"), TestEcosystem::Jest);
+        assert_eq!(TestEcosystem::detect("make check"), TestEcosystem::Unknown);
+    }
+
+    #[test]
+    fn test_bun_count_line_anchoring() {
+        assert!(is_bun_count_line("6 pass"));
+        assert!(is_bun_count_line("0 fail"));
+        assert!(is_bun_count_line("1 skip"));
+        assert!(is_bun_count_line("1 todo"));
+        // Echoed source naming a test "fails"/"passes" must not match.
+        assert!(!is_bun_count_line(
+            "3 | test(\"t2 fails\", () => { expect(1 + 1).toBe(3); });"
+        ));
+        assert!(!is_bun_count_line("pass"));
+        assert!(!is_bun_count_line("6 passing"));
+        assert!(!is_bun_count_line("x fail"));
+        assert!(!is_bun_count_line("10 expect() calls"));
+    }
 }

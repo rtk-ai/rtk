@@ -1,0 +1,23 @@
+# rtk:verbatim-diffs — no line numbers, diffs byte-for-byte
+#
+# For agents whose edit tools do not address lines by number: strips read line
+# numbers, and passes `git diff` and `git show` through untouched so a diff the
+# agent must apply is never reformatted.
+#
+# Benchmark: not published. Both rules trade savings for fidelity.
+
+schema_version = 1
+
+[pipeline]
+name    = "rtk:verbatim-diffs"
+extends = ["rtk:posthook", "rtk:proxy"]
+
+# for agents whose edit tools do not address lines by number
+[override.strip-line-numbers]
+enabled = true
+
+# diffs must reach the agent byte-for-byte
+[[hook.before_tool.shell]]
+name   = "keep-diffs"
+when   = { command_matches = "^git (diff|show)\\b" }
+action = "passthrough"

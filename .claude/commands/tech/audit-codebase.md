@@ -122,7 +122,7 @@ ls -lh target/release/rtk 2>/dev/null || echo "Build needed"
 ```bash
 # Regex non-lazy (compilées à chaque appel)
 Grep "Regex::new" src/ --glob "*.rs"
-# Compter celles hors lazy_static!
+# Compter les patterns fixes et réutilisés hors LazyLock
 
 # Modules sans fallback vers commande brute
 Grep "execute_raw\|passthrough\|raw_cmd" src/ --glob "*.rs"
@@ -140,7 +140,7 @@ Grep "mod " src/main.rs
 | Condition                              | Score               |
 | -------------------------------------- | ------------------- |
 | 0 regex non-lazy                       | 10/10               |
-| Regex dans fonction (pas lazy_static)  | -2 par occurrence   |
+| Regex fixe recompilée dans une fonction      | -2 par occurrence   |
 | Module sans fallback brute             | -1.5 par module     |
 | Module sans #[cfg(test)]               | -1 par module       |
 

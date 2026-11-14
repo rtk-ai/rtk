@@ -1,0 +1,26 @@
+# HG changeset patch
+# User Ann <ann@example.com>
+# Date 1788651355 0
+#      Sat Sep 05 23:35:55 2026 +0000
+# Node ID 212e29a52a78719cc9c68df7d2cd53b32a6902fe
+# Parent  b43ce0fdfebd9a11321e99154a6fa88a5e9be882
+fix(g): append y, swap b for c
+
+- first bullet with a dash
+- second bullet
+
+Documenting --no-stat wrapped to column 0 here.
+
+diff -r b43ce0fdfebd -r 212e29a52a78 f.txt
+--- a/f.txt	Sat Sep 05 23:35:55 2026 +0000
++++ b/f.txt	Sat Sep 05 23:35:55 2026 +0000
+@@ -1,2 +1,2 @@
+ a
+-b
++c
+diff -r b43ce0fdfebd -r 212e29a52a78 g.txt
+--- a/g.txt	Sat Sep 05 23:35:55 2026 +0000
++++ b/g.txt	Sat Sep 05 23:35:55 2026 +0000
+@@ -1,1 +1,2 @@
+ x
++y

@@ -6,6 +6,7 @@
 //! to parse.
 
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::utils::ruby_exec;
 use anyhow::Result;
 use serde::Deserialize;
@@ -74,7 +75,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "rubocop",
-        &args.join(" "),
+        &display_args(args),
         move |stdout| {
             if has_format || is_autocorrect {
                 filter_rubocop_text(stdout)

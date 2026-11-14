@@ -63,7 +63,7 @@ git diff "$BASE_BRANCH"...HEAD --stat
 | `src/main.rs`                  | Command routing + Commands enum            |
 | `src/core/tracking.rs`         | SQLite patterns + DB path config           |
 | `src/core/config.rs`           | Configuration system                       |
-| `src/hooks/init.rs`            | Init patterns + hook installation          |
+| `src/hooks/init/`              | Init patterns + hook installation          |
 | `.github/workflows/`           | CI/CD multi-platform build targets         |
 | `tests/` ou `fixtures/`        | Testing Strategy (CLAUDE.md)               |
 | `Cargo.toml`                   | Dependencies + build optimizations         |
@@ -77,23 +77,23 @@ git diff "$BASE_BRANCH"...HEAD --stat
 - Fallback gracieux : si filter échoue → exécuter la commande brute
 
 **Performance**:
-- JAMAIS `Regex::new()` dans une fonction → `lazy_static!` obligatoire
+- Pattern regex fixe et réutilisé → `LazyLock<Regex>`
 - JAMAIS dépendance async (tokio, async-std) → single-threaded by design
 - Startup time cible: <10ms
 
 **Tests**:
 - `#[cfg(test)] mod tests` embarqué dans chaque module
 - Fixtures réelles dans `tests/fixtures/<cmd>_raw.txt`
-- `count_tokens()` pour vérifier savings ≥60%
+- `count_tokens()` pour vérifier savings ≥20%
 - `assert_snapshot!` (insta) pour output format
 
 **Module**:
-- `lazy_static!` pour regex (compile once, reuse forever)
+- `LazyLock<Regex>` pour les patterns fixes et réutilisés
 - `exit_code` propagé (0 = success, non-zero = failure)
 - `strip_ansi()` depuis `utils.rs` — pas re-implémenté
 
 **Filtres**:
-- Token savings ≥60% obligatoire (release blocker)
+- Token savings ≥20% obligatoire (release blocker)
 - Fallback: si filter échoue → raw command exécutée
 - Pas d'output ASCII art, pas de verbose metadata inutile
 
@@ -102,10 +102,10 @@ git diff "$BASE_BRANCH"...HEAD --stat
 ### 🔴 MUST FIX (bloquant)
 
 - `unwrap()` en dehors des tests
-- `Regex::new()` dans une fonction (pas de lazy_static)
+- Pattern regex fixe recompilé dans une fonction
 - `?` sans `.context()` — erreur sans description
 - Dépendance async ajoutée (tokio, async-std, futures)
-- Token savings <60% pour un nouveau filtre
+- Token savings <20% pour un nouveau filtre
 - Pas de fallback vers commande brute sur échec de filtre
 - `panic!()` en production (hors tests)
 - Exit code non propagé sur commande sous-jacente
@@ -118,7 +118,7 @@ git diff "$BASE_BRANCH"...HEAD --stat
 ### 🟡 SHOULD FIX (important)
 
 - `?` sans `.context()` dans code existant (tolerable si pattern établi)
-- Regex non-lazy dans code existant migré vers lazy_static
+- Pattern regex fixe et réutilisé migré vers `LazyLock<Regex>`
 - Fonction >50 lignes (split recommandé)
 - Nesting >3 niveaux (early returns)
 - `clone()` inutile (borrow possible)
@@ -163,13 +163,13 @@ let hash = extract_hash(line).unwrap();
 let hash = extract_hash(line).context("Failed to extract commit hash")?;
 \```
 
-• `grep_cmd.rs:12` - `Regex::new()` dans la fonction → `lazy_static!`
+• `grep_cmd.rs:12` - pattern fixe recompilé dans la fonction → `LazyLock<Regex>`
 
 \```rust
 // ❌ Avant (recompile à chaque appel)
 let re = Regex::new(r"pattern").unwrap();
 // ✅ Après
-lazy_static! { static ref RE: Regex = Regex::new(r"pattern").unwrap(); }
+static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"pattern").unwrap());
 \```
 
 ### 🟡 Important
@@ -181,7 +181,7 @@ lazy_static! { static ref RE: Regex = Regex::new(r"pattern").unwrap(); }
 | Prio | Fichier     | L  | Action            |
 | ---- | ----------- | -- | ----------------- |
 | 🔴   | git_cmd.rs  | 45 | .context() manque |
-| 🔴   | grep_cmd.rs | 12 | lazy_static!       |
+| 🔴   | grep_cmd.rs | 12 | LazyLock          |
 | 🟡   | filter.rs   | 78 | split function    |
 ```
 
@@ -196,8 +196,8 @@ lazy_static! { static ref RE: Regex = Regex::new(r"pattern").unwrap(); }
 3. **Compter les occurrences** — Pattern existant (>10 occurrences) → "Suggestion", PAS "Bloquant"
 
 ```bash
-# Vérifier si lazy_static est déjà utilisé dans le module
-Grep "lazy_static" src/<module>.rs
+# Vérifier si LazyLock est déjà utilisé dans le module
+Grep "LazyLock" src/<module>.rs
 
 # Compter unwrap() (si pattern établi dans tests = ok)
 Grep "unwrap()" src/ --output_mode count
@@ -208,7 +208,7 @@ Glob tests/fixtures/<cmd>_raw.txt
 
 **NE PAS signaler**:
 - `unwrap()` dans `#[cfg(test)] mod tests` → autorisé (avec `expect()` préféré)
-- `lazy_static!` avec `unwrap()` pour initialisation → pattern établi RTK
+- `LazyLock<Regex>` avec `unwrap()` dans l'initialiseur → pattern établi RTK
 - Variables `_unused` → peut être intentionnel (warn suppression)
 
 ## Mode Auto (--auto)
@@ -245,7 +245,7 @@ Glob tests/fixtures/<cmd>_raw.txt
 - Si >5 fichiers modifiés → demander confirmation
 - Quality gate : `cargo fmt --all && cargo clippy --all-targets && cargo test`
 - Si quality gate fail → `git reset --hard HEAD` + reporter les erreurs
-- Commit atomique par passage : `autofix(codereview): fix unwrap + lazy_static`
+- Commit atomique par passage : `autofix(codereview): fix unwrap + lazy lock`
 
 ## Workflow recommandé
 

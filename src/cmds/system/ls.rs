@@ -1,129 +1,423 @@
 //! Filters directory listings into a compact tree format.
 
 use super::constants::NOISE_DIRS;
+use crate::core::arg_tokenizer::{self, Attachment, Dialect, Token, TokenKind, ValueSpec};
+use crate::core::args_utils;
+use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
-use crate::core::truncate::{reduced, CAP_WARNINGS};
-use crate::core::utils::resolved_command;
+use crate::core::shell::display_args;
+use crate::core::tracking::estimate_tokens;
+use crate::core::truncate::CAP_INVENTORY;
+use crate::core::utils::{ChildArgExt, resolved_command};
 use anyhow::Result;
-use lazy_static::lazy_static;
 use regex::Regex;
-use std::io::IsTerminal;
+use std::process::Stdio;
+use std::sync::LazyLock;
 
-lazy_static! {
-    /// Matches the date+time portion in `ls -la` output, which serves as a
-    /// stable anchor regardless of owner/group column width.
-    /// E.g.: " Mar 31 16:18 " or " Dec 25  2024 "
-    static ref LS_DATE_RE: Regex = Regex::new(
+/// Matches the date+time portion in `ls -la` output, which serves as a
+/// stable anchor regardless of owner/group column width.
+/// E.g.: " Mar 31 16:18 " or " Dec 25  2024 "
+static LS_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
         r"\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(?:\d{4}|\d{2}:\d{2})\s+"
     )
-    .unwrap();
+    .unwrap()
+});
+
+/// Every long option GNU ls accepts, transcribed from its own `--help`. Needed in full, not
+/// just the value-taking ones: ls resolves unambiguous abbreviations (`--sor time` sorts by
+/// time), and an abbreviation is only unambiguous against the whole set.
+const LONG_FLAGS: &[&str] = &[
+    "all",
+    "almost-all",
+    "author",
+    "block-size",
+    "classify",
+    "color",
+    "context",
+    "dereference",
+    "dereference-command-line",
+    "dereference-command-line-symlink-to-dir",
+    "directory",
+    "dired",
+    "escape",
+    "file-type",
+    "format",
+    "full-time",
+    "group-directories-first",
+    "help",
+    "hide",
+    "hide-control-chars",
+    "human-readable",
+    "hyperlink",
+    "ignore",
+    "ignore-backups",
+    "indicator-style",
+    "inode",
+    "kibibytes",
+    "literal",
+    "no-group",
+    "numeric-uid-gid",
+    "quote-name",
+    "quoting-style",
+    "recursive",
+    "reverse",
+    "show-control-chars",
+    "si",
+    "size",
+    "sort",
+    "tabsize",
+    "time",
+    "time-style",
+    "version",
+    "width",
+    "zero",
+];
+
+/// Every word GNU ls accepts for `--format=WORD`. ls resolves an unambiguous abbreviation of a
+/// *value* the same way it does an option name, so `--format=lon` is still a long listing.
+const FORMAT_WORDS: &[&str] = &[
+    "across",
+    "commas",
+    "horizontal",
+    "long",
+    "single-column",
+    "verbose",
+    "vertical",
+];
+
+/// The entry of `candidates` that `name` abbreviates. `None` when it matches nothing or is
+/// ambiguous (`--ign` spans `--ignore` and `--ignore-backups`, `--format=ver` spans `verbose`
+/// and `vertical`), both of which real ls rejects. An exact match wins outright, so `--ignore`
+/// is not ambiguous with itself.
+fn resolve_abbrev(candidates: &[&'static str], name: &str) -> Option<&'static str> {
+    if let Some(exact) = candidates.iter().find(|candidate| **candidate == name) {
+        return Some(exact);
+    }
+    let mut matches = candidates.iter().filter(|c| c.starts_with(name));
+    let first = matches.next()?;
+    matches.next().is_none().then_some(*first)
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let show_all = args
+/// The option `name` names, resolving a GNU-style abbreviation.
+fn canonical_long(name: &str) -> Option<&'static str> {
+    resolve_abbrev(LONG_FLAGS, name)
+}
+
+/// The canonical long-option name `token` spells, or `None` for any other kind of token.
+fn long_name(token: &Token<'_>) -> Option<&'static str> {
+    (token.kind == TokenKind::Long)
+        .then(|| canonical_long(token.text))
+        .flatten()
+}
+
+/// Which `ls` the child process will be. The two disagree on short-option grammar outright:
+/// GNU's `-I`/`-T`/`-w` take `--ignore`/`--tabsize`/`--width` values, while on BSD all three
+/// are booleans and only `-D` takes one (a strftime format). Reading a BSD operand as a value
+/// moves it ahead of the `--`, which BSD's non-permuting getopt then lists as a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flavor {
+    Gnu,
+    Bsd,
+}
+
+const HOST_FLAVOR: Flavor = if cfg!(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+)) {
+    Flavor::Bsd
+} else {
+    Flavor::Gnu
+};
+
+/// `ls`'s option grammar, transcribed from GNU's `--help` and FreeBSD/macOS `ls(1)`.
+///
+/// The `[=WHEN]` flags are attached-only: real `ls --color always` lists a file named `always`
+/// rather than reading it as the value. The mandatory-value ones do claim a literal `--` as
+/// their value, as `ls -I -- -al` does.
+fn ls_takes_value(kind: TokenKind, name: &str, flavor: Flavor) -> Option<ValueSpec> {
+    match kind {
+        // BSD ls accepts no long option that takes a separate value, so the GNU table is
+        // harmless there: the flags it names are rejected by BSD ls either way.
+        TokenKind::Long => match canonical_long(name)? {
+            "color" | "classify" | "hyperlink" => Some(ValueSpec::attached_only()),
+            "block-size" | "format" | "hide" | "ignore" | "indicator-style" | "quoting-style"
+            | "sort" | "tabsize" | "time" | "time-style" | "width" => {
+                Some(ValueSpec::value().claiming_dash_dash())
+            }
+            _ => None,
+        },
+        TokenKind::Short => {
+            let takes_value = match flavor {
+                Flavor::Gnu => matches!(name, "I" | "T" | "w"),
+                Flavor::Bsd => name == "D",
+            };
+            takes_value.then(|| ValueSpec::value().claiming_dash_dash())
+        }
+        _ => None,
+    }
+}
+
+/// True if `token` is a short flag spelled as exactly one of `letters` — never a digit run
+/// like `-20`, which is one token carrying the whole number.
+fn is_short_in(token: &Token<'_>, letters: &[char]) -> bool {
+    let mut chars = token.text.chars();
+    token.kind == TokenKind::Short
+        && matches!((chars.next(), chars.next()), (Some(c), None) if letters.contains(&c))
+}
+
+/// `-a`/`--all` and `-A`/`--almost-all` both make ls print dotfiles;
+/// in either case RTK must show everything the child listed.
+fn shows_dotfiles(tokens: &[Token<'_>]) -> bool {
+    tokens
         .iter()
-        .any(|a| (a.starts_with('-') && !a.starts_with("--") && a.contains('a')) || a == "--all");
+        .any(|t| is_short_in(t, &['a', 'A']) || matches!(long_name(t), Some("all" | "almost-all")))
+}
+
+/// What the user's arguments ask for: how to render the listing, and the argv to hand the
+/// child `ls`.
+struct LsPlan {
+    show_all: bool,
+    show_long: bool,
+    child_args: Vec<String>,
+}
+
+fn plan(args: &[String]) -> LsPlan {
+    plan_for(args, HOST_FLAVOR)
+}
+
+fn plan_for(args: &[String], flavor: Flavor) -> LsPlan {
+    let tokens = arg_tokenizer::tokenize_grammar(
+        args,
+        &|kind, name| ls_takes_value(kind, name, flavor),
+        Dialect::Posix,
+    );
+
+    let show_all = shows_dotfiles(&tokens);
 
     // Per `man ls`, the long listing is triggered by `-l` and also implied by
     // `-g`, `-n`, `-o`, `--full-time` or GNU `--format=long` and `--format=verbose`.
     // In any of those cases we preserve permission info as octal.
-    let show_long = args.iter().any(|a| {
-        if a == "--full-time" || a == "--format=long" || a == "--format=verbose" {
-            return true;
-        }
-        if a.starts_with('-') && !a.starts_with("--") {
-            return a.chars().any(|c| matches!(c, 'l' | 'g' | 'n' | 'o'));
-        }
-        false
+    let show_long = tokens.iter().any(|t| {
+        is_short_in(t, &['l', 'g', 'n', 'o'])
+            || match long_name(t) {
+                Some("full-time") => true,
+                Some("format") => matches!(
+                    t.value(&tokens)
+                        .and_then(|word| resolve_abbrev(FORMAT_WORDS, word)),
+                    Some("long" | "verbose")
+                ),
+                _ => false,
+            }
     });
 
-    let flags: Vec<&str> = args
+    LsPlan {
+        show_all,
+        show_long,
+        child_args: build_child_args(&tokens, flavor),
+    }
+}
+
+/// The index of a trailing flag left without the value it requires, if any. Such a flag can only
+/// be the user's very last argument — anything after it would have been consumed as its value —
+/// so no positional before it can have been `--`-protected.
+fn dangling_value_flag(tokens: &[Token<'_>], flavor: Flavor) -> Option<usize> {
+    let index = tokens.len().checked_sub(1)?;
+    let last = tokens.get(index)?;
+    let spec = ls_takes_value(last.kind, last.text, flavor)?;
+    (spec.attachment != Attachment::AttachedOnly && last.value(tokens).is_none()).then_some(index)
+}
+
+/// Rebuilds the user's options as argv for the child `ls`, re-attaching every flag's value to
+/// the flag rather than letting it drift into the path list.
+fn build_child_args(tokens: &[Token<'_>], flavor: Flavor) -> Vec<String> {
+    // RTK asks for its own long listing, so `-l`/`-a`/`--all` from the user are redundant, and
+    // the human-readable ones would pre-format the sizes RTK renders itself. Bare spellings
+    // only: `--all=x` is an error the child still has to report.
+    let wants_all = tokens
         .iter()
-        .filter(|a| a.starts_with('-'))
-        .map(|s| s.as_str())
-        .collect();
-    let paths: Vec<&str> = args
-        .iter()
-        .filter(|a| !a.starts_with('-'))
-        .map(|s| s.as_str())
-        .collect();
+        .any(|t| is_short_in(t, &['a']) || long_name(t) == Some("all"));
+    let mut child_args = vec![if wants_all { "-la" } else { "-l" }.to_string()];
+
+    let dangling = dangling_value_flag(tokens, flavor);
+
+    for (index, token) in tokens.iter().enumerate() {
+        if Some(index) == dangling {
+            continue;
+        }
+        match token.kind {
+            TokenKind::Long => match token.value(tokens) {
+                Some(value) => child_args.push(format!("--{}={}", token.text, value)),
+                None if matches!(long_name(token), Some("all" | "human-readable" | "si")) => {}
+                None => child_args.push(format!("--{}", token.text)),
+            },
+            TokenKind::Short => match token.value(tokens) {
+                Some(value) => {
+                    child_args.push(format!("-{}", token.text));
+                    child_args.push(value.to_string());
+                }
+                None if is_short_in(token, &['l', 'a', 'h']) => {}
+                None => child_args.push(format!("-{}", token.text)),
+            },
+            _ => {}
+        }
+    }
+
+    // The boundary protects a path the user wrote with their own `--`, or one that merely starts
+    // with a dash, from being re-read as flags. A flag still waiting for its value would eat it
+    // instead, so that flag goes last and the boundary is dropped — letting the child report the
+    // missing argument, which is what real ls does.
+    if dangling.is_none() {
+        child_args.push("--".to_string());
+    }
+
+    let before = child_args.len();
+    child_args.extend(
+        tokens
+            .iter()
+            .filter(|t| t.is_free_positional())
+            .map(|t| t.text.to_string()),
+    );
+    if child_args.len() == before {
+        child_args.push(".".to_string());
+    }
+
+    if let Some(token) = dangling.and_then(|index| tokens.get(index)) {
+        let dashes = if token.kind == TokenKind::Long {
+            "--"
+        } else {
+            "-"
+        };
+        child_args.push(format!("{}{}", dashes, token.text));
+    }
+
+    child_args
+}
+
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    let args = &args_utils::restore_double_dash(args);
+    let LsPlan {
+        show_all,
+        show_long,
+        child_args,
+    } = plan(args);
 
     let mut cmd = resolved_command("ls");
     cmd.env("LC_ALL", "C");
-    cmd.arg("-la");
-    for flag in &flags {
-        if flag.starts_with("--") {
-            if *flag != "--all" {
-                cmd.arg(flag);
-            }
-        } else {
-            let stripped = flag.trim_start_matches('-');
-            let extra: String = stripped
-                .chars()
-                .filter(|c| *c != 'l' && *c != 'a' && *c != 'h')
-                .collect();
-            if !extra.is_empty() {
-                cmd.arg(format!("-{}", extra));
-            }
-        }
-    }
+    cmd.child_args(&child_args);
 
-    if paths.is_empty() {
-        cmd.arg(".");
-    } else {
-        for p in &paths {
-            cmd.arg(p);
-        }
-    }
-
-    let target_display = if paths.is_empty() {
+    let label = if args.is_empty() {
         ".".to_string()
     } else {
-        paths.join(" ")
+        display_args(args)
     };
 
-    runner::run_filtered(
+    let native = native_listing(args);
+    let listed = native
+        .as_ref()
+        .filter(|(stdout, succeeded)| *succeeded || !stdout.is_empty())
+        .map(|(stdout, _)| stdout.as_str());
+
+    runner::run_filtered_with_exit(
         cmd,
         "ls",
-        &format!("-la {}", target_display),
-        |raw| {
-            let (entries, summary, parsed_count) = compact_ls(raw, show_all, show_long);
-
-            // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
-            // This is safer than returning "(empty)" for a non-empty directory.
-            let has_real_content = raw
-                .lines()
-                .any(|l| !l.starts_with("total ") && !l.is_empty() && !is_dotdir(l));
-            if parsed_count == 0 && has_real_content {
-                return raw.to_string();
-            }
-
-            // Only show summary in interactive mode (not when piped)
-            let is_tty = std::io::stdout().is_terminal();
-            let filtered = if is_tty {
-                format!("{}{}", entries, summary)
-            } else {
-                entries
-            };
-
-            if verbose > 0 {
-                eprintln!(
-                    "Chars: {} → {} ({}% reduction)",
-                    raw.len(),
-                    filtered.len(),
-                    if !raw.is_empty() {
-                        100 - (filtered.len() * 100 / raw.len())
-                    } else {
-                        0
-                    }
-                );
-            }
-            filtered
+        &label,
+        |raw, code| match (code, &native) {
+            (0, _) => render(raw, listed, show_all, show_long, verbose),
+            (_, Some((native, _))) => never_worse(native, raw).to_string(),
+            (_, None) => raw.to_string(),
         },
-        RunOptions::stdout_only()
-            .early_exit_on_failure()
-            .no_trailing_newline(),
+        RunOptions::stdout_only().no_trailing_newline(),
     )
+}
+
+fn native_listing(args: &[String]) -> Option<(String, bool)> {
+    let output = resolved_command("ls")
+        .child_args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    Some((
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        output.status.success(),
+    ))
+}
+
+fn render(raw: &str, native: Option<&str>, show_all: bool, show_long: bool, verbose: u8) -> String {
+    let (entries, parsed_count, truncated, filtered) = compact_ls(raw, show_all, show_long);
+
+    // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
+    // This is safer than returning "(empty)" for a non-empty directory.
+    let has_real_content = raw
+        .lines()
+        .any(|l| !l.starts_with("total ") && !l.is_empty() && !is_dotdir(l));
+    if parsed_count == 0 && has_real_content {
+        return native
+            .map_or(raw, |native| never_worse(native, raw))
+            .to_string();
+    }
+
+    if let Some(native) = native
+        && estimate_tokens(&entries) > estimate_tokens(native)
+    {
+        return native.to_string();
+    }
+
+    let mut out = entries;
+
+    if let Some(hint) = hidden_hint(&truncated, &filtered) {
+        out.push_str(&hint);
+        out.push('\n');
+    }
+
+    if verbose > 0 {
+        eprintln!(
+            "Chars: {} → {} ({}% reduction)",
+            raw.len(),
+            out.len(),
+            if !raw.is_empty() {
+                100usize.saturating_sub(out.len() * 100 / raw.len())
+            } else {
+                0
+            }
+        );
+    }
+    match native {
+        Some(native) => never_worse(native, &out).to_string(),
+        None => out,
+    }
+}
+
+/// Build the recovery hint for entries dropped from the listing —
+/// truncated past the display cap and/or RTK-filtered noise.
+///
+/// Standard RTK pattern: a truncation note plus a one-shot command to
+/// retrieve the remaining. The tee file contains ONLY the dropped
+/// entries (truncated first, then filtered), so `tail -n +1` (whole
+/// file) retrieves nothing the agent has already seen.
+fn hidden_hint(truncated: &[String], filtered: &[String]) -> Option<String> {
+    if truncated.is_empty() && filtered.is_empty() {
+        return None;
+    }
+    let note = match (truncated.len(), filtered.len()) {
+        (0, f) => format!("... ({} filtered)", f),
+        (t, 0) => format!("... ({} more)", t),
+        (t, f) => format!("... ({} more, {} filtered)", t, f),
+    };
+    let mut hidden_only = String::new();
+    for line in truncated.iter().chain(filtered) {
+        hidden_only.push_str(line);
+        hidden_only.push('\n');
+    }
+    match crate::core::tee::force_tee_tail_hint(&hidden_only, "ls-hidden", 1) {
+        Some(tee_hint) => Some(format!("{}\n{}", note, tee_hint)),
+        None => Some(note),
+    }
 }
 
 /// Format bytes into human-readable size
@@ -229,24 +523,31 @@ fn perms_to_octal(perms: &str) -> Option<String> {
 ///
 /// Without `show_long`:
 ///   name/        (dirs)
-///   name  size   (files)
+///   name         (files)
 ///
 /// With `show_long` (user passed `-l`):
 ///   755  name/        (dirs)
 ///   644  name  size   (files)
 ///
-/// Returns (entries, summary, parsed_count) so caller can suppress summary when piped.
+/// Returns (entries, parsed_count, truncated, filtered) so caller can emit
+/// a recovery hint when anything was dropped.
 /// parsed_count tracks how many non-header lines were successfully parsed.
+/// truncated holds compact lines beyond the CAP_INVENTORY display cap.
+/// filtered holds the display name of each entry RTK removed from view
+/// (noise dirs without -a/-A as `name/`, plus raw unparsable non-dotdir
+/// lines).
 /// If parsed_count == 0 but raw had content, caller should fall back to raw output.
-fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, usize) {
-    use std::collections::HashMap;
-
+fn compact_ls(
+    raw: &str,
+    show_all: bool,
+    show_long: bool,
+) -> (String, usize, Vec<String>, Vec<String>) {
     let mut dirs: Vec<(String, Option<String>)> = Vec::new(); // (name, octal_perms)
     let mut files: Vec<(String, String, Option<String>)> = Vec::new(); // (name, size, octal_perms)
-    let mut by_ext: HashMap<String, usize> = HashMap::new();
     let mut lines_seen: usize = 0;
     let mut parsed_count: usize = 0;
     let mut dotdirs: usize = 0;
+    let mut filtered: Vec<String> = Vec::new();
 
     for line in raw.lines() {
         if line.starts_with("total ") || line.is_empty() {
@@ -257,13 +558,17 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
         let Some((file_type, perms, size, name)) = parse_ls_line(line) else {
             if is_dotdir(line) {
                 dotdirs += 1;
+            } else {
+                filtered.push(line.trim().to_string());
             }
             continue;
         };
         parsed_count += 1;
 
-        // Filter noise dirs unless -a
+        // Filter noise dirs unless dotfiles were requested; every entry the
+        // child printed and RTK drops is recorded so the hint can recover it.
         if !show_all && NOISE_DIRS.iter().any(|noise| name == *noise) {
+            filtered.push(format!("{}/", name));
             continue;
         }
 
@@ -279,12 +584,6 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
             dirs.push((name, octal));
         } else {
             // Regular files, symlinks, character/block devices, pipes, sockets
-            let ext = if let Some(pos) = name.rfind('.') {
-                name[pos..].to_string()
-            } else {
-                "no ext".to_string()
-            };
-            *by_ext.entry(ext).or_insert(0) += 1;
             files.push((name, human_size(size), octal));
         }
     }
@@ -293,60 +592,46 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
         if lines_seen > 0 && parsed_count == 0 {
             if dotdirs == lines_seen {
                 // Only . and .. entries (empty directory)
-                return ("(empty)\n".to_string(), String::new(), 0);
+                return ("(empty)\n".to_string(), 0, Vec::new(), Vec::new());
             }
             // Real content that couldn't be parsed (e.g., non-English locale)
-            return (String::new(), String::new(), 0);
+            return (String::new(), 0, Vec::new(), Vec::new());
         }
-        return ("(empty)\n".to_string(), String::new(), 0);
+        // Everything parsed was filtered out (e.g., only noise dirs) —
+        // keep filtered so the caller can still emit a recovery hint.
+        return ("(empty)\n".to_string(), parsed_count, Vec::new(), filtered);
     }
+
+    // Dirs first, then files — one compact line each
+    let mut all_lines: Vec<String> = Vec::with_capacity(dirs.len() + files.len());
+    for (name, octal) in &dirs {
+        all_lines.push(match octal {
+            Some(octal) => format!("{}  {}/", octal, name),
+            None => format!("{}/", name),
+        });
+    }
+    for (name, size, octal) in &files {
+        all_lines.push(match (show_long, octal) {
+            (false, _) => name.clone(),
+            (true, Some(octal)) => format!("{}  {}  {}", octal, name, size),
+            (true, None) => format!("{}  {}", name, size),
+        });
+    }
+
+    // Cap the displayed listing; the rest is recoverable via the tee hint.
+    let truncated = if all_lines.len() > CAP_INVENTORY {
+        all_lines.split_off(CAP_INVENTORY)
+    } else {
+        Vec::new()
+    };
 
     let mut entries = String::new();
-
-    // Dirs first, compact
-    for (name, octal) in &dirs {
-        if let Some(octal) = octal {
-            entries.push_str(octal);
-            entries.push_str("  ");
-        }
-        entries.push_str(name);
-        entries.push_str("/\n");
-    }
-
-    // Files with size
-    for (name, size, octal) in &files {
-        if let Some(octal) = octal {
-            entries.push_str(octal);
-            entries.push_str("  ");
-        }
-        entries.push_str(name);
-        entries.push_str("  ");
-        entries.push_str(size);
+    for line in &all_lines {
+        entries.push_str(line);
         entries.push('\n');
     }
 
-    // Summary line (separate so caller can suppress when piped)
-    let mut summary = format!("\nSummary: {} files, {} dirs", files.len(), dirs.len());
-    if !by_ext.is_empty() {
-        // inline single-line summary — fewer entries to avoid wrapping.
-        const MAX_EXT_SUMMARY: usize = reduced(CAP_WARNINGS, 5);
-        let mut ext_counts: Vec<_> = by_ext.iter().collect();
-        ext_counts.sort_by(|a, b| b.1.cmp(a.1));
-        let ext_parts: Vec<String> = ext_counts
-            .iter()
-            .take(MAX_EXT_SUMMARY)
-            .map(|(ext, count)| format!("{} {}", count, ext))
-            .collect();
-        summary.push_str(" (");
-        summary.push_str(&ext_parts.join(", "));
-        if ext_counts.len() > MAX_EXT_SUMMARY {
-            summary.push_str(&format!(", +{} more", ext_counts.len() - MAX_EXT_SUMMARY));
-        }
-        summary.push(')');
-    }
-    summary.push('\n');
-
-    (entries, summary, parsed_count)
+    (entries, parsed_count, truncated, filtered)
 }
 
 #[cfg(test)]
@@ -361,12 +646,12 @@ mod tests {
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n\
                      -rw-r--r--  1 user  staff  5678 Jan  1 12:00 README.md\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
         assert!(entries.contains("src/"));
         assert!(entries.contains("Cargo.toml"));
         assert!(entries.contains("README.md"));
-        assert!(entries.contains("1.2K")); // 1234 bytes
-        assert!(entries.contains("5.5K")); // 5678 bytes
+        assert!(!entries.contains("1.2K"));
+        assert!(!entries.contains("5.5K"));
         assert!(!entries.contains("drwx")); // no permissions
         assert!(!entries.contains("staff")); // no group
         assert!(!entries.contains("total")); // no total
@@ -382,7 +667,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 target\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  100 Jan  1 12:00 main.rs\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
         assert!(!entries.contains("node_modules"));
         assert!(!entries.contains(".git"));
         assert!(!entries.contains("target"));
@@ -391,11 +676,349 @@ mod tests {
     }
 
     #[test]
+    fn test_compact_hidden_noise_dirs() {
+        let input = "total 8\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 node_modules\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 target\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n\
+                     -rw-r--r--  1 user  staff  100 Jan  1 12:00 main.rs\n";
+        let (_entries, _parsed, _truncated, hidden) = compact_ls(input, false, false);
+        assert_eq!(
+            hidden,
+            vec!["node_modules/", ".git/", "target/"],
+            "every noise dir the child printed is recorded"
+        );
+
+        let (_entries, _parsed, _truncated, hidden_all) = compact_ls(input, true, false);
+        assert!(hidden_all.is_empty(), "-a shows noise dirs, nothing hidden");
+    }
+
+    #[test]
+    fn test_compact_hidden_unparsable_line() {
+        // A non-dotdir line the date regex can't parse is silently dropped —
+        // it must be collected as hidden so the caller emits a recovery hint.
+        let input = "total 8\n\
+                     -rw-r--r--  1 user  staff  100 Jan  1 12:00 main.rs\n\
+                     garbage line without date anchor\n";
+        let (entries, _parsed, _truncated, hidden) = compact_ls(input, false, false);
+        assert!(entries.contains("main.rs"));
+        assert_eq!(hidden, vec!["garbage line without date anchor"]);
+    }
+
+    #[test]
+    fn test_compact_hidden_clean_listing() {
+        let input = "total 8\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n\
+                     -rw-r--r--  1 user  staff  100 Jan  1 12:00 main.rs\n";
+        let (_entries, _parsed, _truncated, hidden) = compact_ls(input, false, false);
+        assert!(hidden.is_empty(), "nothing dropped, no hint expected");
+    }
+
+    #[test]
+    fn test_compact_only_noise_dirs_keeps_hidden() {
+        // Directory containing only noise dirs: output collapses to (empty),
+        // but RTK-filtered entries must survive so the agent knows they exist.
+        let input = "total 8\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 node_modules\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n";
+        let (entries, parsed, _truncated, hidden) = compact_ls(input, false, false);
+        assert_eq!(entries, "(empty)\n");
+        assert_eq!(parsed, 2);
+        assert_eq!(hidden, vec!["node_modules/", ".git/"]);
+    }
+
+    #[test]
+    fn test_shows_dotfiles_flags() {
+        assert!(plan_of(&["-a"]).show_all);
+        assert!(plan_of(&["-A"]).show_all);
+        assert!(plan_of(&["-lA", "."]).show_all);
+        assert!(plan_of(&["--all"]).show_all);
+        assert!(plan_of(&["--almost-all"]).show_all);
+        assert!(!plan_of(&["-l", "."]).show_all);
+        assert!(!plan_of(&["--author"]).show_all);
+    }
+
+    /// Pins the GNU grammar regardless of the host, so these expectations describe one `ls`
+    /// rather than whichever one the test machine ships.
+    fn plan_of(args: &[&str]) -> LsPlan {
+        plan_flavored(args, Flavor::Gnu)
+    }
+
+    fn plan_bsd(args: &[&str]) -> LsPlan {
+        plan_flavored(args, Flavor::Bsd)
+    }
+
+    fn plan_flavored(args: &[&str], flavor: Flavor) -> LsPlan {
+        plan_for(
+            &args.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+            flavor,
+        )
+    }
+
+    #[test]
+    fn test_plan_double_dash_makes_following_arg_a_path() {
+        let p = plan_of(&["--", "-al"]);
+        assert_eq!(p.child_args, vec!["-l", "--", "-al"]);
+        assert!(!p.show_all);
+        assert!(!p.show_long);
+    }
+
+    #[test]
+    fn test_plan_keeps_flag_value_with_its_flag_when_a_path_comes_first() {
+        let p = plan_of(&["dir", "-I", "pattern"]);
+        assert_eq!(p.child_args, vec!["-l", "-I", "pattern", "--", "dir"]);
+    }
+
+    #[test]
+    fn test_plan_flag_value_looking_like_a_flag_is_not_read_as_one() {
+        let p = plan_of(&["-I", "-al"]);
+        assert_eq!(p.child_args, vec!["-l", "-I", "-al", "--", "."]);
+        assert!(!p.show_all);
+        assert!(!p.show_long);
+    }
+
+    #[test]
+    fn test_plan_separate_format_value_implies_long_listing() {
+        assert!(plan_of(&["--format", "long"]).show_long);
+        assert!(plan_of(&["--format=long"]).show_long);
+        assert!(plan_of(&["--format", "verbose"]).show_long);
+        assert!(!plan_of(&["--format", "across"]).show_long);
+    }
+
+    #[test]
+    fn test_plan_color_optional_value_leaves_next_arg_a_path() {
+        // `ls --color always` lists a file named `always`; the value only ever attaches.
+        let p = plan_of(&["--color", "always"]);
+        assert_eq!(p.child_args, vec!["-l", "--color", "--", "always"]);
+        assert_eq!(
+            plan_of(&["--color=always"]).child_args,
+            vec!["-l", "--color=always", "--", "."]
+        );
+    }
+
+    #[test]
+    fn test_plan_resolves_unambiguous_long_abbreviation() {
+        // Real `ls --sor time` sorts by time, so the value must not become a path.
+        let p = plan_of(&["--sor", "time", "dir"]);
+        assert_eq!(p.child_args, vec!["-l", "--sor=time", "--", "dir"]);
+        assert!(plan_of(&["--forma", "long"]).show_long);
+        assert!(plan_of(&["--alm"]).show_all);
+    }
+
+    #[test]
+    fn test_plan_leaves_ambiguous_abbreviation_for_ls_to_reject() {
+        // `--ign` spans --ignore and --ignore-backups; ls errors, so RTK must not guess.
+        let p = plan_of(&["--ign", "beta*"]);
+        assert_eq!(p.child_args, vec!["-l", "--ign", "--", "beta*"]);
+    }
+
+    #[test]
+    fn test_plan_short_cluster_still_expands() {
+        let p = plan_of(&["-la"]);
+        assert_eq!(p.child_args, vec!["-la", "--", "."]);
+        assert!(p.show_all);
+        assert!(p.show_long);
+        let almost = plan_of(&["-lA"]);
+        assert_eq!(almost.child_args, vec!["-l", "-A", "--", "."]);
+        assert!(almost.show_all);
+        // -h is dropped because RTK renders sizes itself; -1 is a flag, not a digit-run value.
+        assert_eq!(plan_of(&["-lh1"]).child_args, vec!["-l", "-1", "--", "."]);
+    }
+
+    #[test]
+    fn test_plan_defaults_to_current_dir() {
+        assert_eq!(plan_of(&[]).child_args, vec!["-l", "--", "."]);
+    }
+
+    #[test]
+    fn test_host_flavor_follows_the_target() {
+        let expected = if cfg!(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        )) {
+            Flavor::Bsd
+        } else {
+            Flavor::Gnu
+        };
+        assert_eq!(HOST_FLAVOR, expected);
+    }
+
+    #[test]
+    fn test_plan_bsd_boolean_short_flags_do_not_eat_the_path() {
+        // -I/-T/-w are booleans on BSD, so the path must stay behind the `--`; ahead of it,
+        // BSD's non-permuting getopt would list `--` and the current directory too.
+        assert_eq!(
+            plan_bsd(&["-lT", "/tmp"]).child_args,
+            vec!["-l", "-T", "--", "/tmp"]
+        );
+        assert_eq!(
+            plan_bsd(&["-lw", "/tmp"]).child_args,
+            vec!["-l", "-w", "--", "/tmp"]
+        );
+        assert_eq!(
+            plan_bsd(&["-lI", "/tmp"]).child_args,
+            vec!["-l", "-I", "--", "/tmp"]
+        );
+    }
+
+    #[test]
+    fn test_plan_bsd_date_format_flag_keeps_its_value() {
+        assert_eq!(
+            plan_bsd(&["-D", "%F", "/tmp"]).child_args,
+            vec!["-l", "-D", "%F", "--", "/tmp"]
+        );
+    }
+
+    #[test]
+    fn test_plan_long_flag_with_a_rejected_value_is_still_forwarded() {
+        // `--all=x` is an error real ls reports with exit 2; dropping it as if it were a bare
+        // `--all` would turn that into a successful listing.
+        assert_eq!(
+            plan_of(&["--all=x"]).child_args,
+            vec!["-la", "--all=x", "--", "."]
+        );
+        assert_eq!(plan_of(&["--all"]).child_args, vec!["-la", "--", "."]);
+    }
+
+    #[test]
+    fn test_plan_drops_human_readable_long_aliases() {
+        // They pre-format sizes RTK renders itself, leaving `200K` where a byte count belongs.
+        assert_eq!(
+            plan_of(&["--human-readable", "big.bin"]).child_args,
+            vec!["-l", "--", "big.bin"]
+        );
+        assert_eq!(plan_of(&["--si"]).child_args, vec!["-l", "--", "."]);
+        assert_eq!(plan_of(&["-h"]).child_args, vec!["-l", "--", "."]);
+    }
+
+    #[test]
+    fn test_plan_resolves_abbreviated_format_value() {
+        assert!(plan_of(&["--format=lon"]).show_long);
+        assert!(plan_of(&["--format", "verb"]).show_long);
+        assert!(!plan_of(&["--format=acr"]).show_long);
+        // `ver` spans verbose and vertical: ambiguous, as real ls reports.
+        assert!(!plan_of(&["--format=ver"]).show_long);
+    }
+
+    #[test]
+    fn test_plan_flag_awaiting_a_value_goes_last_instead_of_eating_the_boundary() {
+        // Ahead of the `--` these swallow it, so ls reports a bad argument value instead of the
+        // missing one; last, the child sees no value at all and says so.
+        assert_eq!(
+            plan_of(&["-a", "--indicator-style"]).child_args,
+            vec!["-la", ".", "--indicator-style"]
+        );
+        assert_eq!(plan_of(&["sub", "-I"]).child_args, vec!["-l", "sub", "-I"]);
+        // An optional-value flag is not waiting for anything.
+        assert_eq!(
+            plan_of(&["--color"]).child_args,
+            vec!["-l", "--color", "--", "."]
+        );
+    }
+
+    #[test]
+    fn test_compact_records_dot_noise_dir_when_child_printed_it() {
+        // Child ran with -A but RTK was told not to show all: the dot noise
+        // dir must be recorded, never silently vanish.
+        let input = "total 8\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 node_modules\n\
+                     -rw-r--r--  1 user  staff  100 Jan  1 12:00 README.md\n";
+        let (entries, _parsed, _truncated, filtered) = compact_ls(input, false, false);
+        assert!(!entries.contains(".git"));
+        assert_eq!(filtered, vec![".git/", "node_modules/"]);
+    }
+
+    #[test]
+    fn test_hidden_hint_none_when_empty() {
+        assert!(hidden_hint(&[], &[]).is_none());
+    }
+
+    #[test]
+    fn test_hidden_hint_truncation_note_and_one_shot_command() {
+        let noise = vec!["node_modules/".to_string(), "target/".to_string()];
+        let hint = hidden_hint(&[], &noise).expect("hint for hidden entries");
+        assert!(hint.starts_with("... (2 filtered)"));
+        assert!(
+            !hint.contains("use -a"),
+            "standard ls flags are not RTK's job to teach: {hint}"
+        );
+        assert!(
+            !hint.contains("full output"),
+            "must not point at already-seen output: {hint}"
+        );
+        // Recovery availability depends on environment; when present the hint
+        // is the standard one-shot retrieval command over the hidden entries.
+        if hint.lines().count() > 1 {
+            assert!(
+                hint.contains("[see remaining: tail -n +1 ")
+                    || hint.contains("hidden: rtk recall "),
+                "recovery hint must be a standard retrieval form: {hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hidden_hint_note_variants() {
+        let t = vec!["x  1B".to_string()];
+        let f = vec!["target/".to_string()];
+        assert!(
+            hidden_hint(&t, &[])
+                .expect("hint")
+                .starts_with("... (1 more)")
+        );
+        assert!(
+            hidden_hint(&[], &f)
+                .expect("hint")
+                .starts_with("... (1 filtered)")
+        );
+        assert!(
+            hidden_hint(&t, &f)
+                .expect("hint")
+                .starts_with("... (1 more, 1 filtered)")
+        );
+    }
+
+    #[test]
+    fn test_compact_truncates_past_cap() {
+        let mut input = String::from("total 0\n");
+        for i in 0..60 {
+            input.push_str(&format!(
+                "-rw-r--r--  1 user  staff  100 Jan  1 12:00 file{:02}.txt\n",
+                i
+            ));
+        }
+        let (entries, _parsed, truncated, _hidden) = compact_ls(&input, false, false);
+        assert_eq!(entries.lines().count(), CAP_INVENTORY);
+        assert_eq!(truncated.len(), 60 - CAP_INVENTORY);
+        assert!(entries.contains("file00.txt"));
+        assert!(!entries.contains("file59.txt"));
+        assert!(
+            truncated.iter().any(|l| l.contains("file59.txt")),
+            "overflow entries must be recoverable via the tee file"
+        );
+    }
+
+    #[test]
+    fn test_compact_no_truncation_under_cap() {
+        let input = "total 8\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n\
+                     -rw-r--r--  1 user  staff  100 Jan  1 12:00 main.rs\n";
+        let (_entries, _parsed, truncated, _hidden) = compact_ls(input, false, false);
+        assert!(truncated.is_empty());
+    }
+
+    #[test]
     fn test_compact_show_all() {
         let input = "total 8\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n";
-        let (entries, _summary, _parsed) = compact_ls(input, true, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, true, false);
         assert!(entries.contains(".git/"));
         assert!(entries.contains("src/"));
     }
@@ -403,9 +1026,8 @@ mod tests {
     #[test]
     fn test_compact_empty() {
         let input = "total 0\n";
-        let (entries, summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
         assert_eq!(entries, "(empty)\n");
-        assert!(summary.is_empty());
     }
 
     #[test]
@@ -413,10 +1035,9 @@ mod tests {
         let input = "total 8\n\
                      drwxr-xr-x  2 user user  4096  1月  1 12:00 .\n\
                      drwxr-xr-x 16 user user 20480  1月  1 12:00 ..\n";
-        let (entries, summary, parsed_count) = compact_ls(input, false, false);
+        let (entries, parsed_count, _truncated, _hidden) = compact_ls(input, false, false);
         assert_eq!(parsed_count, 0);
         assert_eq!(entries, "(empty)\n");
-        assert!(summary.is_empty());
     }
 
     #[test]
@@ -424,23 +1045,9 @@ mod tests {
         let input = "total 0\n\
                      drwxr-xr-x  2 lumin  wheel  64 Apr 23 00:37 .\n\
                      drwxr-xr-x 16 root  wheel 164576 Apr 23 00:37 ..\n";
-        let (entries, summary, parsed_count) = compact_ls(input, false, false);
+        let (entries, parsed_count, _truncated, _hidden) = compact_ls(input, false, false);
         assert_eq!(parsed_count, 0);
         assert_eq!(entries, "(empty)\n");
-        assert!(summary.is_empty());
-    }
-
-    #[test]
-    fn test_compact_summary() {
-        let input = "total 48\n\
-                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
-                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n\
-                     -rw-r--r--  1 user  staff  5678 Jan  1 12:00 lib.rs\n\
-                     -rw-r--r--  1 user  staff   100 Jan  1 12:00 Cargo.toml\n";
-        let (_entries, summary, _parsed) = compact_ls(input, false, false);
-        assert!(summary.contains("Summary: 3 files, 1 dirs"));
-        assert!(summary.contains(".rs"));
-        assert!(summary.contains(".toml"));
     }
 
     #[test]
@@ -457,7 +1064,7 @@ mod tests {
     fn test_compact_handles_filenames_with_spaces() {
         let input = "total 8\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 my file.txt\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
         assert!(entries.contains("my file.txt"));
     }
 
@@ -465,24 +1072,20 @@ mod tests {
     fn test_compact_symlinks() {
         let input = "total 8\n\
                      lrwxr-xr-x  1 user  staff  10 Jan  1 12:00 link -> target\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
         assert!(entries.contains("link -> target"));
     }
 
     #[test]
     fn test_entries_no_summary() {
-        // Entries should never contain the summary line
+        // No summary line anywhere — pure entries (agent-first output)
         let input = "total 48\n\
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n";
-        let (entries, summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
         assert!(
             !entries.contains("Summary:"),
             "entries must not contain summary"
-        );
-        assert!(
-            summary.contains("Summary:"),
-            "summary must contain the icon"
         );
     }
 
@@ -494,7 +1097,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n\
                      -rw-r--r--  1 user  staff  5678 Jan  1 12:00 lib.rs\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
         let line_count = entries.lines().count();
         assert_eq!(
             line_count, 3,
@@ -509,7 +1112,7 @@ mod tests {
         let input = "total 8\n\
                      -rw-r--r--  1 fjeanne utilisa. du domaine    0 Mar 31 16:18 empty.txt\n\
                      -rw-r--r--  1 fjeanne utilisa. du domaine 1234 Mar 31 16:18 data.json\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, true);
         assert!(
             entries.contains("empty.txt"),
             "should contain 'empty.txt', got: {entries}"
@@ -537,7 +1140,7 @@ mod tests {
         // Some systems show year instead of time for old files
         let input = "total 8\n\
                      -rw-r--r--  1 user staff  5678 Dec 25  2024 archive.tar\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, true);
         assert!(
             entries.contains("archive.tar"),
             "should contain filename, got: {entries}"
@@ -592,7 +1195,7 @@ mod tests {
         // Regression test for #844: `rtk ls /dev/ttyACM*` returned "(empty)"
         // because character devices (type 'c') were not handled by compact_ls.
         let input = "crw-rw----  1 root  dialout  166, 0 Apr 22 09:46 /dev/ttyACM0\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
         assert!(
             entries.contains("/dev/ttyACM0"),
             "should contain device file, got: {entries}"
@@ -604,7 +1207,7 @@ mod tests {
     fn test_compact_device_files_macos_hex_size() {
         // macOS shows device major/minor as hex (e.g. 0x2000000)
         let input = "crw-rw-rw-  1 root  wheel  0x2000000 Mar 31 19:25 /dev/tty\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
         assert!(
             entries.contains("/dev/tty"),
             "should contain device file, got: {entries}"
@@ -614,7 +1217,7 @@ mod tests {
     #[test]
     fn test_compact_block_device() {
         let input = "brw-rw----  1 root  disk  8, 0 Apr 22 09:46 /dev/sda\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
         assert!(
             entries.contains("/dev/sda"),
             "should contain block device, got: {entries}"
@@ -673,7 +1276,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n\
                      -rwxr-xr-x  1 user  staff   500 Jan  1 12:00 build.sh\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, true);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, true);
         assert!(
             entries.contains("755  src/"),
             "dir should be prefixed with octal perms, got: {entries}"
@@ -694,7 +1297,7 @@ mod tests {
         // under the hood.
         let input = "total 48\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n";
-        let (entries, _summary, _parsed) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
         assert!(
             !entries.contains("644"),
             "short format must not include octal perms, got: {entries}"
@@ -703,13 +1306,145 @@ mod tests {
     }
 
     #[test]
+    fn test_compact_short_format_is_names_only() {
+        let input = "total 48\n\
+                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
+                     lrwxr-xr-x  1 user  staff    10 Jan  1 12:00 link -> target\n";
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        assert_eq!(entries, "src/\nCargo.toml\nlink -> target\n");
+    }
+
+    fn long_line(kind: char, name: &str) -> String {
+        format!("{kind}rw-r--r--  1 user  staff  1234 Jan  1 12:00 {name}\n")
+    }
+
+    fn one_per_line(names: &[&str]) -> String {
+        names.iter().map(|name| format!("{name}\n")).collect()
+    }
+
+    #[test]
+    fn test_render_bare_ls_is_native_when_markers_cost_more() {
+        let raw: String = ["src", "docs", "tests", "a.rs"]
+            .iter()
+            .map(|n| long_line(if n.contains('.') { '-' } else { 'd' }, n))
+            .collect();
+        let native = one_per_line(&["a.rs", "docs", "src", "tests"]);
+        assert_eq!(render(&raw, Some(&native), false, false, 0), native);
+    }
+
+    #[test]
+    fn test_render_bare_ls_is_native_when_the_hint_costs_more() {
+        let raw = format!(
+            "{}{}{}",
+            long_line('-', "Cargo.toml"),
+            long_line('d', "target"),
+            long_line('-', "README.md")
+        );
+        let native = one_per_line(&["Cargo.toml", "README.md", "target"]);
+        assert_eq!(render(&raw, Some(&native), false, false, 0), native);
+    }
+
+    #[test]
+    fn test_render_bare_ls_keeps_compact_when_it_saves() {
+        let files: Vec<String> = (0..CAP_INVENTORY + 40)
+            .map(|i| format!("file_with_a_long_name_{i:03}.txt"))
+            .collect();
+        let mut raw: String = files.iter().map(|name| long_line('-', name)).collect();
+        raw.push_str(&long_line('d', "node_modules"));
+        let mut names: Vec<&str> = files.iter().map(String::as_str).collect();
+        names.push("node_modules");
+        let native = one_per_line(&names);
+        let out = render(&raw, Some(&native), false, false, 0);
+        assert!(out.starts_with("file_with_a_long_name_000.txt\n"), "{out}");
+        assert!(out.contains("... (40 more, 1 filtered)"), "{out}");
+        assert!(estimate_tokens(&out) < estimate_tokens(&native));
+    }
+
+    #[test]
+    fn test_render_bare_ls_never_exceeds_native() {
+        let names = [
+            "a",
+            "src",
+            "node_modules",
+            "target",
+            ".git",
+            "x.rs",
+            "my file",
+        ];
+        for n in 0..=names.len() {
+            for dirs_mask in 0..(1u32 << n) {
+                let raw: String = names[..n]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| {
+                        long_line(if (dirs_mask >> i) & 1 == 1 { 'd' } else { '-' }, name)
+                    })
+                    .collect();
+                let native = one_per_line(&names[..n]);
+                let out = render(&raw, Some(&native), false, false, 0);
+                assert!(
+                    estimate_tokens(&out) <= estimate_tokens(&native),
+                    "rtk ls emitted {out:?} for native {native:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_render_unparsed_listing_is_held_to_native() {
+        let raw = "Desktop:\ntotal 0\n\ngo:\ntotal 0\n";
+        let native = "Desktop:\n\ngo:\n";
+        assert_eq!(render(raw, Some(native), false, false, 0), native);
+        assert_eq!(render(raw, None, false, false, 0), raw);
+    }
+
+    #[test]
+    fn test_render_unrecognised_date_format_is_held_to_native() {
+        let raw = "total 8\n\
+                   -rw-r--r--  1 user  staff  1234 Oct 28 16:25:03 2026 Cargo.toml\n\
+                   drwxr-xr-x  2 user  staff    64 Oct 28 16:25:03 2026 src\n";
+        let native = "Cargo.toml\nsrc\n";
+        assert_eq!(render(raw, Some(native), false, false, 0), native);
+    }
+
+    #[test]
+    fn test_render_long_listing_keeps_compact_when_it_saves() {
+        let raw = format!("{}{}", long_line('d', "src"), long_line('-', "a.rs"));
+        let compact = "644  src/\n644  a.rs  1.2K\n";
+        assert_eq!(render(&raw, Some(&raw), false, true, 0), compact);
+        assert_eq!(render(&raw, None, false, true, 0), compact);
+    }
+
+    #[test]
+    fn test_render_long_listing_is_held_to_native() {
+        let raw = format!("{}{}", long_line('d', "src"), long_line('-', "a.rs"));
+        let native = "a.rs\n";
+        assert_eq!(render(&raw, Some(native), false, true, 0), native);
+    }
+
+    #[test]
+    fn test_render_without_native_keeps_compact() {
+        let raw = format!("{}{}", long_line('d', "src"), long_line('-', "a.rs"));
+        assert_eq!(render(&raw, None, false, false, 0), "src/\na.rs\n");
+    }
+
+    #[test]
+    fn test_render_empty_directory_matches_bare_ls() {
+        let raw = "total 0\n\
+                   drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .\n\
+                   drwxr-xr-x  2 user  staff  64 Jan  1 12:00 ..\n";
+        assert_eq!(render(raw, Some(""), false, false, 0), "");
+        assert_eq!(render(raw, None, false, true, 0), "(empty)\n");
+    }
+
+    #[test]
     fn test_compact_chinese_locale_fallback() {
         let input = "total 8\n\
                       drwxr-xr-x  2 user staff  64  1月  1 12:00 src\n\
                       -rw-r--r--  1 user staff 1234  1月  1 12:00 main.rs\n";
-        let (entries, summary, parsed_count) = compact_ls(input, false, false);
+        let (entries, parsed_count, _truncated, _hidden) = compact_ls(input, false, false);
         assert_eq!(parsed_count, 0);
         assert!(entries.is_empty());
-        assert!(summary.is_empty());
     }
 }

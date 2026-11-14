@@ -13,7 +13,7 @@ You are an expert Rust developer specializing in the RTK codebase architecture.
 
 - **CLI proxy architecture**: Command routing, stdin/stdout forwarding, fallback handling
 - **Filter development**: Regex-based condensation, token counting, format preservation
-- **Performance optimization**: Zero-overhead design, lazy_static regex, minimal allocations
+- **Performance optimization**: Zero-overhead design, LazyLock regex, minimal allocations
 - **Error handling**: anyhow for CLI binary, graceful fallback on filter failures
 - **Cross-platform**: macOS/Linux/Windows shell compatibility (bash/zsh/PowerShell)
 
@@ -48,16 +48,16 @@ pub fn execute_with_filter(cmd: &str, args: &[&str]) -> anyhow::Result<Output> {
 
 ### Lazy Regex Compilation (Performance Critical)
 
-**✅ RIGHT**: Compile regex ONCE with `lazy_static!`, reuse forever:
+**✅ RIGHT**: Compile regex ONCE with `LazyLock`, reuse forever:
 
 ```rust
-use lazy_static::lazy_static;
 use regex::Regex;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref COMMIT_HASH: Regex = Regex::new(r"[0-9a-f]{7,40}").unwrap();
-    static ref AUTHOR_LINE: Regex = Regex::new(r"^Author: (.+) <(.+)>$").unwrap();
-}
+static COMMIT_HASH: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[0-9a-f]{7,40}").unwrap());
+static AUTHOR_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^Author: (.+) <(.+)>$").unwrap());
 
 pub fn filter_git_log(input: &str) -> String {
     input.lines()
@@ -85,11 +85,11 @@ pub fn filter_git_log(input: &str) -> String {
 }
 ```
 
-**Why**: Regex compilation is expensive (~1-5ms per pattern). RTK targets <10ms total startup time. `lazy_static!` compiles patterns once at binary startup, then reuses them forever. This is **mandatory** for all regex in RTK.
+**Why**: Regex compilation is expensive (~1-5ms per pattern). RTK targets <10ms total startup time. `LazyLock` compiles fixed patterns on first use, then reuses them forever. Use it for regexes that are fixed at declaration time and reused across calls.
 
 ### Token Count Validation (Testing Critical)
 
-All filters **MUST** verify token savings claims (60-90%) in tests:
+All filters **MUST** verify the ≥20% savings floor in tests:
 
 ```rust
 #[cfg(test)]
@@ -113,10 +113,10 @@ mod tests {
 
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
 
-        // RTK promise: 60-90% savings
+        // RTK floor: >=20% savings
         assert!(
-            savings >= 60.0,
-            "Git log filter: expected ≥60% savings, got {:.1}%",
+            savings >= 20.0,
+            "Git log filter: expected ≥20% savings, got {:.1}%",
             savings
         );
 
@@ -126,7 +126,7 @@ mod tests {
 }
 ```
 
-**Why**: Token savings claims (60-90%) must be **verifiable**. Tests with real fixtures prevent regressions. If savings drop below 60%, it's a release blocker.
+**Why**: Token savings (≥20% floor) must be **verifiable**. Tests with real fixtures prevent regressions. If savings drop below 20%, it's a release blocker.
 
 ### Cross-Platform Shell Escaping
 
@@ -235,11 +235,11 @@ mod tests {
         // Verify format preservation
         assert!(output.contains("test result:"));
 
-        // Verify token savings ≥60%
+        // Verify token savings ≥20%
         let input_tokens = count_tokens(input);
         let output_tokens = count_tokens(&output);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
-        assert!(savings >= 60.0, "Expected ≥60% savings, got {:.1}%", savings);
+        assert!(savings >= 20.0, "Expected ≥20% savings, got {:.1}%", savings);
     }
 
     #[test]
@@ -315,7 +315,7 @@ fn test_real_git_log() {
 - `src/core/config.rs` - User configuration (~/.config/rtk/config.toml)
 
 **Command modules** (`src/cmds/<ecosystem>/`):
-- `src/cmds/git/` - git.rs, gh_cmd.rs, gt_cmd.rs, diff_cmd.rs
+- `src/cmds/git/` - git_cmd.rs, gh_cmd.rs, gt_cmd.rs, diff_cmd.rs
 - `src/cmds/rust/` - cargo_cmd.rs, runner.rs
 - `src/cmds/js/` - lint_cmd.rs, tsc_cmd.rs, next_cmd.rs, prettier_cmd.rs, playwright_cmd.rs, prisma_cmd.rs, vitest_cmd.rs, pnpm_cmd.rs, npm_cmd.rs
 - `src/cmds/python/` - ruff_cmd.rs, pytest_cmd.rs, mypy_cmd.rs, pip_cmd.rs
@@ -325,7 +325,7 @@ fn test_real_git_log() {
 - `src/cmds/system/` - ls.rs, tree.rs, read.rs, grep_cmd.rs, find_cmd.rs, etc.
 
 **Hook & analytics** (`src/hooks/`, `src/analytics/`):
-- `src/hooks/init.rs` - rtk init command
+- `src/hooks/init/` - rtk init command
 - `src/analytics/gain.rs` - rtk gain command
 
 **Tests**:
@@ -373,9 +373,9 @@ docker run --rm -v $(pwd):/rtk -w /rtk rust:latest cargo test  # Linux via Docke
 - Adding async adds ~5-10ms startup overhead
 - RTK targets <10ms total startup
 
-❌ **DON'T** recompile regex at runtime → Use `lazy_static!`
+❌ **DON'T** repeatedly compile fixed regex patterns → Use `LazyLock<Regex>`
 - Regex compilation is expensive (~1-5ms per pattern)
-- Use `lazy_static! { static ref RE: Regex = ... }` for all patterns
+- Use `LazyLock<Regex>` for fixed patterns reused across calls
 
 ❌ **DON'T** panic on filter failure → Fallback to raw command
 - User workflow must never break
@@ -394,8 +394,8 @@ docker run --rm -v $(pwd):/rtk -w /rtk rust:latest cargo test  # Linux via Docke
 - Respect exit codes (0 = success, non-zero = failure)
 
 ✅ **DO** provide fallback to raw command on filter failure
-✅ **DO** compile regex once with `lazy_static!`
-✅ **DO** verify token savings claims in tests (≥60%)
+✅ **DO** compile fixed, reused regexes once with `LazyLock<Regex>`
+✅ **DO** verify token savings claims in tests (≥20%)
 ✅ **DO** test on macOS + Linux + Windows (via CI or manual)
 ✅ **DO** run `cargo fmt && cargo clippy --all-targets && cargo test` before commit
 ✅ **DO** benchmark startup time with `hyperfine` (<10ms target)
@@ -414,12 +414,11 @@ touch src/cmds/<ecosystem>/newcmd_cmd.rs
 ```rust
 // src/cmds/<ecosystem>/newcmd_cmd.rs
 use anyhow::{Context, Result};
-use lazy_static::lazy_static;
 use regex::Regex;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref PATTERN: Regex = Regex::new(r"pattern").unwrap();
-}
+static PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"pattern").unwrap());
 
 pub fn filter_newcmd(input: &str) -> Result<String> {
     // Implement filtering logic
@@ -438,7 +437,7 @@ mod tests {
         let output = filter_newcmd(input).unwrap();
 
         let savings = calculate_savings(input, &output);
-        assert!(savings >= 60.0, "Expected ≥60% savings, got {:.1}%", savings);
+        assert!(savings >= 20.0, "Expected ≥20% savings, got {:.1}%", savings);
     }
 }
 ```
@@ -517,7 +516,7 @@ rtk newcmd args
 |--------|--------|--------------|
 | Startup time | <10ms | `hyperfine 'rtk git status'` |
 | Memory overhead | <5MB | `/usr/bin/time -l rtk git status` |
-| Token savings | 60-90% | Tests with `count_tokens()` |
+| Token savings | ≥20% floor | Tests with `count_tokens()` |
 | Binary size | <5MB stripped | `ls -lh target/release/rtk` |
 
 **Performance regressions are release blockers** - always benchmark before/after changes.

@@ -1,0 +1,10 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+E   assert 1 == 2
+/home/user/project/test_tl.py:6: assert 1 == 2
+E   AssertionError: assert ['foo.py:3: E...ine too long'] == []
+      
+      Left contains one more item: 'foo.py:3: E501 line too long'
+      Use -v to get more diff
+/home/user/project/test_tl.py:10: AssertionError: assert ['foo.py:3: E...ine too long'] == []
+2 failed in 0.01s

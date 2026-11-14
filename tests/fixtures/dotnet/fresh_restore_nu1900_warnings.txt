@@ -1,0 +1,22 @@
+  Determining projects to restore...
+  Restored /private/tmp/dotnet-repro/Lib/Lib.csproj (in 22 ms).
+/private/tmp/dotnet-repro/B.Tests/B.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json. [/private/tmp/dotnet-repro/Warnings.slnx]
+/private/tmp/dotnet-repro/A.Tests/A.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json. [/private/tmp/dotnet-repro/Warnings.slnx]
+  Restored /private/tmp/dotnet-repro/B.Tests/B.Tests.csproj (in 5.48 sec).
+  Restored /private/tmp/dotnet-repro/A.Tests/A.Tests.csproj (in 5.48 sec).
+/private/tmp/dotnet-repro/B.Tests/B.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json.
+  Lib -> /private/tmp/dotnet-repro/Lib/bin/Debug/net10.0/Lib.dll
+/private/tmp/dotnet-repro/A.Tests/A.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json.
+  B.Tests -> /private/tmp/dotnet-repro/B.Tests/bin/Debug/net10.0/B.Tests.dll
+  A.Tests -> /private/tmp/dotnet-repro/A.Tests/bin/Debug/net10.0/A.Tests.dll
+
+Build succeeded.
+
+/private/tmp/dotnet-repro/B.Tests/B.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json. [/private/tmp/dotnet-repro/Warnings.slnx]
+/private/tmp/dotnet-repro/A.Tests/A.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json. [/private/tmp/dotnet-repro/Warnings.slnx]
+/private/tmp/dotnet-repro/B.Tests/B.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json.
+/private/tmp/dotnet-repro/A.Tests/A.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json.
+    4 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:06.21
