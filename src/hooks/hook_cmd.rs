@@ -612,6 +612,65 @@ fn vibe_rewrite_json(rewritten: &str) -> String {
     .to_string()
 }
 
+// ── Codewhale hook ─────────────────────────────────────────────
+
+/// Run the Codewhale `tool_call_before` hook.
+///
+/// Codewhale passes tool context in environment variables, not stdin:
+/// `DEEPSEEK_TOOL_ARGS` holds the tool-input JSON preview. On success RTK
+/// prints a `{"decision": "allow", "updatedInput": {...}}` document to
+/// stdout, exit 0, or nothing to leave the call untouched.
+pub fn run_codewhale() -> Result<()> {
+    let Some(args) = user_env::var("DEEPSEEK_TOOL_ARGS") else {
+        return Ok(());
+    };
+    if let Some(output) = run_codewhale_inner(&args) {
+        let _ = writeln!(io::stdout(), "{output}");
+    }
+    Ok(())
+}
+
+fn run_codewhale_inner(args: &str) -> Option<String> {
+    let input: Value = match serde_json::from_str(args) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    // `tool_call_before` fires for every tool; only shell tools carry a
+    // `command` to rewrite. Non-`run` actions (`wait`, `interact`, `cancel`)
+    // name a `task_id` instead, so the missing command already passes through.
+    let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    if cmd.is_empty() {
+        return None;
+    }
+
+    match decide_hook_action(cmd, permissions::Host::Codewhale, None) {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            Some(r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string())
+        }
+        HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten, _) => {
+            audit_log("rewrite", cmd, rewritten);
+            Some(codewhale_rewrite_json(&input, rewritten))
+        }
+        HookDecision::Defer => None,
+    }
+}
+
+/// Codewhale's `updatedInput` replaces the whole tool input, so every field
+/// the shell tool needs (`cwd`, `timeout_ms`, …) is preserved and only
+/// `command` changes.
+fn codewhale_rewrite_json(input: &Value, rewritten: &str) -> String {
+    let mut updated = input.clone();
+    if let Some(obj) = updated.as_object_mut() {
+        obj.insert("command".into(), Value::String(rewritten.to_string()));
+    }
+    serde_json::json!({
+        "decision": "allow",
+        "updatedInput": updated,
+    })
+    .to_string()
+}
+
 fn gemini_json(decision: &str, rewrite: Option<&str>) -> String {
     let mut output = serde_json::json!({ "decision": decision });
     if let Some(cmd) = rewrite {
@@ -3481,6 +3540,71 @@ mod tests {
     fn test_vibe_substitution_defers() {
         let input = vibe_input("bash", "echo $(rm -rf /)");
         assert!(run_vibe_inner(&input).is_none());
+    }
+
+    fn codewhale_input(tool_input: Value) -> String {
+        // `rtk hook codewhale` reads the tool input from `DEEPSEEK_TOOL_ARGS`,
+        // so the unit under test is fed that JSON directly (not a wrapper).
+        tool_input.to_string()
+    }
+
+    #[test]
+    fn test_codewhale_rewrites_bash_command() {
+        let out = run_codewhale_inner(&codewhale_input(json!({ "command": "git status" })))
+            .expect("rewrite expected");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["updatedInput"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_codewhale_preserves_other_input_fields() {
+        let out = run_codewhale_inner(&codewhale_input(json!(
+            { "command": "git status", "cwd": "sub/dir", "timeout_ms": 120000 }
+        )))
+        .expect("rewrite expected");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["updatedInput"]["command"], "rtk git status");
+        assert_eq!(v["updatedInput"]["cwd"], "sub/dir");
+        assert_eq!(v["updatedInput"]["timeout_ms"], 120000);
+    }
+
+    #[test]
+    fn test_codewhale_empty_command_passthrough() {
+        assert!(run_codewhale_inner(&codewhale_input(json!({ "command": "" }))).is_none());
+        assert!(run_codewhale_inner(&codewhale_input(json!({}))).is_none());
+    }
+
+    #[test]
+    fn test_codewhale_non_run_action_passthrough() {
+        // `action = "wait"` names a task_id, not a command, so it passes through.
+        assert!(
+            run_codewhale_inner(&codewhale_input(json!(
+                { "action": "wait", "task_id": "x" }
+            )))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn test_codewhale_malformed_json_returns_none() {
+        assert!(run_codewhale_inner("not json at all").is_none());
+        assert!(run_codewhale_inner("{ unterminated").is_none());
+    }
+
+    #[test]
+    fn test_codewhale_already_prefixed_passthrough() {
+        assert!(
+            run_codewhale_inner(&codewhale_input(json!({ "command": "rtk git status" }))).is_none()
+        );
+    }
+
+    #[test]
+    fn test_codewhale_substitution_defers() {
+        assert!(
+            run_codewhale_inner(&codewhale_input(json!({ "command": "echo $(rm -rf /)" })))
+                .is_none()
+        );
     }
 
     fn antigravity_input(cmd: &str) -> String {

@@ -36,6 +36,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Pi | `rtk init --agent pi` | `.pi/extensions/rtk.ts` | -- |
 | Oh My Pi (OMP) | `rtk init --agent omp` | `.omp/extensions/rtk.ts` (shared Pi extension) | -- |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
+| Codewhale | `rtk init --agent codewhale` (project) or `rtk init -g --agent codewhale` (global) | Native `rtk hook codewhale` registration | `.codewhale/hooks.toml` (project) or `~/.codewhale/config.toml` (global) |
 
 
 ## Integrity Verification
