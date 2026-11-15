@@ -1,0 +1,87 @@
+Test project /tmp/ctest_crash_repro/build
+    Start 1: passes
+1/2 Test #1: passes ...........................   Passed    0.00 sec
+    Start 2: crashes
+2/2 Test #2: crashes ..........................***Failed    0.00 sec
+********* Start testing of DemoTest *********
+Config: Using QtTest library
+PASS   : DemoTest::case1()
+PASS   : DemoTest::case2()
+PASS   : DemoTest::case3()
+PASS   : DemoTest::case4()
+PASS   : DemoTest::case5()
+FAIL!  : DemoTest::importantCase() Compared values are not the same
+   Actual   (value): 1
+   Expected (want) : 2
+   Loc: [demo_test.cpp(42)]
+=== Stack trace ===
+#1  0x00007f000001 in frame1 () from /usr/lib/libdemo.so
+#2  0x00007f000002 in frame2 () from /usr/lib/libdemo.so
+#3  0x00007f000003 in frame3 () from /usr/lib/libdemo.so
+#4  0x00007f000004 in frame4 () from /usr/lib/libdemo.so
+#5  0x00007f000005 in frame5 () from /usr/lib/libdemo.so
+#6  0x00007f000006 in frame6 () from /usr/lib/libdemo.so
+#7  0x00007f000007 in frame7 () from /usr/lib/libdemo.so
+#8  0x00007f000008 in frame8 () from /usr/lib/libdemo.so
+#9  0x00007f000009 in frame9 () from /usr/lib/libdemo.so
+#10  0x00007f0000010 in frame10 () from /usr/lib/libdemo.so
+#11  0x00007f0000011 in frame11 () from /usr/lib/libdemo.so
+#12  0x00007f0000012 in frame12 () from /usr/lib/libdemo.so
+#13  0x00007f0000013 in frame13 () from /usr/lib/libdemo.so
+#14  0x00007f0000014 in frame14 () from /usr/lib/libdemo.so
+#15  0x00007f0000015 in frame15 () from /usr/lib/libdemo.so
+#16  0x00007f0000016 in frame16 () from /usr/lib/libdemo.so
+#17  0x00007f0000017 in frame17 () from /usr/lib/libdemo.so
+#18  0x00007f0000018 in frame18 () from /usr/lib/libdemo.so
+#19  0x00007f0000019 in frame19 () from /usr/lib/libdemo.so
+#20  0x00007f0000020 in frame20 () from /usr/lib/libdemo.so
+#21  0x00007f0000021 in frame21 () from /usr/lib/libdemo.so
+#22  0x00007f0000022 in frame22 () from /usr/lib/libdemo.so
+#23  0x00007f0000023 in frame23 () from /usr/lib/libdemo.so
+#24  0x00007f0000024 in frame24 () from /usr/lib/libdemo.so
+#25  0x00007f0000025 in frame25 () from /usr/lib/libdemo.so
+#26  0x00007f0000026 in frame26 () from /usr/lib/libdemo.so
+#27  0x00007f0000027 in frame27 () from /usr/lib/libdemo.so
+#28  0x00007f0000028 in frame28 () from /usr/lib/libdemo.so
+#29  0x00007f0000029 in frame29 () from /usr/lib/libdemo.so
+#30  0x00007f0000030 in frame30 () from /usr/lib/libdemo.so
+#31  0x00007f0000031 in frame31 () from /usr/lib/libdemo.so
+#32  0x00007f0000032 in frame32 () from /usr/lib/libdemo.so
+#33  0x00007f0000033 in frame33 () from /usr/lib/libdemo.so
+#34  0x00007f0000034 in frame34 () from /usr/lib/libdemo.so
+#35  0x00007f0000035 in frame35 () from /usr/lib/libdemo.so
+#36  0x00007f0000036 in frame36 () from /usr/lib/libdemo.so
+#37  0x00007f0000037 in frame37 () from /usr/lib/libdemo.so
+#38  0x00007f0000038 in frame38 () from /usr/lib/libdemo.so
+#39  0x00007f0000039 in frame39 () from /usr/lib/libdemo.so
+#40  0x00007f0000040 in frame40 () from /usr/lib/libdemo.so
+#41  0x00007f0000041 in frame41 () from /usr/lib/libdemo.so
+#42  0x00007f0000042 in frame42 () from /usr/lib/libdemo.so
+#43  0x00007f0000043 in frame43 () from /usr/lib/libdemo.so
+#44  0x00007f0000044 in frame44 () from /usr/lib/libdemo.so
+#45  0x00007f0000045 in frame45 () from /usr/lib/libdemo.so
+#46  0x00007f0000046 in frame46 () from /usr/lib/libdemo.so
+#47  0x00007f0000047 in frame47 () from /usr/lib/libdemo.so
+#48  0x00007f0000048 in frame48 () from /usr/lib/libdemo.so
+#49  0x00007f0000049 in frame49 () from /usr/lib/libdemo.so
+#50  0x00007f0000050 in frame50 () from /usr/lib/libdemo.so
+#51  0x00007f0000051 in frame51 () from /usr/lib/libdemo.so
+#52  0x00007f0000052 in frame52 () from /usr/lib/libdemo.so
+#53  0x00007f0000053 in frame53 () from /usr/lib/libdemo.so
+#54  0x00007f0000054 in frame54 () from /usr/lib/libdemo.so
+#55  0x00007f0000055 in frame55 () from /usr/lib/libdemo.so
+#56  0x00007f0000056 in frame56 () from /usr/lib/libdemo.so
+#57  0x00007f0000057 in frame57 () from /usr/lib/libdemo.so
+#58  0x00007f0000058 in frame58 () from /usr/lib/libdemo.so
+#59  0x00007f0000059 in frame59 () from /usr/lib/libdemo.so
+#60  0x00007f0000060 in frame60 () from /usr/lib/libdemo.so
+=== End of stack trace ===
+
+
+50% tests passed, 1 tests failed out of 2
+
+Total Test time (real) =   0.00 sec
+
+The following tests FAILED:
+	  2 - crashes (Failed)
+Errors while running CTest
