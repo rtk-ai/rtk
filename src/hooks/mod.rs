@@ -96,6 +96,9 @@ mod tests {
         assert!(is_legacy_rewrite_hook("./hooks/rtk-rewrite.sh"));
         assert!(is_legacy_rewrite_hook("\"/path/to/rtk-rewrite.sh\""));
         assert!(is_legacy_rewrite_hook(
+            "\"/Users/John Doe/.claude/hooks/rtk-rewrite.sh\""
+        ));
+        assert!(is_legacy_rewrite_hook(
             "'C:\\Users\\test\\.claude\\hooks\\rtk-rewrite.sh'"
         ));
         assert!(is_legacy_rewrite_hook(
