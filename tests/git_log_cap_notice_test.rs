@@ -2615,6 +2615,17 @@ const PRINTS_AFTER_A_COMMIT: &[&str] = &[
     "-L1,1:f.txt",
 ];
 
+/// Flags of [`PRINTS_AFTER_A_COMMIT`] that an older git rejects: `--dd` came in git 2.43.
+const NEWER_THAN_SOME_GITS: &[&str] = &["--dd"];
+
+/// Whether the installed git accepts `flag` on `git log`.
+fn git_log_accepts(repo: &Repo, flag: &str) -> bool {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(&repo.path).args(["log", "-1", flag]);
+    isolate(&mut cmd, &repo.home);
+    cmd.output().expect("run git").status.success()
+}
+
 #[test]
 fn text_printed_after_a_commit_is_not_a_commit_past_the_cap() {
     // Every commit touches a file in a directory of its own, so each of these flags has
@@ -2630,6 +2641,9 @@ fn text_printed_after_a_commit_is_not_a_commit_past_the_cap() {
     let exact = history(10);
     let over = history(11);
     for flag in PRINTS_AFTER_A_COMMIT {
+        if NEWER_THAN_SOME_GITS.contains(flag) && !git_log_accepts(&exact, flag) {
+            continue;
+        }
         let out = rtk_log(&exact.path, &exact.home, &[flag]);
         assert!(out.status.success(), "rtk git log {flag} failed");
         assert!(!out.stdout.is_empty(), "{flag}: nothing printed");
