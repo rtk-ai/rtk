@@ -228,6 +228,45 @@ mod unix {
     }
 
     #[test]
+    fn summary_preserves_permission_diagnostics_for_test_like_paths() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let nested = dir.path().join(format!("test-{}", "a".repeat(120)));
+        std::fs::create_dir(&nested).expect("create long test-like directory");
+        let file = nested.join("noexec");
+        std::fs::write(&file, b"not executable\n").expect("write file");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
+            .expect("remove execution permissions");
+        let path = file.to_str().expect("UTF-8 path");
+
+        let output = rtk().args(["summary", path]).output().expect("run summary");
+        assert_eq!(output.status.code(), Some(126));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Permission denied"), "{stdout}");
+        assert!(!stdout.contains("Test Results:"), "{stdout}");
+    }
+
+    #[test]
+    fn summary_preserves_missing_command_diagnostics_for_test_and_build_names() {
+        for keyword in ["test", "build"] {
+            let program = format!("rtk-missing-{keyword}-{}", "a".repeat(160));
+            let output = rtk()
+                .args(["summary", &program])
+                .output()
+                .expect("run summary");
+            assert_eq!(output.status.code(), Some(127));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains(&format!("{program}: command not found")),
+                "{stdout}"
+            );
+            assert!(!stdout.contains("Test Results:"), "{stdout}");
+            assert!(!stdout.contains("Build Summary:"), "{stdout}");
+        }
+    }
+
+    #[test]
     fn a_directory_reports_exit_126() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().to_string_lossy().into_owned();

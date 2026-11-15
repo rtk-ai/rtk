@@ -21,13 +21,16 @@ pub fn run(command: &[String], shell: Option<&str>, verbose: u8) -> Result<i32> 
         eprintln!("Running and summarizing: {}", command_display);
     }
 
-    // A program that cannot be run is summarized like any other failed run,
-    // carrying the code the shell RTK replaced would have returned.
+    // A command that never started has no test or build output to summarize.
+    // Keep its launch diagnostic even when its path resembles a test command.
     let report_unrunnable = |outcome: crate::core::shell::Unrunnable| {
-        let summary = summarize_output(&outcome.message, &command_display, false);
-        let shown = never_worse(&outcome.message, &summary);
-        println!("{}", shown);
-        timer.track(&command_display, "rtk summary", &outcome.message, shown);
+        println!("{}", outcome.message);
+        timer.track(
+            &command_display,
+            "rtk summary",
+            &outcome.message,
+            &outcome.message,
+        );
         outcome.code
     };
 
