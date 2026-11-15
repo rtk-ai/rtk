@@ -15,9 +15,14 @@ use crate::core::utils::{resolved_command, strip_ansi};
 const MAX_SLOWEST: usize = 3;
 const MAX_FAILURE_LINES: usize = CAP_WARNINGS;
 const MAX_FAILURE_HEAD_LINES: usize = 2;
+// Lines that name a failure are kept out of a block's elided middle, each with
+// the lines after it (QtTest's Actual/Expected/Loc), up to this many in total.
+const MAX_FAILURE_MARKER_LINES: usize = CAP_WARNINGS;
+const FAILURE_MARKER_CONTEXT_LINES: usize = 3;
 const MAX_FAILED_LIST_LINES: usize = CAP_LIST;
 const MAX_DETECT_PREAMBLE_LINES: usize = 4;
-// Failure entries carry a header plus up to `MAX_FAILURE_LINES` detail lines each,
+// Failure entries carry a header plus up to `MAX_FAILURE_LINES` detail lines each
+// (and up to `MAX_FAILURE_MARKER_LINES` more when failure markers are elided),
 // so this list deviates below `CAP_LIST`; the single-line skipped and raw-trailer
 // lists keep the full cap.
 const MAX_FAILED_BLOCK_ENTRIES: usize = truncate::reduced(CAP_LIST, 5);
@@ -40,6 +45,19 @@ static START_RE: LazyLock<Regex> = LazyLock::new(|| {
 static SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\s*\d+%\s+tests passed,\s+(\d+)\s+tests failed out of\s+(\d+)")
         .expect("invalid ctest summary regex")
+});
+// The line naming a failed check in the C/C++ test frameworks ctest usually runs:
+// QtTest, GoogleTest, Catch2, Boost.Test, assert(3), and Rust panics.
+static FAILURE_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"^\s*(?:FAIL!|QFATAL|XPASS)\s*:",
+        r"|\[\s*FAILED\s*\]",
+        r"|:\d+:\s*(?:Failure|FAILED:)",
+        r#"|\(\d+\):\s*(?:fatal\s+)?error:?\s+in\s+""#,
+        r"|Assertion\s+[`'].*'\s+failed",
+        r"|panicked at",
+    ))
+    .expect("invalid ctest failure marker regex")
 });
 static TIME_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\s*Total Test time \(real\)\s+=\s+([\d.]+)\s+sec")
@@ -697,14 +715,65 @@ fn render_failure_block(block: &[String]) -> Vec<String> {
         return block.to_vec();
     }
 
-    let hidden = block.len() - MAX_FAILURE_LINES;
     // Preserve setup context at the head and assertion evidence at the tail.
     let tail_lines = truncate::reduced(MAX_FAILURE_LINES, MAX_FAILURE_HEAD_LINES);
-    let mut rendered = Vec::with_capacity(MAX_FAILURE_LINES + 1);
-    rendered.extend(block.iter().take(MAX_FAILURE_HEAD_LINES).cloned());
-    rendered.push(format!("... +{hidden} more lines"));
-    rendered.extend(block[block.len() - tail_lines..].iter().cloned());
+    let middle_start = MAX_FAILURE_HEAD_LINES;
+    let middle_end = block.len() - tail_lines;
+    // A crash handler prints its backtrace after the assertion, pushing the
+    // line that names the failure into the middle: keep those lines too.
+    let kept = failure_marker_runs(&block[middle_start..middle_end]);
+
+    let mut rendered = Vec::with_capacity(MAX_FAILURE_LINES + MAX_FAILURE_MARKER_LINES + 2);
+    rendered.extend(block[..middle_start].iter().cloned());
+    let mut cursor = 0;
+    for (start, end) in kept {
+        if start > cursor {
+            rendered.push(format!("... +{} more lines", start - cursor));
+        }
+        rendered.extend(
+            block[middle_start + start..middle_start + end]
+                .iter()
+                .cloned(),
+        );
+        cursor = end;
+    }
+    let middle_len = middle_end - middle_start;
+    if middle_len > cursor {
+        rendered.push(format!("... +{} more lines", middle_len - cursor));
+    }
+    rendered.extend(block[middle_end..].iter().cloned());
     rendered
+}
+
+/// Half-open `(start, end)` runs of `middle` to keep: each failure-marker line
+/// plus the context lines after it, merged when they overlap, at most
+/// `MAX_FAILURE_MARKER_LINES` lines in total.
+fn failure_marker_runs(middle: &[String]) -> Vec<(usize, usize)> {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut budget = MAX_FAILURE_MARKER_LINES;
+    for (index, line) in middle.iter().enumerate() {
+        if budget == 0 {
+            break;
+        }
+        if !FAILURE_MARKER_RE.is_match(line) {
+            continue;
+        }
+        // A marker inside the previous window extends it instead of repeating lines.
+        let covered = runs.last().map_or(0, |&(_, end)| end);
+        let start = index.max(covered);
+        let end = (index + 1 + FAILURE_MARKER_CONTEXT_LINES)
+            .min(middle.len())
+            .min(start + budget);
+        if end <= start {
+            continue;
+        }
+        budget -= end - start;
+        match runs.last_mut() {
+            Some(last) if last.1 == start => last.1 = end,
+            _ => runs.push((start, end)),
+        }
+    }
+    runs
 }
 
 fn collect_failure_block(
@@ -1474,6 +1543,177 @@ Errors while running CTest"#
             120
         );
         assert!(!full_section.contains("... +"));
+    }
+
+    #[test]
+    fn keeps_the_failure_line_a_crash_backtrace_pushes_into_the_middle() {
+        let input =
+            include_str!("../../../tests/fixtures/ctest_crash_backtrace_output_on_failure_raw.txt");
+        let filtered = filter_ctest_output(input);
+
+        assert_eq!(
+            without_tee_hints(&filtered),
+            r#"ctest: 1/2 passed, 1 failed (0.00 sec)
+failed:
+  #2 crashes (Failed, 0.00 sec)
+    ********* Start testing of DemoTest *********
+    Config: Using QtTest library
+    ... +5 more lines
+    FAIL!  : DemoTest::importantCase() Compared values are not the same
+       Actual   (value): 1
+       Expected (want) : 2
+       Loc: [demo_test.cpp(42)]
+    ... +54 more lines
+    #54  0x00007f0000054 in frame54 () from /usr/lib/libdemo.so
+    #55  0x00007f0000055 in frame55 () from /usr/lib/libdemo.so
+    #56  0x00007f0000056 in frame56 () from /usr/lib/libdemo.so
+    #57  0x00007f0000057 in frame57 () from /usr/lib/libdemo.so
+    #58  0x00007f0000058 in frame58 () from /usr/lib/libdemo.so
+    #59  0x00007f0000059 in frame59 () from /usr/lib/libdemo.so
+    #60  0x00007f0000060 in frame60 () from /usr/lib/libdemo.so
+    === End of stack trace ===
+
+Errors while running CTest"#
+        );
+        // The tee still holds the whole block for `rtk recall`.
+        let (_, full_section, truncated) = failed_section_parts(input);
+        assert!(truncated);
+        assert!(full_section.contains("#30  0x00007f0000030 in frame30 ()"));
+    }
+
+    fn block_of(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| line.to_string()).collect()
+    }
+
+    fn numbered(prefix: &str, count: usize) -> Vec<String> {
+        (1..=count).map(|i| format!("{prefix} {i}")).collect()
+    }
+
+    /// Every line of `block` is either rendered or counted by a `... +N more lines` marker.
+    fn assert_every_line_accounted_for(block: &[String], rendered: &[String]) {
+        let hidden: usize = rendered
+            .iter()
+            .filter_map(|line| {
+                line.strip_prefix("... +")
+                    .and_then(|rest| rest.strip_suffix(" more lines"))
+                    .and_then(|n| n.parse::<usize>().ok())
+            })
+            .sum();
+        let shown = rendered
+            .iter()
+            .filter(|line| !line.starts_with("... +"))
+            .count();
+        assert_eq!(shown + hidden, block.len(), "{rendered:#?}");
+    }
+
+    #[test]
+    fn failure_markers_of_common_frameworks_are_recognized() {
+        for line in [
+            "FAIL!  : DemoTest::importantCase() Compared values are not the same",
+            "QFATAL : DemoTest::importantCase() ASSERT failure",
+            "XPASS  : DemoTest::flaky() unexpectedly passed",
+            "[  FAILED  ] MathTest.Adds (0 ms)",
+            "/src/math_test.cc:12: Failure",
+            "/src/math_test.cpp:12: FAILED:",
+            r#"/src/math_test.cpp(12): error: in "math/adds": check 1 == 2 has failed"#,
+            r#"/src/math_test.cpp(12): fatal error: in "math/adds": critical check failed"#,
+            "demo: demo.c:7: main: Assertion `x == 2' failed.",
+            "thread 'adds' panicked at src/lib.rs:4:5:",
+        ] {
+            assert!(FAILURE_MARKER_RE.is_match(line), "not a marker: {line}");
+        }
+        for line in [
+            "PASS   : DemoTest::case1()",
+            "[       OK ] MathTest.Adds (0 ms)",
+            "#12 0x00007f0000012 in frame12 () from /usr/lib/libdemo.so",
+            "Config: Using QtTest library",
+        ] {
+            assert!(!FAILURE_MARKER_RE.is_match(line), "false marker: {line}");
+        }
+    }
+
+    #[test]
+    fn block_without_a_marker_renders_head_and_tail_only() {
+        let block = numbered("noise line", 40);
+        let rendered = render_failure_block(&block);
+
+        assert_eq!(rendered.len(), MAX_FAILURE_LINES + 1);
+        assert_eq!(rendered[2], "... +30 more lines");
+        assert_every_line_accounted_for(&block, &rendered);
+    }
+
+    #[test]
+    fn overlapping_marker_windows_merge_into_one_run() {
+        let mut block = numbered("setup", 4);
+        block.extend(block_of(&[
+            "FAIL!  : DemoTest::a() first",
+            "QFATAL : DemoTest::a() abort",
+            "   Loc: [demo_test.cpp(9)]",
+        ]));
+        block.extend(numbered("frame", 30));
+        let rendered = render_failure_block(&block);
+
+        assert_eq!(
+            rendered[..8],
+            block_of(&[
+                "setup 1",
+                "setup 2",
+                "... +2 more lines",
+                "FAIL!  : DemoTest::a() first",
+                "QFATAL : DemoTest::a() abort",
+                "   Loc: [demo_test.cpp(9)]",
+                "frame 1",
+                "frame 2",
+            ])[..]
+        );
+        assert_eq!(rendered[8], "... +20 more lines");
+        assert_every_line_accounted_for(&block, &rendered);
+    }
+
+    #[test]
+    fn kept_marker_lines_are_capped() {
+        let mut block = numbered("setup", 2);
+        for i in 1..=20 {
+            block.push(format!("[  FAILED  ] Suite.Case{i} (0 ms)"));
+            block.extend(numbered(&format!("frame of case {i}"), 5));
+        }
+        block.extend(numbered("tail", 8));
+        let rendered = render_failure_block(&block);
+
+        let kept_markers = rendered
+            .iter()
+            .filter(|line| line.starts_with("[  FAILED  ]"))
+            .count();
+        assert_eq!(kept_markers, 3);
+        let shown = rendered
+            .iter()
+            .filter(|line| !line.starts_with("... +"))
+            .count();
+        assert_eq!(shown, MAX_FAILURE_LINES + MAX_FAILURE_MARKER_LINES);
+        assert_every_line_accounted_for(&block, &rendered);
+    }
+
+    #[test]
+    fn marker_next_to_the_tail_leaves_no_empty_gap_marker() {
+        let mut block = numbered("setup", 2);
+        block.extend(numbered("frame", 20));
+        block.extend(block_of(&[
+            "FAIL!  : DemoTest::late() boom",
+            "   Actual   (value): 1",
+            "   Expected (want) : 2",
+            "   Loc: [demo_test.cpp(7)]",
+        ]));
+        block.extend(numbered("tail", 8));
+        let rendered = render_failure_block(&block);
+
+        assert!(!rendered.iter().any(|line| line == "... +0 more lines"));
+        let marker = rendered
+            .iter()
+            .position(|line| line.starts_with("FAIL!"))
+            .expect("marker kept");
+        assert_eq!(rendered[marker - 1], "... +20 more lines");
+        assert_eq!(rendered[marker + 4], "tail 1");
+        assert_every_line_accounted_for(&block, &rendered);
     }
 
     #[test]
