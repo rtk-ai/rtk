@@ -9,13 +9,20 @@ sidebar:
 
 ## rtk discover — find missed savings
 
-`rtk discover` analyzes your Claude Code command history to identify commands that ran without RTK filtering, and estimates how much bash output RTK would have removed from them.
+`rtk discover` analyzes your Claude Code and Codewhale command history to identify commands that ran without RTK filtering, and estimates how much bash output RTK would have removed from them.
 
 ```bash
-rtk discover                    # analyze current project history
-rtk discover --all              # all projects
-rtk discover --all --since 7    # last 7 days, all projects
+rtk discover                     # analyze current project history (both sources)
+rtk discover --source codewhale  # Codewhale sessions only
+rtk discover --source claude     # Claude Code sessions only
+rtk discover --all               # all projects
+rtk discover --all --since 7     # last 7 days, all projects
 ```
+
+For Codewhale, an installed `rtk hook codewhale` records each `tool_call_before`
+decision (keyed by the tool's `execution_id`, which the session transcript also
+stores), so coverage is measured rather than estimated. History that predates
+that logging falls back to a current-state estimate, as noted in the output.
 
 **Example output** (illustrative values):
 

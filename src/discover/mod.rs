@@ -11,8 +11,9 @@ pub(crate) mod shell_wrapper;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-use provider::{ClaudeProvider, SessionProvider};
+use provider::{ClaudeProvider, CodewhaleProvider, SessionProvider};
 use registry::{
     Classification, ExcludePattern, category_avg_tokens, classify_command, split_command_chain,
     strip_disabled_prefix_for_analytics,
@@ -334,32 +335,59 @@ pub fn run(
     limit: usize,
     format: &str,
     verbose: u8,
+    source: &str,
 ) -> Result<()> {
-    let provider = ClaudeProvider;
-
     // Determine project filter
+    let cwd_str = user_dirs::current_dir()?.to_string_lossy().to_string();
     let scope = if all {
         report::ScanScope::AllProjects
     } else if let Some(p) = project {
         report::ScanScope::ProjectFilter(p.to_string())
     } else {
         // Default: current working directory
-        let cwd = user_dirs::current_dir()?;
-        let cwd_str = cwd.to_string_lossy().to_string();
         report::ScanScope::CurrentProject(ClaudeProvider::encode_project_path(&cwd_str))
     };
-    let project_filter = match &scope {
+
+    // Each provider matches the project filter its own way: Claude against the
+    // encoded `~/.claude/projects` slug, Codewhale against the raw workspace
+    // path it stores in each session's metadata.
+    let claude_filter = match &scope {
         report::ScanScope::AllProjects => None,
-        report::ScanScope::ProjectFilter(f) | report::ScanScope::CurrentProject(f) => {
-            Some(f.as_str())
-        }
+        report::ScanScope::ProjectFilter(f) => Some(f.clone()),
+        report::ScanScope::CurrentProject(_) => Some(ClaudeProvider::encode_project_path(&cwd_str)),
+    };
+    let codewhale_filter = match &scope {
+        report::ScanScope::AllProjects => None,
+        report::ScanScope::ProjectFilter(f) => Some(f.clone()),
+        report::ScanScope::CurrentProject(_) => Some(cwd_str.clone()),
     };
 
-    let sessions = provider.discover_sessions(project_filter, Some(since_days))?;
+    let mut providers: Vec<Box<dyn SessionProvider>> = Vec::new();
+    let mut filters: Vec<Option<String>> = Vec::new();
+    if matches!(source, "claude" | "all") {
+        providers.push(Box::new(ClaudeProvider));
+        filters.push(claude_filter);
+    }
+    if matches!(source, "codewhale" | "all") {
+        providers.push(Box::new(CodewhaleProvider));
+        filters.push(codewhale_filter);
+    }
+
+    let mut sessions: Vec<(usize, PathBuf)> = Vec::new();
+    for (index, provider) in providers.iter().enumerate() {
+        match provider.discover_sessions(filters[index].as_deref(), Some(since_days)) {
+            Ok(paths) => sessions.extend(paths.into_iter().map(|path| (index, path))),
+            Err(e) => {
+                if verbose > 0 {
+                    eprintln!("Warning: could not scan sessions: {e}");
+                }
+            }
+        }
+    }
 
     if verbose > 0 {
         eprintln!("Scanning {} session files...", sessions.len());
-        for s in &sessions {
+        for (_, s) in &sessions {
             eprintln!("  {}", s.display());
         }
     }
@@ -369,7 +397,12 @@ pub fn run(
     // `tool_use_id`, populated at the moment the hook actually ran) over guessing from
     // today's hook-install state; fall back to a heuristic only for history that
     // predates logging (or isn't Claude Code).
-    let hook_installed = hook_status() != HookStatus::Missing;
+    // A hook being installed for ANY agent counts: a Codewhale-only setup has
+    // no Claude hook, but the estimate must still credit commands the Codewhale
+    // hook rewrites. Measured `hook_decisions` rows (keyed by `tool_use_id`)
+    // always take precedence; this only feeds the pre-logging fallback.
+    let hook_installed =
+        hook_status() != HookStatus::Missing || crate::hooks::init::codewhale::is_configured();
     let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
     // Compiled once here (see `CoverageContext`'s doc comment), not once per
     // command inside `registry::rewrite_command`.
@@ -437,8 +470,9 @@ pub fn run(
     let mut supported_map: HashMap<&'static str, SupportedBucket> = HashMap::new();
     let mut unsupported_map: HashMap<String, UnsupportedBucket> = HashMap::new();
 
-    for session_path in &sessions {
-        let extracted = match provider.extract_commands(session_path) {
+    for (index, session_path) in &sessions {
+        let provider = &providers[*index];
+        let extracted = match provider.extract_commands(session_path.as_path()) {
             Ok(cmds) => cmds,
             Err(e) => {
                 if verbose > 0 {
