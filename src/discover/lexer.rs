@@ -658,20 +658,26 @@ pub(crate) fn redirect_takes_operand(value: &str) -> bool {
     tail.is_empty() || !tail.chars().all(|c| c.is_ascii_digit() || c == '-')
 }
 
+/// True when a [`TokenKind::Redirect`] token's value is a heredoc or herestring
+/// operator (`<<`, `<<-`, `<<<`), with any leading fd number (`3<<`) stripped.
+///
+/// The tokenizer folds leading digits into the redirect value (`3<<`), keeps
+/// the `-` of `<<-` in the next word, and emits `<<<` as `<<` followed by `<`.
+pub(crate) fn is_heredoc_redirect(value: &str) -> bool {
+    value
+        .trim_start_matches(|ch: char| ch.is_ascii_digit())
+        .starts_with("<<")
+}
+
 // A redirect that takes an operand names a file unless that operand is
 // `/dev/null`; a bare `>&` before a word is `>word 2>&1` — a file target too.
 // A heredoc or herestring also returns true, whatever its delimiter: its body
 // is inline data that no caller can attest.
 pub(crate) fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool {
     let value = &tokens[i].value;
-    // A heredoc operator arrives as `<<` with any fd digits folded in front
-    // (`3<<`); the `-` of `<<-` stays in the next word, and a herestring `<<<`
-    // arrives as `<<` then `<`. Its operand is a delimiter, so a delimiter
-    // spelled `/dev/null` must not reach the exemption below.
-    if value
-        .trim_start_matches(|ch: char| ch.is_ascii_digit())
-        .starts_with("<<")
-    {
+    // A heredoc's operand is a delimiter, so a delimiter spelled `/dev/null`
+    // must not reach the exemption below.
+    if is_heredoc_redirect(value) {
         return true;
     }
     if !redirect_takes_operand(value) {
