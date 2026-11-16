@@ -770,14 +770,19 @@ fn process_shell(
 
     if (filtered_stdout == stdout && filtered_stderr == stderr) || shadow {
         if shadow && let Some(applied) = &applied_stdout {
-            attribute(applied, &raw_combined, &filtered_stdout);
+            // Shadow predicts what the rule would save, so the "after" side is
+            // the pair the emitting path reports: filtered stdout plus the
+            // filtered stderr. Counting stdout alone books every stderr byte
+            // as saved even though shadow mode drops neither stream.
+            let emitted_combined = combine_streams(&filtered_stdout, &filtered_stderr);
+            attribute(applied, &raw_combined, &emitted_combined);
             queue_log(
                 Subject::Shell,
                 Some(command),
                 "",
                 applied,
                 estimate_tokens(&raw_combined),
-                estimate_tokens(&filtered_stdout),
+                estimate_tokens(&emitted_combined),
             );
         }
         track(
@@ -1507,6 +1512,50 @@ mod tests {
             "[pipeline]\nextends = \"rtk:posthook\"\n[override.term-default]\nshadow = true\n",
         );
         assert!(run_with(&bash_fixture("repetitive"), &test_config(), &pipeline).is_none());
+    }
+
+    #[test]
+    fn test_shadow_decision_counts_the_stderr_it_would_emit() {
+        let pipeline = pipeline_from(
+            "[pipeline]\nextends = \"rtk:posthook\"\n[override.term-default]\nshadow = true\n",
+        );
+        let mut event = bash_fixture("repetitive");
+        let stderr: String = (0..30)
+            .map(|i| format!("warning: compiler note {i} that only the stderr stream carries\n"))
+            .collect();
+        event["tool_response"]["stderr"] = serde_json::json!(stderr);
+
+        pipeline_log::set_enabled(true).expect("pipeline log marker");
+        assert!(run_with(&event, &test_config(), &pipeline).is_none());
+        pipeline_log::flush();
+        pipeline_log::set_enabled(false).expect("pipeline log marker removed");
+
+        let entries: Vec<pipeline_log::LogEntry> =
+            pipeline_log::read_last(500, Some("term-default"))
+                .into_iter()
+                .filter(|e| e.shadow)
+                .collect();
+        assert!(!entries.is_empty(), "a shadow decision must be logged");
+
+        // Shadow mode drops neither stream, so the "after" figure must carry
+        // the stderr as well as the filtered stdout.
+        let stderr_tokens = estimate_tokens(&stderr);
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.tokens_after.unwrap_or(0) >= stderr_tokens),
+            "no shadow entry counted the stderr ({stderr_tokens} tokens): {:?}",
+            entries
+                .iter()
+                .map(|e| (e.tokens_before, e.tokens_after))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.tokens_after.unwrap_or(usize::MAX) < e.tokens_before.unwrap_or(0)),
+            "the repetitive stdout is still filtered"
+        );
     }
 
     #[test]
