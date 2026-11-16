@@ -2592,10 +2592,10 @@ mod tests {
                 split_for_permissions(cmd),
                 vec!["git status", "grep x", "cargo build"]
             );
-            // Analytics: split_command_chain stops entirely at the first `|`,
-            // discarding everything after it (including the later `&&` clause) —
-            // it only needs to classify what's in front of the pipe.
-            assert_eq!(split_command_chain(cmd), vec!["git status"]);
+            // Analytics: split_command_chain keeps only the first stage of each
+            // pipeline — `grep x` is the pipeline's tail — but resumes at the
+            // `&&`, so the clause after the pipeline is still classified.
+            assert_eq!(split_command_chain(cmd), vec!["git status", "cargo build"]);
             // Rewrite: pipelines are handled specially (rewrite_pipeline_final_stage),
             // and clauses after the pipeline are still walked and rewritten.
             assert_eq!(
@@ -3435,6 +3435,11 @@ mod tests {
     #[test]
     fn test_split_pipe_first_only() {
         assert_eq!(split_command_chain("a | b"), vec!["a"]);
+        assert_eq!(split_command_chain("a | b ; c"), vec!["a", "c"]);
+        assert_eq!(
+            split_command_chain("a | b | c && d || e | f"),
+            vec!["a", "d", "e"]
+        );
     }
 
     #[test]
