@@ -3,7 +3,7 @@
 # RTK Cursor Agent hook — rewrites shell commands to use rtk for token savings.
 # Works with both Cursor editor and cursor-cli (they share ~/.cursor/hooks.json).
 # Cursor preToolUse hook format: receives JSON on stdin, returns JSON on stdout.
-# Requires: rtk >= 0.23.0, jq
+# Requires: rtk >= 0.25.0, jq
 #
 # This is a thin delegating hook: all rewrite logic lives in `rtk rewrite`,
 # which is the single source of truth (src/discover/registry.rs).
@@ -19,13 +19,13 @@ if ! command -v rtk &>/dev/null; then
   exit 0
 fi
 
-# Version guard: rtk rewrite was added in 0.23.0.
+# Version guard: rtk rewrite was added in 0.25.0.
 RTK_VERSION=$(rtk --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
 if [ -n "$RTK_VERSION" ]; then
   MAJOR=$(echo "$RTK_VERSION" | cut -d. -f1)
   MINOR=$(echo "$RTK_VERSION" | cut -d. -f2)
-  if [ "$MAJOR" -eq 0 ] && [ "$MINOR" -lt 23 ]; then
-    echo "[rtk] WARNING: rtk $RTK_VERSION is too old (need >= 0.23.0). Upgrade: cargo install rtk" >&2
+  if [ "$MAJOR" -eq 0 ] && [ "$MINOR" -lt 25 ]; then
+    echo "[rtk] WARNING: rtk $RTK_VERSION is too old (need >= 0.25.0). Upgrade: cargo install rtk" >&2
     exit 0
   fi
 fi

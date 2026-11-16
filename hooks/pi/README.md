@@ -19,7 +19,7 @@ with other Pi extensions.
 - Calls `rtk rewrite` via `pi.exec`; mutates `event.input.command` in-place if rewrite differs
 - All error paths return `undefined` (pass through); RTK never blocks execution on its own
 - If an rtk pipeline rule blocks the command, the extension returns `{ block: true, reason }` with the rule's message
-- Version guard at load time: checks `rtk >= 0.23.0`; warns and registers no-op if too old or missing
+- Version guard at load time: checks `rtk >= 0.25.0`; warns and registers no-op if too old or missing
 - Install updates only current or known historical stock content. For modified or unrelated content it asks before overwriting; `--auto-patch` approves and `--no-patch` leaves the file unchanged. A declined protected update, including `--no-patch`, exits nonzero; in `--dry-run` mode it reports the prompt without changing files or creating directories. LF and CRLF line endings are treated as the same stock content.
 - Installed to `.pi/extensions/rtk.ts` by `rtk init --agent pi` (project-local) or `~/.pi/agent/extensions/rtk.ts` by `rtk init --agent pi --global`
 

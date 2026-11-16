@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # rtk-hook-version: 4
 # RTK Claude Code hook — rewrites commands to use rtk for token savings.
-# Requires: rtk >= 0.23.0, jq
+# Requires: rtk >= 0.25.0, jq
 #
 # This is a thin delegating hook: all rewrite logic lives in `rtk rewrite`,
 # which is the single source of truth (src/discover/registry.rs).
@@ -23,7 +23,7 @@ if ! command -v rtk &>/dev/null; then
   exit 0
 fi
 
-# Version guard: rtk rewrite was added in 0.23.0.
+# Version guard: rtk rewrite was added in 0.25.0.
 # Older binaries: warn once and exit cleanly (no silent failure).
 # Cache the version check to avoid spawning multiple processes on every hook call.
 CACHE_DIR=${XDG_CACHE_HOME:-$HOME/.cache}
@@ -34,9 +34,9 @@ if [ ! -f "$CACHE_FILE" ]; then
   RTK_VERSION=${RTK_VERSION%% *}
   if [ -n "$RTK_VERSION" ]; then
     IFS=. read -r MAJOR MINOR PATCH <<<"$RTK_VERSION"
-    # Require >= 0.23.0
-    if [ "$MAJOR" -eq 0 ] && [ "$MINOR" -lt 23 ]; then
-      echo "[rtk] WARNING: rtk $RTK_VERSION is too old (need >= 0.23.0). Upgrade: cargo install rtk" >&2
+    # Require >= 0.25.0
+    if [ "$MAJOR" -eq 0 ] && [ "$MINOR" -lt 25 ]; then
+      echo "[rtk] WARNING: rtk $RTK_VERSION is too old (need >= 0.25.0). Upgrade: cargo install rtk" >&2
       exit 0
     fi
   fi

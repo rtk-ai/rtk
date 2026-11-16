@@ -66,6 +66,7 @@ enum ExtensionShareStatus {
 }
 
 const KNOWN_PI_PLUGIN_HASHES: &[&str] = &[
+    "a9bd68b0884ac83653f36eb59afc8b7bc9461c93e2746e7dc10f50f53570e7b9",
     "5e80e811e689adc9d5ae5a59d1d5702060ca0c10320fea7cffd83c659026f1c5",
     "2cbb2a7a9081275d6eda140d9e375f6772b5c354e7fe931c554c371ad8836c6e",
     "94e80d1a5c159ea38ba8913f7c5b9d9b5c89bf7c204f1e583bfac2ed7fc40ab9",
