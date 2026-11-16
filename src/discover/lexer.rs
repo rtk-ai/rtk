@@ -172,6 +172,20 @@ pub(crate) fn coalesce_words<'a>(cmd: &'a str, tokens: &[ParsedToken]) -> Vec<(&
     words
 }
 
+/// The first word of `cmd` when it is a word on its own, up to a blank or an operator
+/// glued to it, without a continuation at its end: `true` in `true>f`, `pwd)` and
+/// `rm\<newline> x`. Unlike [`coalesce_words`] it stops at operators. `None` where `$` or a
+/// glob carries the word on, as in `rm$x` and `test*`, since that is another command.
+pub(crate) fn first_plain_word(cmd: &str) -> Option<&str> {
+    let tokens = tokenize_with_newlines(cmd);
+    let first = tokens.first()?;
+    let end = first.offset + first.value.len();
+    if cmd.get(end..)?.starts_with(['$', '*', '?', '{', '}', '!']) {
+        return None;
+    }
+    Some(cmd.get(first.offset..end)?.trim_end_matches(['\\', '\n']))
+}
+
 fn tokenize_inner(input: &str, newline_mode: NewlineMode) -> Vec<ParsedToken> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -973,6 +987,41 @@ pub fn shell_split(input: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_first_plain_word_ends_at_a_blank_or_an_operator() {
+        for (cmd, word) in [
+            ("true", "true"),
+            ("true x", "true"),
+            ("wait\t1", "wait"),
+            ("pwd\ngit status", "pwd"),
+            ("pwd\r\ngit status", "pwd"),
+            ("true>f", "true"),
+            ("echo<f", "echo"),
+            ("pwd)", "pwd"),
+            ("wait&", "wait"),
+            ("pwd&>f", "pwd"),
+            ("true|x", "true"),
+            ("true;", "true"),
+            ("wait(", "wait"),
+            ("pwd`", "pwd"),
+            ("echo $x", "echo"),
+            ("sort *", "sort"),
+            ("pwd\\", "pwd"),
+            ("rm\\\n -rf x", "rm"),
+            ("echo\u{c}x", "echo\u{c}x"),
+            ("waitress-serve x", "waitress-serve"),
+        ] {
+            assert_eq!(first_plain_word(cmd), Some(word), "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn test_first_plain_word_is_none_where_the_word_goes_on() {
+        for cmd in ["rm$x file", "test*", "cut?", "sh{,x}", "a}", "sort!", ""] {
+            assert_eq!(first_plain_word(cmd), None, "{cmd:?}");
+        }
+    }
 
     #[test]
     fn test_coalesce_words_merges_adjacent_tokens() {

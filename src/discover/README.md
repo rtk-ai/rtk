@@ -49,6 +49,7 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 |---|---|---|
 | `tokenize(cmd)` | Full shell-syntax tokens: quotes, escapes, operators, pipes, redirects, shellisms | — |
 | `tokenize_with_newlines(cmd)` | Like `tokenize`, plus a `\n` `Operator` token per unquoted newline (a lone `\r` stays glued to its word, matching real bash) | — |
+| `first_plain_word(cmd)` | The first word when it stands on its own, up to a blank or a glued operator; `None` where `$` or a glob carries it on | — (`pub(crate)`; its caller `registry::first_word_is_ignored` is in `discover/`) |
 | `shell_split(cmd)` | Quote-aware split into argv-ready words (quotes stripped, escapes resolved) | `hooks/mod.rs::is_claude_hook_command`, `main.rs`'s `rtk bypass '...'` |
 | `split_for_permissions(cmd)` | Segments a compound command for the **permission gate** — deliberately the most conservative of three segmenters (see its doc comment for the full comparison table) | `hooks/permissions.rs::check_command_with_rules` |
 | `split_for_classify(cmd)` | Segments for classification only — not safe for permission/security decisions | — (`pub(crate)`; its caller `registry.rs::split_command_chain` is this module) |

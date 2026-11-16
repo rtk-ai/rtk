@@ -1137,56 +1137,14 @@ pub const RULES: &[RtkRule] = &[
     },
 ];
 
-pub const IGNORED_PREFIXES: &[&str] = &[
-    "cd ",
-    "cd\t",
-    "echo ",
-    "printf ",
-    "export ",
-    "source ",
-    "mkdir ",
-    "rm ",
-    "mv ",
-    "cp ",
-    "chmod ",
-    "chown ",
-    "touch ",
-    "which ",
-    "type ",
-    "test ",
-    "true",
-    "false",
-    "sleep ",
-    "wait",
-    "kill ",
-    "set ",
-    "unset ",
-    "sort ",
-    "uniq ",
-    "tr ",
-    "cut ",
-    "awk ",
-    "sed ",
-    "python3 -c",
-    "python -c",
-    "node -e",
-    "ruby -e",
-    "rtk ",
-    "pwd",
-    "bash ",
-    "sh ",
-    "then\n",
-    "then ",
-    "else\n",
-    "else ",
-    "do\n",
-    "do ",
-    "for ",
-    "while ",
-    "if ",
-    "case ",
-];
+/// Commands the report leaves out, compared as written.
+pub const IGNORED_PREFIXES: &[&str] = &["python3 -c", "python -c", "node -e", "ruby -e", "rtk "];
 
-pub const IGNORED_EXACT: &[&str] = &[
-    "cd", "echo", "true", "false", "wait", "pwd", "bash", "sh", "fi", "done",
+/// Commands the report leaves out, compared with the command's first word, see
+/// `registry::first_word_is_ignored`.
+pub const IGNORED_WORDS: &[&str] = &[
+    "cd", "echo", "printf", "export", "source", "mkdir", "rm", "mv", "cp", "chmod", "chown",
+    "touch", "which", "type", "test", "true", "false", "sleep", "wait", "kill", "set", "unset",
+    "sort", "uniq", "tr", "cut", "awk", "sed", "pwd", "bash", "sh", "then", "else", "do", "for",
+    "while", "if", "case", "fi", "done",
 ];
