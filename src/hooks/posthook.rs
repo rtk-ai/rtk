@@ -682,8 +682,10 @@ fn process_websearch(
     ) {
         last.push('\n');
         last.push_str(&h);
+        // `filtered_concat` already ends with the filtered text; only the
+        // hint is new.
         filtered_concat.push('\n');
-        filtered_concat.push_str(last);
+        filtered_concat.push_str(&h);
     }
 
     if estimate_tokens(&filtered_concat) > estimate_tokens(&raw_concat) {
@@ -2215,6 +2217,58 @@ mod tests {
         );
         assert_eq!(entry.tokens_before, Some(estimate_tokens(&result)));
         assert_eq!(entry.tokens_after, entry.tokens_before);
+    }
+
+    #[test]
+    fn test_websearch_with_recall_counts_the_filtered_result_once() {
+        let tee_dir = crate::core::test_isolation::tempdir();
+        let result = (0..40)
+            .map(|i| format!("\x1b[1mresult number {i:02}\x1b[0m "))
+            .collect::<String>();
+        let pipeline = posthook_pipeline();
+        let filtered = run_selected(
+            &pipeline,
+            Subject::Web,
+            "WebSearch",
+            ContentFormat::Web,
+            "",
+            &result,
+            0,
+            None,
+        )
+        .expect("web chain applies")
+        .text;
+        let (raw_tokens, filtered_tokens) = (estimate_tokens(&result), estimate_tokens(&filtered));
+        // Smaller by well under half: counting the filtered text twice would
+        // push it over the raw size and drop a result that is in fact smaller.
+        assert!(
+            filtered_tokens * 2 > raw_tokens && filtered_tokens < raw_tokens,
+            "{raw_tokens} -> {filtered_tokens}"
+        );
+
+        let (output, entries) = run_logged_with(
+            &websearch_event(&result),
+            &tee_config(tee_dir.path()),
+            &pipeline,
+            true,
+        );
+        let output: Value =
+            serde_json::from_str(&output.expect("filtered + hint is smaller than raw"))
+                .expect("hook output is JSON");
+        let emitted = output["hookSpecificOutput"]["updatedToolOutput"]["results"][1]
+            .as_str()
+            .expect("the filtered result is a string");
+        assert!(
+            emitted.starts_with(&format!("{filtered}\n[full output: ")),
+            "{emitted}"
+        );
+
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.rule, "web-default");
+        assert_eq!(entry.outcome, None, "{entry:?}");
+        assert_eq!(entry.tokens_before, Some(raw_tokens));
+        assert_eq!(entry.tokens_after, Some(estimate_tokens(emitted)));
     }
 
     #[test]
