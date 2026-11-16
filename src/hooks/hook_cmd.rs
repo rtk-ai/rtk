@@ -710,6 +710,16 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         None => return PayloadAction::Ignore,
     };
 
+    // #4627: auto mode reviews the call server-side before hooks run; a rewritten
+    // input voids that review and the call is refused until it is reissued.
+    if v.get("permission_mode").and_then(Value::as_str) == Some("auto") {
+        return PayloadAction::Skip {
+            decision: HookOutcome::Defer,
+            reason: "skip:auto_mode",
+            cmd: cmd.to_string(),
+        };
+    }
+
     let cwd = v.get("cwd").and_then(Value::as_str);
     process_claude_payload_from_decision(v, cmd, decide_claude_hook_action(cmd, cwd))
 }
@@ -2153,6 +2163,33 @@ mod tests {
         assert_eq!(updated["command"], "rtk git status");
         assert_eq!(updated["timeout"], 30000);
         assert_eq!(updated["description"], "Check repo status");
+    }
+
+    #[test]
+    fn test_claude_auto_mode_skips_rewrite() {
+        let mut v = claude_input_value("git status");
+        v["permission_mode"] = json!("auto");
+        assert!(matches!(
+            process_claude_payload(&v),
+            PayloadAction::Skip {
+                decision: HookOutcome::Defer,
+                reason: "skip:auto_mode",
+                ..
+            }
+        ));
+        for mode in [
+            "default",
+            "acceptEdits",
+            "plan",
+            "dontAsk",
+            "bypassPermissions",
+        ] {
+            v["permission_mode"] = json!(mode);
+            assert!(
+                matches!(process_claude_payload(&v), PayloadAction::Rewrite { .. }),
+                "{mode} should still rewrite"
+            );
+        }
     }
 
     #[test]
