@@ -987,6 +987,23 @@ mod tests {
         }
     }
 
+    /// #5132: the jj filter is tuned for `jj log` (and bare `jj`, which runs
+    /// it); its 30-line cap hid the changes in diffs and file contents.
+    #[test]
+    fn jj_filter_covers_log_only() {
+        for cmd in ["jj", "jj log", "jj log -r @"] {
+            assert_eq!(
+                find_matching_filter(cmd).map(|f| f.name.as_str()),
+                Some("jj"),
+                "{cmd:?}"
+            );
+        }
+        for cmd in ["jj diff", "jj show", "jj file show a.py", "jj logs"] {
+            assert!(find_matching_filter(cmd).is_none(), "{cmd:?}");
+            assert!(!command_matches_filter(cmd), "{cmd:?}");
+        }
+    }
+
     #[test]
     fn test_loss_tail_configured_unfired_max_fires_is_whole() {
         let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\ntail_lines = 100\nmax_lines = 2\n";

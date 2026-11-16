@@ -3891,8 +3891,13 @@ mod tests {
     #[test]
     fn test_rewrite_toml_compound() {
         assert_eq!(
+            rewrite_command_no_prefixes("jj log && jq .", &[]),
+            Some("rtk jj log && rtk jq .".into())
+        );
+        // #5132: the jj filter covers log only, so `jj diff` is left as is.
+        assert_eq!(
             rewrite_command_no_prefixes("jj diff && jq .", &[]),
-            Some("rtk jj diff && rtk jq .".into())
+            Some("jj diff && rtk jq .".into())
         );
     }
 

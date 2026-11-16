@@ -1,6 +1,7 @@
 [filters.jj]
-description = "Compact Jujutsu (jj) output — strip blank lines, truncate"
-match_command = "^jj\\b"
+description = "Compact Jujutsu (jj) log output — strip blank lines, truncate"
+# `jj log` and bare `jj` (which runs log) only: a 30-line cap hides diffs and file contents (#5132).
+match_command = "^jj(\\s+log\\b.*|\\s*)$"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",
