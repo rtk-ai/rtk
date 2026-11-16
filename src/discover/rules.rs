@@ -1185,8 +1185,19 @@ pub const IGNORED_PREFIXES: &[&str] = &[
     "while ",
     "if ",
     "case ",
+    // A block closer that `;` split off, with the redirect the whole group or
+    // loop carries (`{ a; b; } > out`, `done 2>&1`). Space only, never `\n`:
+    // a closer followed by a newline still has a command after it.
+    "} ",
+    "done ",
+    "fi ",
+    "esac ",
+    "break ",
+    "continue ",
+    "exit ",
 ];
 
 pub const IGNORED_EXACT: &[&str] = &[
-    "cd", "echo", "true", "false", "wait", "pwd", "bash", "sh", "fi", "done",
+    "cd", "echo", "true", "false", "wait", "pwd", "bash", "sh", "fi", "done", "}", "esac", "break",
+    "continue", "exit",
 ];

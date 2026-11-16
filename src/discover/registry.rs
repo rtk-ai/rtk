@@ -3423,6 +3423,46 @@ mod tests {
     }
 
     #[test]
+    fn test_block_closers_and_loop_builtins_ignored() {
+        // What `;` leaves behind when it splits a group or loop: the closer,
+        // often carrying the group's redirect, and loop-control builtins.
+        for cmd in [
+            "}",
+            "} > /tmp/out.txt 2>&1",
+            "} >> ~/notes.md",
+            "done > /tmp/d.txt",
+            "done 2>&1",
+            "fi 2>/dev/null",
+            "esac",
+            "break",
+            "break 2",
+            "continue",
+            "exit 0",
+        ] {
+            assert_eq!(classify_command(cmd), Classification::Ignored, "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn test_block_closers_do_not_shadow_commands() {
+        // The `fi`/`find` regression above, for the closers added next to it:
+        // a command that merely starts with the same letters, or sits on the
+        // line after a closer, is still classified.
+        assert!(matches!(
+            classify_command("find . -name x"),
+            Classification::Supported { .. }
+        ));
+        assert_ne!(
+            classify_command("done\ngit status"),
+            Classification::Ignored
+        );
+        assert_ne!(
+            classify_command("exiftool img.jpg"),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
     fn test_split_chain_and() {
         assert_eq!(split_command_chain("a && b"), vec!["a", "b"]);
     }
