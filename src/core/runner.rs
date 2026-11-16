@@ -217,7 +217,9 @@ pub struct RunOptions<'a> {
     /// What the tool prints on a clean run in the output format rtk injected, e.g. ruff's
     /// `[]`. See [`guard_stdout`]. Not consulted when `tee_label` is set.
     pub clean_outputs: &'a [&'a str],
-    pub unguarded_help: bool,
+    /// The caller named the whole command, so the program can be any: its usage is
+    /// recognized by [`requests_help_of_named_command`] rather than [`requests_help`].
+    pub caller_named_command: bool,
 }
 
 impl<'a> RunOptions<'a> {
@@ -228,8 +230,8 @@ impl<'a> RunOptions<'a> {
         }
     }
 
-    pub fn unguarded_help(mut self) -> Self {
-        self.unguarded_help = true;
+    pub fn caller_named_command(mut self) -> Self {
+        self.caller_named_command = true;
         self
     }
 
@@ -473,9 +475,12 @@ fn help_spelling(stem: &str, first: Option<&str>) -> HelpSpelling {
     }
 }
 
-fn asks_for_usage(stem: &str, args: &[String]) -> bool {
+fn asks_for_usage(stem: &str, args: &[String], any_program: bool) -> bool {
     let first = args.first().map(String::as_str);
-    let spelling = help_spelling(stem, first);
+    let mut spelling = help_spelling(stem, first);
+    // `help_spelling` knows the tools RTK wraps. A program the caller named can be any
+    // other, and `du -h` or `df -h` ask for sizes, not usage.
+    spelling.short_h &= !any_program;
     let takes_value = |kind: TokenKind, name: &str| {
         let cargo_install_version = stem == "cargo"
             && first == Some("install")
@@ -551,6 +556,17 @@ fn names_usage(
 /// True when `cmd` asks the tool for its usage. Reads the program's stem and its argv; it
 /// never runs anything.
 pub fn requests_help(cmd: &Command) -> bool {
+    command_asks_for_usage(cmd, false)
+}
+
+/// [`requests_help`] for a command the caller named whole, as `rtk err`, `rtk test` and
+/// `rtk summary` run it. `--help`, `--version` and a forwarding tool's `-- -h` are still
+/// requests; a bare `-h` is not, since the program can be anything.
+pub fn requests_help_of_named_command(cmd: &Command) -> bool {
+    command_asks_for_usage(cmd, true)
+}
+
+fn command_asks_for_usage(cmd: &Command, any_program: bool) -> bool {
     let stem = std::path::Path::new(cmd.get_program())
         .file_stem()
         .and_then(|s| s.to_str())
@@ -559,7 +575,7 @@ pub fn requests_help(cmd: &Command) -> bool {
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    asks_for_usage(stem, &args)
+    asks_for_usage(stem, &args, any_program)
 }
 
 /// Same rule, for a filter that runs the child itself rather than through [`run`].
@@ -568,7 +584,7 @@ pub fn requests_help_args(tool: &str, args: &[String]) -> bool {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(tool);
-    asks_for_usage(stem, args)
+    asks_for_usage(stem, args, false)
 }
 
 pub fn run(
@@ -578,7 +594,12 @@ pub fn run(
     mode: RunMode<'_>,
     opts: RunOptions<'_>,
 ) -> Result<i32> {
-    let mode = if !opts.unguarded_help && requests_help(&cmd) {
+    let asks_for_usage = if opts.caller_named_command {
+        requests_help_of_named_command(&cmd)
+    } else {
+        requests_help(&cmd)
+    };
+    let mode = if asks_for_usage {
         RunMode::Passthrough
     } else {
         mode
@@ -839,7 +860,7 @@ pub fn run_err_cmd(
         tool,
         display,
         Box::new(ErrorStreamFilter::new()),
-        RunOptions::with_tee(tee_label).unguarded_help(),
+        RunOptions::with_tee(tee_label).caller_named_command(),
     )
 }
 
@@ -968,7 +989,7 @@ pub fn run_test_cmd(
         display,
         move |raw| extract_test_summary(raw, eco),
         if caller_named_command {
-            RunOptions::with_tee(tee_label).unguarded_help()
+            RunOptions::with_tee(tee_label).caller_named_command()
         } else {
             RunOptions::with_tee(tee_label)
         },
@@ -1771,6 +1792,26 @@ mod requests_help_tests {
         assert!(asks("npx", &["--", "tsc", "--help"]));
         assert!(asks("npx", &["--no-install", "--", "tsc", "-h"]));
         assert!(!asks("pnpm", &["exec", "--", "vitest", "run"]));
+    }
+
+    /// `rtk err`, `rtk test` and `rtk summary` run whatever the caller names (#4548).
+    #[test]
+    fn a_named_command_asks_by_its_long_spelling() {
+        let named = |program: &str, args: &[&str]| {
+            let mut cmd = Command::new(program);
+            cmd.args(args);
+            requests_help_of_named_command(&cmd)
+        };
+        assert!(named("cargo", &["build", "--help"]));
+        assert!(named("node", &["--version"]));
+        assert!(named("go", &["vet", "-help"]));
+        assert!(named("cargo", &["test", "--", "-h"]));
+
+        // The program's own `-h` is as often not a help request as it is.
+        assert!(!named("du", &["-h", "src"]));
+        assert!(!named("df", &["-h"]));
+        assert!(!named("cargo", &["build", "-h"]));
+        assert!(!named("sh", &["-c", "cargo build --help"]));
     }
 
     /// Every tool RTK wraps, crossed with every position a meta token can take. The
