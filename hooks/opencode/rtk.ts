@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process"
 import { existsSync, statSync } from "node:fs"
 import { homedir } from "node:os"
-import { delimiter, dirname, join } from "node:path"
+import { basename, delimiter, dirname, isAbsolute, join } from "node:path"
 
 // RTK OpenCode plugin — rewrites commands to use rtk for token savings.
 //
@@ -46,14 +46,34 @@ function probeDirsForRtk(dirs: string[], exts: string[]): string | null {
 }
 
 /**
- * Resolves the rtk binary.
+ * Whether the shell reaches `bin` as a bare `rtk` once `dirname(bin)` is
+ * appended to its PATH: an absolute path (a relative one would be resolved
+ * against the shell's working directory) to a file named `rtk`.
+ */
+function reachableAsRtk(bin: string, exts: string[]): boolean {
+  const fold = (s: string) => (process.platform === "win32" ? s.toLowerCase() : s)
+  const name = fold(basename(bin))
+  if (!isAbsolute(bin) || !exts.some((ext) => name === fold(`rtk${ext}`))) return false
+  try {
+    return existsSync(bin) && !statSync(bin).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Resolves the rtk binary that OpenCode's shell will run.
  *
- * Checks RTK_BIN first. If unset or missing, probes system PATH (including
- * PATHEXT on Windows, #1993). If still not found (common when OpenCode is
- * launched from GUI environments like macOS Dock or Linux desktop entries
- * where shell profiles are not sourced), probes standard installation directories:
- * ~/.cargo/bin, ~/.local/bin, /opt/homebrew/bin, /usr/local/bin, /usr/bin,
- * and Windows local app data / program files (#4462).
+ * The rewrite stays a bare `rtk …` and the shell hooks only append rtk's
+ * directory to the shell's PATH, so an rtk already on PATH is the one every
+ * rewritten command runs. It is therefore checked first (PATHEXT on Windows,
+ * #1993): probing and judging the command with any other rtk would let the
+ * binary that judged it and the one that runs it disagree. Without one,
+ * RTK_BIN is used when the shell can reach it as `rtk`, then the standard
+ * install directories: ~/.cargo/bin, ~/.local/bin, /opt/homebrew/bin,
+ * /usr/local/bin, /usr/bin, and Windows local app data / program files. Those
+ * are where an rtk sits when OpenCode is launched from a desktop GUI (macOS
+ * Dock, a Linux desktop entry) that does not source the shell profile (#4462).
  *
  * A directory named `rtk` is skipped rather than returned.
  */
@@ -63,21 +83,23 @@ export function resolveRtkPath(): string | null {
   const exts = process.platform === "win32"
     ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";")
     : [""]
+  const rtkBinEnv = process.env.RTK_BIN
 
-  // 1. Explicit override via RTK_BIN
-  if (process.env.RTK_BIN) {
-    const bin = process.env.RTK_BIN
-    try {
-      if (existsSync(bin) && !statSync(bin).isDirectory()) {
-        return (cachedRtkPath = bin)
-      }
-    } catch {}
-  }
-
-  // 2. System PATH
+  // 1. System PATH
   const pathDirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean)
   const pathMatch = probeDirsForRtk(pathDirs, exts)
-  if (pathMatch) return (cachedRtkPath = pathMatch)
+  if (pathMatch) {
+    if (rtkBinEnv && rtkBinEnv !== pathMatch) {
+      console.warn(`[rtk] RTK_BIN=${rtkBinEnv} ignored: ${pathMatch} is on PATH, so it is the rtk OpenCode's shell runs`)
+    }
+    return (cachedRtkPath = pathMatch)
+  }
+
+  // 2. RTK_BIN
+  if (rtkBinEnv) {
+    if (reachableAsRtk(rtkBinEnv, exts)) return (cachedRtkPath = rtkBinEnv)
+    console.warn(`[rtk] RTK_BIN=${rtkBinEnv} ignored: it must be an absolute path to a file named rtk`)
+  }
 
   // 3. Candidate directories outside system PATH (#4462)
   const candidateMatch = probeDirsForRtk(candidateRtkDirs(), exts)
@@ -86,7 +108,7 @@ export function resolveRtkPath(): string | null {
   return (cachedRtkPath = null)
 }
 
-/** Install directories probed when rtk is on neither `RTK_BIN` nor `PATH`. */
+/** Install directories probed when rtk is on neither `PATH` nor `RTK_BIN`. */
 export function candidateRtkDirs(): string[] {
   const home = homedir()
   const dirs: string[] = [
@@ -108,7 +130,8 @@ export function candidateRtkDirs(): string[] {
 /**
  * Appends the rtk directory to the spawned shell's PATH if not already present.
  *
- * Appending rather than prepending ensures no other command resolves differently.
+ * Appending rather than prepending keeps every command that already resolves
+ * on PATH resolving to the same binary.
  */
 export function appendRtkDirToPath(env: Record<string, any>, rtkDir: string): void {
   // Windows names it `Path` and matches it case-insensitively. Reuse the key the
@@ -242,7 +265,7 @@ async function handleToolHook(tool: unknown, container: any, agent?: string) {
 async function ensureRtkUsable(): Promise<string | null> {
   const rtkBin = resolveRtkPath()
   if (!rtkBin) {
-    console.warn("[rtk] rtk binary not found (checked RTK_BIN, PATH, ~/.cargo/bin, ~/.local/bin, Homebrew) — plugin disabled")
+    console.warn("[rtk] rtk binary not found (checked PATH, RTK_BIN and the standard install directories) — plugin disabled")
     return null
   }
   if (!(await probeRtkHookOpencode(rtkBin))) {

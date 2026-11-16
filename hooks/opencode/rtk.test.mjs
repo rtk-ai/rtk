@@ -399,13 +399,45 @@ test("candidate probing and shell PATH injection for rtk outside PATH (#4462)", 
     envShellHook(envShell)
     assert.equal(envShell.env.PATH, `/usr/bin${delimiter}${customDir}`)
 
-    // 3. RTK_BIN takes precedence over PATH
-    process.env.PATH = mockDir
+    // RTK_BIN is the explicit choice: it comes before ~/.cargo/bin
+    process.env.HOME = customHome
+    process.env.USERPROFILE = customHome
     _resetCachedRtkPath()
     assert.equal(resolveRtkPath(), envRtk)
+    process.env.HOME = emptyDir
+    process.env.USERPROFILE = emptyDir
+
+    // 3. An rtk on PATH comes before RTK_BIN and before ~/.cargo/bin: the shell
+    // hooks only append, so the PATH one is the rtk every rewrite runs, and it
+    // has to be the one that probes and judges the command.
+    process.env.PATH = mockDir
+    _resetCachedRtkPath()
+    assert.equal(resolveRtkPath(), mockBin())
+    delete process.env.RTK_BIN
+    process.env.HOME = customHome
+    process.env.USERPROFILE = customHome
+    _resetCachedRtkPath()
+    assert.equal(resolveRtkPath(), mockBin())
+    process.env.HOME = emptyDir
+    process.env.USERPROFILE = emptyDir
+
+    // RTK_BIN is skipped where the shell cannot reach it as a bare `rtk` once
+    // its directory is appended: a file with another name, a relative path
+    // (this test runs in mockDir, where `rtk` exists). Asserted as "not
+    // RTK_BIN" rather than null, since a system-wide rtk (/usr/bin,
+    // /opt/homebrew/bin) would be the next candidate.
+    const renamed = join(customDir, process.platform === "win32" ? "rtk-nightly.EXE" : "rtk-nightly")
+    installMockBin(renamed)
+    process.env.PATH = emptyDir
+    for (const bin of [renamed, BIN]) {
+      process.env.RTK_BIN = bin
+      _resetCachedRtkPath()
+      assert.notEqual(resolveRtkPath(), bin, bin)
+    }
 
     // 4. rtk on PATH:
     delete process.env.RTK_BIN
+    process.env.PATH = mockDir
     _resetCachedRtkPath()
     assert.equal(resolveRtkPath(), mockBin())
     assert.equal(await tryRewriteCommand("shell", "ls -la"), "rtk ls -la")
@@ -416,12 +448,15 @@ test("candidate probing and shell PATH injection for rtk outside PATH (#4462)", 
     pathShellHook(alreadyOnPath)
     assert.equal(alreadyOnPath.env.PATH, `/bin${delimiter}${mockDir}`)
 
-    // 5. A directory at RTK_BIN is skipped
-    const decoyDir = mkdtempSync(join(tmpdir(), "rtk-opencode-dir-"))
+    // 5. A directory at RTK_BIN is skipped, even one named rtk
+    const decoyParent = mkdtempSync(join(tmpdir(), "rtk-opencode-dir-"))
+    const decoyDir = join(decoyParent, BIN)
+    mkdirSync(decoyDir)
+    process.env.PATH = emptyDir
     process.env.RTK_BIN = decoyDir
     _resetCachedRtkPath()
-    assert.equal(resolveRtkPath(), mockBin())
-    rmSync(decoyDir, { recursive: true, force: true })
+    assert.notEqual(resolveRtkPath(), decoyDir)
+    rmSync(decoyParent, { recursive: true, force: true })
   } finally {
     process.env.PATH = `${mockDir}${delimiter}${savedPath}`
     process.env.HOME = emptyDir
@@ -482,7 +517,11 @@ function runInShell(command, shellEnv, cwd) {
   }
 }
 
-test("rtk outside PATH: every rtk of a rewrite runs in the shell the hooks set up (#4462)", async () => {
+test("rtk outside PATH: every rtk of a rewrite runs in the shell the hooks set up (#4462)", async (t) => {
+  // The launcher PATH keeps /usr/bin for `env`; a machine with rtk installed
+  // there resolves that one instead, and has nothing to assert here.
+  const launcherRtk = launcherPath().split(delimiter).map((d) => join(d, BIN)).find((p) => existsSync(p))
+  if (launcherRtk) return t.skip(`${launcherRtk} exists`)
   const home = mkdtempSync(join(tmpdir(), "rtk-opencode-home-"))
   const elsewhere = mkdtempSync(join(tmpdir(), "rtk-opencode-custom-"))
   const shellCwd = mkdtempSync(join(tmpdir(), "rtk-opencode-cwd-"))
@@ -505,8 +544,9 @@ test("rtk outside PATH: every rtk of a rewrite runs in the shell the hooks set u
       _resetCachedRtkPath()
       assert.equal(resolveRtkPath(), bin, where)
 
-      // OpenCode hands both hooks an env without PATH: the hook has to carry
-      // OpenCode's own PATH over, not replace it with rtk's directory alone,
+      // OpenCode 1.x hands `shell.env` an empty env (2.x passes its whole
+      // environment, PATH included, which the test above covers): the hook has
+      // to carry OpenCode's own PATH over, not replace it with rtk's directory alone,
       // and under the key OpenCode's environment already uses, so spreading
       // one over the other leaves a single PATH.
       const { shellHook } = await captureSetup()
