@@ -440,7 +440,9 @@ mod decision_consistency {
                 Some("rtk git status && rtk cargo test"),
             ),
             ("git status 2>&1", Some("rtk git status 2>&1")),
-            ("git log | head", Some("rtk git log | head")),
+            // Producers are never rewritten: the downstream command needs
+            // the original Git output bytes.
+            ("git log | head", None),
             ("htop", None),
             ("git status $(rm -rf /tmp/x)", None),
             ("git status `rm -rf /tmp/x`", None),
