@@ -166,10 +166,16 @@ fn remove_at_exit(dir: &Path) {
 /// temporary files go (`TMPDIR`), whose path a socket there must fit within;
 /// the locale and the time zone with the data and character set converters
 /// they load, which a test comparing the child's output with a native tool
-/// pins for both or neither; and the toolchain rustup sets for the tools it
+/// pins for both or neither; the toolchain rustup sets for the tools it
 /// proxies, so a child's `cargo` is the suite's once `HOME` no longer leads to
-/// it, though with `CARGO_HOME` under the scratch home. A test binary run
-/// outside cargo has them only if the shell exports them.
+/// it, though with `CARGO_HOME` under the scratch home (a test binary run
+/// outside cargo has the rustup variables only if the shell exports them); and
+/// the roots where proto and volta keep the toolchains their shims on `PATH`
+/// run, when the shell exports them. `RUSTUP_HOME`, `PROTO_HOME` and
+/// `VOLTA_HOME` are the developer's own directories, where those managers write
+/// their bookkeeping and logs, and where volta, or proto set to auto-install,
+/// installs a version a project asks for: the price of a child running the
+/// developer's toolchains at all.
 const KEPT: &[&str] = &[
     "PATH",
     "LD_LIBRARY_PATH",
@@ -200,6 +206,8 @@ const KEPT: &[&str] = &[
     "TZDIR",
     "RUSTUP_HOME",
     "RUSTUP_TOOLCHAIN",
+    "PROTO_HOME",
+    "VOLTA_HOME",
 ];
 
 /// What a Windows child keeps besides: the system and program directories its
