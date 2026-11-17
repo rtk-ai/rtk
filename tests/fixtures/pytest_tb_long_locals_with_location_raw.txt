@@ -1,0 +1,27 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________________________ test_load ___________________________________
+
+    def test_load():
+        expected = 'app.py:12: error'
+>       load(expected)
+
+expected   = 'app.py:12: error'
+
+test_sr.py:6: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+path = 'app.py:12: error'
+
+    def load(path):
+>       raise ValueError(
+            'bad config\nline two\nline three'
+        )
+E       ValueError: bad config
+E       line two
+E       line three
+
+path       = 'app.py:12: error'
+
+mylib/conf.py:2: ValueError
+1 failed in 0.01s

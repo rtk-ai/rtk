@@ -6,8 +6,16 @@
 //! | Entry point | Verdict source | Identity rewrite |
 //! |---|---|---|
 //! | `rtk hook <agent>` (`hook_cmd`) | `check_command_for(cmd, host)` | suppressed |
-//! | `rtk rewrite` (`rewrite_cmd`, run as a subprocess by the shell/TS/Python delegates) | `check_command` (always `Host::Claude`) | reported |
+//! | `rtk rewrite` (`rewrite_cmd`, run as a subprocess by the shell/TS/Python delegates) | Claude Code's rules | reported |
 //! | `rtk hook check` (`main.rs`) | whatever the named `--agent` consults, via [`AgentPath`] | suppressed |
+//!
+//! Each also hands [`decide`] a [`DenyRules`], which is not the verdict but a
+//! statement about the *caller*: whether it is the one path whose deny rules
+//! RTK reads and whose hook asks explicitly for every wrap it builds. That
+//! is what decides whether a fish script may be wrapped, because once a
+//! script reaches a fish the verdict no longer describes what runs. Only
+//! `rtk hook claude` qualifies — see
+//! [`ClaudeHookPermissions`](super::permissions::ClaudeHookPermissions).
 //!
 //! [`decide`] is the shared answer. What legitimately differs between callers
 //! stays outside it: the verdict is passed in rather than looked up, so each
@@ -15,9 +23,10 @@
 //! machine's settings (#3146); the no-op-rewrite policy lives in
 //! [`decide_for_agent`], which every hook shares and the CLI does not; and
 //! whether the caller runs its own approval gate on the result lives in
-//! [`ApprovalOwner`], which only ever relaxes the *default* ask.
+//! [`ApprovalOwner`], which only ever relaxes the *default* ask, and never on
+//! a fish wrap.
 
-use super::permissions::{Host, PermissionVerdict, check_command_for};
+use super::permissions::{DenyRules, Host, PermissionVerdict};
 use crate::core::user_env;
 use crate::discover::registry::rewrite_command;
 
@@ -30,12 +39,33 @@ use crate::discover::registry::rewrite_command;
 pub(crate) enum HookDecision {
     /// Rewrite, and the host may auto-allow it — an explicit user allow rule matched.
     AllowRewrite(String),
-    /// Rewrite, but leave approval to the host's own prompt.
-    AskRewrite(String),
+    /// Rewrite, without an allow from RTK; [`AskOwner`] says whether the host's
+    /// own permission check decides or the hook asks itself.
+    AskRewrite(String, AskOwner),
     /// Say nothing; let the host handle the command untouched.
     Defer,
     /// A deny rule matched — stay out of the way of the host's native deny.
     Deny,
+}
+
+/// Whether an [`HookDecision::AskRewrite`] may be left to the host's own
+/// permission rules, or the hook has to ask itself.
+///
+/// Each host renders an ask its own way. Only the Claude hook's path can be
+/// handed a [`AskOwner::Hook`] ask today (`rtk hook check --agent claude`
+/// prints it like any rewrite), and `rtk hook claude` is the host response that
+/// tells the two apart: no `permissionDecision` for [`AskOwner::Host`], `"ask"`
+/// for [`AskOwner::Hook`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AskOwner {
+    /// The host's rules may judge the rewritten command as they would any
+    /// other: it says what runs.
+    Host,
+    /// The rewritten command hides its parts from the host's rules (the fish
+    /// wrap is one `rtk run` command), so no rule of the host may allow it
+    /// unprompted, no delegate relaxes it, and a rewrite that changed nothing
+    /// keeps its ask.
+    Hook,
 }
 
 /// The environment variable a delegate sets to say which agent it speaks for.
@@ -107,11 +137,17 @@ impl ApprovalOwner {
     /// never opted into them (#3908). An explicit [`PermissionVerdict::Ask`] is
     /// the user's own instruction and is left for the host to honour; every
     /// other decision passes through by construction.
+    ///
+    /// Only an ask the host owns relaxes. An [`AskOwner::Hook`] ask is never
+    /// promoted, though none reaches a delegate today: the delegate paths are
+    /// [`DenyRules::Unattested`], so they never wrap.
     pub(crate) fn apply(self, decision: HookDecision, verdict: PermissionVerdict) -> HookDecision {
         match (self, verdict, decision) {
-            (Self::Delegate, PermissionVerdict::Default, HookDecision::AskRewrite(rewritten)) => {
-                HookDecision::AllowRewrite(rewritten)
-            }
+            (
+                Self::Delegate,
+                PermissionVerdict::Default,
+                HookDecision::AskRewrite(rewritten, AskOwner::Host),
+            ) => HookDecision::AllowRewrite(rewritten),
             (_, _, other) => other,
         }
     }
@@ -124,7 +160,17 @@ impl ApprovalOwner {
 /// 1. **Deny wins outright.** Checked before anything else so a denied command
 ///    is never even considered for rewriting. A deny rule matched inside a
 ///    shell wrapper's script yields `Defer` instead: no rewrite, no decision.
-/// 2. **Unattestable constructs are refused.** Command substitution and
+/// 2. **A provably-fish script is wrapped, where no deny rule can be in play.**
+///    A host that evaluates the command string with a POSIX layer fails to
+///    parse it before RTK is consulted at all, so it is handed back as
+///    `rtk run --shell fish -c '<script>'` — with its own commands rewritten
+///    first, so wrapping costs no savings. The wrap refuses everything gate 3
+///    refuses, and is offered only when [`DenyRules`] says RTK reads this
+///    host's deny rules and it has none: past this point the script is read by
+///    a fish, where gate 1's segmenter no longer describes what runs.
+///    Off unless `hooks.wrap_fish_scripts` turns it on; `src/hooks/README.md` records
+///    why it runs ahead of gate 3.
+/// 3. **Unattestable constructs are refused.** Command substitution and
 ///    file-target redirects can't be decomposed into segments the permission
 ///    gate can check individually, so a rewrite could smuggle an unchecked
 ///    command past an allow rule. `check_command_with_rules` already forces
@@ -133,7 +179,7 @@ impl ApprovalOwner {
 ///    this gate only because a `<<` operand reads as a file target; what
 ///    actually refuses them is `rewrite_command`'s own `has_heredoc`, which
 ///    catches the forms this gate lets past (see #3980).
-/// 3. **Otherwise rewrite if a rule matches**, and auto-allow only on an
+/// 4. **Otherwise rewrite if a rule matches**, and auto-allow only on an
 ///    explicit `Allow`. Every other verdict — including `Default`, where no
 ///    rule matched at all — yields `AskRewrite`. `Default` must never reach
 ///    `AllowRewrite`: that would auto-approve every rewritable command on a
@@ -141,9 +187,9 @@ impl ApprovalOwner {
 ///
 /// An identity rewrite (`cmd` was already RTK-prefixed) is reported here as a
 /// normal rewrite. Callers that want it suppressed apply [`suppress_identity`].
-pub(crate) fn decide(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
+pub(crate) fn decide(cmd: &str, verdict: PermissionVerdict, deny_rules: DenyRules) -> HookDecision {
     let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
-    decide_with_params(cmd, verdict, &excluded, &transparent_prefixes)
+    decide_with_params(cmd, verdict, &excluded, &transparent_prefixes, deny_rules)
 }
 
 /// [`decide`] with the rewrite parameters supplied by the caller, mirroring
@@ -159,6 +205,50 @@ pub(crate) fn decide_with_params(
     verdict: PermissionVerdict,
     excluded: &[String],
     transparent_prefixes: &[String],
+    deny_rules: DenyRules,
+) -> HookDecision {
+    decide_with_wrap(
+        cmd,
+        verdict,
+        excluded,
+        transparent_prefixes,
+        deny_rules,
+        crate::discover::fish_script::try_wrap,
+    )
+}
+
+/// [`decide_with_params`] with the fish-script wrapper injected, so a test pins
+/// the wrap outcome instead of depending on the machine's `fish` binary and
+/// `hooks.wrap_fish_scripts` — the same reason the verdict and the rewrite
+/// parameters are passed in rather than looked up.
+pub(crate) fn decide_with_wrap(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+    deny_rules: DenyRules,
+    wrap_fish: fn(&str) -> Option<String>,
+) -> HookDecision {
+    decide_with_attestation(
+        cmd,
+        verdict,
+        excluded,
+        transparent_prefixes,
+        deny_rules.permit_wrap().then_some(|| deny_rules),
+        wrap_fish,
+    )
+}
+
+/// `None` keeps callers without wrap authority out of the wrapper entirely.
+/// A Claude settings snapshot is attested only after the wrapper's pure gates
+/// and environment probes succeed.
+fn decide_with_attestation(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+    attest: Option<impl FnOnce() -> DenyRules>,
+    wrap_fish: fn(&str) -> Option<String>,
 ) -> HookDecision {
     if verdict == PermissionVerdict::Deny {
         return HookDecision::Deny;
@@ -166,6 +256,34 @@ pub(crate) fn decide_with_params(
 
     if verdict == PermissionVerdict::Defer {
         return HookDecision::Defer;
+    }
+
+    // A provably-fish script fails to parse in a POSIX host layer before RTK is
+    // ever consulted, so it is handed back as one quoted argument every layer
+    // can parse. Its own commands are rewritten first — the wrap would
+    // otherwise cost every saving the rewrite rules deliver for the script's
+    // leading command. Never auto-allowed: the script's content is not
+    // attested, so its strongest verdict is `Ask` even under an allow rule,
+    // and the Claude hook says so explicitly rather than leaving the decision
+    // to the host (`hook_cmd::process_claude_payload_from_decision`).
+    //
+    // Offered only where there is provably no deny rule for the script to
+    // escape. Once the script reaches a fish, RTK's segmenters no longer
+    // describe what runs — fish starts a command where bash has no grammar at
+    // all, and resolves words at run time — so the question is answered about
+    // the *host* rather than about the script: this host's deny rules are ones
+    // RTK reads, and there are none. Every other case defers, which is what
+    // the command did before the wrap existed. See [`DenyRules`].
+    if let Some(attest) = attest
+        && wrap_fish(cmd).is_some()
+        && attest().permit_wrap()
+    {
+        let rewritten = rewrite_command(cmd, excluded, transparent_prefixes);
+        let script = rewritten.as_deref().unwrap_or(cmd);
+        return HookDecision::AskRewrite(
+            crate::discover::fish_script::wrap(script),
+            AskOwner::Hook,
+        );
     }
 
     if crate::discover::lexer::contains_unattestable_construct(cmd) {
@@ -176,7 +294,7 @@ pub(crate) fn decide_with_params(
         Some(rewritten) if verdict == PermissionVerdict::Allow => {
             HookDecision::AllowRewrite(rewritten)
         }
-        Some(rewritten) => HookDecision::AskRewrite(rewritten),
+        Some(rewritten) => HookDecision::AskRewrite(rewritten, AskOwner::Host),
         None => HookDecision::Defer,
     }
 }
@@ -186,8 +304,12 @@ pub(crate) fn decide_with_params(
 /// This is the composition every *hook* wants, as opposed to [`decide`] alone,
 /// which is what the `rtk rewrite` CLI renders. Every hook entry point goes
 /// through here so they cannot drift apart.
-pub(crate) fn decide_for_agent(cmd: &str, verdict: PermissionVerdict) -> HookDecision {
-    decide_for_agent_at(cmd, verdict, None)
+pub(crate) fn decide_for_agent(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    deny_rules: DenyRules,
+) -> HookDecision {
+    decide_for_agent_at(cmd, verdict, deny_rules, None)
 }
 
 /// [`decide_for_agent`] for a hook whose payload reports the command's working
@@ -206,6 +328,35 @@ pub(crate) fn decide_for_agent(cmd: &str, verdict: PermissionVerdict) -> HookDec
 pub(crate) fn decide_for_agent_at(
     cmd: &str,
     verdict: PermissionVerdict,
+    deny_rules: DenyRules,
+    cwd: Option<&str>,
+) -> HookDecision {
+    decide_for_agent_at_with_attestation(
+        cmd,
+        verdict,
+        deny_rules.permit_wrap().then_some(|| deny_rules),
+        cwd,
+    )
+}
+
+/// The real Claude hook and its diagnostic share the same permission snapshot.
+pub(crate) fn decide_for_claude_hook_at(
+    cmd: &str,
+    permissions: &super::permissions::ClaudeHookPermissions,
+    cwd: Option<&str>,
+) -> HookDecision {
+    decide_for_agent_at_with_attestation(
+        cmd,
+        permissions.verdict,
+        Some(|| permissions.deny_rules()),
+        cwd,
+    )
+}
+
+fn decide_for_agent_at_with_attestation(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    attest: Option<impl FnOnce() -> DenyRules>,
     cwd: Option<&str>,
 ) -> HookDecision {
     let (mut excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
@@ -214,7 +365,14 @@ pub(crate) fn decide_for_agent_at(
     }
     suppress_identity(
         cmd,
-        decide_with_params(cmd, verdict, &excluded, &transparent_prefixes),
+        decide_with_attestation(
+            cmd,
+            verdict,
+            &excluded,
+            &transparent_prefixes,
+            attest,
+            crate::discover::fish_script::try_wrap,
+        ),
     )
 }
 
@@ -259,7 +417,8 @@ pub(crate) fn in_claude_worktree(cwd: &str) -> bool {
 /// pins the difference.
 pub(crate) fn suppress_identity(cmd: &str, decision: HookDecision) -> HookDecision {
     match decision {
-        HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten)
+        HookDecision::AllowRewrite(ref rewritten)
+        | HookDecision::AskRewrite(ref rewritten, AskOwner::Host)
             if rewritten == cmd =>
         {
             HookDecision::Defer
@@ -279,6 +438,12 @@ pub(crate) fn suppress_identity(cmd: &str, decision: HookDecision) -> HookDecisi
 /// `rtk rewrite` do so in their own plugin, because `rtk rewrite` reports the
 /// no-op rather than suppressing it (see [`suppress_identity`]).
 pub(crate) enum AgentPath {
+    /// `rtk hook claude` — the one host whose rules RTK reads and whose hook
+    /// asks explicitly for every wrap it builds, which is what the fish wrap needs
+    /// (`permissions::ClaudeHookPermissions`). Copilot reads the same
+    /// settings but judges the returned command itself, so it is
+    /// [`AgentPath::InProcess`] like every other host.
+    ClaudeHook,
     /// `rtk hook <agent>` — decides in this process, against the host's own
     /// permission rules.
     InProcess(Host),
@@ -326,7 +491,8 @@ impl AgentPath {
             // (see `hook_cmd`'s `vscode_response` and `copilot_cli_response`).
             "antigravity" => Some(Self::InProcess(Host::Antigravity)),
             "cline" | "kilocode" | "kimi" | "windsurf" => Some(Self::RulesOnly),
-            "claude" | "copilot" => Some(Self::InProcess(Host::Claude)),
+            "claude" => Some(Self::ClaudeHook),
+            "copilot" => Some(Self::InProcess(Host::Claude)),
             "codex" => Some(Self::InProcess(Host::Codex)),
             "trae" => Some(Self::InProcess(Host::Trae)),
             "cursor" => Some(Self::InProcess(Host::Cursor)),
@@ -367,14 +533,20 @@ impl AgentPath {
         "windsurf",
     ];
 
-    /// The verdict this agent's hook would judge `cmd` against.
+    /// The verdict this agent's hook judges `cmd` against.
+    ///
+    /// Through [`check_command_for`](super::permissions::check_command_for),
+    /// not the rule triple, because a host can have a rule source that is not
+    /// Claude-shaped — OpenCode's lives in `permissions_opencode` — and this
+    /// diagnostic must report the denial its hook reports.
     fn verdict(&self, cmd: &str) -> PermissionVerdict {
         match self {
-            Self::InProcess(host) => check_command_for(cmd, *host),
+            Self::ClaudeHook => super::permissions::check_command_for(cmd, Host::Claude),
+            Self::InProcess(host) => super::permissions::check_command_for(cmd, *host),
             // `rtk rewrite` always reads Claude Code's rules, for every
             // delegate. Naming a host changes what is done with the verdict,
             // never where the verdict comes from.
-            Self::ViaRewrite(_) => check_command_for(cmd, Host::Claude),
+            Self::ViaRewrite(_) => super::permissions::check_command_for(cmd, Host::Claude),
             // No hook, so no rules to consult.
             Self::RulesOnly => PermissionVerdict::Default,
         }
@@ -385,7 +557,7 @@ impl AgentPath {
     fn approval_owner(&self) -> ApprovalOwner {
         match self {
             Self::ViaRewrite(owner) => *owner,
-            Self::InProcess(_) | Self::RulesOnly => ApprovalOwner::Rtk,
+            Self::ClaudeHook | Self::InProcess(_) | Self::RulesOnly => ApprovalOwner::Rtk,
         }
     }
 
@@ -393,15 +565,22 @@ impl AgentPath {
     /// runtime, including discarding a rewrite that changed nothing and
     /// relaxing the default ask the agent would only ask about twice.
     pub(crate) fn decide(&self, cmd: &str) -> HookDecision {
+        if matches!(self, Self::ClaudeHook) {
+            let permissions = super::permissions::check_claude_hook_command(cmd);
+            return decide_for_claude_hook_at(cmd, &permissions, None);
+        }
         let verdict = self.verdict(cmd);
-        self.approval_owner()
-            .apply(decide_for_agent(cmd, verdict), verdict)
+        self.approval_owner().apply(
+            decide_for_agent(cmd, verdict, DenyRules::Unattested),
+            verdict,
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::permissions::DenyRules;
 
     // --- #3864: Claude Code worktree isolation ---
 
@@ -419,19 +598,39 @@ mod tests {
     fn claude_worktree_leaves_git_plain_but_rewrites_the_rest() {
         let wt = Some("/repo/.claude/worktrees/feat-x");
         assert_eq!(
-            decide_for_agent_at("git status", PermissionVerdict::Default, wt),
+            decide_for_agent_at(
+                "git status",
+                PermissionVerdict::Default,
+                DenyRules::Unattested,
+                wt
+            ),
             HookDecision::Defer
         );
         assert_eq!(
-            decide_for_agent_at("git status && cargo build", PermissionVerdict::Allow, wt),
+            decide_for_agent_at(
+                "git status && cargo build",
+                PermissionVerdict::Allow,
+                DenyRules::Unattested,
+                wt
+            ),
             HookDecision::AllowRewrite("git status && rtk cargo build".into())
         );
         assert_eq!(
-            decide_for_agent_at("git log -1 --oneline", PermissionVerdict::Allow, wt),
+            decide_for_agent_at(
+                "git log -1 --oneline",
+                PermissionVerdict::Allow,
+                DenyRules::Unattested,
+                wt
+            ),
             HookDecision::Defer
         );
         assert_eq!(
-            decide_for_agent_at("git status", PermissionVerdict::Allow, Some("/repo")),
+            decide_for_agent_at(
+                "git status",
+                PermissionVerdict::Allow,
+                DenyRules::Unattested,
+                Some("/repo")
+            ),
             HookDecision::AllowRewrite("rtk git status".into())
         );
     }
@@ -452,15 +651,30 @@ mod tests {
 
             let wt = Some("/repo/.claude/worktrees/feat-x");
             assert_eq!(
-                decide_for_agent_at("cargo test", PermissionVerdict::Allow, wt),
+                decide_for_agent_at(
+                    "cargo test",
+                    PermissionVerdict::Allow,
+                    DenyRules::Unattested,
+                    wt
+                ),
                 HookDecision::Defer
             );
             assert_eq!(
-                decide_for_agent_at("git status", PermissionVerdict::Allow, wt),
+                decide_for_agent_at(
+                    "git status",
+                    PermissionVerdict::Allow,
+                    DenyRules::Unattested,
+                    wt
+                ),
                 HookDecision::Defer
             );
             assert_eq!(
-                decide_for_agent_at("ls -la", PermissionVerdict::Allow, wt),
+                decide_for_agent_at(
+                    "ls -la",
+                    PermissionVerdict::Allow,
+                    DenyRules::Unattested,
+                    wt
+                ),
                 HookDecision::AllowRewrite("rtk ls -la".into())
             );
         });
@@ -471,15 +685,27 @@ mod tests {
     #[test]
     fn default_verdict_asks_rather_than_allows() {
         assert!(matches!(
-            decide_with_params("git status", PermissionVerdict::Default, &[], &[]),
-            HookDecision::AskRewrite(_)
+            decide_with_params(
+                "git status",
+                PermissionVerdict::Default,
+                &[],
+                &[],
+                DenyRules::NoneConfigured
+            ),
+            HookDecision::AskRewrite(_, AskOwner::Host)
         ));
     }
 
     #[test]
     fn explicit_allow_permits_the_rewrite() {
         assert!(matches!(
-            decide_with_params("git status", PermissionVerdict::Allow, &[], &[]),
+            decide_with_params(
+                "git status",
+                PermissionVerdict::Allow,
+                &[],
+                &[],
+                DenyRules::NoneConfigured
+            ),
             HookDecision::AllowRewrite(_)
         ));
     }
@@ -487,7 +713,13 @@ mod tests {
     #[test]
     fn deny_wins_before_anything_else() {
         assert_eq!(
-            decide_with_params("git status", PermissionVerdict::Deny, &[], &[]),
+            decide_with_params(
+                "git status",
+                PermissionVerdict::Deny,
+                &[],
+                &[],
+                DenyRules::NoneConfigured
+            ),
             HookDecision::Deny
         );
     }
@@ -495,7 +727,13 @@ mod tests {
     #[test]
     fn command_without_an_rtk_equivalent_defers() {
         assert_eq!(
-            decide_with_params("htop", PermissionVerdict::Default, &[], &[]),
+            decide_with_params(
+                "htop",
+                PermissionVerdict::Default,
+                &[],
+                &[],
+                DenyRules::NoneConfigured
+            ),
             HookDecision::Defer
         );
     }
@@ -503,12 +741,24 @@ mod tests {
     #[test]
     fn defer_verdict_defers_a_rewritable_command() {
         assert_eq!(
-            decide_with_params("env bash -c 'git push'", PermissionVerdict::Defer, &[], &[]),
+            decide_with_params(
+                "env bash -c 'git push'",
+                PermissionVerdict::Defer,
+                &[],
+                &[],
+                DenyRules::Unattested
+            ),
             HookDecision::Defer
         );
         assert!(matches!(
-            decide_with_params("env bash -c 'git push'", PermissionVerdict::Ask, &[], &[]),
-            HookDecision::AskRewrite(_)
+            decide_with_params(
+                "env bash -c 'git push'",
+                PermissionVerdict::Ask,
+                &[],
+                &[],
+                DenyRules::Unattested
+            ),
+            HookDecision::AskRewrite(_, AskOwner::Host)
         ));
     }
 
@@ -524,7 +774,13 @@ mod tests {
             "git log > /tmp/out.txt",
         ] {
             assert_eq!(
-                decide_with_params(cmd, PermissionVerdict::Default, &[], &[]),
+                decide_with_params(
+                    cmd,
+                    PermissionVerdict::Default,
+                    &[],
+                    &[],
+                    DenyRules::NoneConfigured
+                ),
                 HookDecision::Defer,
                 "cmd: {cmd}"
             );
@@ -535,8 +791,14 @@ mod tests {
     #[test]
     fn fd_dup_redirect_still_rewrites() {
         assert!(matches!(
-            decide_with_params("git status 2>&1", PermissionVerdict::Default, &[], &[]),
-            HookDecision::AskRewrite(_)
+            decide_with_params(
+                "git status 2>&1",
+                PermissionVerdict::Default,
+                &[],
+                &[],
+                DenyRules::NoneConfigured
+            ),
+            HookDecision::AskRewrite(_, AskOwner::Host)
         ));
     }
 
@@ -547,7 +809,8 @@ mod tests {
                 "cat <<'EOF'\nhello\nEOF",
                 PermissionVerdict::Default,
                 &[],
-                &[]
+                &[],
+                DenyRules::NoneConfigured,
             ),
             HookDecision::Defer
         );
@@ -559,15 +822,231 @@ mod tests {
     #[test]
     fn identity_rewrite_is_reported_and_only_suppressed_on_request() {
         let cmd = "rtk git status";
-        let decided = decide_with_params(cmd, PermissionVerdict::Default, &[], &[]);
-        assert_eq!(decided, HookDecision::AskRewrite(cmd.to_string()));
+        let decided = decide_with_params(
+            cmd,
+            PermissionVerdict::Default,
+            &[],
+            &[],
+            DenyRules::NoneConfigured,
+        );
+        assert_eq!(
+            decided,
+            HookDecision::AskRewrite(cmd.to_string(), AskOwner::Host)
+        );
         assert_eq!(suppress_identity(cmd, decided), HookDecision::Defer);
+    }
+
+    mod fish_wrap {
+        use super::super::{AskOwner, HookDecision, decide_with_attestation, decide_with_wrap};
+        use crate::hooks::permissions::{DenyRules, PermissionVerdict};
+
+        /// Real classification and assembly, with the environment gates pinned
+        /// open so the answer does not depend on a local `fish`.
+        fn wrap_stub(cmd: &str) -> Option<String> {
+            crate::discover::fish_script::try_wrap_gated(cmd, true)
+        }
+
+        /// Wrap unavailable: no fish binary, flag off, or Windows.
+        fn wrap_none(_cmd: &str) -> Option<String> {
+            None
+        }
+
+        #[cfg(not(windows))]
+        #[test]
+        fn fish_script_is_wrapped_as_ask() {
+            assert_eq!(
+                decide_with_wrap(
+                    "test -d src; and git status",
+                    PermissionVerdict::Default,
+                    &[],
+                    &[],
+                    DenyRules::NoneConfigured,
+                    wrap_stub
+                ),
+                HookDecision::AskRewrite(
+                    "rtk run --shell fish -c 'test -d src; and git status'".to_string(),
+                    AskOwner::Hook
+                )
+            );
+        }
+
+        /// The wrap used to cost every saving the rewrite rules deliver for the
+        /// script's own commands. They are rewritten first, inside the wrap.
+        #[cfg(not(windows))]
+        #[test]
+        fn fish_script_keeps_the_rewrite_it_would_have_had() {
+            assert_eq!(
+                decide_with_wrap(
+                    "git diff HEAD~3 HEAD; and true",
+                    PermissionVerdict::Default,
+                    &[],
+                    &[],
+                    DenyRules::NoneConfigured,
+                    wrap_stub
+                ),
+                HookDecision::AskRewrite(
+                    "rtk run --shell fish -c 'rtk git diff HEAD~3 HEAD; and true'".to_string(),
+                    AskOwner::Hook
+                )
+            );
+        }
+
+        /// A caller that cannot show there is nothing to escape decides exactly
+        /// as it would if the wrap did not exist.
+        ///
+        /// Once the script reaches a fish, RTK's segmenters no longer describe
+        /// what runs: fish starts a command where bash has no grammar — the
+        /// condition of an `if`/`while`, the right side of `and`/`or`/`not` —
+        /// and resolves words at run time. So the question is not asked about
+        /// the script at all; `Unattested` is answer enough.
+        #[cfg(not(windows))]
+        #[test]
+        fn an_unattested_caller_never_wraps() {
+            for cmd in [
+                "test -d src; and git status",
+                "if test -d src\n  git status\nend",
+                "begin\n  git status\nend",
+            ] {
+                assert_eq!(
+                    decide_with_wrap(
+                        cmd,
+                        PermissionVerdict::Default,
+                        &[],
+                        &[],
+                        DenyRules::Unattested,
+                        |_| panic!("unattested callers must not probe fish")
+                    ),
+                    decide_with_wrap(
+                        cmd,
+                        PermissionVerdict::Default,
+                        &[],
+                        &[],
+                        DenyRules::Unattested,
+                        wrap_none
+                    ),
+                    "{cmd:?}"
+                );
+            }
+        }
+
+        /// …and with the rules read and none denying, the wrap is offered.
+        #[cfg(not(windows))]
+        #[test]
+        fn a_host_with_no_deny_rule_wraps() {
+            assert_eq!(
+                decide_with_wrap(
+                    "test -d src; and git status",
+                    PermissionVerdict::Default,
+                    &[],
+                    &[],
+                    DenyRules::NoneConfigured,
+                    wrap_stub
+                ),
+                HookDecision::AskRewrite(
+                    "rtk run --shell fish -c 'test -d src; and git status'".to_string(),
+                    AskOwner::Hook
+                )
+            );
+        }
+
+        /// The rewrite inside the wrap honours the same configuration the
+        /// unwrapped path does.
+        #[cfg(not(windows))]
+        #[test]
+        fn the_nested_rewrite_honours_exclusions() {
+            assert_eq!(
+                decide_with_wrap(
+                    "git diff HEAD~3 HEAD; and true",
+                    PermissionVerdict::Default,
+                    &["git".to_string()],
+                    &[],
+                    DenyRules::NoneConfigured,
+                    wrap_stub
+                ),
+                HookDecision::AskRewrite(
+                    "rtk run --shell fish -c 'git diff HEAD~3 HEAD; and true'".to_string(),
+                    AskOwner::Hook
+                )
+            );
+        }
+
+        /// An explicit allow rule cannot promote the wrap: the script's content
+        /// was never parsed, so `Ask` is its strongest verdict.
+        #[cfg(not(windows))]
+        #[test]
+        fn fish_wrap_is_never_auto_allowed() {
+            assert!(matches!(
+                decide_with_wrap(
+                    "test -d src; and git status",
+                    PermissionVerdict::Allow,
+                    &[],
+                    &[],
+                    DenyRules::NoneConfigured,
+                    wrap_stub
+                ),
+                HookDecision::AskRewrite(_, AskOwner::Hook)
+            ));
+        }
+
+        /// A deny rule still wins: the wrap is never consulted.
+        #[test]
+        fn deny_outranks_the_wrap() {
+            assert_eq!(
+                decide_with_attestation(
+                    "test -d src; and git status",
+                    PermissionVerdict::Deny,
+                    &[],
+                    &[],
+                    Some(|| panic!("denied commands must not be attested")),
+                    |_| panic!("denied commands must not probe fish")
+                ),
+                HookDecision::Deny
+            );
+        }
+
+        #[test]
+        fn without_a_wrap_the_command_takes_its_usual_path() {
+            // No fish available: `and git status` is just a command bash would
+            // run, and nothing in it is rewritable, so the decision defers.
+            assert_eq!(
+                decide_with_attestation(
+                    "test -d src; and git status",
+                    PermissionVerdict::Default,
+                    &[],
+                    &[],
+                    Some(|| panic!("a refused wrap must not be attested")),
+                    wrap_none
+                ),
+                HookDecision::Defer
+            );
+        }
+
+        #[test]
+        fn posix_script_is_not_wrapped() {
+            assert!(matches!(
+                decide_with_wrap(
+                    "git status; if true; then echo x; fi",
+                    PermissionVerdict::Default,
+                    &[],
+                    &[],
+                    DenyRules::NoneConfigured,
+                    wrap_stub
+                ),
+                HookDecision::AskRewrite(rewritten, AskOwner::Host) if rewritten.starts_with("rtk git status")
+            ));
+        }
     }
 
     /// Suppression only fires on an actual no-op — a real rewrite is untouched.
     #[test]
     fn suppress_identity_leaves_a_real_rewrite_alone() {
-        let decided = decide_with_params("git status", PermissionVerdict::Allow, &[], &[]);
+        let decided = decide_with_params(
+            "git status",
+            PermissionVerdict::Allow,
+            &[],
+            &[],
+            DenyRules::NoneConfigured,
+        );
         assert_eq!(
             suppress_identity("git status", decided),
             HookDecision::AllowRewrite("rtk git status".to_string())
@@ -584,6 +1063,27 @@ mod tests {
         );
         assert_eq!(
             suppress_identity("x", HookDecision::Defer),
+            HookDecision::Defer
+        );
+    }
+
+    /// Only an ask the host may judge is dropped as a no-op: one the hook owns
+    /// keeps its explicit ask, whatever the text.
+    #[test]
+    fn suppress_identity_keeps_an_ask_the_hook_owns() {
+        let cmd = "rtk run --shell fish -c 'test -d src; and git status'";
+        assert_eq!(
+            suppress_identity(
+                cmd,
+                HookDecision::AskRewrite(cmd.to_string(), AskOwner::Hook)
+            ),
+            HookDecision::AskRewrite(cmd.to_string(), AskOwner::Hook)
+        );
+        assert_eq!(
+            suppress_identity(
+                cmd,
+                HookDecision::AskRewrite(cmd.to_string(), AskOwner::Host)
+            ),
             HookDecision::Defer
         );
     }
@@ -641,6 +1141,12 @@ mod tests {
         }
     }
 
+    /// The verdict an agent's path judges `cmd` against — the hook's own,
+    /// including a host whose rule source is not Claude-shaped.
+    fn verdict_for(path: &AgentPath, cmd: &str) -> PermissionVerdict {
+        path.verdict(cmd)
+    }
+
     #[test]
     fn agent_path_rejects_the_unknown() {
         assert!(AgentPath::lookup("nope").is_none());
@@ -655,7 +1161,7 @@ mod tests {
             Some(AgentPath::InProcess(Host::Codex))
         ));
         assert_eq!(
-            check_command_for("git status", Host::Codex),
+            verdict_for(&AgentPath::InProcess(Host::Codex), "git status"),
             PermissionVerdict::Default
         );
         let (deny, ask, allow) = super::super::permissions::load_rules_for(Host::Codex);
@@ -669,7 +1175,7 @@ mod tests {
             Some(AgentPath::InProcess(Host::Antigravity))
         ));
         assert_eq!(
-            check_command_for("git status", Host::Antigravity),
+            verdict_for(&AgentPath::InProcess(Host::Antigravity), "git status"),
             PermissionVerdict::Default
         );
         let (deny, ask, allow) = super::super::permissions::load_rules_for(Host::Antigravity);
@@ -681,7 +1187,7 @@ mod tests {
     #[test]
     fn rules_only_agent_uses_the_default_verdict() {
         assert_eq!(
-            AgentPath::RulesOnly.verdict("git status"),
+            verdict_for(&AgentPath::RulesOnly, "git status"),
             PermissionVerdict::Default
         );
     }
@@ -694,19 +1200,27 @@ mod tests {
     #[test]
     fn a_delegate_owning_approval_relaxes_the_default_ask_only() {
         let rewritten = || "rtk git status".to_string();
+        let wrapped = || "rtk run --shell fish -c 'rtk git status; and true'".to_string();
         assert_eq!(
             ApprovalOwner::Delegate.apply(
-                HookDecision::AskRewrite(rewritten()),
+                HookDecision::AskRewrite(rewritten(), AskOwner::Host),
                 PermissionVerdict::Default
             ),
             HookDecision::AllowRewrite(rewritten())
         );
         assert_eq!(
             ApprovalOwner::Delegate.apply(
-                HookDecision::AskRewrite(rewritten()),
+                HookDecision::AskRewrite(wrapped(), AskOwner::Hook),
+                PermissionVerdict::Default
+            ),
+            HookDecision::AskRewrite(wrapped(), AskOwner::Hook)
+        );
+        assert_eq!(
+            ApprovalOwner::Delegate.apply(
+                HookDecision::AskRewrite(rewritten(), AskOwner::Host),
                 PermissionVerdict::Ask
             ),
-            HookDecision::AskRewrite(rewritten())
+            HookDecision::AskRewrite(rewritten(), AskOwner::Host)
         );
         assert_eq!(
             ApprovalOwner::Delegate.apply(HookDecision::Deny, PermissionVerdict::Default),
@@ -732,7 +1246,7 @@ mod tests {
         for (verdict, decision) in [
             (
                 PermissionVerdict::Ask,
-                HookDecision::AskRewrite("rtk git status".to_string()),
+                HookDecision::AskRewrite("rtk git status".to_string(), AskOwner::Host),
             ),
             (
                 PermissionVerdict::Allow,
@@ -742,7 +1256,7 @@ mod tests {
             (PermissionVerdict::Default, HookDecision::Defer),
         ] {
             let expected = match &decision {
-                HookDecision::AskRewrite(r) => HookDecision::AskRewrite(r.clone()),
+                HookDecision::AskRewrite(r, owner) => HookDecision::AskRewrite(r.clone(), *owner),
                 HookDecision::AllowRewrite(r) => HookDecision::AllowRewrite(r.clone()),
                 HookDecision::Deny => HookDecision::Deny,
                 HookDecision::Defer => HookDecision::Defer,
@@ -773,10 +1287,11 @@ mod tests {
             Some(AgentPath::ViaRewrite(ApprovalOwner::Delegate))
         ));
         assert_eq!(
-            AgentPath::lookup("openclaw")
-                .expect("openclaw resolves")
-                .verdict("git status"),
-            check_command_for("git status", Host::Claude),
+            verdict_for(
+                &AgentPath::lookup("openclaw").expect("openclaw resolves"),
+                "git status"
+            ),
+            super::super::permissions::check_command_for("git status", Host::Claude),
             "naming a host must not change whose rules are read"
         );
     }
