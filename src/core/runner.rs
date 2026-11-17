@@ -209,6 +209,8 @@ pub struct RunOptions<'a> {
     pub tee_label: Option<&'a str>,
     pub filter_stdout_only: bool,
     pub skip_filter_on_failure: bool,
+    /// With `skip_filter_on_failure`: failures this matches still go through the filter.
+    pub filter_failures_matching: Option<fn(&str) -> bool>,
     pub no_trailing_newline: bool,
     /// Forward rtk's own stdin to the child process. Needed for commands that
     /// can read from a pipe (e.g. `cat file | rtk wc`); without it the child
@@ -247,6 +249,13 @@ impl<'a> RunOptions<'a> {
 
     pub fn early_exit_on_failure(mut self) -> Self {
         self.skip_filter_on_failure = true;
+        self
+    }
+
+    /// Raw output on failure, except for failures `known` says the filter summarises.
+    pub fn early_exit_on_failure_unless(mut self, known: fn(&str) -> bool) -> Self {
+        self.skip_filter_on_failure = true;
+        self.filter_failures_matching = Some(known);
         self
     }
 
@@ -311,7 +320,12 @@ where
     let raw = &result.raw;
     let raw_stdout = &result.raw_stdout;
 
-    if opts.skip_filter_on_failure && exit_code != 0 {
+    if opts.skip_filter_on_failure
+        && exit_code != 0
+        && !opts
+            .filter_failures_matching
+            .is_some_and(|known| known(raw))
+    {
         if !result.raw_stdout.trim().is_empty() {
             print!("{}", result.raw_stdout);
         }

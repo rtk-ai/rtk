@@ -360,7 +360,7 @@ impl BlockHandler for CargoTestHandler {
 /// Forwards the complete original argv, including the prefix and any `--` separator.
 ///
 /// `raw_on_failure` prints the child's stdout and stderr unfiltered when it exits
-/// non-zero, for subcommands whose failure text the filter does not recognise.
+/// non-zero, unless it failed to compile: the filter keeps those errors.
 fn run_cargo_filtered<F>(
     subcommand: &str,
     args: &[OsString],
@@ -382,7 +382,7 @@ where
     let tee_label = format!("cargo_{}", subcommand);
     let mut opts = runner::RunOptions::with_tee(&tee_label);
     if raw_on_failure {
-        opts = opts.early_exit_on_failure();
+        opts = opts.early_exit_on_failure_unless(|raw| raw.contains("could not compile"));
     }
 
     runner::run_filtered(cmd, "cargo", &args_display, filter_fn, opts)
