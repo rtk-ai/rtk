@@ -131,22 +131,21 @@ fn analyze_logs(content: &str) -> String {
     if !unique_errors.is_empty() {
         result.push("[ERRORS]".to_string());
 
-        // Sort by count
-        let mut error_list: Vec<_> = error_counts.iter().collect();
-        error_list.sort_by(|a, b| b.1.cmp(a.1));
+        // Most frequent first. `unique_errors` is in first-seen order and the
+        // sort is stable, so equal counts keep input order instead of the
+        // HashMap's random one (which also decided which errors the cap kept).
+        let mut error_list: Vec<(&str, usize)> = unique_errors
+            .iter()
+            .map(|e| {
+                let normalized =
+                    normalize_log_line(e, &TIMESTAMP_RE, &UUID_RE, &HEX_RE, &NUM_RE, &PATH_RE);
+                (e.as_str(), error_counts[&normalized])
+            })
+            .collect();
+        error_list.sort_by_key(|e| std::cmp::Reverse(e.1));
 
         const MAX_LOG_ERRORS: usize = CAP_WARNINGS;
-        for (normalized, count) in error_list.iter().take(MAX_LOG_ERRORS) {
-            // Find original message
-            let original = unique_errors
-                .iter()
-                .find(|e| {
-                    &normalize_log_line(e, &TIMESTAMP_RE, &UUID_RE, &HEX_RE, &NUM_RE, &PATH_RE)
-                        == *normalized
-                })
-                .map(|s| s.as_str())
-                .unwrap_or(normalized);
-
+        for (original, count) in error_list.iter().take(MAX_LOG_ERRORS) {
             let truncated = if original.len() > 100 {
                 let t: String = original.chars().take(97).collect();
                 format!("{}...", t)
@@ -154,7 +153,7 @@ fn analyze_logs(content: &str) -> String {
                 original.to_string()
             };
 
-            if **count > 1 {
+            if *count > 1 {
                 result.push(format!("   [×{}] {}", count, truncated));
             } else {
                 result.push(format!("   {}", truncated));
@@ -174,21 +173,19 @@ fn analyze_logs(content: &str) -> String {
     if !unique_warnings.is_empty() {
         result.push("[WARNINGS]".to_string());
 
-        let mut warn_list: Vec<_> = warn_counts.iter().collect();
-        warn_list.sort_by(|a, b| b.1.cmp(a.1));
+        let mut warn_list: Vec<(&str, usize)> = unique_warnings
+            .iter()
+            .map(|w| {
+                let normalized =
+                    normalize_log_line(w, &TIMESTAMP_RE, &UUID_RE, &HEX_RE, &NUM_RE, &PATH_RE);
+                (w.as_str(), warn_counts[&normalized])
+            })
+            .collect();
+        warn_list.sort_by_key(|e| std::cmp::Reverse(e.1));
 
         // warnings are lower severity than errors — show fewer.
         const MAX_LOG_WARNS: usize = reduced(CAP_WARNINGS, 5);
-        for (normalized, count) in warn_list.iter().take(MAX_LOG_WARNS) {
-            let original = unique_warnings
-                .iter()
-                .find(|w| {
-                    &normalize_log_line(w, &TIMESTAMP_RE, &UUID_RE, &HEX_RE, &NUM_RE, &PATH_RE)
-                        == *normalized
-                })
-                .map(|s| s.as_str())
-                .unwrap_or(normalized);
-
+        for (original, count) in warn_list.iter().take(MAX_LOG_WARNS) {
             let truncated = if original.len() > 100 {
                 let t: String = original.chars().take(97).collect();
                 format!("{}...", t)
@@ -196,7 +193,7 @@ fn analyze_logs(content: &str) -> String {
                 original.to_string()
             };
 
-            if **count > 1 {
+            if *count > 1 {
                 result.push(format!("   [×{}] {}", count, truncated));
             } else {
                 result.push(format!("   {}", truncated));
@@ -277,5 +274,46 @@ mod tests {
         let result = analyze_logs(&logs);
         // Should not panic even with very long multi-byte messages
         assert!(result.contains("ERRORS"));
+    }
+
+    #[test]
+    fn test_analyze_logs_ties_keep_input_order() {
+        // 15 distinct errors and 8 distinct warnings, each seen once: every count
+        // ties, so the lines shown under the caps must be the first ones in the
+        // log, in order, on every run.
+        let names = [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet", "kilo", "lima", "mike", "november", "oscar",
+        ];
+        let mut logs = String::new();
+        for n in &names {
+            logs.push_str(&format!("ERROR: {} failed\n", n));
+        }
+        for n in names.iter().take(8) {
+            logs.push_str(&format!("WARN: {} slow\n", n));
+        }
+        let result = analyze_logs(&logs);
+        let expected: Vec<String> = names
+            .iter()
+            .take(10)
+            .map(|n| format!("   ERROR: {} failed", n))
+            .collect();
+        let shown: Vec<&str> = result
+            .lines()
+            .filter(|l| l.starts_with("   ERROR: "))
+            .collect();
+        assert_eq!(shown, expected);
+        assert!(result.contains("... +5 more unique errors"));
+        let warns: Vec<&str> = result
+            .lines()
+            .filter(|l| l.starts_with("   WARN: "))
+            .collect();
+        let expected: Vec<String> = names
+            .iter()
+            .take(5)
+            .map(|n| format!("   WARN: {} slow", n))
+            .collect();
+        assert_eq!(warns, expected);
+        assert!(result.contains("... +3 more unique warnings"));
     }
 }
