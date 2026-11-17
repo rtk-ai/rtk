@@ -118,7 +118,7 @@ struct CoverageContext {
 /// imprecision is unavoidable without per-segment hook logging and isn't worth
 /// chasing further. `Estimated` is the fallback for history that predates
 /// `hook_decisions` logging — but note it does NOT simply fade out over time:
-/// `hook_decisions` rows are pruned by the same `DEFAULT_HISTORY_DAYS` retention
+/// `hook_decisions` rows are pruned by the same `tracking.history_days` retention
 /// window as the rest of the tracking DB (see `Tracker::cleanup_hook_decisions`),
 /// so any `--since` reaching further back than that window permanently needs
 /// `Estimated`, indefinitely, not just during an initial backfill period.

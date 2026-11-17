@@ -3,12 +3,15 @@
 use super::constants::NOISE_DIRS;
 use crate::core::arg_tokenizer::{self, Attachment, Dialect, Token, TokenKind, ValueSpec};
 use crate::core::args_utils;
+use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::display_args;
+use crate::core::tracking::estimate_tokens;
 use crate::core::truncate::CAP_INVENTORY;
 use crate::core::utils::{ChildArgExt, resolved_command};
 use anyhow::Result;
 use regex::Regex;
+use std::process::Stdio;
 use std::sync::LazyLock;
 
 /// Matches the date+time portion in `ls -la` output, which serves as a
@@ -313,47 +316,81 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         display_args(args)
     };
 
-    runner::run_filtered(
+    let native = native_listing(args);
+    let listed = native
+        .as_ref()
+        .filter(|(stdout, succeeded)| *succeeded || !stdout.is_empty())
+        .map(|(stdout, _)| stdout.as_str());
+
+    runner::run_filtered_with_exit(
         cmd,
         "ls",
         &label,
-        |raw| {
-            let (entries, parsed_count, truncated, filtered) = compact_ls(raw, show_all, show_long);
-
-            // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
-            // This is safer than returning "(empty)" for a non-empty directory.
-            let has_real_content = raw
-                .lines()
-                .any(|l| !l.starts_with("total ") && !l.is_empty() && !is_dotdir(l));
-            if parsed_count == 0 && has_real_content {
-                return raw.to_string();
-            }
-
-            let mut out = entries;
-
-            if let Some(hint) = hidden_hint(&truncated, &filtered) {
-                out.push_str(&hint);
-                out.push('\n');
-            }
-
-            if verbose > 0 {
-                eprintln!(
-                    "Chars: {} → {} ({}% reduction)",
-                    raw.len(),
-                    out.len(),
-                    if !raw.is_empty() {
-                        100usize.saturating_sub(out.len() * 100 / raw.len())
-                    } else {
-                        0
-                    }
-                );
-            }
-            out
+        |raw, code| match (code, &native) {
+            (0, _) => render(raw, listed, show_all, show_long, verbose),
+            (_, Some((native, _))) => never_worse(native, raw).to_string(),
+            (_, None) => raw.to_string(),
         },
-        RunOptions::stdout_only()
-            .early_exit_on_failure()
-            .no_trailing_newline(),
+        RunOptions::stdout_only().no_trailing_newline(),
     )
+}
+
+fn native_listing(args: &[String]) -> Option<(String, bool)> {
+    let output = resolved_command("ls")
+        .child_args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    Some((
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        output.status.success(),
+    ))
+}
+
+fn render(raw: &str, native: Option<&str>, show_all: bool, show_long: bool, verbose: u8) -> String {
+    let (entries, parsed_count, truncated, filtered) = compact_ls(raw, show_all, show_long);
+
+    // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
+    // This is safer than returning "(empty)" for a non-empty directory.
+    let has_real_content = raw
+        .lines()
+        .any(|l| !l.starts_with("total ") && !l.is_empty() && !is_dotdir(l));
+    if parsed_count == 0 && has_real_content {
+        return native
+            .map_or(raw, |native| never_worse(native, raw))
+            .to_string();
+    }
+
+    if let Some(native) = native
+        && estimate_tokens(&entries) > estimate_tokens(native)
+    {
+        return native.to_string();
+    }
+
+    let mut out = entries;
+
+    if let Some(hint) = hidden_hint(&truncated, &filtered) {
+        out.push_str(&hint);
+        out.push('\n');
+    }
+
+    if verbose > 0 {
+        eprintln!(
+            "Chars: {} → {} ({}% reduction)",
+            raw.len(),
+            out.len(),
+            if !raw.is_empty() {
+                100usize.saturating_sub(out.len() * 100 / raw.len())
+            } else {
+                0
+            }
+        );
+    }
+    match native {
+        Some(native) => never_worse(native, &out).to_string(),
+        None => out,
+    }
 }
 
 /// Build the recovery hint for entries dropped from the listing —
@@ -486,7 +523,7 @@ fn perms_to_octal(perms: &str) -> Option<String> {
 ///
 /// Without `show_long`:
 ///   name/        (dirs)
-///   name  size   (files)
+///   name         (files)
 ///
 /// With `show_long` (user passed `-l`):
 ///   755  name/        (dirs)
@@ -574,9 +611,10 @@ fn compact_ls(
         });
     }
     for (name, size, octal) in &files {
-        all_lines.push(match octal {
-            Some(octal) => format!("{}  {}  {}", octal, name, size),
-            None => format!("{}  {}", name, size),
+        all_lines.push(match (show_long, octal) {
+            (false, _) => name.clone(),
+            (true, Some(octal)) => format!("{}  {}  {}", octal, name, size),
+            (true, None) => format!("{}  {}", name, size),
         });
     }
 
@@ -612,8 +650,8 @@ mod tests {
         assert!(entries.contains("src/"));
         assert!(entries.contains("Cargo.toml"));
         assert!(entries.contains("README.md"));
-        assert!(entries.contains("1.2K")); // 1234 bytes
-        assert!(entries.contains("5.5K")); // 5678 bytes
+        assert!(!entries.contains("1.2K"));
+        assert!(!entries.contains("5.5K"));
         assert!(!entries.contains("drwx")); // no permissions
         assert!(!entries.contains("staff")); // no group
         assert!(!entries.contains("total")); // no total
@@ -1074,7 +1112,7 @@ mod tests {
         let input = "total 8\n\
                      -rw-r--r--  1 fjeanne utilisa. du domaine    0 Mar 31 16:18 empty.txt\n\
                      -rw-r--r--  1 fjeanne utilisa. du domaine 1234 Mar 31 16:18 data.json\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, true);
         assert!(
             entries.contains("empty.txt"),
             "should contain 'empty.txt', got: {entries}"
@@ -1102,7 +1140,7 @@ mod tests {
         // Some systems show year instead of time for old files
         let input = "total 8\n\
                      -rw-r--r--  1 user staff  5678 Dec 25  2024 archive.tar\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, true);
         assert!(
             entries.contains("archive.tar"),
             "should contain filename, got: {entries}"
@@ -1265,6 +1303,139 @@ mod tests {
             "short format must not include octal perms, got: {entries}"
         );
         assert!(entries.contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn test_compact_short_format_is_names_only() {
+        let input = "total 48\n\
+                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
+                     lrwxr-xr-x  1 user  staff    10 Jan  1 12:00 link -> target\n";
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        assert_eq!(entries, "src/\nCargo.toml\nlink -> target\n");
+    }
+
+    fn long_line(kind: char, name: &str) -> String {
+        format!("{kind}rw-r--r--  1 user  staff  1234 Jan  1 12:00 {name}\n")
+    }
+
+    fn one_per_line(names: &[&str]) -> String {
+        names.iter().map(|name| format!("{name}\n")).collect()
+    }
+
+    #[test]
+    fn test_render_bare_ls_is_native_when_markers_cost_more() {
+        let raw: String = ["src", "docs", "tests", "a.rs"]
+            .iter()
+            .map(|n| long_line(if n.contains('.') { '-' } else { 'd' }, n))
+            .collect();
+        let native = one_per_line(&["a.rs", "docs", "src", "tests"]);
+        assert_eq!(render(&raw, Some(&native), false, false, 0), native);
+    }
+
+    #[test]
+    fn test_render_bare_ls_is_native_when_the_hint_costs_more() {
+        let raw = format!(
+            "{}{}{}",
+            long_line('-', "Cargo.toml"),
+            long_line('d', "target"),
+            long_line('-', "README.md")
+        );
+        let native = one_per_line(&["Cargo.toml", "README.md", "target"]);
+        assert_eq!(render(&raw, Some(&native), false, false, 0), native);
+    }
+
+    #[test]
+    fn test_render_bare_ls_keeps_compact_when_it_saves() {
+        let files: Vec<String> = (0..CAP_INVENTORY + 40)
+            .map(|i| format!("file_with_a_long_name_{i:03}.txt"))
+            .collect();
+        let mut raw: String = files.iter().map(|name| long_line('-', name)).collect();
+        raw.push_str(&long_line('d', "node_modules"));
+        let mut names: Vec<&str> = files.iter().map(String::as_str).collect();
+        names.push("node_modules");
+        let native = one_per_line(&names);
+        let out = render(&raw, Some(&native), false, false, 0);
+        assert!(out.starts_with("file_with_a_long_name_000.txt\n"), "{out}");
+        assert!(out.contains("... (40 more, 1 filtered)"), "{out}");
+        assert!(estimate_tokens(&out) < estimate_tokens(&native));
+    }
+
+    #[test]
+    fn test_render_bare_ls_never_exceeds_native() {
+        let names = [
+            "a",
+            "src",
+            "node_modules",
+            "target",
+            ".git",
+            "x.rs",
+            "my file",
+        ];
+        for n in 0..=names.len() {
+            for dirs_mask in 0..(1u32 << n) {
+                let raw: String = names[..n]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| {
+                        long_line(if (dirs_mask >> i) & 1 == 1 { 'd' } else { '-' }, name)
+                    })
+                    .collect();
+                let native = one_per_line(&names[..n]);
+                let out = render(&raw, Some(&native), false, false, 0);
+                assert!(
+                    estimate_tokens(&out) <= estimate_tokens(&native),
+                    "rtk ls emitted {out:?} for native {native:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_render_unparsed_listing_is_held_to_native() {
+        let raw = "Desktop:\ntotal 0\n\ngo:\ntotal 0\n";
+        let native = "Desktop:\n\ngo:\n";
+        assert_eq!(render(raw, Some(native), false, false, 0), native);
+        assert_eq!(render(raw, None, false, false, 0), raw);
+    }
+
+    #[test]
+    fn test_render_unrecognised_date_format_is_held_to_native() {
+        let raw = "total 8\n\
+                   -rw-r--r--  1 user  staff  1234 Oct 28 16:25:03 2026 Cargo.toml\n\
+                   drwxr-xr-x  2 user  staff    64 Oct 28 16:25:03 2026 src\n";
+        let native = "Cargo.toml\nsrc\n";
+        assert_eq!(render(raw, Some(native), false, false, 0), native);
+    }
+
+    #[test]
+    fn test_render_long_listing_keeps_compact_when_it_saves() {
+        let raw = format!("{}{}", long_line('d', "src"), long_line('-', "a.rs"));
+        let compact = "644  src/\n644  a.rs  1.2K\n";
+        assert_eq!(render(&raw, Some(&raw), false, true, 0), compact);
+        assert_eq!(render(&raw, None, false, true, 0), compact);
+    }
+
+    #[test]
+    fn test_render_long_listing_is_held_to_native() {
+        let raw = format!("{}{}", long_line('d', "src"), long_line('-', "a.rs"));
+        let native = "a.rs\n";
+        assert_eq!(render(&raw, Some(native), false, true, 0), native);
+    }
+
+    #[test]
+    fn test_render_without_native_keeps_compact() {
+        let raw = format!("{}{}", long_line('d', "src"), long_line('-', "a.rs"));
+        assert_eq!(render(&raw, None, false, false, 0), "src/\na.rs\n");
+    }
+
+    #[test]
+    fn test_render_empty_directory_matches_bare_ls() {
+        let raw = "total 0\n\
+                   drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .\n\
+                   drwxr-xr-x  2 user  staff  64 Jan  1 12:00 ..\n";
+        assert_eq!(render(raw, Some(""), false, false, 0), "");
+        assert_eq!(render(raw, None, false, true, 0), "(empty)\n");
     }
 
     #[test]
