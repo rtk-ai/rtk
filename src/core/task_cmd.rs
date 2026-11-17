@@ -5,8 +5,11 @@
 //! net accounting. The files never enter the agent's context — that is the
 //! saving.
 
+use crate::core::http;
 use crate::core::pipeline_config;
+use crate::core::shell::{Launch, shell_command};
 use crate::core::tracking::{Tracker, estimate_tokens};
+use crate::core::utils::{ChildArgExt, resolved_command};
 use anyhow::{Context, Result, bail};
 use rtk_engine::pipeline::{TaskDef, UpstreamDef};
 use rtk_engine::task::{CorpusFile, TaskIntent, TaskOutcome, WorkerRequest, find_kind};
@@ -150,8 +153,9 @@ fn run_for_output(command: &[String]) -> Result<(CorpusFile, i32)> {
     let (program, rest) = command
         .split_first()
         .context("`--` needs a command after it")?;
-    let output = std::process::Command::new(program)
-        .args(rest)
+    let mut cmd = resolved_command(program);
+    cmd.child_args(rest);
+    let output = cmd
         .output()
         .with_context(|| format!("Failed to run {program}"))?;
     let mut content = String::new();
@@ -322,18 +326,25 @@ fn default_key_env(provider: &str) -> Option<&'static str> {
 /// conventional one when the upstream does not name it.
 fn api_key(upstream: &UpstreamDef) -> Result<String> {
     if let Some(command) = upstream.api_key_command.as_deref() {
-        let out = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
+        let mut cmd = match shell_command(command, None)? {
+            Launch::Ready(cmd) => cmd,
+            Launch::Unrunnable(unrunnable) => {
+                bail!(
+                    "api_key_command could not be run: {}",
+                    unrunnable.message.trim()
+                );
+            }
+        };
+        let out = cmd
             .output()
             .with_context(|| format!("running api_key_command: {command}"))?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
-            anyhow::bail!("api_key_command failed: {}", err.trim());
+            bail!("api_key_command failed: {}", err.trim());
         }
         let key = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if key.is_empty() {
-            anyhow::bail!("api_key_command printed nothing: {command}");
+            bail!("api_key_command printed nothing: {command}");
         }
         return Ok(key);
     }
@@ -371,24 +382,28 @@ fn post_json(
     headers: &[(&str, &str)],
     body: &serde_json::Value,
     limit: std::time::Duration,
+    via_daemon: bool,
 ) -> Result<serde_json::Value> {
-    let mut req = ureq::post(url)
-        .timeout(limit)
-        .set("Content-Type", "application/json");
+    let mut req = if via_daemon {
+        http::direct_global_timeout(ureq::post(url), limit)
+    } else {
+        http::global_timeout(ureq::post(url), limit)
+    };
     for (key, value) in headers {
-        req = req.set(key, value);
+        req = req.header(*key, *value);
     }
-    let response = req.send_string(&body.to_string()).map_err(|e| match e {
-        ureq::Error::Status(code, response) => {
-            let detail = response.into_string().unwrap_or_default();
-            anyhow::anyhow!("worker call failed ({code}): {detail}")
-        }
-        other => anyhow::anyhow!("worker call failed: {other}"),
-    })?;
-    let text = response
-        .into_string()
-        .context("worker response read failed")?;
-    serde_json::from_str(&text).context("worker response was not JSON")
+    let mut response = req
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .send_json(body)
+        .map_err(|e| anyhow::anyhow!("worker call failed: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let detail = http::read_text_lossy(&mut response, http::MAX_BODY).unwrap_or_default();
+        anyhow::bail!("worker call failed ({}): {detail}", status.as_u16());
+    }
+    http::read_json(&mut response).context("worker response was not readable JSON")
 }
 
 /// The dialects the local daemon speaks. A `google` worker has no route
@@ -472,8 +487,8 @@ fn claude_project_dir(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect();
-    let dir = crate::core::user_dirs::home()?
-        .join(".claude")
+    let dir = crate::hooks::init::resolve_claude_dir()
+        .ok()?
         .join("projects")
         .join(slug);
     dir.is_dir().then_some(dir)
@@ -534,6 +549,7 @@ fn call_anthropic(
         &headers,
         &body,
         timeout(upstream),
+        via_daemon,
     )?;
     let text = response["content"]
         .as_array()
@@ -582,6 +598,7 @@ fn call_openai(
         &headers,
         &body,
         timeout(upstream),
+        via_daemon,
     )?;
     let text = response["choices"][0]["message"]["content"]
         .as_str()
@@ -616,6 +633,7 @@ fn call_google(
         &[("x-goog-api-key", &key)],
         &body,
         timeout(upstream),
+        false,
     )?;
     let text = response["candidates"][0]["content"]["parts"]
         .as_array()
@@ -675,6 +693,32 @@ mod tests {
     fn unknown_flag_is_an_error() {
         assert!(parse_args(&["--quesiton".to_string(), "x".to_string()]).is_err());
         assert!(parse_args(&["--question".to_string()]).is_err());
+    }
+
+    #[test]
+    fn claude_project_dir_respects_custom_config_dir() {
+        // Claude Code names the directory after the absolute path, every
+        // non-alphanumeric character turned into `-`: the separators, and the
+        // `.` and `:` in the path too.
+        #[cfg(windows)]
+        let (cwd, slug) = (r"C:\work\my.project", "C--work-my-project");
+        #[cfg(not(windows))]
+        let (cwd, slug) = ("/work/my.project", "-work-my-project");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let custom_claude = temp.path().join("custom_claude");
+        let expected_dir = custom_claude.join("projects").join(slug);
+        std::fs::create_dir_all(&expected_dir).expect("project dir");
+
+        crate::core::test_isolation::with_agent_dir(
+            temp.path(),
+            "CLAUDE_CONFIG_DIR",
+            &custom_claude,
+            || {
+                let resolved = claude_project_dir(std::path::Path::new(cwd));
+                assert_eq!(resolved, Some(expected_dir));
+            },
+        );
     }
 }
 
@@ -754,6 +798,93 @@ mod command_tests {
     fn a_successful_command_reports_zero() {
         let (_, code) = run_for_output(&args(&["sh", "-c", "exit 0"])).expect("runs");
         assert_eq!(code, 0);
+    }
+
+    /// npm, vitest and the other Node tools install as `.cmd` wrappers on
+    /// Windows, and `Command::new("npm")` cannot start one: the failure
+    /// `resolved_command` is there for. `which` reads the process's own `PATH`,
+    /// so rather than change it under the tests running beside this one, the
+    /// test runs itself again with the wrapper's directory on the child's.
+    #[cfg(windows)]
+    #[test]
+    fn a_cmd_wrapper_on_path_is_run() {
+        /// Set on the re-run that does the work: the directory holding `hello.cmd`.
+        const WRAPPER_DIR: &str = "RTK_TEST_CMD_WRAPPER_DIR";
+
+        if std::env::var_os(WRAPPER_DIR).is_some() {
+            let (captured, code) = run_for_output(&args(&["hello"])).expect("hello.cmd runs");
+            assert_eq!(code, 0, "{}", captured.content);
+            assert!(
+                captured.content.contains("hello from a .cmd wrapper"),
+                "{}",
+                captured.content
+            );
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("hello.cmd"),
+            "@echo off\r\necho hello from a .cmd wrapper\r\n",
+        )
+        .expect("write hello.cmd");
+        let path = std::env::join_paths(std::iter::once(dir.path().to_path_buf()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))
+        .expect("a PATH with the wrapper's directory first");
+        // libtest names a test by its path inside the crate.
+        let (_, module) = module_path!()
+            .split_once("::")
+            .expect("a module inside the crate");
+        let exe = std::env::current_exe().expect("the test executable");
+        // nosemgrep: dynamic-command-execution — this test binary, run again with hello.cmd on PATH
+        let output = std::process::Command::new(exe)
+            .arg("--exact")
+            .arg(format!("{module}::a_cmd_wrapper_on_path_is_run"))
+            .env(WRAPPER_DIR, dir.path())
+            .env("PATH", path)
+            .output()
+            .expect("run the test again");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // A name libtest matched nothing with passes vacuously, so the re-run
+        // has to report the one test it ran.
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn api_key_command_resolves_credential_from_stdout() {
+        let upstream = UpstreamDef {
+            api_key_command: Some("echo secret-token-abc".to_string()),
+            ..Default::default()
+        };
+        let key = api_key(&upstream).expect("resolves");
+        assert_eq!(key, "secret-token-abc");
+    }
+
+    #[test]
+    fn api_key_command_nonzero_exit_errors() {
+        let upstream = UpstreamDef {
+            api_key_command: Some("exit 1".to_string()),
+            ..Default::default()
+        };
+        assert!(api_key(&upstream).is_err());
+    }
+
+    #[test]
+    fn api_key_command_empty_output_errors() {
+        #[cfg(unix)]
+        let cmd = "printf ''";
+        #[cfg(windows)]
+        let cmd = "type nul";
+        let upstream = UpstreamDef {
+            api_key_command: Some(cmd.to_string()),
+            ..Default::default()
+        };
+        assert!(api_key(&upstream).is_err());
     }
 }
 
@@ -886,6 +1017,9 @@ pub fn answer_call(task_name: &str, facts: &rtk_engine::pipeline::Facts) -> Opti
 /// agent runs instead — the task, wrapping the original command.
 pub fn swap_command(task_name: &str, command: &str) -> Option<String> {
     let resolved = resolve_task(task_name)?;
+    if resolved.task.kind != "digest" {
+        return None;
+    }
     let question = task_question(&resolved).unwrap_or_else(|| IN_HOOK_QUESTION.to_string());
     Some(format!(
         "rtk {task_name} --question {} -- sh -c {}",
@@ -985,6 +1119,74 @@ mod borrowed_credential {
             base_url: base.map(String::from),
             ..UpstreamDef::default()
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_call_through_the_daemon_ignores_the_proxy_environment() {
+        use crate::core::http::test_server::{refused_port, serve_once};
+
+        let (port, server) = serve_once(r#"{"content":[{"text":"done"}]}"#);
+        let proxy = format!("http://127.0.0.1:{}", refused_port());
+        // `0x7f.1` is 127.0.0.1 in the inet_aton shorthand glibc and musl resolve,
+        // standing in for a daemon bound to this machine's LAN address.
+        let url = format!("http://0x7f.1:{port}/v1/messages");
+        let result = temp_env::with_vars(
+            [
+                ("ALL_PROXY", Some(proxy.as_str())),
+                ("NO_PROXY", None),
+                ("no_proxy", None),
+            ],
+            || {
+                post_json(
+                    &url,
+                    &[],
+                    &serde_json::json!({}),
+                    std::time::Duration::from_secs(5),
+                    true,
+                )
+            },
+        );
+        let response = result.expect("the daemon is reached directly");
+        assert_eq!(response["content"][0]["text"], "done");
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn a_worker_error_reply_carries_its_status_and_body() {
+        use crate::core::http::test_server::serve_once_with_status;
+
+        let (port, server) = serve_once_with_status("401 Unauthorized", r#"{"error":"bad key"}"#);
+        let err = post_json(
+            &format!("http://127.0.0.1:{port}/v1/messages"),
+            &[],
+            &serde_json::json!({}),
+            std::time::Duration::from_secs(5),
+            false,
+        )
+        .expect_err("a 401 is an error");
+        server.join().expect("server");
+        assert_eq!(
+            err.to_string(),
+            r#"worker call failed (401): {"error":"bad key"}"#
+        );
+    }
+
+    #[test]
+    fn a_worker_reply_that_is_not_json_is_an_error() {
+        use crate::core::http::test_server::serve_once;
+
+        let (port, server) = serve_once("<html>gateway</html>");
+        let err = post_json(
+            &format!("http://127.0.0.1:{port}/v1/messages"),
+            &[],
+            &serde_json::json!({}),
+            std::time::Duration::from_secs(5),
+            false,
+        )
+        .expect_err("HTML is not a worker reply");
+        server.join().expect("server");
+        assert_eq!(err.to_string(), "worker response was not readable JSON");
     }
 
     #[test]

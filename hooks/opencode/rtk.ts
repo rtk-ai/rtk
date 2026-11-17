@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process"
 import { existsSync, statSync } from "node:fs"
-import { delimiter, join } from "node:path"
+import { homedir } from "node:os"
+import { basename, delimiter, dirname, isAbsolute, join } from "node:path"
 
 // RTK OpenCode plugin — rewrites commands to use rtk for token savings.
 //
@@ -28,38 +29,125 @@ export function _resetCachedRtkPath(): void {
   probedBin = null
 }
 
+function probeDirsForRtk(dirs: string[], exts: string[]): string | null {
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const fullPath = join(dir, `rtk${ext}`)
+      try {
+        if (existsSync(fullPath) && !statSync(fullPath).isDirectory()) {
+          return fullPath
+        }
+      } catch {
+        continue
+      }
+    }
+  }
+  return null
+}
+
 /**
- * Resolves the rtk binary from the system PATH.
+ * Whether the shell reaches `bin` as a bare `rtk` once `dirname(bin)` is
+ * appended to its PATH: an absolute path (a relative one would be resolved
+ * against the shell's working directory) to a file named `rtk`.
+ */
+function reachableAsRtk(bin: string, exts: string[]): boolean {
+  const fold = (s: string) => (process.platform === "win32" ? s.toLowerCase() : s)
+  const name = fold(basename(bin))
+  if (!isAbsolute(bin) || !exts.some((ext) => name === fold(`rtk${ext}`))) return false
+  try {
+    return existsSync(bin) && !statSync(bin).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Resolves the rtk binary that OpenCode's shell will run.
  *
- * PATH only, deliberately. OpenCode's bash/shell tool runs commands with
- * OpenCode's own PATH and never sources `.profile`, `.bashrc` or
- * `.bash_profile`, so an rtk found outside PATH cannot be spawned as a bare
- * `rtk …` — the tool comes back `rtk: command not found`. Finding one anyway
- * is worse than not rewriting (#4462 carries that case). A directory on PATH
- * named `rtk` is skipped rather than frozen as the answer: it disables the
- * plugin for the whole session.
+ * The rewrite stays a bare `rtk …` and the shell hooks only append rtk's
+ * directory to the shell's PATH, so an rtk already on PATH is the one every
+ * rewritten command runs. It is therefore checked first (PATHEXT on Windows,
+ * #1993): probing and judging the command with any other rtk would let the
+ * binary that judged it and the one that runs it disagree. Without one,
+ * RTK_BIN is used when the shell can reach it as `rtk`, then the standard
+ * install directories: ~/.cargo/bin, ~/.local/bin, /opt/homebrew/bin,
+ * /usr/local/bin, /usr/bin, and Windows local app data / program files. Those
+ * are where an rtk sits when OpenCode is launched from a desktop GUI (macOS
+ * Dock, a Linux desktop entry) that does not source the shell profile (#4462).
  *
- * Windows still probes PATHEXT, which is the #1993 fix: `which` does not exist
- * there.
+ * A directory named `rtk` is skipped rather than returned.
  */
 export function resolveRtkPath(): string | null {
   if (cachedRtkPath && existsSync(cachedRtkPath)) return cachedRtkPath
 
-  const dirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean)
   const exts = process.platform === "win32"
     ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";")
     : [""]
+  const rtkBinEnv = process.env.RTK_BIN
 
-  for (const dir of dirs) {
-    for (const ext of exts) {
-      const fullPath = join(dir, `rtk${ext}`)
-      if (existsSync(fullPath) && !statSync(fullPath).isDirectory()) {
-        return (cachedRtkPath = fullPath)
-      }
+  // 1. System PATH
+  const pathDirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean)
+  const pathMatch = probeDirsForRtk(pathDirs, exts)
+  if (pathMatch) {
+    if (rtkBinEnv && rtkBinEnv !== pathMatch) {
+      console.warn(`[rtk] RTK_BIN=${rtkBinEnv} ignored: ${pathMatch} is on PATH, so it is the rtk OpenCode's shell runs`)
     }
+    return (cachedRtkPath = pathMatch)
   }
 
+  // 2. RTK_BIN
+  if (rtkBinEnv) {
+    if (reachableAsRtk(rtkBinEnv, exts)) return (cachedRtkPath = rtkBinEnv)
+    console.warn(`[rtk] RTK_BIN=${rtkBinEnv} ignored: it must be an absolute path to a file named rtk`)
+  }
+
+  // 3. Candidate directories outside system PATH (#4462)
+  const candidateMatch = probeDirsForRtk(candidateRtkDirs(), exts)
+  if (candidateMatch) return (cachedRtkPath = candidateMatch)
+
   return (cachedRtkPath = null)
+}
+
+/** Install directories probed when rtk is on neither `PATH` nor `RTK_BIN`. */
+export function candidateRtkDirs(): string[] {
+  const home = homedir()
+  const dirs: string[] = [
+    join(home, ".cargo", "bin"),
+    join(home, ".local", "bin"), // install.sh's default INSTALL_DIR
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+  ]
+
+  if (process.platform === "win32") {
+    if (process.env.LOCALAPPDATA) dirs.push(join(process.env.LOCALAPPDATA, "cargo", "bin"))
+    if (process.env.ProgramFiles) dirs.push(join(process.env.ProgramFiles, "rtk"))
+    if (process.env["ProgramFiles(x86)"]) dirs.push(join(process.env["ProgramFiles(x86)"], "rtk"))
+  }
+  return dirs
+}
+
+/**
+ * Appends the rtk directory to the spawned shell's PATH if not already present.
+ *
+ * Appending rather than prepending keeps every command that already resolves
+ * on PATH resolving to the same binary.
+ */
+export function appendRtkDirToPath(env: Record<string, any>, rtkDir: string): void {
+  // Windows names it `Path` and matches it case-insensitively. Reuse the key the
+  // environment already has, so `{ ...process.env, ...env }` carries one PATH
+  // rather than two that differ only in case.
+  const isPathKey = (k: string) => (process.platform === "win32" ? k.toUpperCase() === "PATH" : k === "PATH")
+  const pathKey = Object.keys(env).find(isPathKey) ?? Object.keys(process.env).find(isPathKey) ?? "PATH"
+  const currentPath = env[pathKey] ?? process.env[pathKey] ?? ""
+  if (currentPath) {
+    const parts = currentPath.split(delimiter)
+    if (!parts.includes(rtkDir)) {
+      env[pathKey] = `${currentPath}${delimiter}${rtkDir}`
+    }
+  } else {
+    env[pathKey] = rtkDir
+  }
 }
 
 /**
@@ -174,17 +262,17 @@ async function handleToolHook(tool: unknown, container: any, agent?: string) {
 /**
  * Registers hooks only against an rtk that carries `rtk hook opencode`.
  */
-async function ensureRtkUsable(): Promise<boolean> {
+async function ensureRtkUsable(): Promise<string | null> {
   const rtkBin = resolveRtkPath()
   if (!rtkBin) {
-    console.warn("[rtk] no rtk on OpenCode's PATH — plugin disabled")
-    return false
+    console.warn("[rtk] rtk binary not found (checked PATH, RTK_BIN and the standard install directories) — plugin disabled")
+    return null
   }
   if (!(await probeRtkHookOpencode(rtkBin))) {
     console.warn(`[rtk] ${rtkBin} has no \`rtk hook opencode\` subcommand — plugin disabled`)
-    return false
+    return null
   }
-  return true
+  return rtkBin
 }
 
 /**
@@ -205,7 +293,16 @@ const RtkOpenCodePlugin = {
 
   // OpenCode 2.x entrypoint: `{tool, sessionID, agent, messageID, id, input}`.
   async setup(ctx: any) {
-    if (!(await ensureRtkUsable())) return
+    const rtkBin = await ensureRtkUsable()
+    if (!rtkBin) return
+    const rtkDir = dirname(rtkBin)
+
+    await ctx?.shell?.hook?.("create.before", (e: any) => {
+      if (!e) return
+      if (!e.env) e.env = {}
+      appendRtkDirToPath(e.env, rtkDir)
+    })
+
     await ctx?.tool?.hook?.("execute.before", (e: any) =>
       handleToolHook(e?.tool, e?.input, typeof e?.agent === "string" ? e.agent : undefined)
     )
@@ -214,8 +311,16 @@ const RtkOpenCodePlugin = {
   // OpenCode 1.x entrypoint: `{tool, sessionID, callID}` — no agent field, so
   // an agent-scoped ask stays silenced here.
   async server() {
-    if (!(await ensureRtkUsable())) return {}
+    const rtkBin = await ensureRtkUsable()
+    if (!rtkBin) return {}
+    const rtkDir = dirname(rtkBin)
+
     return {
+      "shell.env": (input: any, output: any) => {
+        if (!output) return
+        if (!output.env) output.env = {}
+        appendRtkDirToPath(output.env, rtkDir)
+      },
       "tool.execute.before": (input: any, output: any) =>
         handleToolHook(input?.tool, output?.args),
     }
