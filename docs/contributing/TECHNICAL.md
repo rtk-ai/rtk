@@ -153,16 +153,15 @@ rewrite_compound(cmd, excluded)                    [src/discover/registry.rs]
   |
   |  Step 2 — Split on operators, rewrite each segment
   |  Operator (&&, ||, ;) → rewrite both sides
-  |  Pipe (|) → keep intermediate stages raw
-  |             rewrite a pipeline-safe final stage, or the
-  |             producer when its rule allows it and all
-  |             consumers are display-only
+  |  Pipe (|) → keep producer and intermediate stages raw
+  |             so consumers receive native bytes; only rewrite
+  |             a pipeline-safe final stage (grep/rg)
   |  Stderr pipe (|&) → keep the complete pipeline raw
   |  Shellism (&) → rewrite both sides (background)
   |
-  |  Calls rewrite_segment() per segment:
-  |    segment 1: "cargo fmt --all"
-  |    segment 2: "cargo test 2>&1"
+  |  Calls rewrite_segment() only for eligible commands:
+  |    segment 1: "cargo fmt --all" → "rtk cargo fmt --all"
+  |    segment 2: "cargo test 2>&1" → remains native (pipeline producer)
   |    after pipe: "tail -20" kept raw
   |
   v
@@ -170,8 +169,9 @@ rewrite_segment(seg, excluded)                     [src/discover/registry.rs]
   |
   |  Step 3 — Strip trailing redirects
   |  strip_trailing_redirects() re-tokenizes the segment:
-  |    "cargo test 2>&1" → cmd_part="cargo test", redirect=" 2>&1"
+  |    standalone "git status 2>&1" → cmd_part="git status", redirect=" 2>&1"
   |  (simple commands like "cargo fmt --all" → no redirect, suffix is "")
+  |  (pipeline producers do not call this rewrite path)
   |
   |  Step 4 — Already RTK → return as-is
   |
@@ -207,14 +207,14 @@ classify_command(cmd)                              [src/discover/registry.rs]
   |  9. Return Classification::Supported { rtk_equivalent, category, savings, status }
   |
   v
-Result: "rtk cargo fmt --all && rtk cargo test 2>&1 | tail -20"
+Result: "rtk cargo fmt --all && cargo test 2>&1 | tail -20"
   |
   |  Hook response
   |  Hook wraps result in agent-specific JSON, returns to LLM agent
   |
   v
 LLM Agent executes rewritten command
-  (bash handles && and |, each rtk invocation is a separate process)
+  (bash handles && and |; the pipe's producer keeps its native output)
 ```
 
 Key design decisions:
