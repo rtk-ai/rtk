@@ -428,3 +428,27 @@ fn workbuddy_unset_and_empty_override_use_global_home_settings() {
         );
     }
 }
+
+#[test]
+fn workbuddy_install_is_detected_by_gain_and_uninstall_restores_warning() {
+    let temp = TempDir::new().unwrap();
+    fs::create_dir(temp.path().join("claude")).unwrap();
+    let gain = || {
+        let output = command(&temp).arg("gain").output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stderr).unwrap()
+    };
+    assert!(gain().contains("No hook installed"));
+    let installed = command(&temp)
+        .args(["init", "-g", "--agent", "workbuddy", "--auto-patch"])
+        .output()
+        .unwrap();
+    assert!(installed.status.success());
+    assert!(!gain().contains("No hook installed"));
+    let removed = command(&temp)
+        .args(["init", "-g", "--agent", "workbuddy", "--uninstall"])
+        .output()
+        .unwrap();
+    assert!(removed.status.success());
+    assert!(gain().contains("No hook installed"));
+}

@@ -155,3 +155,60 @@ pub fn show_workbuddy_config(global: bool) -> Result<()> {
     );
     Ok(())
 }
+
+/// Detect only the global settings this installer manages, including its override.
+pub fn is_configured() -> bool {
+    workbuddy_settings_path(true)
+        .ok()
+        .and_then(|path| read_json_file(&path).ok().flatten())
+        .is_some_and(|root| workbuddy_hook_already_present(&root))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{test_isolation, user_env};
+
+    #[test]
+    fn workbuddy_probe_matches_installer_scopes_and_valid_hooks() {
+        let tmp = test_isolation::tempdir();
+        test_isolation::with_root(tmp.path(), || {
+            user_env::with_vars(&[("WORKBUDDY_CONFIG_DIR", None)], || {
+                let path = workbuddy_settings_path(true).unwrap();
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                assert!(!is_configured());
+                for content in [
+                    "not json",
+                    "{}",
+                    r#"{"hooks":{"PreToolUse":[{"matcher":"Bash|execute_command","hooks":[{"type":"command","command":"rtk hook trae"}]}]}}"#,
+                    r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook workbuddy"}]}]}}"#,
+                ] {
+                    fs::write(&path, content).unwrap();
+                    assert!(!is_configured());
+                }
+                let valid = serde_json::json!({"hooks":{"PreToolUse":[{"matcher":WORKBUDDY_MATCHER,"hooks":[{"type":"command","command":WORKBUDDY_HOOK_COMMAND}]}]}});
+                fs::write(&path, format!("\u{feff}{valid}")).unwrap();
+                assert!(is_configured());
+                assert!(crate::hooks::hook_check::is_any_agent_configured());
+                user_env::with_vars(&[("WORKBUDDY_CONFIG_DIR", Some(""))], || {
+                    assert!(is_configured())
+                });
+                let override_dir = tmp.path().join("override");
+                user_env::with_path("WORKBUDDY_CONFIG_DIR", Some(&override_dir), || {
+                    assert!(!is_configured(), "override must not fall back to home");
+                    fs::create_dir_all(&override_dir).unwrap();
+                    fs::write(override_dir.join(SETTINGS_JSON), valid.to_string()).unwrap();
+                    assert!(is_configured());
+                });
+                fs::remove_file(path).unwrap();
+                let project = tmp.path().join(".codebuddy");
+                fs::create_dir_all(&project).unwrap();
+                fs::write(project.join(SETTINGS_JSON), valid.to_string()).unwrap();
+                assert!(
+                    !is_configured(),
+                    "shared CodeBuddy project scope is not managed"
+                );
+            });
+        });
+    }
+}

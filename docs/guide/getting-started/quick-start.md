@@ -107,6 +107,19 @@ fish -c 'git status; and cargo test'  # unchanged
 
 Shell expansion inside an outer double quote, extra shell options, redirects to files and nested wrappers pass through unchanged.
 
+A command string that is *itself* fish — a multi-line `if`/`for`/`switch` … `end` block, or a `; and` / `; or` chain — can be handed back for explicit fish execution instead, because a host evaluating it with a POSIX layer would fail to parse it before RTK ever runs. **This is off by default**; turn it on with `wrap_fish_scripts = true` under `[hooks]`:
+
+```fish
+if test -d src
+  git status
+end
+# → rtk run --shell fish -c 'if test -d src\n  git status\nend'
+```
+
+**What turning it on costs.** The script reaches Claude Code's approval prompt as a single `rtk run` command, so what the prompt — and every permission rule — sees is that command, not `git status` inside it. RTK therefore always marks a wrap as an explicit *ask*, and withholds it entirely when it can see any `deny` rule, or when a settings file it reads is unparsable or unreadable. But some rule sources never reach the hook at all: `--settings`, `--disallowedTools`, managed settings, and the project directory the agent has `cd`'d away from. A rule in one of those becomes an approval prompt instead of a refusal.
+
+It happens on Claude Code's own hook only — every other host, and `rtk rewrite`, leave fish scripts exactly as they are without the feature. It also needs a resolvable `fish` binary and is disabled on Windows.
+
 ## Step 4: Unsupported commands
 
 Commands RTK doesn't recognize run through passthrough — output is unchanged, usage is tracked:
