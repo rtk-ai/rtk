@@ -3129,12 +3129,6 @@ fn filter_status_with_args(output: &str) -> String {
             continue;
         }
 
-        // Special case: clean working tree
-        if trimmed.contains("nothing to commit") && trimmed.contains("working tree clean") {
-            result.push(trimmed.to_string());
-            break;
-        }
-
         result.push(line.to_string());
     }
 
@@ -7816,6 +7810,25 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let output = "nothing to commit, working tree clean\n";
         let result = filter_status_with_args(output);
         assert!(result.contains("nothing to commit"));
+    }
+
+    #[test]
+    fn test_filter_status_with_args_keeps_entries_after_clean_phrase_path() {
+        // A path may spell git's clean-tree sentence; it must not end the listing.
+        let short = "?? \"nothing to commit, working tree clean\"\n?? zz-after.txt\n";
+        let result = filter_status_with_args(short);
+        assert!(result.contains("?? zz-after.txt"), "{result}");
+
+        let long = "On branch main
+Untracked files:
+  (use \"git add <file>...\" to include in what will be committed)
+\tnothing to commit, working tree clean
+\tzz-after.txt
+
+nothing added to commit but untracked files present (use \"git add\" to track)
+";
+        let result = filter_status_with_args(long);
+        assert!(result.contains("\tzz-after.txt"), "{result}");
     }
 
     #[test]
