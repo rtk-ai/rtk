@@ -1,0 +1,23 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_________________________________ test_dunder __________________________________
+test_du5.py:7: in test_dunder
+    assert {'a': 1} == {'a': 2}, 'dunder fail'
+E   AssertionError: dunder fail
+E   assert {'a': 1} == {'a': 2}
+E     
+E     Differing items:
+E     {'a': 1} != {'a': 2}
+E     Use -v to get more diff
+----------------------------- Captured stdout call -----------------------------
+__init__
+__main__ _
+_cache_
+_ warming cache_
+  done _
+__________________________________ test_after __________________________________
+test_du5.py:11: in test_after
+    assert 0, 'after dunder'
+E   AssertionError: after dunder
+E   assert 0
+2 failed in 0.01s

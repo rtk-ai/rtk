@@ -22,6 +22,14 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 | `git diff` | Context reduced, headers stripped |
 | `git show` | Same as diff |
 | `git stash list` | Compact one-line per entry |
+| `git ls-tree --name-only` / `--name-status` | Consecutive paths grouped by directory; other formats pass through unchanged |
+
+For `ls-tree`, read `src/ lib.rs main.rs` as `src/lib.rs` and `src/main.rs`.
+`./` means no directory part in Git's output; omit that prefix to rebuild the
+original paths. Paths with spaces or Git C-quoting stand alone in
+double quotes; Git's escapes are preserved. Listings that would not shrink pass
+through unchanged. The hook keeps Git's original lines when you pipe a foldable
+listing into `head`, `tail`, or `cat`.
 
 ## GitHub CLI
 
@@ -44,7 +52,6 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 | Command | What changes |
 |---------|--------------|
 | `cargo test` | Failures only, passed tests suppressed |
-| `cargo nextest` | Same as test |
 | `cargo build` | Errors and warnings only |
 | `cargo check` | Errors and warnings only |
 | `cargo clippy` | Lint warnings grouped by file |
@@ -60,6 +67,7 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 | `pnpm list` | Compact dependency tree |
 | `pnpm outdated` | Package + current + latest only |
 | `next build` | Route summary + errors only |
+| `ng build` | Compact Angular build tables; every bundle and diagnostic retained |
 | `prisma migrate` | Migration status only |
 | `playwright test` | Failures + trace links only |
 
@@ -86,15 +94,14 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 |---------|--------------|
 | `rspec` | Failures only |
 | `rubocop` | Offenses grouped by file |
-| `rake` | Task output, build errors highlighted |
+| `rake test` | Test task output, failures highlighted |
 
 ## .NET
 
 | Command | What changes |
 |---------|--------------|
 | `dotnet build` | Errors and warnings only |
-| `dotnet test` | Failures only |
-| `dotnet format` | Changed files only |
+| `dotnet restore` | Restore summary, errors and warnings kept |
 
 ## Docker / Kubernetes
 
@@ -103,9 +110,17 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 | `docker ps` | Essential columns (name, image, status, port) |
 | `docker images` | Name + tag + size only |
 | `docker logs` | Deduplicated, last N lines |
-| `docker compose up` | Service status, errors highlighted |
+| `docker compose ps` | Container status and ports |
+| `docker compose logs` | Deduplicated logs |
+| `docker compose build` | Build output, warnings and errors highlighted |
 | `kubectl get pods` | Name + status + restarts only |
 | `kubectl logs` | Deduplicated entries |
+
+## Build Tools
+
+| Command | What changes |
+|---------|--------------|
+| `make` | Errors and warnings highlighted, noise stripped |
 
 ## Files and Search
 
@@ -117,16 +132,19 @@ RTK reduces **bash output bytes** — the only thing it controls. Those bytes ar
 | `ast-grep` | Grouped by file, capped overflow; `--json` passes through |
 | `diff` | Context reduced |
 | `wc` | Compact counts |
-| `cat` / `head` / `tail <file>` | Smart file reading via `rtk read` |
-| `rtk smart <file>` | 2-line heuristic code summary (signatures only) |
+| `cat <file>` | Smart file reading via `rtk read` |
+| `head <file>` | First 10 lines via `rtk read --head-lines 10` |
+| `tail -n <N> <file>` | Last N lines via `rtk read --tail-lines <N>` |
 
-## Cloud and Data
+## Cloud and Infrastructure
 
 | Command | What changes |
 |---------|--------------|
 | `aws` | JSON condensed, relevant fields only |
 | `psql` | Query results without decoration |
 | `curl` | Response body only, headers stripped |
+| `helm list` | Release name, namespace, status, and chart columns |
+| `terraform plan` | Planned changes summary, resource diffs condensed |
 
 ## Global flags
 
@@ -143,10 +161,16 @@ rtk -vvv git status
 
 ## Commands that are not rewritten
 
-If a command isn't in the list above, RTK runs it through passthrough — the output reaches the LLM unchanged. You can explicitly track unsupported commands:
+If a command isn't intercepted by the hook rules, RTK runs it through passthrough — the output reaches the LLM unchanged. You can explicitly track unsupported commands:
 
 ```bash
-rtk bypass make install    # runs make install, tracks usage, no filtering
+rtk bypass cargo run      # runs cargo run, tracks usage, no filtering
+```
+
+To check whether any command will be rewritten before running it:
+
+```bash
+rtk rewrite "<command>"   # prints the rewritten command, or exits 1 if left alone
 ```
 
 To check which commands were missed opportunities: `rtk discover`.
