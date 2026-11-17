@@ -5877,10 +5877,7 @@ mod tests {
         // A pipeline producer must pass its original data to the consumer.
         // Redirects on standalone commands still preserve their spelling.
         assert_eq!(
-            rewrite_command_no_prefixes(
-                "golangci-lint run ./... 2>&1 | tail -5",
-                &[]
-            ),
+            rewrite_command_no_prefixes("golangci-lint run ./... 2>&1 | tail -5", &[]),
             None
         );
     }
