@@ -6362,6 +6362,25 @@ mod tests {
                 "unexpected rewrite for {command:?}"
             );
         }
+
+        // Negative-only tests also pass when rewriting is disabled entirely.
+        // Keep adjacent positive controls so the boundary remains exact,
+        // rather than becoming an over-restrictive prefix ban.
+        for command in [
+            "git status",
+            "cargo test",
+            "gh pr list",
+            "glab mr list",
+            "docker ps",
+            "kubectl get pods",
+            "ruff check .",
+            "go vet ./...",
+        ] {
+            assert!(
+                rewrite_command_no_prefixes(command, &[]).is_some(),
+                "expected a rewrite for valid command {command:?}"
+            );
+        }
     }
 
     // --- exclude_commands (#243) ---
