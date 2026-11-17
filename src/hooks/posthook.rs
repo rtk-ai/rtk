@@ -709,6 +709,40 @@ fn process_shell(
         .pointer("/tool_input/command")
         .and_then(|c| c.as_str())
         .unwrap_or("");
+    let stdout = response
+        .get("stdout")
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+    let stderr = response
+        .get("stderr")
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+    let (composed_stdout, filtered_stderr) =
+        shell_outcome(config, pipeline, command, stdout, stderr, duration_ms)?;
+
+    let mut updated = response.clone();
+    let obj = updated.as_object_mut()?;
+    obj.insert("stdout".into(), json!(composed_stdout));
+    obj.insert("stderr".into(), json!(filtered_stderr));
+    Some(
+        json!({
+            "hookSpecificOutput": {
+                "hookEventName": POST_TOOL_USE_KEY,
+                "updatedToolOutput": updated,
+            }
+        })
+        .to_string(),
+    )
+}
+
+fn shell_outcome(
+    config: &Config,
+    pipeline: &Resolved,
+    command: &str,
+    stdout: &str,
+    stderr: &str,
+    duration_ms: u64,
+) -> Option<(String, String)> {
     let is_rtk_command = RTK_IN_COMMAND.is_match(command);
     // Recall-recovery gate: a command reading the recall store must see the
     // raw bytes (else e.g. an elided base64 blob could never be recovered).
@@ -721,14 +755,6 @@ fn process_shell(
         return None;
     }
 
-    let stdout = response
-        .get("stdout")
-        .and_then(|s| s.as_str())
-        .unwrap_or("");
-    let stderr = response
-        .get("stderr")
-        .and_then(|s| s.as_str())
-        .unwrap_or("");
     if stdout.len() + stderr.len() < pipeline.guards.min_size {
         return None;
     }
@@ -811,11 +837,6 @@ fn process_shell(
         return None;
     }
 
-    let mut updated = response.clone();
-    let obj = updated.as_object_mut()?;
-    obj.insert("stdout".into(), json!(composed_stdout));
-    obj.insert("stderr".into(), json!(filtered_stderr));
-
     if let Some(applied) = &applied_stdout {
         attribute(applied, &raw_combined, &emitted_combined);
         queue_log(
@@ -835,15 +856,96 @@ fn process_shell(
         &emitted_combined,
         duration_ms,
     );
-    Some(
-        json!({
-            "hookSpecificOutput": {
-                "hookEventName": POST_TOOL_USE_KEY,
-                "updatedToolOutput": updated,
-            }
-        })
-        .to_string(),
+    Some((composed_stdout, filtered_stderr))
+}
+
+pub(crate) fn run_text(
+    agent: &str,
+    tool_name: &str,
+    input: &Value,
+    text: &str,
+    duration_ms: u64,
+) -> Option<String> {
+    if crate::core::user_env::var("RTK_DISABLED").as_deref() == Some("1")
+        || crate::core::user_env::var("RTK_POSTHOOK").as_deref() == Some("0")
+    {
+        return None;
+    }
+    let config = Config::load().unwrap_or_default();
+    let loaded = pipeline_config::load();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        compress_text(
+            &config,
+            &loaded.resolved,
+            agent,
+            tool_name,
+            input,
+            text,
+            duration_ms,
+        )
+    }));
+    pipeline_config::write_status(&loaded);
+    pipeline_log::flush();
+    outcome.ok().flatten()
+}
+
+pub(crate) fn compress_text(
+    config: &Config,
+    pipeline: &Resolved,
+    agent: &str,
+    tool_name: &str,
+    input: &Value,
+    text: &str,
+    duration_ms: u64,
+) -> Option<String> {
+    let profile = rtk_engine::harness::profile(agent)?;
+    let subject = profile.map_tool(tool_name);
+    if subject == Subject::Shell {
+        let command = input.get("command").and_then(Value::as_str).unwrap_or("");
+        return shell_outcome(config, pipeline, command, text, "", duration_ms)
+            .map(|(stdout, _)| stdout);
+    }
+    if matches!(subject, Subject::Write | Subject::Edit) || text.len() < pipeline.guards.min_size {
+        return None;
+    }
+    let source = ["file_path", "url", "path", "pattern"]
+        .iter()
+        .find_map(|key| input.get(key).and_then(Value::as_str))
+        .unwrap_or("")
+        .to_string();
+    let format = format_of(subject, &source, text);
+    filter_and_compose(
+        config,
+        pipeline,
+        subject,
+        tool_name,
+        &source,
+        text,
+        format,
+        duration_ms,
     )
+}
+
+static GREP_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[^:\n]+:\d+[:-]").expect("valid regex"));
+
+fn format_of(subject: Subject, source: &str, text: &str) -> ContentFormat {
+    match subject {
+        Subject::Read if is_lockfile_name(&basename_of(source)) => ContentFormat::Lockfile,
+        Subject::Read if extension_of(source) == "json" => ContentFormat::Json,
+        Subject::Web => ContentFormat::Web,
+        Subject::Search => {
+            let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+            let matching = lines.iter().filter(|l| GREP_LINE.is_match(l)).count();
+            if !lines.is_empty() && matching * 2 >= lines.len() {
+                ContentFormat::Matches
+            } else {
+                ContentFormat::Term
+            }
+        }
+        _ if serde_json::from_str::<Value>(text.trim()).is_ok() => ContentFormat::Json,
+        _ => ContentFormat::Term,
+    }
 }
 
 /// Path or URL the tracking rows and `when` facts key on.
@@ -1656,6 +1758,98 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(stdout.contains("[x40]"), "explicit dedup marker: {stdout}");
+    }
+
+    #[test]
+    fn test_text_entry_runs_the_shell_rules_on_vibe_output() {
+        let event = bash_fixture("ansi");
+        let text = event["tool_response"]["stdout"].as_str().unwrap();
+        let out = compress_text(
+            &test_config(),
+            &posthook_pipeline(),
+            "vibe",
+            "bash",
+            &json!({ "command": "cargo test" }),
+            text,
+            0,
+        )
+        .expect("ansi output must be filtered");
+        assert!(!out.contains('\x1b'));
+        assert!(out.contains("PASS test_0"));
+        assert!(
+            compress_text(
+                &test_config(),
+                &posthook_pipeline(),
+                "vibe",
+                "bash",
+                &json!({ "command": "rtk cargo test" }),
+                text,
+                0,
+            )
+            .is_none(),
+            "an rtk command is already filtered"
+        );
+        assert!(
+            compress_text(
+                &test_config(),
+                &default_pipeline(),
+                "vibe",
+                "bash",
+                &json!({ "command": "cargo test" }),
+                text,
+                0,
+            )
+            .is_none(),
+            "rtk:default has no after_tool rules"
+        );
+    }
+
+    #[test]
+    fn test_text_entry_sniffs_grep_output_and_leaves_edits_alone() {
+        let matches: String = (0..40)
+            .map(|i| format!("src/lib.rs:{i}:fn item_{i}() {{}}\n"))
+            .collect();
+        assert_eq!(
+            format_of(Subject::Search, "", &matches),
+            ContentFormat::Matches
+        );
+        assert_eq!(
+            format_of(Subject::Search, "", "src/a.rs\nsrc/b.rs\n"),
+            ContentFormat::Term
+        );
+        assert_eq!(
+            format_of(Subject::Read, "Cargo.lock", ""),
+            ContentFormat::Lockfile
+        );
+        assert_eq!(format_of(Subject::Read, "a.json", ""), ContentFormat::Json);
+        assert_eq!(
+            format_of(Subject::Mcp, "", "{\"a\": 1}"),
+            ContentFormat::Json
+        );
+        let out = compress_text(
+            &test_config(),
+            &posthook_pipeline(),
+            "vibe",
+            "grep",
+            &json!({ "pattern": "fn item", "path": "src" }),
+            &matches,
+            0,
+        )
+        .expect("grep output is grouped");
+        assert!(out.contains("src/lib.rs"));
+        assert!(estimate_tokens(&out) < estimate_tokens(&matches));
+        assert!(
+            compress_text(
+                &test_config(),
+                &posthook_pipeline(),
+                "vibe",
+                "edit",
+                &json!({ "file_path": "a.rs" }),
+                &matches,
+                0,
+            )
+            .is_none()
+        );
     }
 
     #[test]

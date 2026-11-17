@@ -36,6 +36,19 @@ pub fn directive_text(directive: &ResolvedDirective) -> Option<String> {
     None
 }
 
+pub fn session_start_text(resolved: &Resolved) -> Option<String> {
+    let texts: Vec<String> = resolved
+        .directives
+        .iter()
+        .filter(|directive| {
+            directive.def.enabled && directive.def.channel.as_deref() == Some("session_start")
+        })
+        .filter_map(directive_text)
+        .collect();
+    let merged = rtk_engine::directive::merge(&texts);
+    (!merged.is_empty()).then_some(merged)
+}
+
 /// `rtk` subcommand names a task may not shadow (E014).
 pub const RESERVED_COMMAND_NAMES: &[&str] = &[
     "init",

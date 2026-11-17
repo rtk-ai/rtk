@@ -13,6 +13,7 @@
 use clap::Args;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_ANTHROPIC_UPSTREAM: &str = "https://api.anthropic.com";
@@ -20,6 +21,24 @@ const DEFAULT_OPENAI_UPSTREAM: &str = "https://api.openai.com";
 const DB_FILE_NAME: &str = "rtk-proxy.db";
 const ICM_DB_FILE_NAME: &str = "rtk-proxy-memory.db";
 const DEFAULT_UPSTREAM_RETRIES: u32 = 2;
+const UPSTREAM_ENV_PREFIX: &str = "RTK_PROXY_UPSTREAM_";
+const UPSTREAM_ENV_SETTINGS: &[&str] = &["TIMEOUT", "RETRIES"];
+pub const ANTHROPIC_UPSTREAM_NAME: &str = "anthropic";
+pub const OPENAI_UPSTREAM_NAME: &str = "openai";
+pub const MISTRAL_UPSTREAM_NAME: &str = "mistral";
+pub const CHATGPT_UPSTREAM_NAME: &str = "chatgpt";
+const DEFAULT_UPSTREAMS: &[(&str, &str)] = &[
+    (MISTRAL_UPSTREAM_NAME, "https://api.mistral.ai"),
+    (CHATGPT_UPSTREAM_NAME, "https://chatgpt.com"),
+];
+const RESERVED_UPSTREAM_NAMES: &[&str] = &[
+    ANTHROPIC_UPSTREAM_NAME,
+    OPENAI_UPSTREAM_NAME,
+    "v1",
+    "health",
+    "stats",
+    "admin",
+];
 
 /// Where the daemon keeps its data unless told otherwise: the same directory
 /// the `rtk` CLI reads for `gain`. A bare filename would resolve against the
@@ -110,6 +129,7 @@ pub struct Config {
     pub anthropic_upstream: String,
     /// Upstream base URL for the OpenAI Chat Completions API.
     pub openai_upstream: String,
+    pub upstreams: BTreeMap<String, String>,
     /// Boot default for CCR (Compress-Cache-Retrieve). On — it is the only
     /// compression this proxy performs. A persisted runtime value wins over
     /// this (see `settings::RuntimeSettings`).
@@ -227,6 +247,8 @@ pub(crate) struct FileConfig {
     compression: Option<String>,
     #[serde(default)]
     pixel_compress: PixelCompressConfig,
+    #[serde(default)]
+    upstreams: BTreeMap<String, String>,
     relay_borrowing: Option<bool>,
     db: Option<String>,
     icm_db: Option<String>,
@@ -301,12 +323,33 @@ impl Config {
     pub fn from_cli(cli: StartArgs) -> anyhow::Result<Self> {
         let file: FileConfig =
             load_toml_file("RTK_PROXY_CONFIG", CONFIG_PATHS)?.unwrap_or_default();
-        Ok(Self::resolve(cli, file))
+        let env: Vec<(String, String)> = std::env::vars().collect();
+        let config = Self::resolve(cli, file, &env);
+        for name in config.upstreams.keys() {
+            validate_upstream_name(name)?;
+        }
+        Ok(config)
     }
 
     /// Merge the three layers (CLI wins over file wins over default). Pure — the
     /// testable core of [`Config::from_cli`].
-    fn resolve(cli: StartArgs, file: FileConfig) -> Self {
+    fn resolve(cli: StartArgs, file: FileConfig, env: &[(String, String)]) -> Self {
+        let mut upstreams: BTreeMap<String, String> = DEFAULT_UPSTREAMS
+            .iter()
+            .map(|(name, url)| (name.to_string(), url.to_string()))
+            .collect();
+        upstreams.extend(file.upstreams);
+        for (key, value) in env {
+            let Some(name) = key.strip_prefix(UPSTREAM_ENV_PREFIX) else {
+                continue;
+            };
+            if UPSTREAM_ENV_SETTINGS.contains(&name) {
+                continue;
+            }
+            if !value.trim().is_empty() {
+                upstreams.insert(name.to_ascii_lowercase(), value.trim().to_string());
+            }
+        }
         Config {
             bind: cli
                 .bind
@@ -329,6 +372,7 @@ impl Config {
                 .or(file.compression)
                 .unwrap_or_else(|| "off".to_string()),
             pixel_compress: file.pixel_compress,
+            upstreams,
             relay_borrowing: cli.relay_borrowing.or(file.relay_borrowing).unwrap_or(true),
             db: cli.db.or(file.db).unwrap_or_else(default_db_path),
             icm_db: cli
@@ -365,6 +409,7 @@ impl Config {
             normalize: Some(self.normalize),
             compression: Some(self.compression.clone()),
             pixel_compress: self.pixel_compress.clone(),
+            upstreams: self.upstreams.clone(),
             relay_borrowing: Some(self.relay_borrowing),
             db: Some(self.db.clone()),
             icm_db: Some(self.icm_db.clone()),
@@ -381,6 +426,24 @@ impl Config {
     pub fn binds_loopback(&self) -> bool {
         bind_is_loopback(&self.bind)
     }
+}
+
+pub fn validate_upstream_name(name: &str) -> anyhow::Result<()> {
+    let well_formed = name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+    if !well_formed {
+        anyhow::bail!(
+            "invalid upstream name `{name}`: use lowercase letters, digits, `_` or `-`, starting with a letter"
+        );
+    }
+    if RESERVED_UPSTREAM_NAMES.contains(&name) {
+        anyhow::bail!(
+            "upstream name `{name}` is reserved; `anthropic` and `openai` are set with anthropic_upstream / openai_upstream"
+        );
+    }
+    Ok(())
 }
 
 /// Whether `addr` is a loopback bind. Pure, so the policy is testable without
@@ -463,7 +526,10 @@ mod tests {
 
     #[test]
     fn defaults_when_all_unset() {
-        let c = Config::resolve(empty_cli(), FileConfig::default());
+        let c = Config::resolve(empty_cli(), FileConfig::default(), &[]);
+        assert_eq!(c.upstreams["mistral"], "https://api.mistral.ai");
+        assert_eq!(c.upstreams["chatgpt"], "https://chatgpt.com");
+        assert_eq!(c.upstreams.len(), 2);
         assert_eq!(c.bind, DEFAULT_BIND);
         assert_eq!(c.anthropic_upstream, DEFAULT_ANTHROPIC_UPSTREAM);
         assert_eq!(c.db, default_db_path());
@@ -478,18 +544,18 @@ mod tests {
     #[test]
     fn ccr_can_be_turned_off_by_file_and_by_cli() {
         let file: FileConfig = toml::from_str("ccr = false").unwrap();
-        assert!(!Config::resolve(empty_cli(), file).ccr);
+        assert!(!Config::resolve(empty_cli(), file, &[]).ccr);
 
         let mut cli = empty_cli();
         cli.ccr = Some(false);
-        assert!(!Config::resolve(cli, FileConfig::default()).ccr);
+        assert!(!Config::resolve(cli, FileConfig::default(), &[]).ccr);
     }
 
     #[test]
     fn cache_align_defaults_on_and_can_be_turned_off() {
-        assert!(Config::resolve(empty_cli(), FileConfig::default()).cache_align);
+        assert!(Config::resolve(empty_cli(), FileConfig::default(), &[]).cache_align);
         let file: FileConfig = toml::from_str("cache_align = false").unwrap();
-        assert!(!Config::resolve(empty_cli(), file).cache_align);
+        assert!(!Config::resolve(empty_cli(), file, &[]).cache_align);
     }
 
     #[test]
@@ -502,7 +568,7 @@ mod tests {
         )
         .unwrap();
 
-        let c = Config::resolve(empty_cli(), file);
+        let c = Config::resolve(empty_cli(), file, &[]);
         assert_eq!(c.bind, "0.0.0.0:9000");
         assert_eq!(c.openai_upstream, "https://api.groq.com/openai");
         // Untouched key still defaults.
@@ -511,7 +577,115 @@ mod tests {
         let mut cli = empty_cli();
         cli.bind = Some("127.0.0.1:1".into());
         let file2: FileConfig = toml::from_str(r#"bind = "0.0.0.0:9000""#).unwrap();
-        assert_eq!(Config::resolve(cli, file2).bind, "127.0.0.1:1");
+        assert_eq!(Config::resolve(cli, file2, &[]).bind, "127.0.0.1:1");
+    }
+
+    #[test]
+    fn named_upstreams_come_from_the_file_table_and_the_environment() {
+        let file: FileConfig = toml::from_str(
+            r#"
+            [upstreams]
+            mistral = "https://api.mistral.ai"
+            acme = "https://llm.acme.test"
+        "#,
+        )
+        .unwrap();
+        let env = vec![
+            (
+                "RTK_PROXY_UPSTREAM_ACME".to_string(),
+                "http://127.0.0.1:9".to_string(),
+            ),
+            (
+                "RTK_PROXY_UPSTREAM_GROQ".to_string(),
+                "https://api.groq.com/openai".to_string(),
+            ),
+            ("RTK_PROXY_UPSTREAM_BLANK".to_string(), "  ".to_string()),
+            ("RTK_PROXY_UPSTREAM_TIMEOUT".to_string(), "30".to_string()),
+            ("RTK_PROXY_UPSTREAM_RETRIES".to_string(), "1".to_string()),
+            ("RTK_PROXY_BIND".to_string(), "127.0.0.1:1".to_string()),
+            (
+                "RTK_PROXY_UPSTREAM_MISTRAL".to_string(),
+                "http://127.0.0.1:7".to_string(),
+            ),
+        ];
+        let c = Config::resolve(empty_cli(), file, &env);
+        assert_eq!(
+            c.upstreams["mistral"], "http://127.0.0.1:7",
+            "the built-in default yields to the file and the environment"
+        );
+        assert_eq!(
+            c.upstreams["acme"], "http://127.0.0.1:9",
+            "env wins over the file"
+        );
+        assert_eq!(c.upstreams["groq"], "https://api.groq.com/openai");
+        assert!(!c.upstreams.contains_key("blank"));
+        assert!(!c.upstreams.contains_key("timeout"));
+        assert!(!c.upstreams.contains_key("retries"));
+        assert_eq!(
+            c.bind, DEFAULT_BIND,
+            "unrelated RTK_PROXY_* variables are not upstreams"
+        );
+        let back: FileConfig =
+            toml::from_str(&toml::to_string(&c.to_file_config()).unwrap()).unwrap();
+        assert_eq!(back.upstreams, c.upstreams);
+    }
+
+    #[test]
+    fn upstream_names_are_path_safe_and_never_shadow_a_route() {
+        for ok in ["mistral", "chatgpt", "acme-eu", "lab_2"] {
+            assert!(validate_upstream_name(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "v1",
+            "health",
+            "stats",
+            "admin",
+            "anthropic",
+            "openai",
+            "Mistral",
+            "",
+            "1x",
+            "a/b",
+            "a.b",
+        ] {
+            assert!(
+                validate_upstream_name(bad).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn from_cli_refuses_a_malformed_or_reserved_upstream_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("proxy.toml");
+        std::fs::write(&file, "").unwrap();
+        let file = file.to_str().unwrap();
+        for bad in ["1X", "HEALTH", "ANTHROPIC"] {
+            let var = format!("RTK_PROXY_UPSTREAM_{bad}");
+            temp_env::with_vars(
+                [
+                    ("RTK_PROXY_CONFIG", Some(file)),
+                    (var.as_str(), Some("http://127.0.0.1:9")),
+                ],
+                || {
+                    assert!(
+                        Config::from_cli(empty_cli()).is_err(),
+                        "{bad} must be refused at load"
+                    );
+                },
+            );
+        }
+        temp_env::with_vars(
+            [
+                ("RTK_PROXY_CONFIG", Some(file)),
+                ("RTK_PROXY_UPSTREAM_ACME", Some("http://127.0.0.1:9")),
+            ],
+            || {
+                let c = Config::from_cli(empty_cli()).expect("a well-formed name loads");
+                assert_eq!(c.upstreams["acme"], "http://127.0.0.1:9");
+            },
+        );
     }
 
     #[test]
@@ -519,11 +693,11 @@ mod tests {
         let mut cli = empty_cli();
         cli.bind = Some("127.0.0.1:9999".into());
         cli.ccr = Some(false);
-        let c = Config::resolve(cli, FileConfig::default());
+        let c = Config::resolve(cli, FileConfig::default(), &[]);
 
         let text = toml::to_string(&c.to_file_config()).unwrap();
         let back: FileConfig = toml::from_str(&text).unwrap();
-        let c2 = Config::resolve(empty_cli(), back);
+        let c2 = Config::resolve(empty_cli(), back, &[]);
 
         assert_eq!(c2.bind, "127.0.0.1:9999");
         assert!(!c2.ccr);
@@ -577,6 +751,7 @@ mod default_paths {
                 upstream_retries: None,
             },
             FileConfig::default(),
+            &[],
         );
         assert!(
             std::path::Path::new(&c.db).is_absolute(),

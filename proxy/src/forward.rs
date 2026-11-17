@@ -143,6 +143,54 @@ pub fn truncate_text(s: &str, max: usize) -> String {
     format!("{}…", &s[..end])
 }
 
+/// ChatGPT-login Codex sends `content-encoding: zstd` bodies. Unread, they lose
+/// the `stream` flag, the model and the usage row, so they are decoded here and
+/// forwarded plain. A body that does not decode is left exactly as it came.
+pub fn decode_zstd_request(mut headers: HeaderMap, body: Bytes) -> (HeaderMap, Bytes) {
+    let is_zstd = headers
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("zstd"));
+    if !is_zstd {
+        return (headers, body);
+    }
+    let Some(decoded) = decode_zstd(&body) else {
+        return (headers, body);
+    };
+    headers.remove("content-encoding");
+    (headers, Bytes::from(decoded))
+}
+
+fn decode_zstd(body: &[u8]) -> Option<Vec<u8>> {
+    use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
+    use std::io::Read;
+    let limit = crate::server::BODY_LIMIT_BYTES;
+    let mut source = body;
+    let mut out = Vec::new();
+    let mut frame_decoder = ruzstd::decoding::FrameDecoder::new();
+    // The decoder reads one frame, so a body of several is decoded frame by
+    // frame, all of them spending one size budget. Anything it cannot decode
+    // leaves the body as it came: forwarding part of it would hand the
+    // upstream a truncated one.
+    while !source.is_empty() && out.len() <= limit {
+        match ruzstd::decoding::StreamingDecoder::new_with_decoder(&mut source, &mut frame_decoder)
+        {
+            Ok(decoder) => {
+                decoder
+                    .take((limit + 1 - out.len()) as u64)
+                    .read_to_end(&mut out)
+                    .ok()?;
+            }
+            Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::SkipFrame {
+                length,
+                ..
+            })) => source = source.get(length as usize..)?,
+            Err(_) => return None,
+        }
+    }
+    (!out.is_empty() && out.len() <= limit).then_some(out)
+}
+
 /// Parse the JSON body, run the compression pipeline over it, and report the
 /// bytes to forward + stats fields. A pure passthrough (body unchanged, stats
 /// zeroed) when the body isn't JSON; a no-op rewrite when the pipeline is empty
@@ -298,16 +346,21 @@ pub enum Forwarded {
 /// usage outcome for the stats store. `stream` (the client's `stream: true`)
 /// selects the SSE relay, which counts tokens as the bytes flow; otherwise the
 /// body is buffered and parsed once.
+pub struct UpstreamTarget {
+    pub name: String,
+    pub base: String,
+}
+
 pub async fn relay(
     state: &AppState,
-    base: &str,
+    target: &UpstreamTarget,
     path: &str,
     headers: HeaderMap,
     body: Bytes,
     provider: Provider,
     stream: bool,
 ) -> Forwarded {
-    let url = format!("{}{}", base.trim_end_matches('/'), path);
+    let url = format!("{}{}", target.base.trim_end_matches('/'), path);
     let retries = state.config.upstream_retries;
     let timeout = state.config.upstream_timeout_secs;
     let started = Instant::now();
@@ -328,7 +381,8 @@ pub async fn relay(
         // A local worker that sent no credential borrows the one the agent is
         // already relaying, rather than needing a second copy of it.
         if state.config.relay_borrowing {
-            if let Some((name, value)) = state.relayed_auth.lend_if_missing(provider, &headers) {
+            if let Some((name, value)) = state.relayed_auth.lend_if_missing(&target.name, &headers)
+            {
                 req = req.header(name, value);
             }
         }
@@ -515,6 +569,7 @@ fn stream_relay(resp: reqwest::Response, provider: Provider, started: Instant) -
     let has_ct = headers.get("content-type").is_some();
 
     let (tx, outcome_rx) = oneshot::channel::<UsageOutcome>();
+    let mut tx = Some(tx);
 
     let body_stream = async_stream::stream! {
         let mut acc = SseAccumulator::new(provider);
@@ -537,21 +592,36 @@ fn stream_relay(resp: reqwest::Response, provider: Provider, started: Instant) -
                 }
                 Err(e) => stream_error = Some(e.to_string()),
             }
+            if let Some(tx) = tx.take_if(|_| acc.completed()) {
+                let ttfb_ms = first_byte_at.map(|t| t.duration_since(started).as_millis() as i64);
+                let gen_ms = first_byte_at.map(|t| t.elapsed().as_millis() as i64);
+                let _ = tx.send(stream_outcome(
+                    status_u16,
+                    acc.usage,
+                    acc.tool_calls(),
+                    stream_error.take(),
+                    started.elapsed().as_millis() as i64,
+                    ttfb_ms,
+                    gen_ms,
+                ));
+            }
             yield chunk;
         }
-        let tool_calls = acc.tool_calls();
-        let usage = acc.finish();
-        let ttfb_ms = first_byte_at.map(|t| t.duration_since(started).as_millis() as i64);
-        let gen_ms = first_byte_at.map(|t| t.elapsed().as_millis() as i64);
-        let _ = tx.send(stream_outcome(
-            status_u16,
-            usage,
-            tool_calls,
-            stream_error,
-            started.elapsed().as_millis() as i64,
-            ttfb_ms,
-            gen_ms,
-        ));
+        if let Some(tx) = tx.take() {
+            let tool_calls = acc.tool_calls();
+            let usage = acc.finish();
+            let ttfb_ms = first_byte_at.map(|t| t.duration_since(started).as_millis() as i64);
+            let gen_ms = first_byte_at.map(|t| t.elapsed().as_millis() as i64);
+            let _ = tx.send(stream_outcome(
+                status_u16,
+                usage,
+                tool_calls,
+                stream_error,
+                started.elapsed().as_millis() as i64,
+                ttfb_ms,
+                gen_ms,
+            ));
+        }
     };
 
     let mut builder = copy_resp_headers(Response::builder().status(status), &headers);
@@ -602,6 +672,7 @@ pub struct SseAccumulator {
     text: String,
     /// Streamed tool calls by content-block index: (name, accumulated input JSON).
     tool_buf: std::collections::BTreeMap<i64, (String, String)>,
+    completed: bool,
 }
 
 impl SseAccumulator {
@@ -612,7 +683,15 @@ impl SseAccumulator {
             usage: extract::Usage::default(),
             text: String::new(),
             tool_buf: std::collections::BTreeMap::new(),
+            completed: false,
         }
+    }
+
+    /// The Responses stream reported its terminal event. Codex hangs up on it
+    /// without waiting for the upstream to close, which would drop this stream
+    /// before anything after its last `yield` runs.
+    pub fn completed(&self) -> bool {
+        self.completed
     }
 
     /// The tool calls reconstructed from the stream (`input` parsed from the
@@ -679,6 +758,13 @@ impl SseAccumulator {
         if let Some(usage) = json.get("usage").filter(|u| !u.is_null()) {
             self.merge(usage);
         }
+        if let Some(usage) = json
+            .get("response")
+            .and_then(|r| r.get("usage"))
+            .filter(|u| !u.is_null())
+        {
+            self.merge(usage);
+        }
         // Native Gemini streams usage under `usageMetadata`.
         if let Some(usage) = json.get("usageMetadata").filter(|u| !u.is_null()) {
             self.merge(usage);
@@ -689,6 +775,34 @@ impl SseAccumulator {
 
     /// Reconstruct streamed tool calls across the three dialects.
     fn feed_tool_use(&mut self, json: &serde_json::Value) {
+        if matches!(self.provider, Provider::OpenaiResponses) {
+            if matches!(
+                json.get("type").and_then(|t| t.as_str()),
+                Some("response.completed" | "response.incomplete" | "response.failed")
+            ) {
+                self.completed = true;
+            }
+            if json.get("type").and_then(|t| t.as_str()) == Some("response.output_item.done")
+                && json.pointer("/item/type").and_then(|t| t.as_str()) == Some("function_call")
+            {
+                let index = json
+                    .get("output_index")
+                    .and_then(|i| i.as_i64())
+                    .unwrap_or(self.tool_buf.len() as i64);
+                let name = json
+                    .pointer("/item/name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let arguments = json
+                    .pointer("/item/arguments")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("null")
+                    .to_string();
+                self.tool_buf.insert(index, (name, arguments));
+            }
+            return;
+        }
         // Native Gemini streams a whole functionCall (name + args) per chunk.
         if matches!(self.provider, Provider::Google) {
             if let Some(parts) = json
@@ -809,6 +923,13 @@ impl SseAccumulator {
                     }
                 }
             }
+            Provider::OpenaiResponses => {
+                if json.get("type").and_then(|t| t.as_str()) == Some("response.output_text.delta") {
+                    if let Some(t) = json.get("delta").and_then(|d| d.as_str()) {
+                        self.text.push_str(t);
+                    }
+                }
+            }
         }
     }
 
@@ -873,6 +994,7 @@ mod tests {
             bind: "127.0.0.1:0".into(),
             anthropic_upstream: "https://api.anthropic.com".into(),
             openai_upstream: "https://api.openai.com".into(),
+            upstreams: Default::default(),
             ccr,
             compression: "off".into(),
             pixel_compress: Default::default(),
@@ -1050,5 +1172,247 @@ mod tests {
         acc.feed(b"data: {\"type\":\"message_delta\",\"usage\":{\"out");
         acc.feed(b"put_tokens\":55}}\n\n");
         assert_eq!(acc.finish().output, 55);
+    }
+
+    fn responses_call_done(index: i64, name: &str, arguments: &str) -> Vec<u8> {
+        format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": index,
+                "item": { "type": "function_call", "name": name, "arguments": arguments }
+            })
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn sse_responses_keeps_every_function_call_in_output_order() {
+        let mut acc = SseAccumulator::new(Provider::OpenaiResponses);
+        acc.feed(&responses_call_done(3, "shell", r#"{"command":"ls"}"#));
+        acc.feed(b"data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"name\":\"not_a_call\"}}\n\n");
+        acc.feed(&responses_call_done(1, "read_file", r#"{"path":"a"}"#));
+        let calls = acc.tool_calls();
+        let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["read_file", "shell"]);
+        assert_eq!(calls[0].input, serde_json::json!({"path": "a"}));
+        assert_eq!(calls[1].input, serde_json::json!({"command": "ls"}));
+    }
+
+    #[test]
+    fn sse_responses_collects_output_text_deltas() {
+        let mut acc = SseAccumulator::new(Provider::OpenaiResponses);
+        acc.feed(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n");
+        acc.feed(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n");
+        acc.feed(b"data: {\"type\":\"response.output_text.done\",\"text\":\"ignored\"}\n\n");
+        assert_eq!(acc.text, "Hello");
+    }
+
+    #[test]
+    fn sse_responses_is_complete_only_at_a_terminal_event() {
+        let mut acc = SseAccumulator::new(Provider::OpenaiResponses);
+        acc.feed(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n");
+        assert!(!acc.completed());
+        acc.feed(b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}\n\n");
+        assert!(acc.completed());
+        let u = acc.finish();
+        assert_eq!((u.input, u.output), (10, 4));
+    }
+
+    #[test]
+    fn a_response_is_complete_at_any_of_its_three_terminal_events() {
+        for event in [
+            "response.completed",
+            "response.incomplete",
+            "response.failed",
+        ] {
+            let mut acc = SseAccumulator::new(Provider::OpenaiResponses);
+            acc.feed(
+                format!("event: {event}\ndata: {{\"type\":\"{event}\",\"response\":{{}}}}\n\n")
+                    .as_bytes(),
+            );
+            assert!(acc.completed(), "{event}");
+        }
+    }
+
+    #[test]
+    fn the_end_of_one_output_text_is_not_the_end_of_the_response() {
+        let mut acc = SseAccumulator::new(Provider::OpenaiResponses);
+        for event in [
+            r#"{"type":"response.created","response":{"id":"resp_1"}}"#,
+            r#"{"type":"response.output_text.delta","delta":"Done."}"#,
+            r#"{"type":"response.output_text.done","text":"Done."}"#,
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}"#,
+        ] {
+            acc.feed(format!("data: {event}\n\n").as_bytes());
+            assert!(!acc.completed(), "{event}");
+        }
+    }
+
+    const CODEX_STREAM: &str = concat!(
+        "event: response.created\n",
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5-codex\"}}\n\n",
+        "event: response.output_text.delta\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Listing\"}\n\n",
+        "event: response.output_text.done\n",
+        "data: {\"type\":\"response.output_text.done\",\"text\":\"Listing\"}\n\n",
+        "event: response.output_item.done\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"name\":\"shell\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}\n\n",
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":1200,\"output_tokens\":50}}}\n\n",
+    );
+
+    /// A reqwest response whose body yields `chunks` in order, standing in for
+    /// an upstream that is still connected.
+    fn upstream_response(chunks: Vec<Result<Bytes, std::io::Error>>) -> reqwest::Response {
+        let body = reqwest::Body::wrap_stream(futures::stream::iter(chunks));
+        reqwest::Response::from(axum::http::Response::new(body))
+    }
+
+    /// The body of a relayed stream and the receiver of its outcome.
+    fn relayed(
+        chunks: Vec<Result<Bytes, std::io::Error>>,
+    ) -> (Body, oneshot::Receiver<UsageOutcome>) {
+        let Forwarded::Streaming {
+            response,
+            outcome_rx,
+        } = stream_relay(
+            upstream_response(chunks),
+            Provider::OpenaiResponses,
+            Instant::now(),
+        )
+        else {
+            panic!("a streamed relay");
+        };
+        (response.into_body(), outcome_rx)
+    }
+
+    #[tokio::test]
+    async fn the_early_outcome_carries_the_tool_calls_seen() {
+        use http_body_util::BodyExt;
+        let (mut body, mut outcome_rx) = relayed(vec![
+            Ok(Bytes::from(CODEX_STREAM)),
+            Ok(Bytes::from_static(b": keep-alive\n\n")),
+        ]);
+        // The first frame holds the terminal event, and the upstream has not
+        // closed: the outcome is already there.
+        let _ = body.frame().await;
+        let outcome = outcome_rx
+            .try_recv()
+            .expect("the outcome is sent at the terminal event, before the stream closes");
+        assert_eq!(outcome.status, 200);
+        assert_eq!(outcome.tokens_output, 50);
+        assert_eq!(outcome.tool_calls.len(), 1);
+        assert_eq!(outcome.tool_calls[0].name, "shell");
+        assert_eq!(
+            outcome.tool_calls[0].input,
+            serde_json::json!({ "command": "ls" })
+        );
+    }
+
+    fn zstd_frame(bytes: &[u8]) -> Vec<u8> {
+        ruzstd::encoding::compress_to_vec(bytes, ruzstd::encoding::CompressionLevel::Fastest)
+    }
+
+    fn zstd_headers(encoding: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", encoding.parse().unwrap());
+        headers
+    }
+
+    const REQUEST: &[u8] = br#"{"model":"gpt-5-codex","stream":true,"input":"hello there"}"#;
+
+    fn skippable_frame(payload: &[u8]) -> Vec<u8> {
+        let mut frame = 0x184D2A50u32.to_le_bytes().to_vec();
+        frame.extend((payload.len() as u32).to_le_bytes());
+        frame.extend(payload);
+        frame
+    }
+
+    /// A zstd frame of `len` zero bytes written as run-length blocks, so a body
+    /// far past the size limit stays a few kilobytes.
+    fn zstd_frame_of_zeros(len: usize) -> Vec<u8> {
+        const BLOCK: usize = 128 * 1024;
+        // Magic, a descriptor with no checksum, dictionary or declared size,
+        // and a 128 KiB window (the largest block it allows).
+        let mut frame = vec![0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x38];
+        let mut left = len;
+        while left > 0 {
+            let size = left.min(BLOCK);
+            left -= size;
+            let last = u32::from(left == 0);
+            let header = ((size as u32) << 3) | (1 << 1) | last;
+            frame.extend_from_slice(&header.to_le_bytes()[..3]);
+            frame.push(0);
+        }
+        frame
+    }
+
+    fn forwarded_zstd(body: &[u8]) -> (HeaderMap, Bytes) {
+        decode_zstd_request(zstd_headers("zstd"), Bytes::copy_from_slice(body))
+    }
+
+    #[test]
+    fn the_encoding_name_is_matched_without_case_or_padding() {
+        for encoding in ["ZSTD", " zstd ", "Zstd"] {
+            let (headers, forwarded) =
+                decode_zstd_request(zstd_headers(encoding), Bytes::from(zstd_frame(REQUEST)));
+            assert!(!headers.contains_key("content-encoding"), "{encoding:?}");
+            assert_eq!(forwarded, REQUEST, "{encoding:?}");
+        }
+    }
+
+    #[test]
+    fn every_frame_of_a_zstd_body_is_decoded() {
+        let (first, second) = REQUEST.split_at(30);
+        let mut body = zstd_frame(first);
+        body.extend(zstd_frame(second));
+
+        let (headers, forwarded) = forwarded_zstd(&body);
+        assert!(!headers.contains_key("content-encoding"));
+        assert_eq!(forwarded, REQUEST);
+    }
+
+    #[test]
+    fn skippable_frames_around_a_zstd_frame_are_skipped() {
+        let mut body = skippable_frame(b"metadata");
+        body.extend(zstd_frame(REQUEST));
+        body.extend(skippable_frame(b"more metadata"));
+
+        let (headers, forwarded) = forwarded_zstd(&body);
+        assert!(!headers.contains_key("content-encoding"));
+        assert_eq!(forwarded, REQUEST);
+    }
+
+    #[test]
+    fn a_zstd_frame_with_no_content_is_forwarded_as_it_came() {
+        let body = zstd_frame(b"");
+        let (headers, forwarded) = forwarded_zstd(&body);
+        assert_eq!(headers.get("content-encoding").unwrap(), "zstd");
+        assert_eq!(forwarded, body);
+    }
+
+    #[test]
+    fn a_zstd_body_with_garbage_after_its_frame_is_forwarded_as_it_came() {
+        let mut body = zstd_frame(REQUEST);
+        body.extend(b"not a frame");
+
+        let (headers, forwarded) = forwarded_zstd(&body);
+        assert_eq!(headers.get("content-encoding").unwrap(), "zstd");
+        assert_eq!(forwarded, body);
+    }
+
+    #[test]
+    fn a_zstd_body_that_inflates_past_the_body_limit_is_forwarded_as_it_came() {
+        let (headers, forwarded) = forwarded_zstd(&zstd_frame_of_zeros(300_000));
+        assert!(!headers.contains_key("content-encoding"));
+        assert_eq!(forwarded, vec![0u8; 300_000]);
+
+        // One byte past the limit and no more: the decoder finishes the frame
+        // cleanly, so only the size check can refuse it.
+        let body = zstd_frame_of_zeros(crate::server::BODY_LIMIT_BYTES + 1);
+        let (headers, forwarded) = forwarded_zstd(&body);
+        assert_eq!(headers.get("content-encoding").unwrap(), "zstd");
+        assert_eq!(forwarded, body);
     }
 }

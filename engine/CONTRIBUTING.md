@@ -21,7 +21,7 @@ The rest of RTK — filters, commands, hooks — is unaffected. It keeps followi
 | **A chain or an option** on a built-in | the guide example that exercises it, validating |
 | **A directive** | the text; its measured standing cost per turn; measured output reduction on real sessions |
 | **A task kind** (`impl TaskKind`) | interface, prompt template, output handling; credit if it comes from a published method |
-| **A harness profile** | evidence for every capability (a link to the harness's hook documentation or a recorded transcript); `TODO: VERIFY` on anything not proven — never a guess |
+| **A harness profile** | evidence for every capability: the profile's `docs` URL and `verified` date, or a recorded transcript; `TODO: VERIFY` on anything not proven — never a guess. `docs/guide/resources/agent-coverage.md` is generated from the profiles (`coverage_markdown`) and a test fails when it drifts, so regenerate it in the same PR |
 | **A reference pipeline** (`rtk:*`) | the literal file; a provenance section with numbers and source credit; every rule justified; a golden file for `rtk pipeline show` |
 | **A proxy transform** | everything a method needs, plus: a pure function of its block (`cache_stable`), and `CacheHealth.hit_ratio` unchanged on the fixture sessions |
 | **Docs** | grammar changes are guide changes in the same PR; the guide is normative |

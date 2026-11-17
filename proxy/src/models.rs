@@ -160,6 +160,26 @@ mod tests {
         assert_eq!(r.cache_read_mult("gpt-4o"), 0.5);
         assert_eq!(r.family("gpt-4o"), "openai");
         assert_eq!(r.family("gemini-1.5-pro"), "google");
+        assert_eq!(r.family("devstral-medium-latest"), "mistral");
+        assert_eq!(r.family("ministral-8b-latest"), "mistral");
+        assert_eq!(r.cache_read_mult("codestral-latest"), 0.1);
+    }
+
+    #[test]
+    fn mistral_models_read_cached_prefixes_at_a_tenth() {
+        let r = Registry::parse(DEFAULT_TOML).unwrap();
+        for model in [
+            "devstral-medium-latest",
+            "devstral-small-2507",
+            "codestral-latest",
+            "magistral-medium-latest",
+            "ministral-8b-latest",
+            "pixtral-large-latest",
+            "mistral-large-latest",
+            "open-mixtral-8x7b",
+        ] {
+            assert_eq!(r.cache_read_mult(model), 0.1, "{model}");
+        }
     }
 
     #[test]
