@@ -175,6 +175,16 @@ const CASES: &[Case] = &[
         native_args: &["diff", "--help"],
     },
     Case {
+        rtk_args: &["git", "ls-tree", "--help"],
+        tool: "git",
+        native_args: &["ls-tree", "--help"],
+    },
+    Case {
+        rtk_args: &["git", "ls-tree", "-h"],
+        tool: "git",
+        native_args: &["ls-tree", "-h"],
+    },
+    Case {
         rtk_args: &["go", "vet", "-h"],
         tool: "go",
         native_args: &["vet", "-h"],
@@ -265,9 +275,9 @@ const CASES: &[Case] = &[
 
 #[test]
 fn a_wrapped_tools_own_help_survives_rtk() {
-    let mut checked = 0usize;
     let mut skipped = Vec::new();
-
+    // The cases of one tool, in `CASES` order, with the tool's resolved path.
+    let mut by_tool: Vec<(PathBuf, Vec<&Case>)> = Vec::new();
     for case in CASES {
         if UNIX_ONLY.contains(&case.tool) {
             skipped.push(case.tool);
@@ -277,45 +287,84 @@ fn a_wrapped_tools_own_help_survives_rtk() {
             skipped.push(case.tool);
             continue;
         };
-        let label = format!("rtk {}", case.rtk_args.join(" "));
-        let mine = run_rtk(case.rtk_args);
-        let native = run(&tool, case.native_args);
-        checked += 1;
-
-        assert!(
-            !is_rtk_usage(&mine.text),
-            "{label} answered with RTK's own usage:\n{}",
-            &mine.text[..mine.text.len().min(200)]
-        );
-        assert_eq!(
-            mine.code, native.code,
-            "{label} exit code drifted from the tool's"
-        );
-        // Content, not length: a length check passes on a long page from the wrong
-        // subcommand, which is exactly what a bad `git_name` arm would return. Exact bytes
-        // are still not asserted, because `man` renders to the terminal it thinks it has
-        // and a tool may print its own name from argv[0].
-        let anchor = without_exe(first_substantial_line(&native.text));
-        assert!(
-            without_exe(&mine.text).contains(&anchor),
-            "{label} does not contain the tool's own first line {anchor:?}:\n{}",
-            &mine.text[..mine.text.len().min(200)]
-        );
-        assert!(
-            mine.text.len() * 2 >= native.text.len(),
-            "{label} returned {} bytes of the tool's {}",
-            mine.text.len(),
-            native.text.len()
-        );
+        match by_tool.iter_mut().find(|(path, _)| *path == tool) {
+            Some((_, cases)) => cases.push(case),
+            None => by_tool.push((tool, vec![case])),
+        }
     }
-
     assert!(
-        checked > 0,
+        !by_tool.is_empty(),
         "no wrapped tool was available to compare against"
     );
+
+    // A toolchain's first launch can take seconds (a Windows runner's cold start, a
+    // first run in the scratch profile), so the tools run side by side. One tool's
+    // cases stay in order on one thread, rtk before the tool, so whatever a tool
+    // prints only on its first run lands on the same side it always has.
+    std::thread::scope(|scope| {
+        let threads: Vec<_> = by_tool
+            .iter()
+            .map(|(tool, cases)| {
+                // Named after the tool, so a failure reads `thread 'git' panicked`.
+                std::thread::Builder::new()
+                    .name(cases[0].tool.to_string())
+                    .spawn_scoped(scope, move || {
+                        for case in cases {
+                            check(tool, case);
+                        }
+                    })
+                    .expect("spawn a thread per tool")
+            })
+            .collect();
+        // Every thread is joined before the first panic is resumed, so `scope`
+        // adds no generic panic of its own.
+        let mut first = None;
+        for thread in threads {
+            if let Err(panic) = thread.join() {
+                first.get_or_insert(panic);
+            }
+        }
+        if let Some(panic) = first {
+            std::panic::resume_unwind(panic);
+        }
+    });
+
     if !skipped.is_empty() {
         eprintln!("skipped (not installed): {}", skipped.join(", "));
     }
+}
+
+/// `rtk <case.rtk_args>` against `<tool> <case.native_args>`.
+fn check(tool: &Path, case: &Case) {
+    let label = format!("rtk {}", case.rtk_args.join(" "));
+    let mine = run_rtk(case.rtk_args);
+    let native = run(tool, case.native_args);
+
+    assert!(
+        !is_rtk_usage(&mine.text),
+        "{label} answered with RTK's own usage:\n{}",
+        &mine.text[..mine.text.len().min(200)]
+    );
+    assert_eq!(
+        mine.code, native.code,
+        "{label} exit code drifted from the tool's"
+    );
+    // Content, not length: a length check passes on a long page from the wrong
+    // subcommand, which is exactly what a bad `git_name` arm would return. Exact bytes
+    // are still not asserted, because `man` renders to the terminal it thinks it has
+    // and a tool may print its own name from argv[0].
+    let anchor = without_exe(first_substantial_line(&native.text));
+    assert!(
+        without_exe(&mine.text).contains(&anchor),
+        "{label} does not contain the tool's own first line {anchor:?}:\n{}",
+        &mine.text[..mine.text.len().min(200)]
+    );
+    assert!(
+        mine.text.len() * 2 >= native.text.len(),
+        "{label} returned {} bytes of the tool's {}",
+        mine.text.len(),
+        native.text.len()
+    );
 }
 
 /// The reported bug, end to end: `-h` is grep's `--no-filename`, so the output must be
@@ -528,8 +577,18 @@ fn a_tools_own_dash_h_is_still_filtered() {
     std::fs::write(dir.join("one.txt"), "x\n").expect("write");
     std::fs::write(dir.join("two.txt"), "y\n").expect("write");
     let path = dir.to_string_lossy().into_owned();
+    let wide = common::tempdir();
+    for n in 0..60 {
+        std::fs::write(
+            wide.path()
+                .join(format!("module_with_a_long_name_{n:02}.rs")),
+            "z\n",
+        )
+        .expect("write");
+    }
+    let wide_path = wide.path().to_string_lossy().into_owned();
 
-    for (tool, args) in [("ls", vec!["-h", &path]), ("tree", vec!["-h", &path])] {
+    for (tool, args) in [("ls", vec!["-h", &wide_path]), ("tree", vec!["-h", &path])] {
         let Some(native) = on_path(tool) else {
             continue;
         };
@@ -548,6 +607,21 @@ fn a_tools_own_dash_h_is_still_filtered() {
             args.join(" ")
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn ls_dash_h_prints_what_ls_prints_where_compacting_costs_more() {
+    let Some(native) = on_path("ls") else { return };
+    let tmp = common::tempdir();
+    std::fs::write(tmp.path().join("one.txt"), "x\n").expect("write");
+    std::fs::write(tmp.path().join("two.txt"), "y\n").expect("write");
+    let path = tmp.path().to_string_lossy().into_owned();
+    let args = ["-h", path.as_str()];
+    let mine = run_rtk(&[&["ls"][..], &args].concat());
+    let theirs = run(&native, &args);
+    assert_eq!(mine.code, theirs.code);
+    assert_eq!(mine.text, theirs.text);
 }
 
 /// RTK's own commands keep their help: releasing everything would satisfy the checks

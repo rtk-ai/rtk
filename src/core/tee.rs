@@ -325,9 +325,10 @@ mod tests {
                             .strip_prefix(prefix)
                             .expect("unchanged hint prefix");
                         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
-                        assert!(
-                            !hash.is_empty(),
-                            "keep the recall command directly runnable"
+                        assert_eq!(
+                            hash.len(),
+                            16,
+                            "keep the upstream recall identity length and runnable command"
                         );
                     } else {
                         let prefix = if index == 2 {

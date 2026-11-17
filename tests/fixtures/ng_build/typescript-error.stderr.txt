@@ -1,0 +1,7 @@
+✘ [ERROR] TS2322: Type 'string' is not assignable to type 'number'. [plugin angular-compiler]
+
+    /workspace/scratch/72640dd8823a/rtk-angular-fixture-work/fixture-app/src/app/app.ts:11:21:
+      11 │   protected readonly count: number = 'not-a-number';
+         ╵                      ~~~~~
+
+
