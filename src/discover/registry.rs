@@ -7,8 +7,8 @@ use std::sync::LazyLock;
 
 use super::lexer::{
     ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer, coalesce_words,
-    contains_unattestable_construct_in, is_crlf_at, resolve_word_text,
-    shell_split, split_on_operators, tokenize, tokenize_with_newlines,
+    contains_unattestable_construct_in, is_crlf_at, resolve_word_text, shell_split,
+    split_on_operators, tokenize, tokenize_with_newlines,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 use super::shell_wrapper::parse_shell_wrapper;
