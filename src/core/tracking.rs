@@ -3349,7 +3349,10 @@ mod tests {
             PRAGMA user_version = 1;").expect("legacy schema");
         run_schema_migrations(&conn).expect("migrate");
         run_schema_migrations(&conn).expect("repeat migration");
-        let tracker = Tracker { conn };
+        let tracker = Tracker {
+            conn,
+            history_days: DEFAULT_HISTORY_DAYS,
+        };
         let row = tracker
             .invocation_history(100, None)
             .expect("history")
