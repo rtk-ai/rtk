@@ -1,0 +1,15 @@
+go: downloading github.com/google/go-cmp v0.7.0
+{"ImportPath":"example.com/rtk-pipe-cold/broken [example.com/rtk-pipe-cold/broken.test]","Action":"build-output","Output":"# example.com/rtk-pipe-cold/broken [example.com/rtk-pipe-cold/broken.test]\n"}
+{"ImportPath":"example.com/rtk-pipe-cold/broken [example.com/rtk-pipe-cold/broken.test]","Action":"build-output","Output":"broken/b.go:3:23: undefined: missing\n"}
+{"ImportPath":"example.com/rtk-pipe-cold/broken [example.com/rtk-pipe-cold/broken.test]","Action":"build-fail"}
+{"Time":"2026-11-02T13:19:52.639394926Z","Action":"start","Package":"example.com/rtk-pipe-cold/broken"}
+{"Time":"2026-11-02T13:19:52.639491095Z","Action":"output","Package":"example.com/rtk-pipe-cold/broken","Output":"FAIL\texample.com/rtk-pipe-cold/broken [build failed]\n","OutputType":"frame"}
+{"Time":"2026-11-02T13:19:52.639500805Z","Action":"fail","Package":"example.com/rtk-pipe-cold/broken","Elapsed":0,"FailedBuild":"example.com/rtk-pipe-cold/broken [example.com/rtk-pipe-cold/broken.test]"}
+{"Time":"2026-11-02T13:19:52.718031713Z","Action":"start","Package":"example.com/rtk-pipe-cold/dep"}
+{"Time":"2026-11-02T13:19:52.719482547Z","Action":"run","Package":"example.com/rtk-pipe-cold/dep","Test":"TestDiff"}
+{"Time":"2026-11-02T13:19:52.719515996Z","Action":"output","Package":"example.com/rtk-pipe-cold/dep","Test":"TestDiff","Output":"=== RUN   TestDiff\n","OutputType":"frame"}
+{"Time":"2026-11-02T13:19:52.719526006Z","Action":"output","Package":"example.com/rtk-pipe-cold/dep","Test":"TestDiff","Output":"--- PASS: TestDiff (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-11-02T13:19:52.719529436Z","Action":"pass","Package":"example.com/rtk-pipe-cold/dep","Test":"TestDiff","Elapsed":0}
+{"Time":"2026-11-02T13:19:52.719533736Z","Action":"output","Package":"example.com/rtk-pipe-cold/dep","Output":"PASS\n","OutputType":"frame"}
+{"Time":"2026-11-02T13:19:52.719832915Z","Action":"output","Package":"example.com/rtk-pipe-cold/dep","Output":"ok  \texample.com/rtk-pipe-cold/dep\t0.002s\n"}
+{"Time":"2026-11-02T13:19:52.719993574Z","Action":"pass","Package":"example.com/rtk-pipe-cold/dep","Elapsed":0.002}

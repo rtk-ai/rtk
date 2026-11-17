@@ -9,6 +9,13 @@ use std::process::Output;
 mod common;
 
 fn run(args: &[&str], stdout: &str, stderr: &str, code: i32) -> (Output, Vec<String>) {
+    let args: Vec<_> = std::iter::once("test")
+        .chain(args.iter().copied())
+        .collect();
+    run_invocation(&args, stdout, stderr, code)
+}
+
+fn run_invocation(args: &[&str], stdout: &str, stderr: &str, code: i32) -> (Output, Vec<String>) {
     let dir = tempfile::tempdir().expect("create fixture");
     fs::write(dir.path().join("stdout"), stdout).expect("write stdout");
     fs::write(dir.path().join("stderr"), stderr).expect("write stderr");
@@ -26,7 +33,7 @@ fn run(args: &[&str], stdout: &str, stderr: &str, code: i32) -> (Output, Vec<Str
     ))
     .expect("fixture PATH");
     let out = common::rtk_command()
-        .args(["cargo", "test"])
+        .arg("cargo")
         .args(args)
         .env("PATH", path)
         .env("NO_COLOR", "1")
@@ -149,4 +156,35 @@ fn libtest_option_can_consume_a_separator_before_list() {
         "",
         0,
     );
+}
+
+#[test]
+fn prefixed_listings_preserve_complete_cargo_argv() {
+    for args in [
+        vec!["+stable", "--locked", "test", "--", "--list"],
+        vec![
+            "--config",
+            "build.jobs=2",
+            "test",
+            "--",
+            "--skip",
+            "--",
+            "--list",
+        ],
+        vec![
+            "+nightly",
+            "-Zunstable-options",
+            "-C",
+            "some path",
+            "test",
+            "--",
+            "--list",
+        ],
+    ] {
+        let (out, argv) = run_invocation(&args, "a: test\n", "diagnostic\n", 0);
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(out.stdout, b"a: test\n");
+        assert_eq!(out.stderr, b"diagnostic\n");
+        assert_eq!(argv, args);
+    }
 }
