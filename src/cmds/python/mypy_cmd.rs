@@ -1,6 +1,7 @@
 //! Filters mypy type-checking output, grouping errors by file.
 
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
@@ -27,7 +28,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered_with_exit(
         cmd,
         "mypy",
-        &args.join(" "),
+        &display_args(args),
         |raw, exit_code| {
             let clean = strip_ansi(raw);
             let filtered = filter_mypy_output(&clean);

@@ -47,7 +47,7 @@ Auto-Rewrite (default)              Suggest (non-intrusive)
 ─────────────────────               ────────────────────────
 Hook intercepts command             Hook emits systemMessage hint
 Rewrites before execution           Claude decides autonomously
-100% adoption                       ~70-85% adoption
+Rewrites every matched command      Relies on the model following it
 Zero context overhead               Minimal context overhead
 Best for: production                Best for: learning / auditing
 ```
@@ -71,7 +71,6 @@ Clap Parser extracts:
   • Command: Commands::Git
   • Args: ["log", "--oneline", "-5"]
   • Flags: verbose = 1
-          ultra_compact = false
 
          ↓
 
@@ -161,19 +160,18 @@ Database: ~/.local/share/rtk/history.db
 
 > For the full file-level module tree, see [TECHNICAL.md](TECHNICAL.md#4-folder-map) and each folder's README.
 
-**Token savings by ecosystem:**
+**Ecosystems:**
 
 ```
-Savings by ecosystem:
-  GIT (cmds/git/)          85-99%    status, diff, log, gh, gt
-  JS/TS (cmds/js/)         70-99%    lint, tsc, next, prettier, playwright, prisma, vitest, pnpm
-  PYTHON (cmds/python/)    70-90%    ruff, pytest, mypy, pip
-  GO (cmds/go/)            75-90%    go test/build/vet, golangci-lint
-  RUBY (cmds/ruby/)        60-90%    rake, rspec, rubocop
-  DOTNET (cmds/dotnet/)    70-85%    dotnet build/test, binlog
-  CLOUD (cmds/cloud/)      60-80%    aws, docker/kubectl, curl, wget, psql
-  SYSTEM (cmds/system/)    50-90%    ls, tree, read, grep, find, json, log, env, deps
-  RUST (cmds/rust/)        60-99%    cargo test/build/clippy, err
+  GIT (cmds/git/)          status, diff, log, gh, gt
+  JS/TS (cmds/js/)         lint, tsc, next, prettier, playwright, prisma, vitest, pnpm
+  PYTHON (cmds/python/)    ruff, pytest, mypy, pip
+  GO (cmds/go/)            go test/build/vet, golangci-lint
+  RUBY (cmds/ruby/)        rake, rspec, rubocop
+  DOTNET (cmds/dotnet/)    dotnet build/test, binlog
+  CLOUD (cmds/cloud/)      aws, docker/kubectl, curl, wget, psql
+  SYSTEM (cmds/system/)    ls, tree, read, grep, find, json, log, env, deps
+  RUST (cmds/rust/)        cargo test/build/clippy, err
 ```
 
 **Total: 64 modules** (42 command modules + 22 infrastructure modules)
@@ -253,7 +251,7 @@ Strategy            Modules              Technique               Reduction
    │ Source code  │  →  Filter by level:
    │              │     • none       → Keep all               0%
    │              │     • minimal    → Strip comments        20-40%
-   │              │     • aggressive → Strip bodies          60-90%
+   │              │     • aggressive → Strip bodies
    └──────────────┘
 
    Used by: read, smart (language-aware stripping via filter.rs)
@@ -321,7 +319,7 @@ fn calculate_total(items: &[Item]) -> i32 {
     items.iter().map(|i| i.value).sum()
 }
 
-// FilterLevel::Aggressive - Strip comments + function bodies (60-90% reduction)
+// FilterLevel::Aggressive - Strip comments + function bodies
 fn calculate_total(items: &[Item]) -> i32 { ... }
 ```
 
@@ -527,30 +525,6 @@ Output format known?
         Examples: go vet, go build
 ```
 
-### Performance Characteristics
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│              Python/Go Module Overhead Benchmarks                      │
-└────────────────────────────────────────────────────────────────────────┘
-
-Command                 Raw Time    rtk Time    Overhead    Savings
-─────────────────────────────────────────────────────────────────────────
-
-ruff check              850ms       862ms       +12ms       83%
-pytest                  1.2s        1.21s       +10ms       92%
-pip list                450ms       458ms       +8ms        78%
-
-go test                 2.1s        2.12s       +20ms       88%
-go build (errors)       950ms       961ms       +11ms       80%
-golangci-lint           4.5s        4.52s       +20ms       85%
-
-Overhead Sources:
-  • JSON parsing: 5-10ms (serde_json)
-  • State machine: 3-8ms (regex + state tracking)
-  • NDJSON streaming: 8-15ms (line-by-line JSON parse)
-```
-
 ### Module Integration Checklist
 
 When adding Python/Go module support:
@@ -600,7 +574,7 @@ Detection Order:
 │    → npx --no-install -- <tool>    │
 └─────────────────────────────────────┘
 
-Example (lint_cmd.rs:50-77):
+Example (lint_cmd.rs):
 
 let is_pnpm = Path::new("pnpm-lock.yaml").exists();
 let is_yarn = Path::new("yarn.lock").exists();
@@ -635,7 +609,7 @@ Affects: lint, tsc, next, prettier, playwright, prisma, vitest, pnpm
 
 Flow:
 
-1. ESTIMATION (tracking.rs:235-238)
+1. ESTIMATION (tracking.rs)
    ────────────
    estimate_tokens(text: &str) → usize {
        (text.len() as f64 / 4.0).ceil() as usize
@@ -654,7 +628,7 @@ Flow:
 
          ↓
 
-3. RECORD (tracking.rs:48-59)
+3. RECORD (tracking.rs)
    ──────
    INSERT INTO commands (
        timestamp,      -- RFC3339 format
@@ -693,7 +667,7 @@ Flow:
 
          ↓
 
-5. CLEANUP (tracking.rs:96-104)
+5. CLEANUP (tracking.rs)
    ───────
    Auto-cleanup on each INSERT:
    DELETE FROM commands
@@ -751,7 +725,7 @@ Single-threaded execution with `Mutex<Option<Tracker>>` for future-proofing. No 
 │                         Verbosity Levels                               │
 └────────────────────────────────────────────────────────────────────────┘
 
-main.rs:47-49
+main.rs
 #[arg(short, long, action = clap::ArgAction::Count)]
 verbose: u8,
 
@@ -765,35 +739,9 @@ Levels:
 │ -vvv    │ + Raw output before filtering                        │
 └─────────┴──────────────────────────────────────────────────────┘
 
-Example (git_cmd.rs:67-69):
+Example (git_cmd.rs):
 if verbose > 0 {
     eprintln!("Git diff summary:");
-}
-```
-
-### Ultra-Compact Mode
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                       Ultra-Compact Mode (-u)                          │
-└────────────────────────────────────────────────────────────────────────┘
-
-main.rs:51-53
-#[arg(long, global = true)]
-ultra_compact: bool,
-
-Features:
-┌──────────────────────────────────────────────────────────────────────┐
-│ • ASCII icons instead of words (✓ ✗ → ⚠)                            │
-│ • Inline formatting (single-line summaries)                          │
-│ • Maximum compression for LLM contexts                               │
-└──────────────────────────────────────────────────────────────────────┘
-
-Example (gh_cmd.rs:521):
-if ultra_compact {
-    println!("✓ PR #{} merged", number);
-} else {
-    println!("Pull request #{} successfully merged", number);
 }
 ```
 
@@ -839,7 +787,7 @@ std::process::exit(1)
 │                    Exit Code Handling Strategy                         │
 └────────────────────────────────────────────────────────────────────────┘
 
-Standard Pattern (git_cmd.rs:45-48, PR #5):
+Standard Pattern (git_cmd.rs):
 
 let output = Command::new("git").args(args).output()?;
 
@@ -862,7 +810,7 @@ Exit Codes:
 Why This Matters:
 • CI/CD pipelines rely on exit codes to determine build success/failure
 • Pre-commit hooks need accurate failure signals
-• Git workflows require proper exit code propagation (PR #5 fix)
+• Git workflows require proper exit code propagation
 
 Modules with Exit Code Preservation:
 • git_cmd.rs (all git commands)
@@ -909,7 +857,7 @@ Write template:
 │ - rtk lint                          │
 │ - rtk test                          │
 │                                     │
-│ Benefits: 60-90% token reduction    │
+│ Benefits: ≥20% less bash output     │
 └─────────────────────────────────────┘
       ↓
 Success: "✓ Initialized rtk for LLM integration"
@@ -964,40 +912,14 @@ opt-level = 3          # Maximum optimization
 lto = true             # Link-time optimization
 codegen-units = 1      # Single codegen unit for better optimization
 strip = true           # Remove debug symbols
-panic = "abort"        # Smaller binary size
 ```
 
-### Performance Characteristics
+`panic = "abort"` is deliberately not set: the PostToolUse hook relies on unwinding to fail open when a filter panics.
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                      Performance Metrics                               │
-└────────────────────────────────────────────────────────────────────────┘
+### Performance Targets
 
-Binary:
-  • Size: ~4.1 MB (stripped release build)
-  • Startup: ~5-10ms (cold start)
-  • Memory: ~2-5 MB (typical usage)
-
-Runtime Overhead (estimated):
-┌──────────────────────┬──────────────┬──────────────┐
-│ Operation            │ rtk Overhead │ Total Time   │
-├──────────────────────┼──────────────┼──────────────┤
-│ rtk git status       │ +8ms         │ 58ms         │
-│ rtk grep "pattern"   │ +12ms        │ 145ms        │
-│ rtk read file.rs     │ +5ms         │ 15ms         │
-│ rtk lint             │ +15ms        │ 2.5s         │
-└──────────────────────┴──────────────┴──────────────┘
-
-Note: Overhead measurements are estimates. Actual performance varies
-by system, command complexity, and output size.
-
-Overhead Sources:
-  • Clap parsing: ~2-3ms
-  • Command execution: ~1-2ms
-  • Filtering/compression: ~2-8ms (varies by strategy)
-  • SQLite tracking: ~1-3ms
-```
+- Startup: <10ms
+- Memory: <5MB in typical usage
 
 ---
 
@@ -1058,7 +980,6 @@ Overhead Sources:
 | **Exit Code Preservation** | Passing through tool's exit code for CI/CD reliability |
 | **Package Manager Detection** | Identifying pnpm/yarn/npm to execute JS/TS tools correctly |
 | **Verbosity Levels** | `-v/-vv/-vvv` for progressively more debug output |
-| **Ultra-Compact** | `-u` flag for maximum compression (ASCII icons, inline format) |
 
 ---
 

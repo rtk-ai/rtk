@@ -1,0 +1,63 @@
+# rtk-proxy — optional config file.
+#
+# Copy to `rtk-proxy.toml` (or point RTK_PROXY_CONFIG at it) to configure the
+# proxy from one versioned file instead of a handful of env vars. Every key is
+# optional and mirrors its env var 1:1 (lowercased, without the RTK_PROXY_
+# prefix).
+#
+# Precedence: CLI flag > environment variable > this file > built-in default.
+# So env still overrides the file, and anything omitted here keeps its default.
+#
+# NOTE: when the daemon is launched by `rtk llm-proxy start`, rtk sets `db` and
+# `icm_db` itself (to ~/.config/rtk/llm-proxy/) so the daemon's state does not
+# depend on the cwd of the shell that started it. A file setting for those two
+# keys is ignored in that flow — env wins.
+
+# Address the proxy binds to. Loopback only unless you have put a network
+# boundary in front of it: the proxy has no authentication and forwards the
+# caller's provider credentials.                  (env: RTK_PROXY_BIND)
+bind = "127.0.0.1:8080"
+
+# Where each dialect's traffic is forwarded. Any API-compatible gateway works;
+# the request path is forwarded unchanged.
+# (env: RTK_PROXY_ANTHROPIC_UPSTREAM / RTK_PROXY_OPENAI_UPSTREAM)
+anthropic_upstream = "https://api.anthropic.com"
+openai_upstream = "https://api.openai.com"
+
+# CCR (Compress-Cache-Retrieve) — the one compression lever. Oversized tool
+# output is replaced by a preview + marker, the original is cached locally, and
+# an injected `rtk_retrieve` tool lets the model ask for it back. Reversible, so
+# nothing is permanently lost. On by default.    (env: RTK_PROXY_CCR)
+ccr = true
+
+# SQLite path for the usage store; empty or "off" disables recording. This is
+# the DB `rtk gain` reads. Default: <config-dir>/rtk/llm-proxy/rtk-proxy.db --
+# the fixed path the CLI looks at. Set this only to an ABSOLUTE path: a
+# relative one resolves against the daemon's working directory (`/` under a
+# service), which `rtk gain` never reads. (env: RTK_PROXY_DB)
+# db = "/absolute/path/to/rtk-proxy.db"
+
+# SQLite path for CCR's content cache (ICM). Separate file from `db`; with this
+# off, CCR silently no-ops. Created owner-only (0600): it stores raw tool
+# output verbatim. Default: beside the usage store; absolute paths only, same
+# reason as above.                                (env: RTK_PROXY_ICM_DB)
+# icm_db = "/absolute/path/to/rtk-proxy-memory.db"
+
+# Seconds a CCR cache entry lives before being pruned (at boot and daily);
+# 0 keeps entries forever.      (default 604800 = 7 days, env: RTK_PROXY_ICM_TTL_SECS)
+# icm_ttl_secs = 604800
+
+# Resilience: retry a transient upstream failure (429/5xx or a connect/timeout
+# error) with exponential backoff, before the response streams. (default 2)
+# upstream_retries = 2
+# Total timeout (seconds) for buffered (non-streaming) upstream calls; 0
+# disables. Streamed SSE responses are instead bounded by a 120s silence
+# (read) timeout on the client.                              (default 600)
+# upstream_timeout_secs = 600
+
+# Capture the request prompt + response completion text on each usage row, for
+# `/stats/requests`. Off by default (privacy); text is truncated to
+# log_body_max_bytes.
+# (env: RTK_PROXY_LOG_BODIES / RTK_PROXY_LOG_BODY_MAX_BYTES)
+# log_bodies = false
+# log_body_max_bytes = 8192

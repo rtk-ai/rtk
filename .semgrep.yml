@@ -6,6 +6,11 @@ rules:
     message: >
       Dynamic shell invocation via Command::new($ARG).
       RTK only executes known CLI tools — use string literals, not variables.
+    paths:
+      exclude:
+        - /src/core/utils.rs
+        - /src/llm_proxy.rs
+        - /engine/src/process.rs
     languages: [rust]
     severity: ERROR
 
@@ -34,6 +39,9 @@ rules:
     message: >
       Raw socket usage detected. RTK is a CLI proxy — it should not
       open network connections directly. Use ureq in telemetry only.
+    paths:
+      exclude:
+        - /src/hooks/session_start.rs
     languages: [rust]
     severity: ERROR
 
@@ -42,6 +50,9 @@ rules:
     message: >
       reqwest is forbidden in RTK. The project uses ureq for HTTP
       (telemetry only). Adding reqwest increases binary size and attack surface.
+    paths:
+      exclude:
+        - /proxy/
     languages: [rust]
     severity: ERROR
 
@@ -68,6 +79,10 @@ rules:
     paths:
       exclude:
         - /src/core/telemetry.rs
+        - /src/core/telemetry_cmd.rs
+        - /src/core/classify.rs
+        - /src/core/task_cmd.rs
+        - /src/llm_proxy.rs
     message: >
       ureq usage outside of src/core/telemetry.rs.
       HTTP calls are restricted to the telemetry module to prevent data exfiltration.

@@ -1,0 +1,56 @@
+# complex-session — a Jev judge driving custom + built-in methods per output kind
+#
+# One classifier ([classifier.intent], served by TypeSafe's Jev) decides what a
+# shell tool's output IS; each kind gets a different treatment, mixing the
+# custom `squeeze-blank` plugin method with built-in chains.
+#
+# Requires: an rtk build with `--features example-plugins` (the default build
+# does not register `squeeze-blank`, and this pipeline will not validate
+# without it), and $TYPESAFE_API_KEY. Without the key, classification yields
+# no fact and everything passes through.
+#
+# Wire format: https://docs.typesafe.ai
+
+schema_version = 1
+
+[pipeline]
+name    = "complex-session"
+extends = "rtk:posthook"
+
+[upstream.jev]
+provider     = "typesafe"
+model        = "jev-latest"
+base_url     = "https://api.typesafe.ai/v1/systemone"
+api_key_env  = "TYPESAFE_API_KEY"
+timeout_secs = 8
+
+[classifier.intent]
+upstream       = "jev"
+question       = "choice"
+instructions   = "What kind of shell tool output is this?"
+input_chars    = 2000
+min_confidence = 0.75
+
+[classifier.intent.labels]
+test_failure    = "Failing test output: assertions, FAILED markers, stack traces, panics"
+build_log       = "Compiler or build progress output without test results"
+dependency_dump = "Package manager listings, lockfiles, dependency trees"
+prose           = "Documentation or natural-language text"
+
+[[hook.after_tool.shell]]
+name = "tests-squeeze-then-cap"
+when = { "class.intent" = "test_failure" }
+use  = ["squeeze-blank", "cap"]
+
+[[hook.after_tool.shell]]
+name = "deps-cap"
+when = { "class.intent" = "dependency_dump", lines_gt = 40 }
+use  = ["term"]
+
+[[hook.after_tool.shell]]
+name = "build-dedup"
+when = { "class.intent" = "build_log" }
+use  = ["dedup", "squeeze-blank"]
+
+[guards]
+min_size = 400

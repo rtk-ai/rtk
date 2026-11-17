@@ -15,7 +15,7 @@ impl PipelineSafety {
 pub struct RtkRule {
     pub pattern: &'static str,
     pub rtk_cmd: &'static str,
-    /// Whether this command may be rewritten as the final stage of a pipeline.
+    /// Whether this rule can rewrite the final stage of a pipeline.
     pub pipeline_safety: PipelineSafety,
     pub rewrite_prefixes: &'static [&'static str],
     pub category: &'static str,
@@ -51,7 +51,7 @@ impl Default for RtkRule {
 /// `core::tracking::SUBCOMMAND_ROUTERS`, or its telemetry label stops at the tool name.
 pub const RULES: &[RtkRule] = &[
     RtkRule {
-        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree)(?:\s|$|[;|&()<>])",
+        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree|ls-tree)(?:\s|$|[;|&()<>])",
         rtk_cmd: "rtk git",
         pipeline_safety: PipelineSafety::None,
         rewrite_prefixes: &["git", "yadm"],
@@ -62,6 +62,7 @@ pub const RULES: &[RtkRule] = &[
             ("show", 80.0),
             ("add", 59.0),
             ("commit", 59.0),
+            ("ls-tree", 37.0),
         ],
         ..RtkRule::DEFAULT
     },
@@ -272,6 +273,15 @@ pub const RULES: &[RtkRule] = &[
         ],
         category: "Build",
         savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^ng\s+build(?:\s|$|[;|&()<>])",
+        rtk_cmd: "rtk ng",
+        rewrite_prefixes: &["ng"],
+        category: "Build",
+        // Angular 22.2.1 real default/lazy build fixtures; diagnostics remain intact.
+        savings_pct: 20.0,
         ..RtkRule::DEFAULT
     },
     RtkRule {
@@ -815,7 +825,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^dotnet\s+build\b",
+        pattern: r"^dotnet\s+(build|restore)\b",
         rtk_cmd: "rtk dotnet",
         pipeline_safety: PipelineSafety::None,
         rewrite_prefixes: &["dotnet"],

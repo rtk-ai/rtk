@@ -8,6 +8,7 @@
 
 use super::utils::php_tool_command;
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::user_dirs;
 use crate::core::utils::fallback_tail;
 use anyhow::Result;
@@ -68,7 +69,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "pint",
-        &args.join(" "),
+        &display_args(args),
         filter,
         runner::RunOptions::stdout_only().tee("pint"),
     )
