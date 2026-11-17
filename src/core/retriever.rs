@@ -777,7 +777,7 @@ fn decode(row: &Row) -> Result<Vec<u8>> {
 pub(crate) fn recalled_content(hash: &str) -> Option<String> {
     let cfg = Config::load().unwrap_or_default().retriever;
     let conn = open_existing(&cfg).ok().flatten()?;
-    let row = load_by_hash(&conn, hash).ok().flatten()?;
+    let row = load_reference(&conn, hash).ok().flatten()?;
     let full = decode(&row).ok()?;
     String::from_utf8(slice_from_line(&full, row.shown_upto).to_vec()).ok()
 }
@@ -1442,8 +1442,10 @@ mod tests {
         let cfg = temp_cfg(dir.path());
         let first = store_inner(&cfg, b"out-25833387", "cmd", Some(1), 1).unwrap();
         let second = store_inner(&cfg, b"out-36334097", "cmd", Some(1), 1).unwrap();
-        assert_eq!(first.hash, "4ce95baf880ee759");
-        assert_eq!(second.hash, "4ce95baf880e306f");
+        assert_eq!(&content_hash("cmd", b"out-25833387")[..12], "4ce95baf880e");
+        assert_eq!(&content_hash("cmd", b"out-36334097")[..12], "4ce95baf880e");
+        assert_ne!(first.hash, second.hash);
+        assert_ne!(first.reference, second.reference);
 
         let conn = open(&cfg).unwrap();
         for (stored, content) in [(&first, b"out-25833387"), (&second, b"out-36334097")] {
