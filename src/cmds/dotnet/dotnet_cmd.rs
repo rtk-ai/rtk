@@ -13,7 +13,6 @@ use crate::core::utils::{resolved_command, truncate};
 use crate::dotnet_format_report;
 use crate::dotnet_trx;
 use anyhow::{Context, Result};
-use quick_xml::Reader;
 use quick_xml::events::Event;
 use serde_json::Value;
 use std::ffi::OsString;
@@ -132,6 +131,9 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
         return run_passthrough(&forwarded, verbose);
     }
     let tokens = tokenize_dotnet_args(args);
+    if subcommand == "test" && has_test_discovery_arg(&tokens) {
+        return run_passthrough(&forwarded_dotnet_args(subcommand, args), verbose);
+    }
     let timer = tracking::TimedExecution::start();
     let binlog_path = build_binlog_path(subcommand);
     let should_expect_binlog = subcommand != "test" || has_binlog_arg(&tokens);
@@ -198,10 +200,12 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
             };
             let raw_summary = binlog::parse_test_from_text(&raw);
             let merged_summary = merge_test_summaries(parsed_summary, raw_summary);
+            let reported_trx_paths = find_reported_trx_paths(&raw);
             let summary = merge_test_summary_from_trx(
                 merged_summary,
                 trx_results_dir.as_deref(),
                 dotnet_trx::find_recent_trx_in_testresults(),
+                &reported_trx_paths,
                 command_started_at,
             );
 
@@ -315,6 +319,10 @@ fn resolve_trx_results_dir(
 
     if let Some(user_dir) = extract_results_directory_arg(tokens, runner_mode) {
         return (Some(user_dir), false);
+    }
+
+    if runner_mode == TestRunnerMode::Classic && has_trx_logger_arg(tokens) {
+        return (None, false);
     }
 
     (Some(build_trx_results_dir()), true)
@@ -490,6 +498,7 @@ fn merge_test_summary_from_trx(
     mut summary: binlog::TestSummary,
     trx_results_dir: Option<&Path>,
     fallback_trx_path: Option<PathBuf>,
+    reported_trx_paths: &[PathBuf],
     command_started_at: SystemTime,
 ) -> binlog::TestSummary {
     let mut trx_summary = None;
@@ -500,6 +509,10 @@ fn merge_test_summary_from_trx(
         if trx_summary.is_none() {
             trx_summary = dotnet_trx::parse_trx_files_in_dir(dir);
         }
+    }
+
+    if trx_summary.is_none() {
+        trx_summary = parse_reported_trx_files(reported_trx_paths, command_started_at);
     }
 
     if trx_summary.is_none()
@@ -532,6 +545,52 @@ fn merge_test_summary_from_trx(
     }
 
     summary
+}
+
+fn find_reported_trx_paths(raw: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for fragment in raw.split("Results File:").skip(1) {
+        let Some(path) = fragment.lines().next() else {
+            continue;
+        };
+        let path = PathBuf::from(path.trim());
+        if !path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("trx"))
+            || paths.iter().any(|reported| reported == &path)
+        {
+            continue;
+        }
+        paths.push(path);
+    }
+    paths
+}
+
+fn parse_reported_trx_files(
+    paths: &[PathBuf],
+    command_started_at: SystemTime,
+) -> Option<binlog::TestSummary> {
+    let mut merged = binlog::TestSummary::default();
+    let mut parsed_any = false;
+
+    for path in paths {
+        let Some(parsed) = dotnet_trx::parse_trx_file_since(path, command_started_at) else {
+            continue;
+        };
+
+        parsed_any = true;
+        merged.passed += parsed.passed;
+        merged.failed += parsed.failed;
+        merged.skipped += parsed.skipped;
+        merged.total += parsed.total;
+        merged.project_count += parsed.project_count.max(1);
+        merged.failed_tests.extend(parsed.failed_tests);
+        if merged.duration_text.is_none() {
+            merged.duration_text = parsed.duration_text;
+        }
+    }
+
+    parsed_any.then_some(merged)
 }
 
 fn build_effective_dotnet_args(
@@ -609,6 +668,20 @@ fn has_verbosity_arg(tokens: &[Token<'_>]) -> bool {
     dotnet_has_loose_flag(tokens, "v") || dotnet_has_loose_flag(tokens, "verbosity")
 }
 
+fn has_test_discovery_arg(tokens: &[Token<'_>]) -> bool {
+    dotnet_own_tokens(tokens).iter().any(|token| {
+        (token.kind == TokenKind::Long
+            && token.double_dash
+            && token.attached.is_none()
+            && token.text.eq_ignore_ascii_case("list-tests"))
+            || (token.kind == TokenKind::Long
+                && !token.double_dash
+                && !token.slash
+                && token.attached.is_none()
+                && token.text.eq_ignore_ascii_case("t"))
+    })
+}
+
 /// How the targeted test project(s) run tests — determines which TRX injection strategy to use.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TestRunnerMode {
@@ -637,40 +710,55 @@ fn scan_mtp_kind_in_file(path: &Path) -> MtpProjectKind {
         Err(_) => return MtpProjectKind::None,
     };
 
-    let mut reader = Reader::from_str(&content);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut inside_mtp_element = false;
+    let mut reader = dotnet_trx::xml_reader(&content);
+    // The text of the MTP property being read, if inside one.
+    let mut value: Option<String> = None;
+    let is_true = |value: &Option<String>| {
+        value
+            .as_deref()
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
+    };
 
+    // Decided after the loop: a malformed end tag or a truncated file still ends a
+    // value read in full.
     loop {
-        match reader.read_event_into(&mut buf) {
+        match reader.read_event() {
             Ok(Event::Start(e)) => {
                 let name_lower = e.local_name().as_ref().to_ascii_lowercase();
                 // All project-file MTP properties run in VSTest bridge mode and require
                 // MTP-specific args to come after `--`. Only global.json MTP mode is native.
-                inside_mtp_element = matches!(
-                    name_lower.as_slice(),
-                    b"usemicrosofttestingplatformrunner"
-                        | b"usetestingplatformrunner"
-                        | b"testingplatformdotnettestsupport"
+                let is_mtp_element = matches!(
+                    name_lower.as_str(),
+                    "usemicrosofttestingplatformrunner"
+                        | "usetestingplatformrunner"
+                        | "testingplatformdotnettestsupport"
                 );
+                value = is_mtp_element.then(String::new);
             }
-            Ok(Event::Text(e)) if inside_mtp_element => {
-                if let Ok(text) = e.unescape()
-                    && text.trim().eq_ignore_ascii_case("true")
-                {
-                    return MtpProjectKind::VsTestBridge;
+            Ok(event @ (Event::Text(_) | Event::CData(_) | Event::GeneralRef(_))) => {
+                if let Some(value) = value.as_mut() {
+                    dotnet_trx::push_content(&event, value);
                 }
             }
-            Ok(Event::End(_)) => inside_mtp_element = false,
-            Ok(Event::Eof) => break,
-            Err(_) => break,
+            // MSBuild reads a property as its inner XML, which a child element makes
+            // something other than `true`.
+            Ok(Event::Empty(_)) => value = None,
+            Ok(Event::End(_)) => {
+                if is_true(&value) {
+                    break;
+                }
+                value = None;
+            }
+            Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
-        buf.clear();
     }
 
-    MtpProjectKind::None
+    if is_true(&value) {
+        MtpProjectKind::VsTestBridge
+    } else {
+        MtpProjectKind::None
+    }
 }
 
 fn parse_global_json_mtp_mode(path: &Path) -> bool {
@@ -2335,6 +2423,55 @@ mod tests {
     }
 
     #[test]
+    fn test_discovery_detection_uses_only_dotnet_owned_bare_flags() {
+        for args in [
+            vec!["--list-tests".to_string()],
+            vec!["-t".to_string()],
+            vec!["--LIST-TESTS".to_string()],
+            vec!["-T".to_string()],
+        ] {
+            assert!(
+                has_test_discovery_arg(&tokenize_dotnet_args(&args)),
+                "{args:?}"
+            );
+        }
+
+        for args in [
+            vec!["--t".to_string()],
+            vec!["/t".to_string()],
+            vec!["-list-tests".to_string()],
+            vec!["--list-tests:true".to_string()],
+            vec!["-t:true".to_string()],
+            vec!["--filter".to_string(), "-t".to_string()],
+            vec!["--filter=-t".to_string()],
+            vec!["--".to_string(), "--list-tests".to_string()],
+            vec!["--logger".to_string(), "--list-tests".to_string()],
+        ] {
+            assert!(
+                !has_test_discovery_arg(&tokenize_dotnet_args(&args)),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_user_trx_logger_uses_native_default_results_directory() {
+        let args = vec![
+            "--logger".to_string(),
+            "trx;LogFileName=rtk-user-report.trx".to_string(),
+        ];
+
+        assert_eq!(
+            resolve_trx_results_dir(
+                "test",
+                &tokenize_dotnet_args(&args),
+                TestRunnerMode::Classic
+            ),
+            (None, false)
+        );
+    }
+
+    #[test]
     fn test_runner_mode_probes_follow_scan_dir_not_the_process_cwd() {
         // All three probes have to start from scan_dir: while only the project scan did, a
         // developer working beneath a global.json decided the result and every tempdir
@@ -2589,6 +2726,74 @@ mod tests {
         .expect("write csproj");
 
         // All project-file properties → VsTestBridge; only global.json gives MtpNative
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
+    }
+
+    #[test]
+    fn test_scan_mtp_kind_resolves_character_references() {
+        let temp_dir = test_isolation::tempdir();
+        let csproj = temp_dir.path().join("MTP.Tests.csproj");
+        fs::write(
+            &csproj,
+            "<Project><PropertyGroup><UseMicrosoftTestingPlatformRunner>tru&#101;</UseMicrosoftTestingPlatformRunner></PropertyGroup></Project>",
+        )
+        .expect("write csproj");
+
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
+    }
+
+    #[test]
+    fn test_scan_mtp_kind_reads_the_value_around_markup() {
+        let temp_dir = test_isolation::tempdir();
+        let csproj = temp_dir.path().join("MTP.Tests.csproj");
+        for (property, expected) in [
+            (
+                "<UseTestingPlatformRunner>true<!-- opt in --></UseTestingPlatformRunner>",
+                MtpProjectKind::VsTestBridge,
+            ),
+            (
+                "<UseTestingPlatformRunner><![CDATA[true]]></UseTestingPlatformRunner>",
+                MtpProjectKind::VsTestBridge,
+            ),
+            (
+                "<UseTestingPlatformRunner>true</UseTestingplatformRunner>",
+                MtpProjectKind::VsTestBridge,
+            ),
+            (
+                "<Description>Tom & Jerry</Description><UseTestingPlatformRunner>true</UseTestingPlatformRunner>",
+                MtpProjectKind::VsTestBridge,
+            ),
+            (
+                "<UseTestingPlatformRunner>tr<!-- x -->ue-ish</UseTestingPlatformRunner>",
+                MtpProjectKind::None,
+            ),
+            (
+                "<UseTestingPlatformRunner>false</UseTestingPlatformRunner>",
+                MtpProjectKind::None,
+            ),
+            (
+                "<UseTestingPlatformRunner>tr<X/>ue</UseTestingPlatformRunner>",
+                MtpProjectKind::None,
+            ),
+            (
+                "<UseTestingPlatformRunner>true<X></X></UseTestingPlatformRunner>",
+                MtpProjectKind::None,
+            ),
+        ] {
+            fs::write(
+                &csproj,
+                format!("<Project><PropertyGroup>{property}</PropertyGroup></Project>"),
+            )
+            .expect("write csproj");
+            assert_eq!(scan_mtp_kind_in_file(&csproj), expected, "{property}");
+        }
+
+        // A file cut off right after the value ends at EOF, not on an end tag.
+        fs::write(
+            &csproj,
+            "<Project><PropertyGroup><UseTestingPlatformRunner>true",
+        )
+        .expect("write csproj");
         assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
     }
 
@@ -2965,6 +3170,7 @@ mod tests {
             binlog::TestSummary::default(),
             Some(temp_dir.path()),
             None,
+            &[],
             SystemTime::now(),
         );
 
@@ -2984,6 +3190,7 @@ mod tests {
             binlog::TestSummary::default(),
             Some(&missing_primary),
             Some(fallback.clone()),
+            &[],
             UNIX_EPOCH,
         );
 
@@ -3001,6 +3208,7 @@ mod tests {
             binlog::TestSummary::default(),
             Some(&missing),
             None,
+            &[],
             SystemTime::now(),
         );
         assert_eq!(filled.total, 0);
@@ -3027,11 +3235,83 @@ mod tests {
             binlog::TestSummary::default(),
             Some(&missing_primary),
             Some(fallback.clone()),
+            &[],
             command_started_at,
         );
 
         assert_eq!(filled.total, 0);
         assert!(fallback.exists());
+    }
+
+    #[test]
+    fn test_merge_test_summary_from_trx_ignores_stale_reported_paths_and_uses_fallback() {
+        let temp_dir = test_isolation::tempdir();
+        let fallback = temp_dir.path().join("fallback.trx");
+        fs::write(&fallback, trx_with_counts(2, 1, 1)).expect("write fallback trx");
+        let stale_report = temp_dir.path().join("stale.trx");
+        fs::write(&stale_report, trx_with_counts(9, 9, 0)).expect("write stale report");
+        std::fs::File::options()
+            .write(true)
+            .open(&stale_report)
+            .expect("open stale report for mtime")
+            .set_modified(SystemTime::now() - std::time::Duration::from_secs(10))
+            .expect("set stale report mtime");
+        let missing_report = temp_dir.path().join("missing.trx");
+        let command_started_at = SystemTime::now();
+        std::fs::File::options()
+            .write(true)
+            .open(&fallback)
+            .expect("open fallback for mtime")
+            .set_modified(command_started_at + std::time::Duration::from_secs(1))
+            .expect("set fallback mtime");
+
+        let filled = merge_test_summary_from_trx(
+            binlog::TestSummary::default(),
+            None,
+            Some(fallback.clone()),
+            &[stale_report, missing_report],
+            command_started_at,
+        );
+
+        assert_eq!(filled.total, 2);
+        assert_eq!(filled.failed, 1);
+        assert!(fallback.exists());
+    }
+
+    #[test]
+    fn test_parse_reported_trx_files_counts_a_project_whose_filter_matched_nothing() {
+        // `--filter` that matches only one project of a solution: dotnet still writes and
+        // reports a zero-test TRX for the other project.
+        let temp_dir = test_isolation::tempdir();
+        let empty = temp_dir.path().join("empty.trx");
+        let ran = temp_dir.path().join("ran.trx");
+        fs::write(&empty, trx_with_counts(0, 0, 0)).expect("write empty trx");
+        fs::write(&ran, trx_with_counts(2, 1, 1)).expect("write ran trx");
+
+        let summary =
+            parse_reported_trx_files(&[empty, ran], UNIX_EPOCH).expect("both reports parse");
+
+        assert_eq!(summary.project_count, 2);
+        assert_eq!((summary.total, summary.passed, summary.failed), (2, 1, 1));
+    }
+
+    #[test]
+    fn test_find_reported_trx_paths_scans_adjacent_markers_and_deduplicates() {
+        let paths = find_reported_trx_paths(
+            "Results File: /tmp/first.trxResults File: /tmp/second.trx\n\
+             Results File: /tmp/first.trx\n\
+             Results File: /tmp/ignored.txt\n\
+             Results File: C:\\a b\\third.trx\r\n",
+        );
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/tmp/first.trx"),
+                PathBuf::from("/tmp/second.trx"),
+                PathBuf::from("C:\\a b\\third.trx"),
+            ]
+        );
     }
 
     #[test]
@@ -3050,8 +3330,13 @@ mod tests {
             duration_text: Some("1 s".to_string()),
         };
 
-        let merged =
-            merge_test_summary_from_trx(existing, Some(temp_dir.path()), None, SystemTime::now());
+        let merged = merge_test_summary_from_trx(
+            existing,
+            Some(temp_dir.path()),
+            None,
+            &[],
+            SystemTime::now(),
+        );
         assert_eq!(merged.total, 12);
         assert_eq!(merged.passed, 10);
         assert_eq!(merged.failed, 2);
@@ -3073,8 +3358,13 @@ mod tests {
             duration_text: Some("1 s".to_string()),
         };
 
-        let merged =
-            merge_test_summary_from_trx(existing, Some(temp_dir.path()), None, SystemTime::now());
+        let merged = merge_test_summary_from_trx(
+            existing,
+            Some(temp_dir.path()),
+            None,
+            &[],
+            SystemTime::now(),
+        );
         assert_eq!(merged.total, 12);
         assert_eq!(merged.passed, 10);
         assert_eq!(merged.failed, 2);
@@ -3098,8 +3388,13 @@ mod tests {
             duration_text: Some("1 s".to_string()),
         };
 
-        let merged =
-            merge_test_summary_from_trx(existing, Some(temp_dir.path()), None, SystemTime::now());
+        let merged = merge_test_summary_from_trx(
+            existing,
+            Some(temp_dir.path()),
+            None,
+            &[],
+            SystemTime::now(),
+        );
         assert_eq!(merged.project_count, 2);
     }
 
@@ -3141,18 +3436,26 @@ mod tests {
 
     #[test]
     fn test_resolve_trx_results_dir_user_directory_is_not_marked_for_cleanup() {
-        let args = vec![
-            "--results-directory".to_string(),
-            "/custom/results".to_string(),
-        ];
-
-        let (dir, cleanup) = resolve_trx_results_dir(
-            "test",
-            &tokenize_dotnet_args(&args),
-            TestRunnerMode::Classic,
-        );
-        assert_eq!(dir, Some(PathBuf::from("/custom/results")));
-        assert!(!cleanup);
+        for args in [
+            vec![
+                "--results-directory".to_string(),
+                "/custom/results".to_string(),
+            ],
+            vec![
+                "--results-directory".to_string(),
+                "/custom/results".to_string(),
+                "--logger".to_string(),
+                "trx".to_string(),
+            ],
+        ] {
+            let (dir, cleanup) = resolve_trx_results_dir(
+                "test",
+                &tokenize_dotnet_args(&args),
+                TestRunnerMode::Classic,
+            );
+            assert_eq!(dir, Some(PathBuf::from("/custom/results")), "{args:?}");
+            assert!(!cleanup, "{args:?}");
+        }
     }
 
     #[test]

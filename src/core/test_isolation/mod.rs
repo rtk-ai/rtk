@@ -597,6 +597,18 @@ fn a_child_keeps_none_of_the_shell_settings() {
     }
 }
 
+/// A proto or volta shim on PATH finds its toolchain through these roots when
+/// the developer exports them, and under the scratch home finds none. Without
+/// them only the go -json help test fails, and only on a machine with such a
+/// toolchain; the help comparisons pass on the manager's error against itself.
+/// This pins the roots on every machine.
+#[test]
+fn a_child_keeps_where_version_managers_keep_their_toolchains() {
+    for name in ["PROTO_HOME", "VOLTA_HOME"] {
+        assert!(scratch::kept(name), "{name} does not reach a child's shims");
+    }
+}
+
 /// `user_env` keeps a test on its own side, but a spawned rtk is built without
 /// `cfg(test)` and obeys whatever it inherits. Every variable rtk reads must
 /// therefore be pinned — to a fixed value, or a path inside the scratch
