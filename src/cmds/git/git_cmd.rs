@@ -2658,6 +2658,15 @@ fn classify_commit_outcome(
         if !stderr.is_empty() {
             return CommitOutcome::OkWithOutput;
         }
+        // A hook may also prefix the Git summary on stdout. Do not drop an
+        // unexpected leading line just because Git eventually succeeds.
+        // Only compact when the first line is a recognizable Git summary;
+        // empty successful output (e.g. --quiet) remains compact.
+        if let Some(first_line) = stdout.lines().next() {
+            if !first_line.starts_with('[') || parse_commit_output(first_line) == "ok" {
+                return CommitOutcome::OkWithOutput;
+            }
+        }
 
         // Extract the commit hash from the first stdout line. A normal successful
         // commit can have additional Git-owned statistics (files changed, modes,
@@ -6436,6 +6445,23 @@ no changes added to commit (use "git add" and/or "git commit -a")
             CommitOutcome::Ok(s) => assert_eq!(s, "ok abc1234"),
             CommitOutcome::OkWithOutput => panic!("ordinary git statistics must remain compacted"),
             CommitOutcome::Failed(_) => panic!("successful commit must be Ok"),
+        }
+    }
+
+    #[test]
+    fn test_classify_commit_success_preserves_stdout_hook_prefix() {
+        for output in [
+            "pre-commit: checks passed\n[main abc1234def] add feature\n",
+            "✅ hook: checks passed\n[main abc1234def] add feature\n",
+            "unexpected successful output without Git summary\n",
+        ] {
+            assert!(
+                matches!(
+                    classify_commit_outcome(true, output, "", 0),
+                    CommitOutcome::OkWithOutput
+                ),
+                "must preserve non-Git stdout rather than collapsing it: {output:?}"
+            );
         }
     }
 
