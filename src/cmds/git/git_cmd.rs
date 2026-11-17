@@ -2662,10 +2662,10 @@ fn classify_commit_outcome(
         // unexpected leading line just because Git eventually succeeds.
         // Only compact when the first line is a recognizable Git summary;
         // empty successful output (e.g. --quiet) remains compact.
-        if let Some(first_line) = stdout.lines().next() {
-            if !first_line.starts_with('[') || parse_commit_output(first_line) == "ok" {
-                return CommitOutcome::OkWithOutput;
-            }
+        if let Some(first_line) = stdout.lines().next()
+            && (!first_line.starts_with('[') || parse_commit_output(first_line) == "ok")
+        {
+            return CommitOutcome::OkWithOutput;
         }
 
         // Extract the commit hash from the first stdout line. A normal successful
