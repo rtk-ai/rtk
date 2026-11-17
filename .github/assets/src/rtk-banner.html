@@ -1,0 +1,33 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;600&family=JetBrains+Mono:wght@500&display=block" rel="stylesheet">
+<style>
+:root{--bg:#060b18;--text-bright:#f8fafc;--text-muted:#94a3b8;--text-dim:#7e8ca6;--accent:#00e599;--accent-hover:#00cc88;--accent-dim:rgba(0,229,153,.10);--accent-glow:rgba(0,229,153,.25);--scene:rgba(0,229,153,.09);--tint:rgba(0,229,153,.045);--vignette:rgba(0,0,0,.42);--grid:rgba(148,163,184,.05);--line:rgba(148,163,184,.14)}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:1280px;height:400px;background:transparent}
+.card{position:relative;width:1280px;height:400px;border-radius:20px;overflow:hidden;background:var(--bg);border:1px solid var(--line);isolation:isolate}
+.atmo{position:absolute;inset:0;z-index:-1;background-image:
+ radial-gradient(ellipse 60% 85% at 23% 50%,var(--scene),transparent 62%),
+ linear-gradient(180deg,transparent 4%,var(--tint) 42%,transparent 84%),
+ radial-gradient(ellipse 120% 105% at 50% 48%,transparent 56%,var(--vignette) 100%)}
+.grid{position:absolute;inset:0;z-index:-1;background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);background-size:40px 40px;-webkit-mask-image:radial-gradient(ellipse 42% 75% at 23% 50%,#000 20%,transparent 75%)}
+.row{display:flex;align-items:center;justify-content:center;height:100%;padding:0;gap:80px}
+.gate{position:relative;flex:0 0 220px;height:100%;display:flex;align-items:center;justify-content:center}
+.gate::before{content:'';position:absolute;left:50%;top:0;width:1px;height:100%;transform:translateX(-50%);background:linear-gradient(to bottom,transparent,var(--accent-glow) 30%,var(--accent-glow) 70%,transparent)}
+.gate::after{content:'';position:absolute;left:50%;top:50%;width:300px;height:300px;transform:translate(-50%,-50%);background:radial-gradient(circle,var(--accent-glow) 0%,transparent 62%);opacity:.7}
+.gate img{position:relative;z-index:1;width:176px;height:176px;filter:drop-shadow(0 0 10px var(--accent-glow)) drop-shadow(0 0 32px var(--accent-glow))}
+.copy{display:flex;flex-direction:column;gap:22px}
+.eyebrow{font-family:'JetBrains Mono',monospace;font-weight:500;font-size:15px;letter-spacing:.32em;text-transform:uppercase;color:var(--text-muted)}
+h1{font-family:'Geist','Inter',sans-serif;font-weight:600;font-size:76px;line-height:1.06;letter-spacing:-.025em;
+ background:linear-gradient(180deg,var(--text-bright) 0%,color-mix(in srgb,var(--text-bright) 45%,var(--text-muted)) 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+h1 em{font-style:normal;display:inline-block;background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 62%,var(--text-bright)) 0%,var(--accent) 58%,color-mix(in srgb,var(--accent-hover) 88%,var(--bg)) 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;filter:drop-shadow(0 0 22px var(--accent-dim))}
+</style></head>
+<body><div class="card"><div class="atmo"></div><div class="grid"></div>
+<div class="row">
+ <div class="gate"><img src="helmet.webp" alt=""></div>
+ <div class="copy">
+  <p class="eyebrow">RTK — Rust Token Killer</p>
+  <h1>Fewer tokens,<br><em>more possibilities.</em></h1>
+ </div>
+</div></div></body></html>

@@ -7,7 +7,7 @@
 //! # Architecture
 //!
 //! - Storage: SQLite database (~/.local/share/rtk/tracking.db)
-//! - Retention: 90-day automatic cleanup
+//! - Retention: automatic cleanup after `tracking.history_days` (default 90)
 //! - Metrics: Input/output tokens, savings %, execution time
 //!
 //! # Quick Start
@@ -97,6 +97,9 @@ use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB};
 /// ```
 pub struct Tracker {
     conn: Connection,
+    /// Retention window in days, resolved once at construction. `cleanup_old` runs on
+    /// every record, so this must not re-read the config file per call.
+    history_days: i64,
 }
 
 /// Individual command record from tracking history.
@@ -327,10 +330,12 @@ pub struct DayStats {
     pub total_time_ms: u64,
     /// Average execution time per timed command (milliseconds)
     pub avg_time_ms: u64,
-    /// Commands whose execution time counts toward `total_time_ms`: those with captured
-    /// input. A zero-input row (passthrough, fallback) filtered nothing, and its duration is
-    /// the wrapped process's lifetime — a whole interactive TUI session for `rtk claude`
-    /// (#4003) — so it would swamp the aggregate. Not exported: CSV/JSON keep their schema.
+    /// Commands whose execution time counts toward `total_time_ms`, as `is_timed_command`
+    /// decides from the stored label: filtered commands count, including filters that produced
+    /// zero output. Rows labelled passthrough (`rtk:passthrough …` or the legacy
+    /// `rtk … (passthrough)`), fallback, bypass or proxy do not, because their duration is the
+    /// wrapped process's lifetime, which can be a whole interactive TUI session (#4003).
+    /// Not exported: CSV/JSON keep their schema.
     #[serde(skip)]
     pub timed_commands: usize,
 }
@@ -338,12 +343,12 @@ pub struct DayStats {
 /// Weekly statistics for token savings and execution metrics.
 ///
 /// Serializable to JSON for export via `rtk gain --weekly --format json`.
-/// Weeks start on Sunday (SQLite default).
+/// Weeks run from Monday through Sunday.
 #[derive(Debug, Serialize)]
 pub struct WeekStats {
-    /// Week start date (YYYY-MM-DD)
+    /// Monday's date (YYYY-MM-DD)
     pub week_start: String,
-    /// Week end date (YYYY-MM-DD)
+    /// Sunday's date (YYYY-MM-DD)
     pub week_end: String,
     /// Number of commands executed this week
     pub commands: usize,
@@ -401,6 +406,41 @@ pub struct MonthStats {
 /// instead. `saved_tokens` is signed, so the rate can be negative where the 3rd field, being
 /// unsigned, is clamped to 0.
 type CommandStats = (String, usize, usize, f64, u64);
+
+/// Whether a stored row's elapsed time belongs to a filtered command run or to the lifetime of
+/// an unfiltered child process. A filtered `rtk <command>` label is timed even with zero input,
+/// since a real filter can produce no output.
+pub(crate) fn is_timed_command(rtk_cmd: &str) -> bool {
+    !(is_legacy_passthrough_command(rtk_cmd)
+        || rtk_cmd == "rtk:passthrough"
+        || rtk_cmd.starts_with("rtk:passthrough ")
+        || rtk_cmd.starts_with("rtk fallback:")
+        || rtk_cmd == "rtk bypass"
+        || rtk_cmd.starts_with("rtk bypass ")
+        || rtk_cmd == "rtk proxy"
+        || rtk_cmd.starts_with("rtk proxy "))
+}
+
+/// Releases up to v0.51.0 labelled passthrough rows `rtk <command> (passthrough)`. Similar text
+/// inside a label or with different casing is timed.
+fn is_legacy_passthrough_command(rtk_cmd: &str) -> bool {
+    rtk_cmd.starts_with("rtk ") && rtk_cmd.ends_with(" (passthrough)")
+}
+
+/// SQL equivalent of [`is_timed_command`] for aggregate queries.
+fn timing_sql(column: &str) -> String {
+    format!(
+        "CASE WHEN {column} = 'rtk:passthrough' \
+                OR {column} GLOB 'rtk:passthrough *' \
+                OR {column} GLOB 'rtk fallback:*' \
+                OR {column} = 'rtk (passthrough)' \
+                OR {column} GLOB 'rtk * (passthrough)' \
+                OR {column} = 'rtk bypass' \
+                OR {column} GLOB 'rtk bypass *' \
+                OR {column} = 'rtk proxy' \
+                OR {column} GLOB 'rtk proxy *' THEN 0 ELSE 1 END"
+    )
+}
 
 /// Mean execution time over the timed commands only (see [`DayStats::timed_commands`]).
 pub fn average_time_ms(total_time_ms: u64, timed_commands: usize) -> u64 {
@@ -648,6 +688,7 @@ const SUBCOMMAND_ROUTERS: &[&str] = &[
     "kubectl",
     "mvn",
     "next",
+    "ng",
     "npm",
     "php",
     "pip",
@@ -815,6 +856,7 @@ impl Tracker {
     pub fn new() -> Result<Self> {
         Ok(Self {
             conn: open_and_prepare(MigrationMode::GatedByVersion)?,
+            history_days: configured_history_days(),
         })
     }
 
@@ -827,13 +869,16 @@ impl Tracker {
     pub fn new_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("Failed to open in-memory DB")?;
         run_schema_migrations(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            history_days: DEFAULT_HISTORY_DAYS,
+        })
     }
 
     /// Record a command execution with token counts and timing.
     ///
     /// Calculates savings metrics and stores the record in the database.
-    /// Automatically cleans up records older than 90 days after insertion.
+    /// Automatically cleans up records beyond the configured retention after insertion.
     ///
     /// # Arguments
     ///
@@ -988,24 +1033,26 @@ impl Tracker {
     }
 
     fn cleanup_old(&self) -> Result<()> {
-        let cutoff = Utc::now() - chrono::Duration::days(DEFAULT_HISTORY_DAYS);
-        self.conn.execute(
-            "DELETE FROM commands WHERE timestamp < ?1",
-            params![cutoff.to_rfc3339()],
-        )?;
+        let Some(cutoff) = Utc::now().checked_sub_signed(chrono::Duration::days(self.history_days))
+        else {
+            return Ok(());
+        };
+        let cutoff_day = cutoff.format("%Y-%m-%d").to_string();
+        let cutoff = cutoff.to_rfc3339();
+        self.conn
+            .execute("DELETE FROM commands WHERE timestamp < ?1", params![cutoff])?;
         self.conn.execute(
             "DELETE FROM recall_events WHERE timestamp < ?1",
-            params![cutoff.to_rfc3339()],
+            params![cutoff],
         )?;
         self.conn.execute(
             "DELETE FROM parse_failures WHERE timestamp < ?1",
-            params![cutoff.to_rfc3339()],
+            params![cutoff],
         )?;
         self.conn.execute(
             "DELETE FROM hook_decisions WHERE timestamp < ?1",
-            params![cutoff.to_rfc3339()],
+            params![cutoff],
         )?;
-        let cutoff_day = cutoff.format("%Y-%m-%d").to_string();
         self.conn.execute(
             "DELETE FROM engine_attribution WHERE day < ?1",
             params![cutoff_day],
@@ -1266,7 +1313,10 @@ impl Tracker {
     /// `maybe_cleanup_hook_decisions` so it's directly callable (bypassing the
     /// sampling gate) from tests without needing to hit the 1-in-N chance for real.
     fn cleanup_hook_decisions(&self) -> Result<()> {
-        let cutoff = Utc::now() - chrono::Duration::days(DEFAULT_HISTORY_DAYS);
+        let Some(cutoff) = Utc::now().checked_sub_signed(chrono::Duration::days(self.history_days))
+        else {
+            return Ok(());
+        };
         self.conn.execute(
             "DELETE FROM hook_decisions WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
@@ -1311,9 +1361,9 @@ impl Tracker {
 
     /// Earliest timestamp among *currently-retained* hook decision rows, if any
     /// exist. NOT the date logging first began: `hook_decisions` is pruned by the
-    /// same `DEFAULT_HISTORY_DAYS` window as the rest of the tracking DB (see
+    /// same `tracking.history_days` window as the rest of the tracking DB (see
     /// `cleanup_hook_decisions`), so this rolls forward over time — on a
-    /// long-running install it settles at roughly "now minus `DEFAULT_HISTORY_DAYS`",
+    /// long-running install it settles at roughly "now minus `tracking.history_days`",
     /// not the true install date.
     ///
     /// Used to tell `rtk discover` where the "measured" window currently starts —
@@ -1430,7 +1480,7 @@ impl Tracker {
         let mut timed_commands = 0usize;
 
         let mut stmt = self.conn.prepare(
-            "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms
+            "SELECT rtk_cmd, input_tokens, output_tokens, saved_tokens, exec_time_ms
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)", // added: project filter
         )?;
@@ -1438,17 +1488,18 @@ impl Tracker {
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             // added: params
             Ok((
-                row.get::<_, i64>(0)? as usize,
+                row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)? as usize,
+                row.get::<_, i64>(2)? as usize,
                 // saved_tokens may be negative (a command that worsened output); clamp
                 // to 0 for the unsigned aggregate so it never wraps to a huge usize.
-                row.get::<_, i64>(2)?.max(0) as usize,
-                row.get::<_, i64>(3)? as u64,
+                row.get::<_, i64>(3)?.max(0) as usize,
+                row.get::<_, i64>(4)? as u64,
             ))
         })?;
 
         for row in rows {
-            let (input, output, saved, time_ms) = row?;
+            let (rtk_cmd, input, output, saved, time_ms) = row?;
             if input > HEADLINE_INPUT_CAP_TOKENS {
                 oversized_excluded += 1;
                 continue;
@@ -1457,7 +1508,7 @@ impl Tracker {
             total_input += input;
             total_output += output;
             total_saved += saved;
-            if input > 0 {
+            if is_timed_command(&rtk_cmd) {
                 total_time_ms += time_ms;
                 timed_commands += 1;
             }
@@ -1493,15 +1544,18 @@ impl Tracker {
         project_path: Option<&str>, // added
     ) -> Result<Vec<CommandStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
+        let timing = timing_sql("rtk_cmd");
         let mut stmt = self.conn.prepare(
-            "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens),
+            &format!(
+                "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens),
                     CASE WHEN SUM(input_tokens) > 0 THEN SUM(saved_tokens) * 100.0 / SUM(input_tokens) ELSE 0.0 END,
-                    AVG(exec_time_ms)
+                    COALESCE(AVG(CASE WHEN {timing} = 1 THEN exec_time_ms END), 0.0)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY rtk_cmd
              ORDER BY SUM(saved_tokens) DESC
-             LIMIT 10", // added: project filter in WHERE
+             LIMIT 10"
+            ), // added: project filter in WHERE
         )?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
@@ -1572,20 +1626,23 @@ impl Tracker {
     /// Get daily statistics filtered by project path. // added
     pub fn get_all_days_filtered(&self, project_path: Option<&str>) -> Result<Vec<DayStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
+        let timing = timing_sql("rtk_cmd");
         let mut stmt = self.conn.prepare(
-            "SELECT
+            &format!(
+                "SELECT
                 DATE(timestamp) as date,
                 COUNT(*) as commands,
                 SUM(input_tokens) as input,
                 SUM(output_tokens) as output,
                 SUM(saved_tokens) as saved,
-                SUM(CASE WHEN input_tokens > 0 THEN exec_time_ms ELSE 0 END) as total_time,
-                SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) as timed_commands
+                SUM(CASE WHEN {timing} = 1 THEN exec_time_ms ELSE 0 END) as total_time,
+                SUM(CASE WHEN {timing} = 1 THEN 1 ELSE 0 END) as timed_commands
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
                AND input_tokens <= ?3
              GROUP BY DATE(timestamp)
-             ORDER BY DATE(timestamp) DESC", // added: project filter
+             ORDER BY DATE(timestamp) DESC"
+            ), // added: project filter
         )?;
 
         let rows = stmt.query_map(
@@ -1629,7 +1686,7 @@ impl Tracker {
     /// Get weekly statistics grouped by week.
     ///
     /// Returns one [`WeekStats`] per week with aggregated metrics.
-    /// Weeks start on Sunday (SQLite default). Results ordered chronologically.
+    /// Weeks run from Monday through Sunday. Results ordered chronologically.
     ///
     /// # Examples
     ///
@@ -1651,21 +1708,24 @@ impl Tracker {
     /// Get weekly statistics filtered by project path. // added
     pub fn get_by_week_filtered(&self, project_path: Option<&str>) -> Result<Vec<WeekStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
+        let timing = timing_sql("rtk_cmd");
         let mut stmt = self.conn.prepare(
-            "SELECT
+            &format!(
+                "SELECT
                 DATE(timestamp, 'weekday 0', '-6 days') as week_start,
                 DATE(timestamp, 'weekday 0') as week_end,
                 COUNT(*) as commands,
                 SUM(input_tokens) as input,
                 SUM(output_tokens) as output,
                 SUM(saved_tokens) as saved,
-                SUM(CASE WHEN input_tokens > 0 THEN exec_time_ms ELSE 0 END) as total_time,
-                SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) as timed_commands
+                SUM(CASE WHEN {timing} = 1 THEN exec_time_ms ELSE 0 END) as total_time,
+                SUM(CASE WHEN {timing} = 1 THEN 1 ELSE 0 END) as timed_commands
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
                AND input_tokens <= ?3
              GROUP BY week_start
-             ORDER BY week_start DESC", // added: project filter
+             ORDER BY week_start DESC"
+            ), // added: project filter
         )?;
 
         let rows = stmt.query_map(
@@ -1732,20 +1792,23 @@ impl Tracker {
     /// Get monthly statistics filtered by project path. // added
     pub fn get_by_month_filtered(&self, project_path: Option<&str>) -> Result<Vec<MonthStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
+        let timing = timing_sql("rtk_cmd");
         let mut stmt = self.conn.prepare(
-            "SELECT
+            &format!(
+                "SELECT
                 strftime('%Y-%m', timestamp) as month,
                 COUNT(*) as commands,
                 SUM(input_tokens) as input,
                 SUM(output_tokens) as output,
                 SUM(saved_tokens) as saved,
-                SUM(CASE WHEN input_tokens > 0 THEN exec_time_ms ELSE 0 END) as total_time,
-                SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) as timed_commands
+                SUM(CASE WHEN {timing} = 1 THEN exec_time_ms ELSE 0 END) as total_time,
+                SUM(CASE WHEN {timing} = 1 THEN 1 ELSE 0 END) as timed_commands
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
                AND input_tokens <= ?3
              GROUP BY month
-             ORDER BY month DESC", // added: project filter
+             ORDER BY month DESC"
+            ), // added: project filter
         )?;
 
         let rows = stmt.query_map(
@@ -2171,6 +2234,28 @@ fn db_sidecars(db_path: &std::path::Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Retention window for `cleanup_old`, from `tracking.history_days`.
+///
+/// A config that fails to load, including a `[tracking]` section that omits
+/// `history_days` (the field has no serde default, so a partial section fails the
+/// whole parse), reaches here as `cached_config`'s default, 90 days. A non-positive
+/// value falls back to the default rather than being honored: a typo'd `0` would
+/// otherwise delete the entire history on the next write.
+fn configured_history_days() -> i64 {
+    resolve_history_days(Some(
+        crate::core::config::cached_config().tracking.history_days,
+    ))
+}
+
+/// Clamping half of [`configured_history_days`], split out so it is testable without
+/// touching the real config file.
+fn resolve_history_days(configured: Option<u32>) -> i64 {
+    configured
+        .map(i64::from)
+        .filter(|d| *d > 0)
+        .unwrap_or(DEFAULT_HISTORY_DAYS)
+}
+
 /// The database to open: `RTK_DB_PATH` where set, otherwise the configured or
 /// default path. In a test build it is the file the test named in
 /// `RTK_DB_PATH` or its own configuration, or else its scratch database: an
@@ -2435,9 +2520,9 @@ impl TimedExecution {
     ///
     /// For commands that stream output or run interactively where output
     /// cannot be captured. Records execution time but sets tokens to 0
-    /// (does not dilute savings statistics). The zero input also keeps the
-    /// row out of the `rtk gain` exec-time aggregates, since its duration is
-    /// the wrapped process's lifetime, not filtering work.
+    /// (does not dilute savings statistics). Its canonical stored label keeps
+    /// the row out of the `rtk gain` exec-time aggregates, since its duration
+    /// is the wrapped process's lifetime, not filtering work.
     ///
     /// # Arguments
     ///
@@ -2459,7 +2544,8 @@ impl TimedExecution {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
         // input_tokens=0, output_tokens=0 won't dilute savings statistics
         if let Ok(tracker) = Tracker::new() {
-            let _ = tracker.record(original_cmd, rtk_cmd, 0, 0, elapsed_ms);
+            let label = normalize_passthrough_label(rtk_cmd);
+            let _ = tracker.record(original_cmd, &label, 0, 0, elapsed_ms);
         }
     }
 }
@@ -2469,6 +2555,21 @@ impl TimedExecution {
 /// back as the words that ran.
 pub fn passthrough_label(command: &str) -> String {
     format!("rtk:passthrough {command}")
+}
+
+/// Normalize older passthrough callers that supplied an ordinary `rtk` label.
+/// Keep canonical and fallback labels intact so their command identity remains readable.
+fn normalize_passthrough_label(rtk_cmd: &str) -> String {
+    if rtk_cmd == "rtk:passthrough"
+        || rtk_cmd.starts_with("rtk:passthrough ")
+        || rtk_cmd.starts_with("rtk fallback:")
+    {
+        rtk_cmd.to_owned()
+    } else if let Some(command) = rtk_cmd.strip_prefix("rtk ") {
+        passthrough_label(command)
+    } else {
+        rtk_cmd.to_owned()
+    }
 }
 
 /// Format OsString args for tracking display.
@@ -2542,6 +2643,7 @@ mod command_label_tests {
                 "rtk gh issue",
             ),
             ("rtk cargo test --all", "rtk cargo test"),
+            ("rtk ng build app", "rtk ng build"),
             ("rtk docker compose up", "rtk docker compose"),
             // A wrapper script and its bare name are the same tool.
             ("rtk ./gradlew build", "rtk gradlew build"),
@@ -2889,6 +2991,285 @@ mod command_label_tests {
 mod tests {
     use super::*;
     use crate::core::test_isolation;
+
+    // Fixed timestamps bypass record(), which uses the wall clock and prunes old
+    // rows. The in-memory tracker still creates the real production schema.
+    fn insert_weekly_command(
+        tracker: &Tracker,
+        timestamp: &str,
+        project_path: &str,
+        rtk_cmd: &str,
+        input: i64,
+        output: i64,
+        exec_time_ms: i64,
+    ) {
+        let saved = input - output;
+        let savings_pct = if input > 0 {
+            saved as f64 / input as f64 * 100.0
+        } else {
+            0.0
+        };
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path,
+                 input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+                 VALUES (?1, 'fixture command', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    timestamp,
+                    rtk_cmd,
+                    project_path,
+                    input,
+                    output,
+                    saved,
+                    savings_pct,
+                    exec_time_ms
+                ],
+            )
+            .expect("Failed to insert weekly command fixture");
+    }
+
+    #[test]
+    fn test_get_by_week_groups_all_weekdays_monday_through_sunday() {
+        for dates in [
+            [
+                "2026-09-28",
+                "2026-09-29",
+                "2026-09-30",
+                "2026-10-01",
+                "2026-10-02",
+                "2026-10-03",
+                "2026-10-04",
+            ],
+            // ISO week 2020-W53 crosses the calendar-year boundary.
+            [
+                "2020-12-28",
+                "2020-12-29",
+                "2020-12-30",
+                "2020-12-31",
+                "2021-01-01",
+                "2021-01-02",
+                "2021-01-03",
+            ],
+            // The leap day belongs to the same Monday-to-Sunday week.
+            [
+                "2024-02-26",
+                "2024-02-27",
+                "2024-02-28",
+                "2024-02-29",
+                "2024-03-01",
+                "2024-03-02",
+                "2024-03-03",
+            ],
+        ] {
+            let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+            for date in dates {
+                insert_weekly_command(
+                    &tracker,
+                    &format!("{date}T12:00:00Z"),
+                    "",
+                    "rtk git status",
+                    100,
+                    25,
+                    10,
+                );
+            }
+
+            let weeks = tracker.get_by_week().expect("Failed to get weeks");
+            assert_eq!(
+                weeks.len(),
+                1,
+                "All seven dates must share a week: {dates:?}"
+            );
+            let week = &weeks[0];
+            assert_eq!(week.week_start, dates[0]);
+            assert_eq!(week.week_end, dates[6]);
+            assert_eq!(week.commands, 7);
+            assert_eq!(week.input_tokens, 700);
+            assert_eq!(week.output_tokens, 175);
+            assert_eq!(week.saved_tokens, 525);
+        }
+    }
+
+    #[test]
+    fn test_get_by_week_sunday_monday_boundaries_are_chronological() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        // Deliberately insert out of order, one second either side of both
+        // boundaries of the week beginning 2026-09-28.
+        for (timestamp, input) in [
+            ("2026-10-05T00:00:00Z", 40),
+            ("2026-09-28T00:00:00Z", 20),
+            ("2026-10-04T23:59:59Z", 30),
+            ("2026-09-27T23:59:59Z", 10),
+        ] {
+            insert_weekly_command(&tracker, timestamp, "", "rtk git status", input, 1, input);
+        }
+
+        let weeks = tracker.get_by_week().expect("Failed to get weeks");
+        let actual: Vec<_> = weeks
+            .iter()
+            .map(|week| {
+                (
+                    week.week_start.as_str(),
+                    week.week_end.as_str(),
+                    week.commands,
+                    week.input_tokens,
+                    week.total_time_ms,
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                ("2026-09-21", "2026-09-27", 1, 10, 10),
+                ("2026-09-28", "2026-10-04", 2, 50, 50),
+                ("2026-10-05", "2026-10-11", 1, 40, 40),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_get_by_week_aggregates_weighted_savings_and_execution_time() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        for (timestamp, command, input, output, time) in [
+            ("2026-09-28T09:00:00Z", "rtk git status", 900, 90, 101),
+            ("2026-10-02T12:00:00Z", "rtk ls", 100, 90, 202),
+            ("2026-10-04T23:59:59Z", "rtk proxy true", 0, 0, 8),
+        ] {
+            insert_weekly_command(&tracker, timestamp, "", command, input, output, time);
+        }
+
+        let weeks = tracker.get_by_week().expect("Failed to get weeks");
+        assert_eq!(weeks.len(), 1);
+        let week = &weeks[0];
+        assert_eq!(week.commands, 3);
+        assert_eq!(week.input_tokens, 1000);
+        assert_eq!(week.output_tokens, 180);
+        assert_eq!(week.saved_tokens, 820);
+        // A mean of the individual rates (90%, 10%, 0%) would be incorrect.
+        assert!((week.savings_pct - 82.0).abs() < 1e-9);
+        assert_eq!(week.total_time_ms, 303);
+        assert_eq!(week.avg_time_ms, 151);
+        assert_eq!(week.timed_commands, 2);
+    }
+
+    #[test]
+    fn test_get_by_week_zero_input_has_zero_savings_rate() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        for (timestamp, time) in [("2026-09-28T00:00:00Z", 7), ("2026-10-04T23:59:59Z", 12)] {
+            insert_weekly_command(&tracker, timestamp, "", "rtk proxy true", 0, 0, time);
+        }
+
+        let weeks = tracker.get_by_week().expect("Failed to get weeks");
+        assert_eq!(weeks.len(), 1);
+        let week = &weeks[0];
+        assert_eq!(week.commands, 2);
+        assert_eq!(week.input_tokens, 0);
+        assert_eq!(week.output_tokens, 0);
+        assert_eq!(week.saved_tokens, 0);
+        assert_eq!(week.savings_pct, 0.0);
+        assert_eq!(week.total_time_ms, 0);
+        assert_eq!(week.avg_time_ms, 0);
+        assert_eq!(week.timed_commands, 0);
+    }
+
+    #[test]
+    fn test_get_by_week_project_filter_includes_exact_and_child_not_sibling() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        let project = PathBuf::from("projects").join("demo");
+        let child = project.join("child");
+        let sibling = PathBuf::from("projects").join("demo-sibling");
+        let unrelated = PathBuf::from("elsewhere");
+        for (path, input, output, time) in [
+            (&project, 100, 20, 10),
+            (&child, 200, 50, 20),
+            (&sibling, 400, 0, 40),
+            (&unrelated, 800, 0, 80),
+        ] {
+            insert_weekly_command(
+                &tracker,
+                "2026-09-28T12:00:00Z",
+                &path.to_string_lossy(),
+                "rtk git status",
+                input,
+                output,
+                time,
+            );
+        }
+
+        let weeks = tracker
+            .get_by_week_filtered(Some(&project.to_string_lossy()))
+            .expect("Failed to get project weeks");
+        assert_eq!(weeks.len(), 1);
+        let week = &weeks[0];
+        assert_eq!(week.week_start, "2026-09-28");
+        assert_eq!(week.week_end, "2026-10-04");
+        assert_eq!(week.commands, 2);
+        assert_eq!(week.input_tokens, 300);
+        assert_eq!(week.output_tokens, 70);
+        assert_eq!(week.saved_tokens, 230);
+        assert!((week.savings_pct - 230.0 / 300.0 * 100.0).abs() < 1e-9);
+        assert_eq!(week.total_time_ms, 30);
+        assert_eq!(week.avg_time_ms, 15);
+        assert_eq!(
+            tracker.get_by_week().expect("Failed to get all weeks")[0].commands,
+            4
+        );
+        assert!(
+            tracker
+                .get_by_week_filtered(Some("missing-project"))
+                .expect("Failed to query missing project")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn monday_week_join_preserves_input_eligibility_boundary() {
+        let tracker = Tracker::new_in_memory().unwrap();
+        insert_weekly_command(
+            &tracker,
+            "2026-09-28T12:00:00Z",
+            "",
+            "rtk eligible",
+            7500,
+            1500,
+            5,
+        );
+        insert_weekly_command(
+            &tracker,
+            "2026-10-04T23:59:59Z",
+            "",
+            "rtk oversized",
+            7501,
+            0,
+            20,
+        );
+        let weeks = tracker.get_by_week().unwrap();
+        assert_eq!(weeks.len(), 1);
+        assert_eq!(weeks[0].week_start, "2026-09-28");
+        assert_eq!(weeks[0].week_end, "2026-10-04");
+        assert_eq!(weeks[0].commands, 1);
+        assert_eq!(weeks[0].input_tokens, 7500);
+        assert_eq!(weeks[0].saved_tokens, 6000);
+        assert_eq!(weeks[0].total_time_ms, 5);
+    }
+
+    #[test]
+    fn test_get_by_week_empty_database() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        assert!(
+            tracker
+                .get_by_week()
+                .expect("Failed to get weeks")
+                .is_empty()
+        );
+        assert!(
+            tracker
+                .get_by_week_filtered(Some("project"))
+                .expect("Failed to get project weeks")
+                .is_empty()
+        );
+    }
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
@@ -3375,19 +3756,30 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
         user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
             let timer = TimedExecution::start();
-            timer.track_passthrough("git tag", &passthrough_label("git tag"));
+            timer.track_passthrough("git tag", "rtk git tag");
+            timer.track_passthrough(
+                "git show HEAD:file.txt",
+                "rtk:passthrough git show HEAD:file.txt",
+            );
+            timer.track_passthrough("claude", "rtk fallback: claude");
 
             let tracker = Tracker::new().expect("Failed to create tracker");
             let recent = tracker.get_recent(5).expect("Failed to get recent");
 
-            let pt = recent
-                .iter()
-                .find(|r| r.rtk_cmd.contains("passthrough"))
-                .expect("Passthrough record not found");
+            for label in [
+                "rtk:passthrough git tag",
+                "rtk:passthrough git show HEAD:file.txt",
+                "rtk fallback: claude",
+            ] {
+                let pt = recent
+                    .iter()
+                    .find(|r| r.rtk_cmd == label)
+                    .unwrap_or_else(|| panic!("Passthrough record not found: {label}"));
 
-            // savings_pct should be 0 for passthrough
-            assert_eq!(pt.savings_pct, 0.0);
-            assert_eq!(pt.saved_tokens, 0);
+                // savings_pct should be 0 for passthrough
+                assert_eq!(pt.savings_pct, 0.0);
+                assert_eq!(pt.saved_tokens, 0);
+            }
         });
         // nosemgrep: filesystem-deletion -- test-only cleanup of this test's own throwaway temp DB file, not production/user data.
         let _ = std::fs::remove_file(&db_path);
@@ -3564,6 +3956,275 @@ mod tests {
         let summary = tracker.get_parse_failure_summary().unwrap();
         // Isolated DB, so the rate is now exact: 2/3 successes ≈ 66.7%.
         assert!((summary.recovery_rate - 66.7).abs() < 0.1);
+    }
+
+    /// Backdated tracker: one row per retained history table 10 days old,
+    /// with an explicit retention window.
+    #[cfg(test)]
+    fn tracker_with_10_day_old_rows(history_days: i64) -> Tracker {
+        tracker_with_rows_aged(history_days, 10)
+    }
+
+    /// Backdated tracker: one row per retained history table `age_days` old,
+    /// with an explicit retention window.
+    fn tracker_with_rows_aged(history_days: i64, age_days: i64) -> Tracker {
+        let mut t = Tracker::new_in_memory().expect("in-memory tracker");
+        t.history_days = history_days;
+        let old = Utc::now() - chrono::Duration::days(age_days);
+        let old_day = old.format("%Y-%m-%d").to_string();
+        let old = old.to_rfc3339();
+        t.conn
+            .execute(
+                "INSERT INTO commands
+                 (timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens,
+                  saved_tokens, savings_pct, exec_time_ms, project_path)
+                 VALUES (?1, 'old cmd', 'rtk old cmd', 100, 20, 80, 80.0, 0, '')",
+                params![old],
+            )
+            .expect("insert backdated command");
+        t.conn
+            .execute(
+                "INSERT INTO parse_failures
+                 (timestamp, raw_command, error_message, fallback_succeeded)
+                 VALUES (?1, 'old raw', 'old err', 1)",
+                params![old],
+            )
+            .expect("insert backdated parse failure");
+        t.conn
+            .execute(
+                "INSERT INTO hook_decisions
+                 (timestamp, session_id, tool_use_id, raw_cmd, decision, rtk_version)
+                 VALUES (?1, 'old session', 'old tool', 'old raw', 'allow', '0.51.0')",
+                params![old],
+            )
+            .expect("insert backdated hook decision");
+        t.conn
+            .execute(
+                "INSERT INTO engine_attribution
+                 (day, site, kind, name, calls, tokens_in, tokens_out)
+                 VALUES (?1, 'old site', 'pipeline', 'old pipeline', 1, 100, 20)",
+                params![old_day],
+            )
+            .expect("insert backdated engine attribution");
+        t
+    }
+
+    #[test]
+    fn test_recall_cleanup_respects_configured_retention() {
+        for (history_days, expected) in [(3, 0), (30, 1)] {
+            let t = tracker_with_10_day_old_rows(history_days);
+            let old = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+            t.conn.execute(
+                "INSERT INTO recall_events (event_id, timestamp, emitted_bytes, output_tokens) VALUES ('old', ?1, 4, 1)",
+                params![old],
+            ).unwrap();
+            t.conn.execute(
+                "INSERT INTO recall_events (event_id, timestamp, emitted_bytes, output_tokens) VALUES ('fresh', ?1, 4, 1)",
+                params![Utc::now().to_rfc3339()],
+            ).unwrap();
+            t.cleanup_old().unwrap();
+            let old_count: i64 = t
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM recall_events WHERE event_id = 'old'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let fresh_count: i64 = t
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM recall_events WHERE event_id = 'fresh'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(old_count, expected);
+            assert_eq!(fresh_count, 1);
+        }
+    }
+
+    // Regression: cleanup_old hardcoded DEFAULT_HISTORY_DAYS, so tracking.history_days
+    // was declared, defaulted, written into config.toml, documented — and never read.
+    // Both directions are asserted deliberately: a hardcoded 90 still passes the
+    // "retained" half, so only the "pruned" half catches the regression, and only the
+    // pair proves the field is what drives the cutoff.
+    #[test]
+    fn test_cleanup_old_prunes_beyond_configured_history_days() {
+        let t = tracker_with_10_day_old_rows(3);
+
+        t.record("git status", "rtk git status fresh", 100, 20, 5)
+            .expect("record triggers cleanup_old");
+
+        let stale: i64 = t
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM commands WHERE rtk_cmd = 'rtk old cmd'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count commands");
+        assert_eq!(
+            stale, 0,
+            "10-day-old command should be pruned at 3-day retention"
+        );
+
+        let stale_pf: i64 = t
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM parse_failures WHERE raw_command = 'old raw'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count parse_failures");
+        assert_eq!(
+            stale_pf, 0,
+            "10-day-old parse failure should be pruned at 3-day retention"
+        );
+        assert!(
+            t.hook_decisions_since(DateTime::<Utc>::MIN_UTC)
+                .expect("query hook decisions")
+                .is_empty(),
+            "10-day-old hook decision should be pruned at 3-day retention"
+        );
+        assert!(
+            t.attribution("pipeline", 30)
+                .expect("query engine attribution")
+                .is_empty(),
+            "10-day-old engine attribution should be pruned at 3-day retention"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_old_retains_within_configured_history_days() {
+        let t = tracker_with_10_day_old_rows(30);
+
+        t.record("git status", "rtk git status fresh", 100, 20, 5)
+            .expect("record triggers cleanup_old");
+
+        let stale: i64 = t
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM commands WHERE rtk_cmd = 'rtk old cmd'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count commands");
+        assert_eq!(
+            stale, 1,
+            "10-day-old command should survive 30-day retention"
+        );
+        assert_eq!(
+            t.hook_decisions_since(DateTime::<Utc>::MIN_UTC)
+                .expect("query hook decisions")
+                .len(),
+            1,
+            "10-day-old hook decision should survive 30-day retention"
+        );
+        assert_eq!(
+            t.attribution("pipeline", 30)
+                .expect("query engine attribution")
+                .len(),
+            1,
+            "10-day-old engine attribution should survive 30-day retention"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_hook_decisions_uses_configured_history_days() {
+        for (history_days, expected) in [(3, 0), (30, 1)] {
+            let t = tracker_with_10_day_old_rows(history_days);
+            t.cleanup_hook_decisions().expect("cleanup hook decisions");
+            assert_eq!(
+                t.hook_decisions_since(DateTime::<Utc>::MIN_UTC)
+                    .expect("query hook decisions")
+                    .len(),
+                expected,
+                "10-day-old hook decision at {history_days}-day retention"
+            );
+        }
+    }
+
+    // The rows are older than DEFAULT_HISTORY_DAYS, so falling back to the default
+    // window would prune them: an unrepresentable cutoff keeps everything.
+    #[test]
+    fn test_cleanup_old_retains_with_unrepresentable_cutoff() {
+        for history_days in [99_999_999, i64::from(u32::MAX)] {
+            let t = tracker_with_rows_aged(history_days, 400);
+            t.record("git status", "rtk git status fresh", 100, 20, 5)
+                .expect("record with an unrepresentable cutoff");
+
+            for (table, expected) in [
+                ("commands", 2),
+                ("parse_failures", 1),
+                ("hook_decisions", 1),
+                ("engine_attribution", 1),
+            ] {
+                let count: i64 = t
+                    .conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                    .expect("count retained rows");
+                assert_eq!(count, expected, "{table} at {history_days}-day retention");
+            }
+        }
+    }
+
+    #[test]
+    fn test_cleanup_hook_decisions_retains_with_unrepresentable_cutoff() {
+        for history_days in [99_999_999, i64::from(u32::MAX)] {
+            let t = tracker_with_rows_aged(history_days, 400);
+            t.cleanup_hook_decisions()
+                .expect("hook cleanup with an unrepresentable cutoff");
+            assert_eq!(
+                t.hook_decisions_since(DateTime::<Utc>::MIN_UTC)
+                    .expect("query hook decisions")
+                    .len(),
+                1,
+                "400-day-old hook decision at {history_days}-day retention"
+            );
+        }
+    }
+
+    #[test]
+    fn test_tracker_new_reads_configured_history_days() {
+        let root = test_isolation::tempdir();
+        test_isolation::with_root(root.path(), || {
+            let config_dir = user_dirs::config().expect("isolated config directory");
+            std::fs::create_dir_all(&config_dir).expect("create config directory");
+            std::fs::write(
+                config_dir.join("config.toml"),
+                "[tracking]\nenabled = true\nhistory_days = 7\n",
+            )
+            .expect("write tracking config");
+
+            let db_path = root.path().join("configured-history.db");
+            user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
+                let t = Tracker::new().expect("tracker from config");
+                assert_eq!(t.history_days, 7);
+            });
+        });
+    }
+
+    #[test]
+    fn test_resolve_history_days() {
+        assert_eq!(
+            resolve_history_days(Some(30)),
+            30,
+            "honors a configured value"
+        );
+        // A missing/unparseable config (including a [tracking] section that omits
+        // history_days, which fails the whole parse) must not change retention.
+        assert_eq!(
+            resolve_history_days(None),
+            DEFAULT_HISTORY_DAYS,
+            "absent config falls back to the default"
+        );
+        // A typo'd 0 would otherwise delete the entire history on the next write.
+        assert_eq!(
+            resolve_history_days(Some(0)),
+            DEFAULT_HISTORY_DAYS,
+            "zero falls back rather than wiping history"
+        );
     }
 
     #[test]
@@ -4124,10 +4785,10 @@ mod tests {
         tracker
     }
 
-    // 20. A zero-input row did no filtering, so its wall-clock lifetime must not reach the
-    // exec-time aggregate or its average. Commands and savings still count every row.
+    // 20. An unfiltered lifetime must not reach the exec-time aggregate or its average.
+    // Commands and savings still count every row, regardless of input tokens.
     #[test]
-    fn test_summary_exec_time_excludes_zero_input_rows() {
+    fn test_summary_exec_time_excludes_unfiltered_lifetimes() {
         let summary = tracker_with_interactive_session()
             .get_summary()
             .expect("Failed to get summary");
@@ -4141,7 +4802,7 @@ mod tests {
 
     // 21. The daily / weekly / monthly breakdowns (text, JSON and CSV) apply the same rule.
     #[test]
-    fn test_period_exec_time_excludes_zero_input_rows() {
+    fn test_period_exec_time_excludes_unfiltered_lifetimes() {
         let tracker = tracker_with_interactive_session();
 
         let days = tracker.get_all_days().expect("get_all_days");
@@ -4172,6 +4833,238 @@ mod tests {
             assert_eq!(commands, 4, "{period}: every row still counts as a command");
             assert_eq!(total_time_ms, 600, "{period}: total exec time");
             assert_eq!(avg_time_ms, 200, "{period}: avg exec time");
+        }
+    }
+
+    // 22. A silent filtered row keeps its timing, while canonical passthrough and fallback
+    // labels remain untimed. This is the distinction required by issue #4671.
+    #[test]
+    fn test_timing_classification_keeps_silent_filters_out_of_unfiltered_lifetimes() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        tracker
+            .record("grep none", "rtk grep", 0, 0, 7)
+            .expect("record silent filtered command");
+        tracker
+            .record("grep hit", "rtk grep", 100, 80, 13)
+            .expect("record ordinary filtered command");
+        tracker
+            .record(
+                "git tag --list",
+                "rtk:passthrough git tag --list",
+                0,
+                0,
+                1_000,
+            )
+            .expect("record passthrough command");
+        tracker
+            .record("claude", "rtk fallback: claude", 0, 0, 2_000)
+            .expect("record fallback command");
+
+        let summary = tracker.get_summary().expect("get_summary");
+        assert_eq!(summary.total_commands, 4);
+        assert_eq!(summary.total_input, 100);
+        assert_eq!(summary.total_output, 80);
+        assert_eq!(summary.total_saved, 20);
+        assert_eq!(summary.total_time_ms, 20);
+        assert_eq!(summary.avg_time_ms, 10);
+
+        let grep = summary
+            .by_command
+            .iter()
+            .find(|(command, ..)| command == "rtk grep")
+            .expect("rtk grep stats");
+        assert_eq!(grep.1, 2, "silent rows still count as commands");
+        assert_eq!(grep.4, 10, "silent filtered rows contribute to timing");
+
+        for label in ["rtk:passthrough git tag --list", "rtk fallback: claude"] {
+            let row = summary
+                .by_command
+                .iter()
+                .find(|(command, ..)| command == label)
+                .unwrap_or_else(|| panic!("{label} stats"));
+            assert_eq!(row.4, 0, "{label} must remain explicitly untimed");
+        }
+
+        let days = tracker.get_all_days().expect("get_all_days");
+        let weeks = tracker.get_by_week().expect("get_by_week");
+        let months = tracker.get_by_month().expect("get_by_month");
+        for (period, commands, total_time_ms, avg_time_ms) in [
+            (
+                "day",
+                days[0].commands,
+                days[0].total_time_ms,
+                days[0].avg_time_ms,
+            ),
+            (
+                "week",
+                weeks[0].commands,
+                weeks[0].total_time_ms,
+                weeks[0].avg_time_ms,
+            ),
+            (
+                "month",
+                months[0].commands,
+                months[0].total_time_ms,
+                months[0].avg_time_ms,
+            ),
+        ] {
+            assert_eq!(commands, 4, "{period}: every row still counts");
+            assert_eq!(total_time_ms, 20, "{period}: filtered timing only");
+            assert_eq!(avg_time_ms, 10, "{period}: filtered timing average");
+        }
+    }
+
+    #[test]
+    fn test_timing_classification_keeps_case_and_marker_boundaries_consistent() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        tracker
+            .record("uppercase label", "RTK:passthrough git tag", 0, 0, 19)
+            .expect("record uppercase ordinary label");
+        tracker
+            .record("near marker", "rtk:passthroughness git tag", 0, 0, 23)
+            .expect("record near-prefix ordinary label");
+        tracker
+            .record("empty filter", "rtk grep", 0, 0, 0)
+            .expect("record zero-duration filter");
+
+        let summary = tracker.get_summary().expect("get_summary");
+        assert_eq!(summary.total_time_ms, 42);
+        assert_eq!(summary.avg_time_ms, 14);
+        for (label, expected) in [
+            ("RTK:passthrough git tag", 19),
+            ("rtk:passthroughness git tag", 23),
+            ("rtk grep", 0),
+        ] {
+            let row = summary
+                .by_command
+                .iter()
+                .find(|(command, ..)| command == label)
+                .unwrap_or_else(|| panic!("{label} stats"));
+            assert_eq!(row.4, expected, "{label}: By Command timing");
+        }
+
+        let days = tracker.get_all_days().expect("get_all_days");
+        let weeks = tracker.get_by_week().expect("get_by_week");
+        let months = tracker.get_by_month().expect("get_by_month");
+        for (period, total_time_ms, avg_time_ms) in [
+            ("day", days[0].total_time_ms, days[0].avg_time_ms),
+            ("week", weeks[0].total_time_ms, weeks[0].avg_time_ms),
+            ("month", months[0].total_time_ms, months[0].avg_time_ms),
+        ] {
+            assert_eq!(total_time_ms, 42, "{period}: timing classification");
+            assert_eq!(avg_time_ms, 14, "{period}: timing average");
+        }
+    }
+
+    #[test]
+    fn test_legacy_passthrough_labels_are_untimed_with_exact_token_boundaries() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        let untimed = [
+            "rtk git zz (passthrough)",
+            "rtk (passthrough)",
+            "rtk x (passthrough)",
+        ];
+        for (index, label) in untimed.iter().enumerate() {
+            assert!(!is_timed_command(label), "{label} should be untimed");
+            tracker
+                .record(
+                    &format!("legacy {index}"),
+                    label,
+                    0,
+                    0,
+                    if *label == "rtk git zz (passthrough)" {
+                        3_002
+                    } else {
+                        100 + index as u64
+                    },
+                )
+                .expect("record legacy passthrough row");
+        }
+
+        for label in [
+            "rtk x (passthrough) y",
+            "rtk x (Passthrough)",
+            "rtk x\t(passthrough)",
+            "rtk x\u{a0}(passthrough)",
+            "rtk x (PASSTHROUGH)",
+            "rtk x (passthrough)z",
+            "rtk x(passthrough)",
+        ] {
+            assert!(is_timed_command(label), "{label} should remain timed");
+            let timed: i64 = tracker
+                .conn
+                .query_row(&format!("SELECT {}", timing_sql("?1")), [label], |row| {
+                    row.get(0)
+                })
+                .expect("SQL classification");
+            assert_eq!(timed, 1, "{label}: SQL should remain timed");
+        }
+
+        let summary = tracker.get_summary().expect("get_summary");
+        assert_eq!(summary.total_commands, untimed.len());
+        assert_eq!(summary.total_time_ms, 0);
+        assert_eq!(summary.avg_time_ms, 0);
+        for label in untimed {
+            let row = summary
+                .by_command
+                .iter()
+                .find(|(command, ..)| command == label)
+                .unwrap_or_else(|| panic!("{label} stats"));
+            assert_eq!(row.4, 0, "{label}: By Command timing");
+        }
+
+        let day = tracker.get_all_days().unwrap();
+        let week = tracker.get_by_week().unwrap();
+        let month = tracker.get_by_month().unwrap();
+        for (period, total_time_ms, avg_time_ms) in [
+            ("day", day[0].total_time_ms, day[0].avg_time_ms),
+            ("week", week[0].total_time_ms, week[0].avg_time_ms),
+            ("month", month[0].total_time_ms, month[0].avg_time_ms),
+        ] {
+            assert_eq!(total_time_ms, 0, "{period}: total exec time");
+            assert_eq!(avg_time_ms, 0, "{period}: average exec time");
+        }
+    }
+
+    #[test]
+    fn test_bypass_and_proxy_rows_with_output_are_untimed_across_aggregates() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        tracker
+            .record("git status", "rtk git status", 100, 50, 7)
+            .expect("record filtered row");
+        tracker
+            .record("echo hi", "rtk bypass echo hi", 1, 1, 3_002)
+            .expect("record bypass row");
+        tracker
+            .record("git log -20", "rtk proxy git log -20", 4, 4, 4_003)
+            .expect("record proxy row");
+
+        let summary = tracker.get_summary().expect("get_summary");
+        assert_eq!(summary.total_commands, 3);
+        assert_eq!(summary.total_input, 105);
+        assert_eq!(summary.total_output, 55);
+        assert_eq!(summary.total_saved, 50);
+        assert_eq!(summary.total_time_ms, 7);
+        assert_eq!(summary.avg_time_ms, 7);
+        for label in ["rtk bypass echo hi", "rtk proxy git log -20"] {
+            let row = summary
+                .by_command
+                .iter()
+                .find(|(command, ..)| command == label)
+                .unwrap_or_else(|| panic!("{label} stats"));
+            assert_eq!(row.4, 0, "{label}: By Command timing");
+        }
+
+        let day = tracker.get_all_days().unwrap();
+        let week = tracker.get_by_week().unwrap();
+        let month = tracker.get_by_month().unwrap();
+        for (period, total_time_ms, avg_time_ms) in [
+            ("day", day[0].total_time_ms, day[0].avg_time_ms),
+            ("week", week[0].total_time_ms, week[0].avg_time_ms),
+            ("month", month[0].total_time_ms, month[0].avg_time_ms),
+        ] {
+            assert_eq!(total_time_ms, 7, "{period}: total exec time");
+            assert_eq!(avg_time_ms, 7, "{period}: average exec time");
         }
     }
 }
