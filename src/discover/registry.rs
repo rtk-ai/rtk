@@ -5856,10 +5856,6 @@ mod tests {
                 "golangci-lint --color never run ./... 2>&1",
                 "rtk golangci-lint --color never run ./... 2>&1",
             ),
-            (
-                "golangci-lint run ./... 2>&1 | tail -5",
-                "rtk golangci-lint run ./... 2>&1 | tail -5",
-            ),
             // No space before the redirect: the boundary is kept exactly as
             // typed, so a word ending in digits is not turned into a
             // descriptor number and vice versa.
@@ -5878,6 +5874,15 @@ mod tests {
                 "{input}"
             );
         }
+        // A pipeline producer must pass its original data to the consumer.
+        // Redirects on standalone commands still preserve their spelling.
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "golangci-lint run ./... 2>&1 | tail -5",
+                &[]
+            ),
+            None
+        );
     }
 
     #[test]
