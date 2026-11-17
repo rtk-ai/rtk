@@ -15,7 +15,7 @@ use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git_cmd, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
-    bun_cmd, deno_cmd, lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
+    bun_cmd, deno_cmd, lint_cmd, next_cmd, ng_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
     prisma_cmd, tsc_cmd, vitest_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
@@ -659,6 +659,13 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Angular build with compact tables; other commands pass through
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Ng {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Next.js build with compact output
     Next {
         /// Next.js build arguments
@@ -696,8 +703,9 @@ enum Commands {
 
     /// Cargo commands with compact output
     Cargo {
-        #[command(subcommand)]
-        command: CargoCommands,
+        /// Cargo arguments, including toolchain selectors and global options
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
     },
 
     /// npm run with filtered output (strip boilerplate)
@@ -1397,6 +1405,12 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// List tree entries; plain path lists are folded by directory
+    LsTree {
+        /// Git ls-tree arguments (tree-ish, paths, flags)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported git subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -1610,49 +1624,6 @@ enum PrismaMigrateCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-}
-
-#[derive(Debug, Subcommand)]
-enum CargoCommands {
-    /// Build with compact output (strip Compiling lines, keep errors)
-    Build {
-        /// Additional cargo build arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Test with failures-only output
-    Test {
-        /// Additional cargo test arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Clippy with warnings grouped by lint rule
-    Clippy {
-        /// Additional cargo clippy arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Check with compact output (strip Checking lines, keep errors)
-    Check {
-        /// Additional cargo check arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Install with compact output (strip dep compilation, keep installed/errors)
-    Install {
-        /// Additional cargo install arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Nextest with failures-only output
-    Nextest {
-        /// Additional cargo nextest arguments (e.g., run, list, --lib)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Passthrough: runs any unsupported cargo subcommand directly
-    #[command(external_subcommand)]
-    Other(Vec<OsString>),
 }
 
 #[derive(Debug, Subcommand)]
@@ -1909,8 +1880,18 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let matches = rtk_command().try_get_matches_from(args)?;
-    <Cli as clap::FromArgMatches>::from_arg_matches(&matches)
+    let raw_args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let matches = rtk_command().try_get_matches_from(&raw_args)?;
+    let mut cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches)?;
+    if let Commands::Cargo { args } = &mut cli.command {
+        // A flat trailing-args field preserves -- after its first argument, but clap
+        // consumes a leading --. Restore that separator from the raw OS argv suffix.
+        let start = raw_args.len() - args.len();
+        if start > 0 && raw_args[start - 1] == "--" {
+            args.insert(0, OsString::from("--"));
+        }
+    }
+    Ok(cli)
 }
 
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
@@ -1931,10 +1912,9 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         parse_error.exit();
     }
 
-    // No args → show Clap's error (user ran just "rtk" with bad syntax)
-    if args.is_empty() {
+    let Some(args) = fallback_command_args(&args) else {
         parse_error.exit();
-    }
+    };
 
     // RTK meta-commands should never fall back to raw execution.
     // e.g. `rtk gain --badtypo` should show Clap's error, not try to run `gain` from $PATH.
@@ -1942,21 +1922,9 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         parse_error.exit();
     }
 
-    // `rtk test` deliberately shadows the POSIX `test` binary, so it cannot join
-    // that list — but a misused `--shell` is RTK's own flag, not something to
-    // hand to `test`. Without this, `rtk test --shell` execs the real `test`
-    // with no arguments and exits 0, silently ignoring the request (#4125).
-    //
-    // Scoped to `test` alone: `--shell` is a flag other tools carry too, and an
-    // argv-wide scan would refuse to run `just --shell bash` or
-    // `hyperfine --shell=none` — including the spellings the hook itself emits.
-    if args[0] == "test"
-        && args
-            .iter()
-            .any(|arg| arg == "--shell" || arg.starts_with("--shell="))
-    {
-        parse_error.exit();
-    }
+    // Fallbacks execute tools too, including TOML filters and typed commands
+    // whose native arguments clap rejects. Keep meta diagnostics above the gate.
+    hooks::integrity::runtime_check()?;
 
     // Dynamic task subcommands: `rtk bulk-read ...` resolves from
     // the active pipeline before anything falls back to raw execution.
@@ -2123,6 +2091,44 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
             }
         }
     }
+}
+
+fn fallback_command_args(args: &[String]) -> Option<Vec<String>> {
+    // Derive the valueless root options from the same clap command used to parse Cli.
+    // A removed flag must never silently turn a filtered command into raw passthrough.
+    let command = rtk_command();
+    let root_flags: Vec<_> = command
+        .get_arguments()
+        .filter(|arg| arg.get_index().is_none() && !arg.get_action().takes_values())
+        .collect();
+
+    let mut command_index = 0;
+    while let Some(arg) = args.get(command_index) {
+        let long_flag = arg
+            .strip_prefix("--")
+            .is_some_and(|name| root_flags.iter().any(|flag| flag.get_long() == Some(name)));
+        let short_flags = arg.strip_prefix('-').is_some_and(|cluster| {
+            !cluster.is_empty()
+                && !cluster.starts_with('-')
+                && cluster.chars().all(|short| {
+                    root_flags
+                        .iter()
+                        .any(|flag| flag.get_short() == Some(short))
+                })
+        });
+        if long_flag || short_flags {
+            command_index += 1;
+        } else {
+            break;
+        }
+    }
+
+    let command = args.get(command_index)?;
+    if command.starts_with('-') {
+        return None;
+    }
+
+    Some(args[command_index..].to_vec())
 }
 
 #[derive(Debug, Subcommand)]
@@ -2370,7 +2376,7 @@ fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
     uninstall_standard: UninstallStandard,
-) -> Result<()>
+) -> Result<i32>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
     UninstallStandard: FnOnce(
@@ -2382,18 +2388,23 @@ where
         bool,
         hooks::init::PatchMode,
         hooks::init::InitContext,
-    ) -> Result<()>,
+    ) -> Result<i32>,
 {
     if agent == Some(AgentTarget::Hermes) {
-        uninstall_hermes(ctx)
+        uninstall_hermes(ctx)?;
+        Ok(0)
     } else if agent == Some(AgentTarget::Trae) {
-        hooks::init::uninstall_trae_mode(global, ctx)
+        hooks::init::uninstall_trae_mode(global, ctx)?;
+        Ok(0)
     } else if agent == Some(AgentTarget::Antigravity) {
-        hooks::init::uninstall_antigravity_mode(global, ctx)
+        hooks::init::uninstall_antigravity_mode(global, ctx)?;
+        Ok(0)
     } else if agent == Some(AgentTarget::Droid) {
-        hooks::init::uninstall_droid(global, ctx)
+        hooks::init::uninstall_droid(global, ctx)?;
+        Ok(0)
     } else if agent == Some(AgentTarget::Vibe) {
-        hooks::init::uninstall_vibe(ctx)
+        hooks::init::uninstall_vibe(ctx)?;
+        Ok(0)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -2759,6 +2770,13 @@ fn run_cli() -> Result<i32> {
                 GitCommands::Other(args) => {
                     git_cmd::run_passthrough(&args, &global_args, cli.verbose)?
                 }
+                GitCommands::LsTree { args } => git_cmd::run(
+                    git_cmd::GitCommand::LsTree,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
             }
         }
 
@@ -3059,7 +3077,7 @@ fn run_cli() -> Result<i32> {
                     hooks::init::uninstall_copilot(ctx)?;
                 }
             } else if uninstall {
-                uninstall_init_dispatch(
+                return uninstall_init_dispatch(
                     agent,
                     global,
                     gemini,
@@ -3068,7 +3086,7 @@ fn run_cli() -> Result<i32> {
                     ctx,
                     hooks::init::uninstall_hermes,
                     hooks::init::uninstall_with_patch_mode,
-                )?;
+                );
             } else if gemini {
                 hooks::init::run_gemini(global, hook_only, patch_mode, ctx)?;
             } else if copilot {
@@ -3399,6 +3417,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Next { args } => next_cmd::run(&args, cli.verbose)?,
 
+        Commands::Ng { args } => ng_cmd::run(&args, cli.verbose)?,
+
         Commands::Lint { args } => lint_cmd::run(None, &args, cli.verbose)?,
 
         Commands::Prettier { args } => prettier_cmd::run(&args, cli.verbose)?,
@@ -3407,27 +3427,7 @@ fn run_cli() -> Result<i32> {
 
         Commands::Playwright { args } => playwright_cmd::run(&args, cli.verbose)?,
 
-        Commands::Cargo { command } => match command {
-            CargoCommands::Build { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Build, &args, cli.verbose)?
-            }
-            CargoCommands::Test { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Test, &args, cli.verbose)?
-            }
-            CargoCommands::Clippy { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Clippy, &args, cli.verbose)?
-            }
-            CargoCommands::Check { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Check, &args, cli.verbose)?
-            }
-            CargoCommands::Install { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Install, &args, cli.verbose)?
-            }
-            CargoCommands::Nextest { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Nextest, &args, cli.verbose)?
-            }
-            CargoCommands::Other(args) => cargo_cmd::run_passthrough(&args, cli.verbose)?,
-        },
+        Commands::Cargo { args } => cargo_cmd::run(&args, cli.verbose)?,
 
         Commands::Bun { command } => match command {
             BunCommands::Install { args } => bun_cmd::run_pkg("install", &args, cli.verbose)?,
@@ -3724,7 +3724,8 @@ fn run_cli() -> Result<i32> {
                     return Ok(2);
                 };
                 match path.decide(&raw) {
-                    HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => {
+                    HookDecision::AllowRewrite(rewritten)
+                    | HookDecision::AskRewrite(rewritten, _) => {
                         println!("{}", rewritten);
                         0
                     }
@@ -4094,6 +4095,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Prisma { .. }
             | Commands::Tsc { .. }
             | Commands::Next { .. }
+            | Commands::Ng { .. }
             | Commands::Lint { .. }
             | Commands::Prettier { .. }
             | Commands::Playwright { .. }
@@ -4149,6 +4151,33 @@ mod tests {
             }
         }
         assert!(Cli::try_parse_from(["rtk", "recall", "--purge", "--gc"]).is_err());
+    }
+
+    #[test]
+    fn test_cargo_cli_preserves_global_options_and_separators() {
+        for args in [
+            vec!["+stable", "--locked", "check"],
+            vec!["--config", "check", "test", "--", "--nocapture"],
+            vec![
+                "+nightly",
+                "-Z",
+                "unstable-options",
+                "-C",
+                "some path",
+                "check",
+            ],
+            vec!["+stable", "--help"],
+            vec!["--", "check"],
+            vec!["--", "--", "check"],
+            vec!["check", "--", "--nocapture"],
+        ] {
+            let cli = try_parse_cli_from(["rtk", "cargo"].into_iter().chain(args.iter().copied()))
+                .unwrap();
+            let Commands::Cargo { args: parsed } = cli.command else {
+                panic!("expected cargo")
+            };
+            assert_eq!(parsed, args.iter().map(OsString::from).collect::<Vec<_>>());
+        }
     }
 
     #[test]
@@ -4503,7 +4532,7 @@ mod tests {
             },
             |_, _, _, _, _, _, _, _| {
                 standard_called.set(true);
-                Ok(())
+                Ok(0)
             },
         );
 
@@ -4564,7 +4593,7 @@ mod tests {
                 assert!(global);
                 assert!(omp);
                 assert_eq!(patch_mode, hooks::init::PatchMode::Auto);
-                Ok(())
+                Ok(0)
             },
         );
 
@@ -4729,6 +4758,7 @@ mod tests {
             "prisma",
             "tsc",
             "next",
+            "ng",
             "lint",
             "prettier",
             "playwright",
@@ -5763,6 +5793,55 @@ mod tests {
             code, 134,
             "rtk crashed with SIGABRT (exit 134) on broken pipe - SIGPIPE handler missing"
         );
+    }
+
+    #[test]
+    fn ng_native_flags_and_separator_reach_the_filter() {
+        for flags in [
+            vec!["build", "--help"],
+            vec!["build", "--verbose"],
+            vec!["build", "--watch"],
+            vec!["build", "--output-path", "dist folder"],
+            vec!["build", "--", "--help"],
+        ] {
+            let mut argv = vec!["rtk", "ng"];
+            argv.extend(flags.iter().copied());
+            let cli = Cli::try_parse_from(argv).unwrap();
+            match cli.command {
+                Commands::Ng { args } => assert_eq!(args, flags),
+                _ => panic!("expected Angular command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_fallback_skips_supported_global_flags_before_command() {
+        for flags in [
+            vec!["-v"],
+            vec!["--verbose"],
+            vec!["-vv"],
+            vec!["-v", "-v"],
+            vec!["--skip-env"],
+            vec!["-vvv", "--skip-env"],
+        ] {
+            let args: Vec<String> = flags
+                .into_iter()
+                .chain(["echo", "--help"])
+                .map(str::to_string)
+                .collect();
+            assert_eq!(
+                fallback_command_args(&args),
+                Some(vec!["echo".to_string(), "--help".to_string()])
+            );
+        }
+    }
+
+    #[test]
+    fn test_fallback_rejects_unrecognized_leading_flag() {
+        for flag in ["-u", "-vx", "-", "--ultra-compact", "--verbose=1"] {
+            let args = [flag.to_string(), "echo".to_string(), "hi".to_string()];
+            assert_eq!(fallback_command_args(&args), None, "accepted {flag}");
+        }
     }
 
     #[test]
