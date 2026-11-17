@@ -699,8 +699,9 @@ enum Commands {
 
     /// Cargo commands with compact output
     Cargo {
-        #[command(subcommand)]
-        command: CargoCommands,
+        /// Cargo arguments, including toolchain selectors and global options
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
     },
 
     /// npm run with filtered output (strip boilerplate)
@@ -1616,49 +1617,6 @@ enum PrismaMigrateCommands {
 }
 
 #[derive(Debug, Subcommand)]
-enum CargoCommands {
-    /// Build with compact output (strip Compiling lines, keep errors)
-    Build {
-        /// Additional cargo build arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Test with failures-only output
-    Test {
-        /// Additional cargo test arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Clippy with warnings grouped by lint rule
-    Clippy {
-        /// Additional cargo clippy arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Check with compact output (strip Checking lines, keep errors)
-    Check {
-        /// Additional cargo check arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Install with compact output (strip dep compilation, keep installed/errors)
-    Install {
-        /// Additional cargo install arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Nextest with failures-only output
-    Nextest {
-        /// Additional cargo nextest arguments (e.g., run, list, --lib)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Passthrough: runs any unsupported cargo subcommand directly
-    #[command(external_subcommand)]
-    Other(Vec<OsString>),
-}
-
-#[derive(Debug, Subcommand)]
 enum DotnetCommands {
     /// Build with compact output
     Build {
@@ -1912,8 +1870,18 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let matches = rtk_command().try_get_matches_from(args)?;
-    <Cli as clap::FromArgMatches>::from_arg_matches(&matches)
+    let raw_args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let matches = rtk_command().try_get_matches_from(&raw_args)?;
+    let mut cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches)?;
+    if let Commands::Cargo { args } = &mut cli.command {
+        // A flat trailing-args field preserves -- after its first argument, but clap
+        // consumes a leading --. Restore that separator from the raw OS argv suffix.
+        let start = raw_args.len() - args.len();
+        if start > 0 && raw_args[start - 1] == "--" {
+            args.insert(0, OsString::from("--"));
+        }
+    }
+    Ok(cli)
 }
 
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
@@ -3425,27 +3393,7 @@ fn run_cli() -> Result<i32> {
 
         Commands::Playwright { args } => playwright_cmd::run(&args, cli.verbose)?,
 
-        Commands::Cargo { command } => match command {
-            CargoCommands::Build { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Build, &args, cli.verbose)?
-            }
-            CargoCommands::Test { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Test, &args, cli.verbose)?
-            }
-            CargoCommands::Clippy { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Clippy, &args, cli.verbose)?
-            }
-            CargoCommands::Check { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Check, &args, cli.verbose)?
-            }
-            CargoCommands::Install { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Install, &args, cli.verbose)?
-            }
-            CargoCommands::Nextest { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Nextest, &args, cli.verbose)?
-            }
-            CargoCommands::Other(args) => cargo_cmd::run_passthrough(&args, cli.verbose)?,
-        },
+        Commands::Cargo { args } => cargo_cmd::run(&args, cli.verbose)?,
 
         Commands::Bun { command } => match command {
             BunCommands::Install { args } => bun_cmd::run_pkg("install", &args, cli.verbose)?,
@@ -4148,6 +4096,33 @@ mod tests {
     use super::*;
     use crate::core::test_isolation;
     use std::cell::Cell;
+
+    #[test]
+    fn test_cargo_cli_preserves_global_options_and_separators() {
+        for args in [
+            vec!["+stable", "--locked", "check"],
+            vec!["--config", "check", "test", "--", "--nocapture"],
+            vec![
+                "+nightly",
+                "-Z",
+                "unstable-options",
+                "-C",
+                "some path",
+                "check",
+            ],
+            vec!["+stable", "--help"],
+            vec!["--", "check"],
+            vec!["--", "--", "check"],
+            vec!["check", "--", "--nocapture"],
+        ] {
+            let cli = try_parse_cli_from(["rtk", "cargo"].into_iter().chain(args.iter().copied()))
+                .unwrap();
+            let Commands::Cargo { args: parsed } = cli.command else {
+                panic!("expected cargo")
+            };
+            assert_eq!(parsed, args.iter().map(OsString::from).collect::<Vec<_>>());
+        }
+    }
 
     #[test]
     fn test_jest_and_vitest_get_the_hook_integrity_check() {
