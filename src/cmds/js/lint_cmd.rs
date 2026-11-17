@@ -114,7 +114,8 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     // sqlfluff owns its own argv and its own rendering: routing, format-flag
     // detection and failure handling live in `sqlfluff_cmd::plan` so this entry
     // point and `rtk sqlfluff ...` cannot drift apart.
-    let sqlfluff = (linter == "sqlfluff").then(|| sqlfluff_cmd::plan(&effective_args[1..]));
+    let sqlfluff =
+        (linter == "sqlfluff").then(|| sqlfluff_cmd::plan_for_lint(&effective_args[1..]));
 
     // Python linter use resolved_command() directly (they're on PATH via pip/pipx)
     // JS linters use package_manager_exec (npx/pnpm exec)
