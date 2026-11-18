@@ -6337,24 +6337,16 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_rules_require_a_complete_subcommand() {
+    fn test_rewrite_rules_reject_additional_prefix_lookalikes() {
+        // Keep only cases absent from the existing wider
+        // test_subcommand_rules_require_token_boundaries regression.
         for command in [
             "git branchless",
             "git statuses",
             "git logger",
             "git showcase",
             "cargo installer",
-            "cargo builder",
-            "gh prs",
             "gh issues",
-            "glab mrs",
-            "docker psql",
-            "kubectl getall",
-            "oc status-check",
-            "ruff checker",
-            "go vetting",
-            "terraform planner",
-            "pio runner",
         ] {
             assert_eq!(
                 rewrite_command_no_prefixes(command, &[]),
@@ -6363,22 +6355,11 @@ mod tests {
             );
         }
 
-        // Negative-only tests also pass when rewriting is disabled entirely.
-        // Keep adjacent positive controls so the boundary remains exact,
-        // rather than becoming an over-restrictive prefix ban.
-        for command in [
-            "git status",
-            "cargo test",
-            "gh pr list",
-            "glab mr list",
-            "docker ps",
-            "kubectl get pods",
-            "ruff check .",
-            "go vet ./...",
-        ] {
+        // Guard against a trivial implementation that disables rewrites.
+        for command in ["git status", "cargo test", "gh pr list"] {
             assert!(
                 rewrite_command_no_prefixes(command, &[]).is_some(),
-                "expected a rewrite for valid command {command:?}"
+                "expected rewrite for {command:?}"
             );
         }
     }
