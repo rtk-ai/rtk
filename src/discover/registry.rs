@@ -11,8 +11,8 @@ use std::sync::LazyLock;
 
 use super::lexer::{
     ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer,
-    contains_unattestable_construct_in, is_crlf_at, resolve_word_text,
-    shell_split, split_on_operators, tokenize, tokenize_with_newlines, words_and_spans,
+    contains_unattestable_construct_in, is_crlf_at, resolve_word_text, shell_split,
+    split_on_operators, tokenize, tokenize_with_newlines, words_and_spans,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 use super::shell_wrapper::parse_shell_wrapper;
