@@ -11,6 +11,12 @@ fn rtk_on(store: &Path, args: &[&str]) -> Output {
     common::rtk_command()
         .args(args)
         .env("RTK_RECALL_DB", store)
+        // Windows resolves its known home folder independently of HOME. Each
+        // concurrent fixture must initialize its own Claude directory.
+        .env(
+            "CLAUDE_CONFIG_DIR",
+            store.parent().unwrap().join("claude-config"),
+        )
         .output()
         .expect("rtk should run")
 }
@@ -88,6 +94,13 @@ fn current_store(store: &Path) {
         initialized.status.success(),
         "{}",
         String::from_utf8_lossy(&initialized.stderr)
+    );
+    assert!(
+        store
+            .parent()
+            .unwrap()
+            .join("claude-config/RTK.md")
+            .is_file()
     );
 }
 
