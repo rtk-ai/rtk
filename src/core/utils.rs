@@ -585,7 +585,11 @@ fn push_child_arg(cmd: &mut Command, arg: &OsStr) {
 /// # Returns
 /// Full path to the resolved binary, or error if not found.
 pub fn resolve_binary(name: &str) -> Result<PathBuf> {
-    which::which(name).context(format!("Binary '{}' not found on PATH", name))
+    #[cfg(windows)]
+    let result = super::windows_path::resolve(name);
+    #[cfg(not(windows))]
+    let result = which::which(name);
+    result.context(format!("Binary '{}' not found on PATH", name))
 }
 
 /// Create a `Command` with PATHEXT-aware binary resolution.
