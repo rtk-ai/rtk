@@ -86,6 +86,29 @@ fn cargo_install_refusal_on_stderr_is_shown_verbatim() {
 }
 
 #[test]
+fn cargo_install_failure_naming_could_not_compile_is_shown_verbatim() {
+    // Only Cargo's own summary line marks a compile failure, not the phrase in a path.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let message = "error: `./could not compile` is not a directory. --path must point to a directory containing a Cargo.toml file.";
+    fake_tool(
+        dir.path(),
+        "cargo",
+        &format!("echo '{}' >&2\nexit 101", message),
+    );
+    let out = rtk_with(
+        dir.path(),
+        &["cargo", "install", "--path", "./could not compile"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(message),
+        "cargo's error must reach the user\nstdout:\n{}\nstderr:\n{stderr}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(out.status.code(), Some(101), "the exit code must survive");
+}
+
+#[test]
 fn bun_install_refusal_on_stdout_is_shown_verbatim() {
     let dir = tempfile::tempdir().expect("tempdir");
     refusing_tool(dir.path(), "bun", false);
