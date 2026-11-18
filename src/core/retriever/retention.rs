@@ -1,25 +1,14 @@
 //! Retention policy and explicit maintenance for the configured recall store.
 
-use super::{RetrieverConfig, db_path, init_schema, now_secs};
+use super::{RetrieverConfig, db_path, now_secs, open_existing_path, query, writer_gate};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use std::collections::HashSet;
 
 pub(super) fn init_storage_accounting(conn: &Connection) -> Result<()> {
-    // The marker table and its triggers are created in one transaction. Once
-    // visible, opening an existing store needs no extra write lock or scan.
-    let initialized: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'recall_storage')",
-        [],
-        |r| r.get(0),
-    )?;
-    if initialized {
-        return Ok(());
-    }
-    // The initial aggregate and trigger installation must see one consistent
-    // snapshot. Subsequent opens skip the scalar aggregate entirely.
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    tx.execute_batch(
+    // db's migration engine owns the transaction and version stamp. Keep this
+    // step idempotent so `rtk init` also restores a dropped accounting trigger.
+    conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS recall_storage (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             entries INTEGER NOT NULL,
@@ -28,7 +17,8 @@ pub(super) fn init_storage_accounting(conn: &Connection) -> Result<()> {
         INSERT INTO recall_storage (id, entries, blob_bytes)
         SELECT 1, (SELECT COUNT(*) FROM recall),
                   (SELECT COALESCE(SUM(length(blob)), 0) FROM recall)
-        WHERE NOT EXISTS (SELECT 1 FROM recall_storage WHERE id = 1);
+        ON CONFLICT(id) DO UPDATE SET entries = excluded.entries,
+            blob_bytes = excluded.blob_bytes;
         CREATE TRIGGER IF NOT EXISTS recall_storage_insert AFTER INSERT ON recall BEGIN
             UPDATE recall_storage SET entries = entries + 1,
                 blob_bytes = blob_bytes + length(NEW.blob) WHERE id = 1;
@@ -42,7 +32,7 @@ pub(super) fn init_storage_accounting(conn: &Connection) -> Result<()> {
                 blob_bytes = blob_bytes - length(OLD.blob) WHERE id = 1;
         END;",
     )?;
-    tx.commit().context("initialize recall storage accounting")
+    Ok(())
 }
 
 fn totals(conn: &Connection) -> Result<(i64, i64)> {
@@ -127,11 +117,20 @@ fn open_for_maintenance(cfg: &RetrieverConfig) -> Result<Option<Connection>> {
                 byte_size, truncated, codec, blob FROM recall LIMIT 0",
     )
     .context("configured database is not a recall store")?;
-    init_schema(&conn)?;
-    Ok(Some(conn))
+    drop(conn);
+    let Some(opened) = open_existing_path(&path)? else {
+        return Ok(None);
+    };
+    query(&opened, |conn| {
+        totals(conn)?;
+        Ok(())
+    })?;
+    Ok(Some(opened.conn))
 }
 
 pub(super) fn maintain_store(cfg: &RetrieverConfig, purge: bool) -> Result<usize> {
+    let writer = writer_gate(&db_path(cfg)?)?;
+    let _guard = writer.lock().unwrap_or_else(|e| e.into_inner());
     let Some(conn) = open_for_maintenance(cfg)? else {
         return Ok(0);
     };
