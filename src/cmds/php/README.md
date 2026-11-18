@@ -5,7 +5,8 @@
 ## Specifics
 
 - `php_cmd.rs` summarizes `php -l` syntax checks and routes `php artisan*` to specialized helpers
-- `artisan_cmd.rs` cleans Artisan output and applies runner-aware filtering for `php artisan test`
+- `artisan_cmd.rs` cleans Artisan output and filters `php artisan test`: passing tests are dropped from Collision/Pest listings, failures, skips and the summary are kept, and `--json`, `-v` and `--testdox` pass through
+- `sail_cmd.rs` runs `vendor/bin/sail` and applies the same filter to `sail artisan test` and `sail test`; every other Sail command passes through
 - `phpunit_cmd.rs` strips progress/header noise and keeps failure details + final summary
 - `phpstan_cmd.rs` injects JSON output by default and emits compact file/line error summaries
 - `ecs_cmd.rs` condenses EasyCodingStandard output while preserving file paths and error lines

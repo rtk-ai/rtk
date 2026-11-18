@@ -21,6 +21,7 @@ use cmds::js::{
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{
     ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpt_cmd, phpunit_cmd, pint_cmd,
+    sail_cmd,
 };
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, sqlfluff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
@@ -955,6 +956,13 @@ enum Commands {
     /// Laravel Pint (PHP-CS-Fixer) code style fixer with compact output
     Pint {
         /// Pint arguments (e.g., --test, app/)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Laravel Sail wrapper with compact artisan test output
+    Sail {
+        /// Sail arguments (e.g., artisan test, test --parallel)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -3583,6 +3591,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Pint { args } => pint_cmd::run(&args, cli.verbose)?,
 
+        Commands::Sail { args } => sail_cmd::run(&args, cli.verbose)?,
+
         Commands::Phpt { args } => phpt_cmd::run(&args, cli.verbose)?,
 
         Commands::Rake { args } => rake_cmd::run(&args, cli.verbose)?,
@@ -4072,6 +4082,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Paratest { .. }
             | Commands::Ecs { .. }
             | Commands::Pint { .. }
+            | Commands::Sail { .. }
             | Commands::Phpt { .. }
             | Commands::Rake { .. }
             | Commands::Rubocop { .. }
@@ -4714,6 +4725,7 @@ mod tests {
             "paratest",
             "ecs",
             "pint",
+            "sail",
             "phpt",
             "uv",
             "bun",
