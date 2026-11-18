@@ -198,15 +198,13 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
         linter, linter
     ))?;
 
-    // Check if process was killed by signal (SIGABRT, SIGKILL, etc.)
-    if !result.success() && result.exit_code > 128 {
-        eprintln!("[warn] Linter process terminated abnormally (possibly out of memory)");
-        if !result.stderr.is_empty() {
-            eprintln!(
-                "stderr: {}",
-                result.stderr.lines().take(5).collect::<Vec<_>>().join("\n")
-            );
-        }
+    let eslint_failed_without_results =
+        linter == "eslint" && !result.success() && result.stdout.trim().is_empty();
+    // Pass through runner failures before filtering linter output. The capture
+    // helper reports signal termination when it occurs.
+    if result.exit_code > 128 || eslint_failed_without_results {
+        print!("{}", result.stdout);
+        eprint!("{}", result.stderr);
         return Ok(result.exit_code);
     }
 
