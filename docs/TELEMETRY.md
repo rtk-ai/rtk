@@ -153,6 +153,8 @@ Under the EU General Data Protection Regulation, you have the right to:
 
 ## Erasure Procedure
 
+Stop other RTK commands before erasure, and do not replace the configured store or its directory while cleanup runs. Cleanup checks for active SQLite writers but is not an interprocess deletion barrier.
+
 1. Run `rtk telemetry forget` — this disables telemetry, deletes your device salt, ping marker, local tracking database (`history.db`), recall database (including SQLite sidecars), and legacy/posthook tee logs, then sends an erasure request to the server.
 2. If the server is unreachable, the CLI prints your full device hash and fallback instructions to email contact@rtk-ai.app for manual erasure.
 3. You can also email contact@rtk-ai.app directly to request manual erasure.
