@@ -3,6 +3,31 @@ use std::path::Path;
 const RELAUNCH_INTERVAL: &str = "PT1M";
 const RELAUNCH_SINCE: &str = "2020-01-01T00:00:00";
 
+/// Name every install used before tasks were named per user. Task names are
+/// machine-wide, so a second account could not install over the first one's.
+pub const LEGACY_TASK_NAME: &str = "rtk-proxy";
+
+/// Task name for `user` (`DOMAIN\name`), with every character Task Scheduler
+/// or a command line could trip on replaced by `_`.
+pub fn task_name(user: Option<&str>) -> String {
+    let safe: String = user
+        .unwrap_or_default()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe.is_empty() {
+        LEGACY_TASK_NAME.to_string()
+    } else {
+        format!("{LEGACY_TASK_NAME}-{safe}")
+    }
+}
+
 fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -132,6 +157,20 @@ mod tests {
         let xml = sample(Some(r"DESK\me"));
         assert_eq!(xml.matches(r"<UserId>DESK\me</UserId>").count(), 2);
         assert!(!sample(None).contains("<UserId>"));
+    }
+
+    #[test]
+    fn two_accounts_on_one_machine_get_two_task_names() {
+        assert_eq!(task_name(Some(r"DESK\me")), "rtk-proxy-DESK_me");
+        assert_ne!(task_name(Some(r"DESK\me")), task_name(Some(r"DESK\you")));
+        assert_ne!(task_name(Some(r"DESK\me")), task_name(Some(r"CORP\me")));
+        assert_eq!(task_name(Some("a b/c:d*e")), "rtk-proxy-a_b_c_d_e");
+    }
+
+    #[test]
+    fn an_unknown_user_keeps_the_legacy_task_name() {
+        assert_eq!(task_name(None), LEGACY_TASK_NAME);
+        assert_eq!(task_name(Some("")), LEGACY_TASK_NAME);
     }
 
     #[test]

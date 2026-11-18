@@ -12,7 +12,7 @@ use std::process::Command;
 
 pub const MECHANISM: &str = "Task Scheduler (log-on trigger, relaunched when it exits)";
 
-const TASK_NAME: &str = "rtk-proxy";
+use super::windows_task::LEGACY_TASK_NAME;
 
 fn current_user() -> Option<String> {
     let name = std::env::var("USERNAME").ok().filter(|n| !n.is_empty())?;
@@ -22,14 +22,46 @@ fn current_user() -> Option<String> {
     })
 }
 
+fn task_name() -> String {
+    super::windows_task::task_name(current_user().as_deref())
+}
+
+/// Whether this user can see a task called `name`. Another account's task
+/// answers "access denied", which reads as absent: it is not ours to manage.
+fn task_exists(name: &str) -> Result<bool> {
+    let out = Command::new("schtasks")
+        .args(["/Query", "/TN", name])
+        .output()
+        .context("running schtasks /Query")?;
+    Ok(out.status.success())
+}
+
+fn delete_task(name: &str) -> Result<()> {
+    let status = Command::new("schtasks")
+        .args(["/Delete", "/TN", name, "/F"])
+        .status()
+        .context("running schtasks /Delete")?;
+    if !status.success() {
+        bail!("schtasks /Delete failed ({status})");
+    }
+    Ok(())
+}
+
+/// Our own task under the pre-per-user name would launch a second proxy every
+/// minute next to the new one, so it goes when we install or uninstall.
+fn has_own_legacy_task(name: &str) -> Result<bool> {
+    Ok(name != LEGACY_TASK_NAME && task_exists(LEGACY_TASK_NAME)?)
+}
+
 pub fn install(bin: &Path, config_path: &Path, log_path: &Path) -> Result<PathBuf> {
+    let name = task_name();
     let xml =
         super::windows_task::definition(bin, config_path, log_path, current_user().as_deref());
     let xml_path = super::state_dir()?.join("rtk-proxy-task.xml");
     std::fs::write(&xml_path, super::windows_task::encode(&xml))
         .with_context(|| format!("writing {}", xml_path.display()))?;
     let status = Command::new("schtasks")
-        .args(["/Create", "/F", "/TN", TASK_NAME, "/XML"])
+        .args(["/Create", "/F", "/TN", &name, "/XML"])
         .arg(&xml_path)
         .status()
         .context("running schtasks /Create");
@@ -38,31 +70,31 @@ pub fn install(bin: &Path, config_path: &Path, log_path: &Path) -> Result<PathBu
     if !status.success() {
         bail!("schtasks /Create failed ({status})");
     }
+    if has_own_legacy_task(&name)? {
+        delete_task(LEGACY_TASK_NAME)?;
+    }
     // schtasks has no on-disk definition file the caller can inspect directly;
     // report the task name in its place for the CLI message.
-    Ok(PathBuf::from(TASK_NAME))
+    Ok(PathBuf::from(name))
 }
 
 pub fn uninstall() -> Result<bool> {
-    if !is_installed()? {
-        return Ok(false);
+    let name = task_name();
+    let mut removed = false;
+    if task_exists(&name)? {
+        delete_task(&name)?;
+        removed = true;
     }
-    let status = Command::new("schtasks")
-        .args(["/Delete", "/TN", TASK_NAME, "/F"])
-        .status()
-        .context("running schtasks /Delete")?;
-    if !status.success() {
-        bail!("schtasks /Delete failed ({status})");
+    if has_own_legacy_task(&name)? {
+        delete_task(LEGACY_TASK_NAME)?;
+        removed = true;
     }
-    Ok(true)
+    Ok(removed)
 }
 
 pub fn is_installed() -> Result<bool> {
-    let out = Command::new("schtasks")
-        .args(["/Query", "/TN", TASK_NAME])
-        .output()
-        .context("running schtasks /Query")?;
-    Ok(out.status.success())
+    let name = task_name();
+    Ok(task_exists(&name)? || has_own_legacy_task(&name)?)
 }
 
 pub fn logs() -> Result<()> {
