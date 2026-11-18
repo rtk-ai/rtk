@@ -630,11 +630,31 @@ fn flush_failure_block(header: &mut String, body: &mut Vec<String>, failures: &m
     body.clear();
 }
 
+/// A nextest status line without the `TRY n ` prefix nextest puts on each attempt of a retried test.
+fn nextest_status(trimmed: &str) -> &str {
+    match trimmed.strip_prefix("TRY ") {
+        Some(rest) => rest
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .trim_start(),
+        None => trimmed,
+    }
+}
+
+/// The test a nextest status line or failure block names, e.g. `fx tests::hang` in
+/// `TRY 1 TMT [   2.003s] (───) fx tests::hang`. The `(1/2)` counter changes between attempts.
+fn nextest_test_name(block: &str) -> &str {
+    let line = block.lines().next().unwrap_or_default();
+    let name = line.split_once(']').map_or(line, |(_, rest)| rest).trim();
+    name.strip_prefix('(')
+        .and_then(|rest| rest.split_once(") "))
+        .map_or(name, |(_, name)| name)
+}
+
 /// Filter cargo nextest output - show failures + compact summary
 fn filter_cargo_nextest(output: &str) -> String {
     // nextest annotates `passed` in place, e.g. `2 passed (1 slow), 1 failed`
     let summary_re = regex::Regex::new(
-        r"Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run:\s+(\d+) passed(?:\s+\([^)]*\))?(?:,\s+(\d+) failed)?(?:,\s+(\d+) skipped)?"
+        r"Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run:\s+(\d+) passed(?:\s+\([^)]*\))?(?:,\s+(\d+) failed)?(?:,\s+(\d+) exec failed)?(?:,\s+(\d+) timed out)?(?:,\s+(\d+) skipped)?"
     ).expect("invalid nextest summary regex");
 
     let starting_re = regex::Regex::new(r"Starting \d+ tests? across (\d+) binar(?:y|ies)")
@@ -683,8 +703,15 @@ fn filter_cargo_nextest(output: &str) -> String {
             continue;
         }
 
-        // Strip PASS lines
-        if trimmed.starts_with("PASS") {
+        // A retried attempt reads `TRY 2 FAIL [...]`, a timeout `TIMEOUT [...]`, or `TRY 2 TMT [...]`
+        // when it is retried
+        let status = nextest_status(trimmed);
+        let is_failure = status.starts_with("FAIL")
+            || status.starts_with("TIMEOUT")
+            || status.starts_with("TMT");
+
+        if is_failure || status.starts_with("PASS") {
+            // Close previous failure block if any
             if in_failure_block {
                 flush_failure_block(
                     &mut current_failure_header,
@@ -693,21 +720,14 @@ fn filter_cargo_nextest(output: &str) -> String {
                 );
                 in_failure_block = false;
             }
-            continue;
-        }
-
-        // Detect FAIL lines
-        if trimmed.starts_with("FAIL") {
-            // Close previous failure block if any
-            if in_failure_block {
-                flush_failure_block(
-                    &mut current_failure_header,
-                    &mut current_failure_body,
-                    &mut failures,
-                );
+            // Only the last attempt of a test counts. Attempts of different tests interleave,
+            // so earlier ones are found by name, not by being the block still open.
+            let name = nextest_test_name(trimmed);
+            failures.retain(|block| nextest_test_name(block) != name);
+            if is_failure {
+                current_failure_header = trimmed.to_string();
+                in_failure_block = true;
             }
-            current_failure_header = trimmed.to_string();
-            in_failure_block = true;
             continue;
         }
 
@@ -763,8 +783,16 @@ fn filter_cargo_nextest(output: &str) -> String {
             .get(4)
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(0);
-        let skipped: u32 = caps
+        let exec_failed: u32 = caps
             .get(5)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
+        let timed_out: u32 = caps
+            .get(6)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
+        let skipped: u32 = caps
+            .get(7)
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(0);
 
@@ -774,7 +802,7 @@ fn filter_cargo_nextest(output: &str) -> String {
             Ordering::Less => String::new(),
         };
 
-        if failed == 0 {
+        if failed + exec_failed + timed_out == 0 {
             // All pass - compact single line
             let mut parts = vec![format!("{} passed", passed)];
             if skipped > 0 {
@@ -803,6 +831,12 @@ fn filter_cargo_nextest(output: &str) -> String {
         let mut summary_parts = vec![format!("{} passed", passed)];
         if failed > 0 {
             summary_parts.push(format!("{} failed", failed));
+        }
+        if exec_failed > 0 {
+            summary_parts.push(format!("{} exec failed", exec_failed));
+        }
+        if timed_out > 0 {
+            summary_parts.push(format!("{} timed out", timed_out));
         }
         if skipped > 0 {
             summary_parts.push(format!("{} skipped", skipped));
@@ -2253,6 +2287,392 @@ error: test run failed
             result.matches("FAIL [").count(),
             1,
             "should have exactly 1 FAIL header (no post-summary duplicate): {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_timeout_is_a_failure() {
+        let output = r#"    Starting 2 tests across 1 binary (5 tests skipped)
+        PASS [   0.001s] (1/2) fx tests::pass_fast
+     TIMEOUT [   2.002s] (2/2) fx tests::hang
+
+  stdout ───
+
+    running 1 test
+
+────────────────────────────
+     Summary [   2.004s] 2 tests run: 1 passed, 1 timed out, 5 skipped
+     TIMEOUT [   2.002s] (2/2) fx tests::hang
+error: test run failed
+"#;
+        let result = filter_cargo_nextest(output);
+        assert!(
+            result.contains("TIMEOUT [   2.002s] (2/2) fx tests::hang"),
+            "should show the timed-out test: {}",
+            result
+        );
+        assert!(
+            result.contains("1 passed, 1 timed out, 5 skipped"),
+            "should count the timeout: {}",
+            result
+        );
+        assert_eq!(result.matches("TIMEOUT [").count(), 1, "{}", result);
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_retried_failure_keeps_details() {
+        let output = r#"    Starting 2 tests across 1 binary (5 tests skipped)
+        PASS [   0.001s] (1/2) fx tests::pass_fast
+  TRY 1 FAIL [   0.003s] (2/2) fx tests::fail_fast
+
+  stderr ───
+
+    thread 'tests::fail_fast' panicked at src/lib.rs:9:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+
+  RETRY 2/3 [         ] (2/2) fx tests::fail_fast
+  TRY 3 FAIL [   0.003s] (2/2) fx tests::fail_fast
+
+  stderr ───
+
+    thread 'tests::fail_fast' panicked at src/lib.rs:9:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+
+────────────────────────────
+     Summary [   0.013s] 2 tests run: 1 passed, 1 failed, 5 skipped
+  TRY 3 FAIL [   0.003s] (2/2) fx tests::fail_fast
+error: test run failed
+"#;
+        let result = filter_cargo_nextest(output);
+        assert!(
+            result.contains("TRY 3 FAIL [   0.003s] (2/2) fx tests::fail_fast"),
+            "should name the failing test: {}",
+            result
+        );
+        assert!(
+            result.contains("assertion `left == right` failed"),
+            "should keep the panic message: {}",
+            result
+        );
+        assert!(
+            result.contains("1 passed, 1 failed, 5 skipped"),
+            "should show summary: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_retried_timeout_keeps_name() {
+        let output = r#"────────────
+    Starting 2 tests across 1 binary (2 tests skipped)
+        PASS [   0.005s] (1/2) fx tests::pass_fast
+        SLOW [>  1.000s] (───) fx tests::hang
+TRY 1 TRMNTG [>  2.000s] (───) fx tests::hang
+   TRY 1 TMT [   2.003s] (───) fx tests::hang
+  stdout ───
+
+    running 1 test
+    hang stdout line
+
+    (test timed out)
+
+  TRY 2 SLOW [>  1.000s] (───) fx tests::hang
+TRY 2 TRMNTG [>  2.000s] (───) fx tests::hang
+   TRY 2 TMT [   2.004s] (2/2) fx tests::hang
+  stdout ───
+
+    running 1 test
+    hang stdout line
+
+    (test timed out)
+
+────────────
+     Summary [   4.010s] 2 tests run: 1 passed, 1 timed out, 2 skipped
+   TRY 2 TMT [   2.004s] (2/2) fx tests::hang
+error: test run failed
+"#;
+        let result = filter_cargo_nextest(output);
+        assert!(
+            result.contains("TRY 2 TMT [   2.004s] (2/2) fx tests::hang"),
+            "should name the timed-out test: {}",
+            result
+        );
+        assert!(
+            result.contains("(test timed out)"),
+            "should keep the output of the last attempt: {}",
+            result
+        );
+        assert!(!result.contains("TRY 1 TMT"), "{}", result);
+        assert!(
+            result.contains("1 passed, 1 timed out, 2 skipped"),
+            "should count the timeout: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_passed_on_retry_is_not_a_failure() {
+        // The flaky attempt's block is not the open one when `TRY 2 PASS` arrives, fail_fast's is
+        let output = r#"────────────
+    Starting 2 tests across 1 binary (2 tests skipped)
+  TRY 1 FAIL [   0.004s] (───) fx tests::flaky
+  stdout ───
+
+    running 1 test
+    test tests::flaky ... FAILED
+
+    failures:
+
+    failures:
+        tests::flaky
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::flaky' (229) panicked at src/lib.rs:23:13:
+    flaky first attempt
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 1 FAIL [   0.004s] (───) fx tests::fail_fast
+  stdout ───
+
+    running 1 test
+    fail_fast stdout line
+    test tests::fail_fast ... FAILED
+
+    failures:
+
+    failures:
+        tests::fail_fast
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::fail_fast' (230) panicked at src/lib.rs:9:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 PASS [   0.005s] (1/2) fx tests::flaky
+  TRY 2 FAIL [   0.005s] (───) fx tests::fail_fast
+  stdout ───
+
+    running 1 test
+    fail_fast stdout line
+    test tests::fail_fast ... FAILED
+
+    failures:
+
+    failures:
+        tests::fail_fast
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::fail_fast' (234) panicked at src/lib.rs:9:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 3 FAIL [   0.005s] (2/2) fx tests::fail_fast
+  stdout ───
+
+    running 1 test
+    fail_fast stdout line
+    test tests::fail_fast ... FAILED
+
+    failures:
+
+    failures:
+        tests::fail_fast
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::fail_fast' (236) panicked at src/lib.rs:9:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.017s] 2 tests run: 1 passed (1 flaky), 1 failed, 2 skipped
+   FLAKY 2/3 [   0.005s] (1/2) fx tests::flaky
+  TRY 3 FAIL [   0.005s] (2/2) fx tests::fail_fast
+error: test run failed
+"#;
+        let result = filter_cargo_nextest(output);
+        assert!(
+            !result.contains("tests::flaky"),
+            "a test that passed on retry is not a failure: {}",
+            result
+        );
+        assert!(!result.contains("flaky first attempt"), "{}", result);
+        assert!(
+            result.contains("TRY 3 FAIL [   0.005s] (2/2) fx tests::fail_fast"),
+            "should keep the test that kept failing: {}",
+            result
+        );
+        assert!(
+            result.contains("1 passed, 1 failed, 2 skipped"),
+            "should show summary: {}",
+            result
+        );
+        let savings = 100.0 - (result.len() as f64 / output.len() as f64) * 100.0;
+        assert!(savings >= 20.0, "savings below 20%: {savings:.1}%");
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_retries_keep_only_the_last_attempt() {
+        let output = r#"────────────
+    Starting 2 tests across 1 binary (2 tests skipped)
+        PASS [   0.005s] (1/2) fx tests::pass_fast
+  TRY 1 FAIL [   0.005s] (───) fx tests::fail_fast
+  stdout ───
+
+    running 1 test
+    fail_fast stdout line
+    test tests::fail_fast ... FAILED
+
+    failures:
+
+    failures:
+        tests::fail_fast
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::fail_fast' (152) panicked at src/lib.rs:9:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 FAIL [   0.005s] (───) fx tests::fail_fast
+  stdout ───
+
+    running 1 test
+    fail_fast stdout line
+    test tests::fail_fast ... FAILED
+
+    failures:
+
+    failures:
+        tests::fail_fast
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::fail_fast' (154) panicked at src/lib.rs:9:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 3 FAIL [   0.005s] (2/2) fx tests::fail_fast
+  stdout ───
+
+    running 1 test
+    fail_fast stdout line
+    test tests::fail_fast ... FAILED
+
+    failures:
+
+    failures:
+        tests::fail_fast
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::fail_fast' (156) panicked at src/lib.rs:9:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.017s] 2 tests run: 1 passed, 1 failed, 2 skipped
+  TRY 3 FAIL [   0.005s] (2/2) fx tests::fail_fast
+error: test run failed
+"#;
+        let result = filter_cargo_nextest(output);
+        assert!(
+            result.contains("TRY 3 FAIL [   0.005s] (2/2) fx tests::fail_fast"),
+            "should name the failing test: {}",
+            result
+        );
+        assert!(
+            result.contains("thread 'tests::fail_fast' (156) panicked"),
+            "should keep the last panic: {}",
+            result
+        );
+        assert_eq!(result.matches("panicked at").count(), 1, "{}", result);
+        assert_eq!(result.matches("TRY ").count(), 1, "{}", result);
+        let savings = 100.0 - (result.len() as f64 / output.len() as f64) * 100.0;
+        assert!(savings >= 20.0, "savings below 20%: {savings:.1}%");
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_retries_keep_each_failing_test() {
+        let output = r#"    Starting 2 tests across 1 binary (3 tests skipped)
+  TRY 1 FAIL [   0.004s] (───) fx tests::fail_fast
+  stderr ───
+
+    fail_fast attempt 1
+
+  TRY 1 FAIL [   0.004s] (───) fx tests::fail_other
+  stderr ───
+
+    fail_other attempt 1
+
+  TRY 2 FAIL [   0.004s] (1/2) fx tests::fail_other
+  stderr ───
+
+    fail_other attempt 2
+
+  TRY 2 FAIL [   0.005s] (2/2) fx tests::fail_fast
+  stderr ───
+
+    fail_fast attempt 2
+
+────────────
+     Summary [   0.017s] 2 tests run: 0 passed, 2 failed, 3 skipped
+  TRY 2 FAIL [   0.004s] (1/2) fx tests::fail_other
+  TRY 2 FAIL [   0.005s] (2/2) fx tests::fail_fast
+error: test run failed
+"#;
+        let result = filter_cargo_nextest(output);
+        assert!(result.contains("fail_other attempt 2"), "{}", result);
+        assert!(result.contains("fail_fast attempt 2"), "{}", result);
+        assert!(!result.contains("attempt 1"), "{}", result);
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_exec_failed_is_a_failure() {
+        // the summary line alone decides the verdict; its order is nextest's own
+        let output = r#"    Starting 1 test across 1 binary
+────────────────────────────
+     Summary [   0.005s] 1 test run: 0 passed, 1 exec failed
+error: test run failed
+"#;
+        let result = filter_cargo_nextest(output);
+        assert!(
+            result.contains("0 passed, 1 exec failed"),
+            "should count the exec failure instead of reporting a green run: {}",
             result
         );
     }

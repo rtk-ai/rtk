@@ -70,6 +70,7 @@ and `clippy` components installed, plus Node.js 24 or newer for the plugin tests
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked
 cargo test --test init_kilocode_test --locked
+cargo test --test hook_detection_multi_agent_test --locked
 cargo test --all --locked
 node --test hooks/kilocode/rtk.test.mjs
 ```
@@ -80,6 +81,11 @@ no-op, dry-run writes nothing, uninstall preserves other plugins, and
 project-scoped install and uninstall fail with the global command to use.
 `KILO_CONFIG_DIR` takes precedence over `XDG_CONFIG_HOME`; empty overrides are
 ignored. With neither override, the plugin goes under `~/.config/kilo`.
+
+The multi-agent detection tests verify that an installed Kilo plugin suppresses
+missing-hook warnings in `rtk gain` and the daily check. An outdated Claude Code
+hook still warns even when the Kilo plugin is installed; Claude-specific hook
+diagnostics remain independent of Kilo installation.
 
 The plugin tests exercise the actual hooks and execute a temporary mock binary
 outside `PATH`, including chains, pipelines, quoted directory names, relative

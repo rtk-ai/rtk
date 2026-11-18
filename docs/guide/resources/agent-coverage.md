@@ -20,7 +20,7 @@ Rows are grouped by what works — output compression first, then command rewrit
 | **Claude Code** | yes | yes | **yes** | yes | yes | yes |
 | **Copilot CLI** | yes | yes | **yes** ¹ | yes | yes | yes |
 | **Hermes** | yes | yes | **yes** | yes | yes | yes |
-| **Kilo Code** ⁸ | yes | yes | **yes** | yes | — | yes |
+| **Kilo Code** | yes | yes | **yes** | yes | — | yes |
 | **Mistral Vibe** | yes | yes | **yes** ³ | yes | — | — |
 | **Oh My Pi** | yes | yes | **yes** | yes | yes | yes |
 | **OpenCode** | yes | yes | **yes** ² | yes | — | — |
@@ -51,7 +51,7 @@ Rows are grouped by what works — output compression first, then command rewrit
 5. **Codex**: the rewrite is honoured only alongside an explicit `allow` decision. Without it the hook fails and the original command runs unwrapped.
 6. **Windsurf**: now **Devin Desktop**. Older Windsurf installs are block-only and cannot rewrite.
 7. **Cline**: the VS Code extension silently drops input overrides and cannot replace output. Both work only in the SDK/CLI plugin runtime, which is a different install. Hooks are also off by default — enable them in Feature Settings.
-8. **Rules file only**: for Kilo Code, Cline, Windsurf / Devin, Kimi Code and Antigravity, `rtk init` writes a rules file asking the model to prefer `rtk <cmd>` and installs no hook. Their row shows what the agent's hook API allows; with RTK today, nothing is blocked, rewritten or compressed.
+8. **Rules file only**: for Cline, Windsurf / Devin, Kimi Code and Antigravity, `rtk init` writes a rules file asking the model to prefer `rtk <cmd>` and installs no hook. Their row shows what the agent's hook API allows; with RTK today, nothing is blocked, rewritten or compressed.
 
 ## What this means per pipeline position
 
