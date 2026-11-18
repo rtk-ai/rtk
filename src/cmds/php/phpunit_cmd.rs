@@ -2,23 +2,33 @@
 //!
 //! Parses PHPUnit's plain-text runner output and emits a compact summary:
 //! aggregate counts from the `Tests: X, Assertions: Y, Failures: Z.` line
-//! plus a bounded list of failures with their first two detail lines.
-//! Dot-progress lines and headers are stripped entirely.
+//! plus a bounded list of failures, each with its message, diff and stack
+//! frames. A long trace keeps only its first and last frames, and details
+//! beyond a cap are counted in a marker, except the last frame, which is
+//! always kept. Dot-progress lines and headers are stripped entirely.
 
 use super::utils::{php_tool_command, strip_ansi_and_controls};
 use crate::core::runner;
 use crate::core::shell::display_args;
 use anyhow::Result;
 use regex::Regex;
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
 const MAX_FAILURES_SHOWN: usize = 10;
-const MAX_DETAIL_LINES_PER_FAILURE: usize = 2;
+// Room for the message, the `--- Expected` / `+++ Actual` / `@@ @@` header,
+// a typical diff hunk and its frames.
+const MAX_DETAIL_LINES_PER_FAILURE: usize = 20;
+// PHPUnit keeps vendor frames: an exception thrown inside a framework prints
+// dozens. Past this, only the throw site and the test line are kept.
+const MAX_FRAMES_IN_FULL: usize = 3;
 
 // PHPUnit prints each failure heading as "N) Class::method". Anchor to that
 // exact shape so detail lines that merely start with a digit and contain ')'
 // (e.g. "5 of 10 assertions passed in Foo::bar()") don't split a block.
 static FAILURE_HEADING_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d+\) \S").unwrap());
+// A stack frame, printed as `/path/to/FooTest.php:42`.
+static FRAME_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.php:\d+$").unwrap());
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = php_tool_command("phpunit");
@@ -68,7 +78,10 @@ pub(crate) fn filter_phpunit_output(output: &str) -> String {
             continue;
         }
 
-        if trimmed == "FAILURES!" || trimmed == "ERRORS!" {
+        // `--` separates PHPUnit's result sections: what follows may be risky
+        // or skipped tests, which are not failures. Matched untrimmed, since a
+        // diff prints the context line `--` as ` --`.
+        if trimmed == "FAILURES!" || trimmed == "ERRORS!" || line.trim_end() == "--" {
             if !current.is_empty() {
                 failures.push(std::mem::take(&mut current));
             }
@@ -82,8 +95,9 @@ pub(crate) fn filter_phpunit_output(output: &str) -> String {
                     failures.push(std::mem::take(&mut current));
                 }
                 current.push(trimmed.to_string());
-            } else if !trimmed.is_empty() {
-                current.push(trimmed.to_string());
+            } else if !line.is_empty() {
+                // Leading whitespace is the diff's context column and indentation.
+                current.push(line.trim_end().to_string());
             }
         }
     }
@@ -140,15 +154,9 @@ fn build_phpunit_summary(output: &str, failures: &[Vec<String>]) -> String {
     result.push('\n');
 
     for failure_lines in failures.iter().take(MAX_FAILURES_SHOWN) {
-        if let Some(first) = failure_lines.first() {
-            result.push_str(&format!("\n{}\n", first));
-        }
-        for detail in failure_lines
-            .iter()
-            .skip(1)
-            .take(MAX_DETAIL_LINES_PER_FAILURE)
-        {
-            result.push_str(&format!("  {}\n", detail));
+        if let Some((heading, details)) = failure_lines.split_first() {
+            result.push_str(&format!("\n{}\n", heading));
+            push_failure_details(&mut result, details);
         }
     }
 
@@ -160,6 +168,48 @@ fn build_phpunit_summary(output: &str, failures: &[Vec<String>]) -> String {
     }
 
     result.trim().to_string()
+}
+
+fn push_failure_details(result: &mut String, details: &[String]) {
+    let lines = compact_frames(details);
+    let (shown, hidden) = lines.split_at(lines.len().min(MAX_DETAIL_LINES_PER_FAILURE));
+    for (line, _) in shown {
+        result.push_str(&format!("  {}\n", line));
+    }
+
+    // PHPUnit drops its own frames, so the last one is the line of the test
+    // method: keep it even when a long diff pushes it past the cap.
+    let last_frame = hidden
+        .iter()
+        .rev()
+        .map(|(line, _)| line)
+        .find(|line| FRAME_RE.is_match(line));
+    let cut = hidden.iter().map(|(_, raw)| raw).sum::<usize>() - usize::from(last_frame.is_some());
+    if cut > 0 {
+        result.push_str(&format!("  ... +{} more lines\n", cut));
+    }
+    if let Some(frame) = last_frame {
+        result.push_str(&format!("  {}\n", frame));
+    }
+}
+
+/// Each line comes with the number of raw lines it stands for, so a cut
+/// that falls after a compacted trace still reports the real count.
+fn compact_frames(details: &[String]) -> Vec<(Cow<'_, str>, usize)> {
+    let is_frame = |line: &String| FRAME_RE.is_match(line);
+    let mut lines = Vec::with_capacity(details.len());
+    for run in details.chunk_by(|a, b| is_frame(a) == is_frame(b)) {
+        match run {
+            [first, middle @ .., last] if run.len() > MAX_FRAMES_IN_FULL && is_frame(first) => {
+                lines.push((Cow::Borrowed(first.as_str()), 1));
+                let marker = format!("... +{} more frames", middle.len());
+                lines.push((Cow::Owned(marker), middle.len()));
+                lines.push((Cow::Borrowed(last.as_str()), 1));
+            }
+            _ => lines.extend(run.iter().map(|line| (Cow::Borrowed(line.as_str()), 1))),
+        }
+    }
+    lines
 }
 
 fn parse_counts(output: &str) -> Counts {
@@ -397,5 +447,224 @@ Tests: 1, Assertions: 0, Errors: 1."#;
             raw_len,
             filtered_len
         );
+    }
+
+    // PHPUnit 13.4.3, `assertSame(['a' => 1, 'b' => 2], ['a' => 1, 'b' => 3])`.
+    const REAL_PHPUNIT_DIFF_FAILURE: &str = r#"PHPUnit 13.4.3 by Sebastian Bergmann and contributors.
+
+Runtime:       PHP 8.5.4
+
+.F                                                                  2 / 2 (100%)
+
+Time: 00:00.007, Memory: 8.00 MB
+
+There was 1 failure:
+
+1) FooTest::testFails
+Failed asserting that two arrays are identical.
+--- Expected
++++ Actual
+@@ @@
+ Array &0 [
+     'a' => 1,
+-    'b' => 2,
++    'b' => 3,
+ ]
+
+/app/tests/FooTest.php:8
+
+FAILURES!
+Tests: 2, Assertions: 2, Failures: 1."#;
+
+    // PHPUnit 13.4.3: a chained exception thrown two calls deep, an assertion
+    // in a helper, a 60-line array diff and a test without assertions.
+    const REAL_PHPUNIT_ERRORS_FAILURES_RISKY: &str =
+        include_str!("../../../tests/fixtures/phpunit_errors_failures_risky_raw.txt");
+
+    fn count_tokens(text: &str) -> usize {
+        text.split_whitespace().count()
+    }
+
+    fn failure_block<'a>(output: &'a str, heading: &str) -> &'a str {
+        let start = output
+            .find(heading)
+            .unwrap_or_else(|| panic!("{heading} missing from: {output}"));
+        let block = &output[start..];
+        block.find("\n\n").map_or(block, |end| &block[..end])
+    }
+
+    #[test]
+    fn test_phpunit_diff_failure_keeps_diff_and_location() {
+        let result = filter_phpunit_output(REAL_PHPUNIT_DIFF_FAILURE);
+        assert_eq!(
+            result,
+            "PHPUnit: 2 tests, 2 assertions, 1 failures
+
+1) FooTest::testFails
+  Failed asserting that two arrays are identical.
+  --- Expected
+  +++ Actual
+  @@ @@
+   Array &0 [
+       'a' => 1,
+  -    'b' => 2,
+  +    'b' => 3,
+   ]
+  /app/tests/FooTest.php:8"
+        );
+    }
+
+    #[test]
+    fn test_phpunit_long_diff_marks_cut_and_keeps_location() {
+        let result = filter_phpunit_output(REAL_PHPUNIT_ERRORS_FAILURES_RISKY);
+        let block = failure_block(&result, "2) BazTest::testLongDiff");
+        // 66 detail lines: the first 20 are shown, then the location.
+        assert_eq!(block.lines().count(), 1 + 20 + 2, "got: {block}");
+        assert!(
+            block.ends_with(
+                "  -    'k14' => 14,\n  ... +45 more lines\n  /app/tests/BazTest.php:41"
+            ),
+            "got: {block}"
+        );
+    }
+
+    #[test]
+    fn test_phpunit_short_details_are_shown_in_full() {
+        let result = filter_phpunit_output(REAL_PHPUNIT_ERRORS_FAILURES_RISKY);
+        assert_eq!(
+            failure_block(&result, "1) BazTest::testDeepError"),
+            "1) BazTest::testDeepError
+  RuntimeException: Outer failure.
+  /app/tests/BazTest.php:16
+  /app/tests/BazTest.php:8
+  /app/tests/BazTest.php:25
+  Caused by
+  InvalidArgumentException: Inner cause.
+  /app/tests/BazTest.php:14
+  /app/tests/BazTest.php:8
+  /app/tests/BazTest.php:25"
+        );
+        assert_eq!(
+            failure_block(&result, "1) BazTest::testHelperAssertion"),
+            "1) BazTest::testHelperAssertion
+  Failed asserting that -1 is greater than 0.
+  /app/tests/BazTest.php:50
+  /app/tests/BazTest.php:30"
+        );
+    }
+
+    #[test]
+    fn test_phpunit_string_diff_keeps_blank_and_dash_lines() {
+        // PHPUnit 13.4.3, `assertSame("a\n\n--\nb\n", "a\n\n--\nc\n")`. The
+        // `\n` escapes spell the whitespace-only context line ` `.
+        let output = "There was 1 failure:
+
+1) StrTest::testMultiline
+Failed asserting that two strings are identical.
+--- Expected
++++ Actual
+@@ @@
+ 'a
+ \n --
+-b
++c
+ '
+
+/app/tests/StrTest.php:7
+
+FAILURES!
+Tests: 1, Assertions: 1, Failures: 1.";
+        assert_eq!(
+            filter_phpunit_output(output),
+            "PHPUnit: 1 tests, 1 assertions, 1 failures
+
+1) StrTest::testMultiline
+  Failed asserting that two strings are identical.
+  --- Expected
+  +++ Actual
+  @@ @@
+   'a
+  \n   --
+  -b
+  +c
+   '
+  /app/tests/StrTest.php:7"
+        );
+    }
+
+    #[test]
+    fn test_phpunit_vendor_trace_keeps_throw_site_and_test_line() {
+        // PHPUnit 13.4.3, a Symfony container compiled with a missing service.
+        let output = r#"There was 1 error:
+
+1) QuxTest::testVendorError
+Symfony\Component\DependencyInjection\Exception\ServiceNotFoundException: The service "app.mailer" has a dependency on a non-existent service "app.missing".
+
+/app/vendor/symfony/dependency-injection/Compiler/CheckExceptionOnInvalidReferenceBehaviorPass.php:116
+/app/vendor/symfony/dependency-injection/Compiler/CheckExceptionOnInvalidReferenceBehaviorPass.php:123
+/app/vendor/symfony/dependency-injection/Compiler/CheckExceptionOnInvalidReferenceBehaviorPass.php:83
+/app/vendor/symfony/dependency-injection/Compiler/AbstractRecursivePass.php:80
+/app/vendor/symfony/dependency-injection/Compiler/CheckExceptionOnInvalidReferenceBehaviorPass.php:48
+/app/vendor/symfony/dependency-injection/Compiler/AbstractRecursivePass.php:89
+/app/vendor/symfony/dependency-injection/Compiler/CheckExceptionOnInvalidReferenceBehaviorPass.php:48
+/app/vendor/symfony/dependency-injection/Compiler/AbstractRecursivePass.php:80
+/app/vendor/symfony/dependency-injection/Compiler/CheckExceptionOnInvalidReferenceBehaviorPass.php:48
+/app/vendor/symfony/dependency-injection/Compiler/AbstractRecursivePass.php:43
+/app/vendor/symfony/dependency-injection/Compiler/CheckExceptionOnInvalidReferenceBehaviorPass.php:39
+/app/vendor/symfony/dependency-injection/Compiler/Compiler.php:73
+/app/vendor/symfony/dependency-injection/ContainerBuilder.php:823
+/app/tests/QuxTest.php:14
+
+ERRORS!
+Tests: 1, Assertions: 0, Errors: 1."#;
+        assert_eq!(
+            filter_phpunit_output(output),
+            r#"PHPUnit: 1 tests, 0 assertions, 0 failures, 1 errors
+
+1) QuxTest::testVendorError
+  Symfony\Component\DependencyInjection\Exception\ServiceNotFoundException: The service "app.mailer" has a dependency on a non-existent service "app.missing".
+  /app/vendor/symfony/dependency-injection/Compiler/CheckExceptionOnInvalidReferenceBehaviorPass.php:116
+  ... +12 more frames
+  /app/tests/QuxTest.php:14"#
+        );
+    }
+
+    #[test]
+    fn test_phpunit_cut_counts_compacted_frames() {
+        let mut output = String::from("There was 1 failure:\n\n1) FooTest::testBar\n");
+        for i in 1..=25 {
+            output.push_str(&format!("-    'k{i}' => {i},\n"));
+        }
+        output.push('\n');
+        for i in 1..=10 {
+            output.push_str(&format!("/app/src/Frame{i}.php:{i}\n"));
+        }
+        output.push_str("\nFAILURES!\nTests: 1, Assertions: 1, Failures: 1.\n");
+
+        let result = filter_phpunit_output(&output);
+        // 35 raw detail lines: 20 shown, the last frame kept, 14 cut.
+        assert!(
+            result
+                .ends_with("  -    'k20' => 20,\n  ... +14 more lines\n  /app/src/Frame10.php:10"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_phpunit_stops_at_section_separator() {
+        let result = filter_phpunit_output(REAL_PHPUNIT_ERRORS_FAILURES_RISKY);
+        assert!(
+            !result.lines().any(|line| line.trim() == "--"),
+            "got: {result}"
+        );
+        assert!(!result.contains("BazTest::testRisky"), "got: {result}");
+    }
+
+    #[test]
+    fn test_phpunit_errors_failures_risky_savings() {
+        let input = REAL_PHPUNIT_ERRORS_FAILURES_RISKY;
+        let output = filter_phpunit_output(input);
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
+        assert!(savings >= 20.0, "expected >=20% savings, got {savings:.1}%");
     }
 }
