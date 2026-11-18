@@ -788,7 +788,8 @@ fn log_hook_decision(v: &Value, cmd: &str, decision: HookOutcome, rewritten: Opt
         decision,
         rewritten,
         env!("CARGO_PKG_VERSION"),
-    ) {
+    ) && !crate::core::db::every_write_would_fail(&e)
+    {
         let _ = writeln!(
             io::stderr(),
             "[rtk hook] hook_decisions logging failed: {e}"
