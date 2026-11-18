@@ -48,9 +48,12 @@ pub trait TokenFormatter {
 
 impl TokenFormatter for TestResult {
     fn format_compact(&self) -> String {
-        // Always surface skipped/pending tests — hiding them lets coverage gaps
-        // (test.skip / it.skip / xfail) accumulate invisibly.
+        // Always surface flaky and skipped/pending tests — hiding them lets
+        // retried failures or coverage gaps accumulate invisibly.
         let mut summary = format!("PASS ({}) FAIL ({})", self.passed, self.failed);
+        if self.flaky > 0 {
+            summary.push_str(&format!(" FLAKY ({})", self.flaky));
+        }
         if self.skipped > 0 {
             summary.push_str(&format!(" skipped ({})", self.skipped));
         }
@@ -70,6 +73,20 @@ impl TokenFormatter for TestResult {
             }
         }
 
+        if !self.flaky_tests.is_empty() {
+            lines.push("\nFlaky:".to_string());
+            for (idx, flaky) in self.flaky_tests.iter().enumerate().take(5) {
+                lines.push(format!("{}. {}", idx + 1, flaky.test_name));
+                for line in flaky.error_message.lines() {
+                    lines.push(format!("   {}", line));
+                }
+            }
+
+            if self.flaky_tests.len() > 5 {
+                lines.push(format!("\n... +{} more flaky", self.flaky_tests.len() - 5));
+            }
+        }
+
         if let Some(duration) = self.duration_ms {
             lines.push(format!("\nTime: {}ms", duration));
         }
@@ -78,10 +95,15 @@ impl TokenFormatter for TestResult {
     }
 
     fn format_verbose(&self) -> String {
-        let mut lines = vec![format!(
-            "Tests: {} passed, {} failed, {} skipped (total: {})",
-            self.passed, self.failed, self.skipped, self.total
-        )];
+        let mut summary = format!(
+            "Tests: {} passed, {} failed, {} skipped",
+            self.passed, self.failed, self.skipped
+        );
+        if self.flaky > 0 {
+            summary.push_str(&format!(", {} flaky", self.flaky));
+        }
+        summary.push_str(&format!(" (total: {})", self.total));
+        let mut lines = vec![summary];
 
         if !self.failures.is_empty() {
             lines.push("\nFailures:".to_string());
@@ -101,6 +123,19 @@ impl TokenFormatter for TestResult {
             }
         }
 
+        if !self.flaky_tests.is_empty() {
+            lines.push("\nFlaky:".to_string());
+            for (idx, flaky) in self.flaky_tests.iter().enumerate() {
+                lines.push(format!(
+                    "\n{}. {} ({})",
+                    idx + 1,
+                    flaky.test_name,
+                    flaky.file_path
+                ));
+                lines.push(format!("   {}", flaky.error_message));
+            }
+        }
+
         if let Some(duration) = self.duration_ms {
             lines.push(format!("\nDuration: {}ms", duration));
         }
@@ -109,13 +144,24 @@ impl TokenFormatter for TestResult {
     }
 
     fn format_ultra(&self) -> String {
-        format!(
-            "[ok]{} [x]{} [skip]{} ({}ms)",
-            self.passed,
-            self.failed,
-            self.skipped,
-            self.duration_ms.unwrap_or(0)
-        )
+        if self.flaky > 0 {
+            format!(
+                "[ok]{} [x]{} [flaky]{} [skip]{} ({}ms)",
+                self.passed,
+                self.failed,
+                self.flaky,
+                self.skipped,
+                self.duration_ms.unwrap_or(0)
+            )
+        } else {
+            format!(
+                "[ok]{} [x]{} [skip]{} ({}ms)",
+                self.passed,
+                self.failed,
+                self.skipped,
+                self.duration_ms.unwrap_or(0)
+            )
+        }
     }
 }
 
@@ -225,8 +271,10 @@ mod tests {
             passed,
             failed: failures.len(),
             skipped: 0,
+            flaky: 0,
             duration_ms: Some(1500),
             failures,
+            flaky_tests: Vec::new(),
         }
     }
 
@@ -316,5 +364,46 @@ mod tests {
             output.contains("Timeout exceeded"),
             "Single-line error must appear\nGot:\n{output}"
         );
+    }
+
+    #[test]
+    fn test_flaky_formats_across_modes_and_omits_when_zero() {
+        let clean = make_result(2, vec![]);
+        assert!(!clean.format_compact().contains("FLAKY"));
+        assert!(!clean.format_verbose().contains("flaky"));
+        assert!(!clean.format_ultra().contains("[flaky]"));
+
+        let flaky = TestResult {
+            total: 1,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            flaky: 1,
+            duration_ms: Some(970),
+            failures: Vec::new(),
+            flaky_tests: vec![make_failure(
+                "flaky on first attempt",
+                "Error: intentional first-attempt failure",
+            )],
+        };
+
+        let compact = flaky.format_compact();
+        assert!(
+            compact.starts_with("PASS (0) FAIL (0) FLAKY (1)"),
+            "{compact}"
+        );
+        assert!(compact.contains("Flaky:"), "{compact}");
+        assert!(compact.contains("flaky on first attempt"), "{compact}");
+        assert!(
+            compact.contains("intentional first-attempt failure"),
+            "{compact}"
+        );
+
+        let verbose = flaky.format_verbose();
+        assert!(verbose.contains("1 flaky (total: 1)"), "{verbose}");
+        assert!(verbose.contains("Flaky:"), "{verbose}");
+
+        let ultra = flaky.format_ultra();
+        assert_eq!(ultra, "[ok]0 [x]0 [flaky]1 [skip]0 (970ms)");
     }
 }

@@ -9,8 +9,12 @@ pub struct TestResult {
     pub passed: usize,
     pub failed: usize,
     pub skipped: usize,
+    #[serde(default)]
+    pub flaky: usize,
     pub duration_ms: Option<u64>,
     pub failures: Vec<TestFailure>,
+    #[serde(default)]
+    pub flaky_tests: Vec<TestFailure>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
