@@ -120,7 +120,7 @@ pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
         .collect();
     match command {
         CargoCommand::Build => run_build(args, &command_args, verbose),
-        CargoCommand::Test => run_test(args, verbose),
+        CargoCommand::Test => run_test(args, &command_args, verbose),
         CargoCommand::Clippy => run_clippy(args, &command_args, verbose),
         CargoCommand::Check => run_check(args, &command_args, verbose),
         CargoCommand::Install => run_install(args, verbose),
@@ -466,7 +466,35 @@ fn run_build(args: &[OsString], command_args: &[String], verbose: u8) -> Result<
     )
 }
 
-fn run_test(args: &[OsString], verbose: u8) -> Result<i32> {
+fn has_machine_readable_libtest_format(args: &[String]) -> bool {
+    let Some(dash_pos) = args.iter().position(|a| a == "--") else {
+        return false;
+    };
+    let mut iter = args[dash_pos + 1..].iter();
+    while let Some(arg) = iter.next() {
+        let val = if let Some(val) = arg.strip_prefix("--format=") {
+            Some(val)
+        } else if arg == "--format" {
+            iter.next().map(|s| s.as_str())
+        } else {
+            None
+        };
+        if let Some(format) = val {
+            let f = format.to_ascii_lowercase();
+            if f == "json" || f == "junit" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn run_test(args: &[OsString], command_args: &[String], verbose: u8) -> Result<i32> {
+    // Machine-readable libtest reports (--format json or junit) are meant for tools/CI;
+    // filtering would drop the test names, panics, and the structured report itself.
+    if has_machine_readable_libtest_format(command_args) {
+        return runner::run_passthrough("cargo", args, verbose);
+    }
     // No json branch here on purpose: --message-format=json only reformats the
     // build phase, the test harness output stays human-readable. CargoTestHandler
     // reads both — it aggregates the `test result:` lines and, on a compile error,
@@ -3248,6 +3276,65 @@ error: aborting due to 1 previous error
             "--message-format=human".into(),
             "--message-format=json".into(),
         ]));
+    }
+
+    #[test]
+    fn test_machine_readable_libtest_format() {
+        // Formats after "--" must be detected
+        assert!(has_machine_readable_libtest_format(&[
+            "--".into(),
+            "--format=json".into(),
+        ]));
+        assert!(has_machine_readable_libtest_format(&[
+            "--".into(),
+            "--format".into(),
+            "json".into(),
+        ]));
+        assert!(has_machine_readable_libtest_format(&[
+            "--".into(),
+            "--format=JSON".into(),
+        ]));
+        assert!(has_machine_readable_libtest_format(&[
+            "--".into(),
+            "--format=junit".into(),
+        ]));
+        assert!(has_machine_readable_libtest_format(&[
+            "--".into(),
+            "--format".into(),
+            "junit".into(),
+        ]));
+        assert!(has_machine_readable_libtest_format(&[
+            "-p".into(),
+            "crate".into(),
+            "--".into(),
+            "-Zunstable-options".into(),
+            "--format".into(),
+            "json".into(),
+        ]));
+
+        // Non-machine-readable formats or formats before "--" must not trigger passthrough
+        assert!(!has_machine_readable_libtest_format(&[
+            "--".into(),
+            "--format=pretty".into(),
+        ]));
+        assert!(!has_machine_readable_libtest_format(&[
+            "--".into(),
+            "--format=terse".into(),
+        ]));
+        assert!(!has_machine_readable_libtest_format(&[
+            "--format=json".into(),
+        ]));
+        assert!(!has_machine_readable_libtest_format(&[
+            "--format".into(),
+            "json".into(),
+            "--".into(),
+            "my_test".into(),
+        ]));
+        assert!(!has_machine_readable_libtest_format(&[
+            "--".into(),
+            "--format".into(),
+        ]));
+        assert!(!has_machine_readable_libtest_format(&[]));
     }
 
     #[test]
