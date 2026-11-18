@@ -5911,6 +5911,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_classify_and_rewrite_sqlcmd() {
+        for (cmd, rewritten) in [
+            (
+                "sqlcmd -S localhost -U sa -Q \"select 1\"",
+                "rtk sqlcmd -S localhost -U sa -Q \"select 1\"",
+            ),
+            ("sqlcmd.exe -S . -E -i q.sql", "rtk sqlcmd -S . -E -i q.sql"),
+            (
+                "SQLCMDPASSWORD=x sqlcmd -S srv",
+                "SQLCMDPASSWORD=x rtk sqlcmd -S srv",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(rewritten.into())
+            );
+        }
+        for cmd in ["sqlcmdx -Q x", "mysqlcmd -Q x"] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+        let excluded = vec!["sqlcmd".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("sqlcmd -S srv", &excluded),
+            None
+        );
+    }
+
     // --- Python tooling ---
 
     #[test]
