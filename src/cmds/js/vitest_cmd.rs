@@ -71,8 +71,10 @@ impl OutputParser for VitestParser {
                     passed: json.num_passed_tests,
                     failed: json.num_failed_tests,
                     skipped: json.num_pending_tests,
+                    flaky: 0,
                     duration_ms: None,
                     failures,
+                    flaky_tests: Vec::new(),
                 };
 
                 ParseResult::Full(result)
@@ -156,8 +158,10 @@ fn extract_stats_regex(output: &str) -> Option<TestResult> {
             passed,
             failed,
             skipped: 0,
+            flaky: 0,
             duration_ms,
             failures: extract_failures_regex(&clean_output),
+            flaky_tests: Vec::new(),
         })
     } else {
         None
