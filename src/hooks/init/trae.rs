@@ -379,6 +379,7 @@ mod tests {
         assert!(is_trae_hook_command("rtk hook trae"));
         assert!(is_trae_hook_command("/opt/homebrew/bin/rtk hook trae"));
         assert!(is_trae_hook_command("\"/opt/homebrew/bin/rtk\" hook trae"));
+        assert!(is_trae_hook_command("rtk hook trae\n"));
         assert!(!is_trae_hook_command("rtk hook claude"));
     }
 
