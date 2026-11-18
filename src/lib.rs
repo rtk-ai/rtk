@@ -10,7 +10,7 @@ mod llm_proxy;
 mod parser;
 
 // Re-export command modules for routing
-use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::cloud::{aws_cmd, compose_cmd, container, curl_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git_cmd, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -2912,9 +2912,7 @@ fn run_cli() -> Result<i32> {
                 ComposeCommands::Build { service } => {
                     container::run_compose_build(service.as_deref(), cli.verbose)?
                 }
-                ComposeCommands::Other(args) => {
-                    container::run_compose_passthrough(&args, cli.verbose)?
-                }
+                ComposeCommands::Other(args) => compose_cmd::run(&args, cli.verbose)?,
             },
             DockerCommands::Other(args) => container::run_docker_passthrough(&args, cli.verbose)?,
         },

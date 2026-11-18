@@ -1,0 +1,3 @@
+ Container rtk1305demo-web-1  Running
+ Container rtk1305demo-db-1  Running
+ Container rtk1305demo-worker-1  Running

@@ -1,0 +1,6 @@
+ Container rtk1305demo-web-1  Restarting
+ Container rtk1305demo-db-1  Restarting
+ Container rtk1305demo-worker-1  Restarting
+ Container rtk1305demo-worker-1  Started
+ Container rtk1305demo-db-1  Started
+ Container rtk1305demo-web-1  Started

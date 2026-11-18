@@ -113,6 +113,9 @@ listing into `head`, `tail`, or `cat`.
 | `docker compose ps` | Container status and ports |
 | `docker compose logs` | Deduplicated logs |
 | `docker compose build` | Build output, warnings and errors highlighted |
+| `docker compose up -d` | One line per network, volume and container; begin lines dropped once the resource finishes |
+| `docker compose down` | Same, for stop and remove |
+| `docker compose restart` | Same, for restart |
 | `kubectl get pods` | Name + status + restarts only |
 | `kubectl logs` | Deduplicated entries |
 
