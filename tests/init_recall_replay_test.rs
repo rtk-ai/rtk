@@ -13,6 +13,7 @@ fn init(project: &Path, store: &Path) -> Output {
     common::rtk_command()
         .env("LC_ALL", "C")
         .env("HOME", project.join("home"))
+        .env("CLAUDE_CONFIG_DIR", project.join("claude-config"))
         .env("RTK_RECALL_DB", store)
         .args(["init", "--global", "--no-patch"])
         .current_dir(project)
