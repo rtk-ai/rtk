@@ -281,3 +281,21 @@ fn forget_erases_batched_payloads_and_captures() {
         assert!(!dir.path().join(name).exists(), "{name}");
     }
 }
+
+#[test]
+fn grouped_search_reports_a_missing_recall_table_once() {
+    let dir = common::tempdir();
+    fixture(dir.path(), 20, "sqlite");
+    assert!(search(dir.path(), "12").status.success());
+    let conn = rusqlite::Connection::open(dir.path().join("recall.db")).unwrap();
+    conn.execute_batch("DROP TABLE recall").unwrap();
+    drop(conn);
+    let output = search(dir.path(), "12");
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("Run `rtk init` to recreate it.").count(),
+        1,
+        "{stderr}"
+    );
+}
