@@ -14,7 +14,9 @@ use super::lexer::{
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 use super::shell_wrapper::parse_shell_wrapper;
 
-const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
+const PHP_TOOL_NAMES: [&str; 8] = [
+    "phpunit", "phpstan", "ecs", "pest", "paratest", "pint", "phpcs", "phpcbf",
+];
 
 /// Result of classifying a command.
 #[derive(Debug, PartialEq)]
@@ -3118,6 +3120,8 @@ mod tests {
                 "rtk next",
                 "rtk paratest",
                 "rtk pest",
+                "rtk phpcbf",
+                "rtk phpcs",
                 "rtk phpstan",
                 "rtk phpunit",
                 "rtk pint",
@@ -8842,6 +8846,26 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn test_rewrite_phpcs_phpcbf_invocation_forms() {
+        for tool in ["phpcs", "phpcbf"] {
+            for form in [
+                tool.to_string(),
+                format!("vendor/bin/{tool}"),
+                format!("./vendor/bin/{tool}"),
+            ] {
+                assert_eq!(
+                    rewrite_command_no_prefixes(&format!("{form} --standard=PSR12 src"), &[]),
+                    Some(format!("rtk {tool} --standard=PSR12 src")),
+                    "form: {form}"
+                );
+            }
+        }
+        for cmd in ["phpcsfixer fix", "phpcs-diff", "vendor/bin/phpcbfx"] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
     }
 
     #[test]

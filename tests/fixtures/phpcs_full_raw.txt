@@ -1,0 +1,63 @@
+E.EE. 5 / 5 (100%)
+
+
+
+FILE: /app/src/Calc.php
+--------------------------------------------------------------------------------
+FOUND 13 ERRORS AFFECTING 6 LINES
+--------------------------------------------------------------------------------
+  1 | ERROR | [x] Header blocks must be separated by a single blank line
+  4 | ERROR | [x] Opening brace of a class must be on the line after the
+    |       |     definition
+  8 | ERROR | [x] Expected at least 1 space before "+"; 0 found
+  8 | ERROR | [x] Expected at least 1 space after "+"; 0 found
+ 10 | ERROR | [x] Opening brace should be on a new line
+ 11 | ERROR | [x] Newline required after opening brace
+ 11 | ERROR | [x] Closing brace must be on a line by itself
+ 14 | ERROR | [ ] Visibility must be declared on method "badName"
+ 14 | ERROR | [ ] Expected "function abc(...)"; found "function abc (...)"
+ 14 | ERROR | [x] Expected 0 spaces after opening parenthesis; 1 found
+ 14 | ERROR | [x] Expected 0 spaces before opening parenthesis; 1 found
+ 14 | ERROR | [x] Expected 0 spaces before closing parenthesis; 1 found
+ 14 | ERROR | [x] Opening brace should be on a new line
+--------------------------------------------------------------------------------
+PHPCBF CAN FIX THE 11 MARKED SNIFF VIOLATIONS AUTOMATICALLY
+--------------------------------------------------------------------------------
+
+
+FILE: /app/src/Util/Arr.php
+----------------------------------------------------------------------
+FOUND 4 ERRORS AFFECTING 2 LINES
+----------------------------------------------------------------------
+  9 | ERROR | [x] Expected 1 space after FOREACH keyword; 0 found
+  9 | ERROR | [x] Expected 1 space after closing parenthesis; found 0
+ 19 | ERROR | [x] Expected 1 space after IF keyword; 0 found
+ 19 | ERROR | [x] Inline control structures are not allowed
+----------------------------------------------------------------------
+PHPCBF CAN FIX THE 4 MARKED SNIFF VIOLATIONS AUTOMATICALLY
+----------------------------------------------------------------------
+
+
+FILE: /app/src/Util/Strings.php
+--------------------------------------------------------------------------------
+FOUND 8 ERRORS AND 1 WARNING AFFECTING 7 LINES
+--------------------------------------------------------------------------------
+  1 | ERROR   | [x] Header blocks must be separated by a single blank line
+  7 | ERROR   | [x] Opening brace of a class must be on the line after the
+    |         |     definition
+  8 | WARNING | [ ] Visibility must be declared on all constants if your
+    |         |     project supports PHP 7.1 or later
+  8 | ERROR   | [ ] Class constants must be uppercase; expected PREFIX but
+    |         |     found prefix
+ 10 | ERROR   | [x] Opening brace should be on a new line
+ 12 | ERROR   | [x] Space after opening parenthesis of function call prohibited
+ 12 | ERROR   | [x] Expected 0 spaces before closing parenthesis; 1 found
+ 14 | ERROR   | [x] No space found after comma in argument list
+ 17 | ERROR   | [x] There must not be a space before the colon in a return type
+    |         |     declaration
+--------------------------------------------------------------------------------
+PHPCBF CAN FIX THE 7 MARKED SNIFF VIOLATIONS AUTOMATICALLY
+--------------------------------------------------------------------------------
+
+Time: 52ms; Memory: 6MB
+
