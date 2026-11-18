@@ -57,8 +57,7 @@ mod tests {
     }
 
     fn powershell(path: &Path, script: &str, sddl: &str) -> std::process::Output {
-        let shell = which::which("powershell.exe").expect("Windows PowerShell must be on PATH");
-        Command::new(shell)
+        Command::new("powershell.exe")
             // A parent pwsh 7 exports an incompatible module search path for
             // inbox Windows PowerShell. Let it construct its own defaults.
             .env_remove("PSModulePath")
@@ -222,6 +221,7 @@ mod tests {
             {
                 let _acl = DeniedFile::new(&path, "ExecuteFile");
                 assert!(!access_denied(&path));
+                // nosemgrep: dynamic-command-execution -- execute only the batch fixture just written in this test's temporary directory.
                 let output = Command::new(&path).output().unwrap();
                 assert!(output.status.success());
                 assert!(String::from_utf8_lossy(&output.stdout).contains("script-ok"));
