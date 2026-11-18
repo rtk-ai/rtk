@@ -77,7 +77,7 @@ fn store_without_its_table(store: &Path) {
     current_store(store);
     Connection::open(store)
         .expect("open")
-        .execute("DROP TABLE recall", [])
+        .execute_batch("DROP TABLE recall; DROP TABLE recall_stats;")
         .expect("drop recall");
 }
 
