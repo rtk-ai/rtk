@@ -32,6 +32,10 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    env:
+      # Rust's target baseline does not constrain C dependencies (mimalloc,
+      # SQLite). Never inherit the runner C compiler's newer CPU baseline.
+      CFLAGS_x86_64_unknown_linux_musl: "-march=x86-64 -mtune=generic"
     strategy:
       fail-fast: false
       matrix:
@@ -74,6 +78,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
+
+      - name: Install baseline CPU emulator
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get install -y qemu-user
 
       - name: Install packaging tools
         if: matrix.musl
@@ -184,7 +192,7 @@ jobs:
           --target-dir target
           --target ${{ matrix.target }}
         env:
-          CFLAGS_x86_64_unknown_linux_musl: "-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t"
+          CFLAGS_x86_64_unknown_linux_musl: "-march=x86-64 -mtune=generic -Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t"
           CFLAGS_aarch64_unknown_linux_musl: "-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t"
 
       - name: Package rtk-proxy (Unix)
@@ -212,6 +220,9 @@ jobs:
               exit 1
             fi
             "$b" --version
+            if [ '${{ matrix.target }}' = x86_64-unknown-linux-musl ]; then
+              bash scripts/test-baseline-cpu.sh "$b"
+            fi
           done
 
       - name: Package rtk-proxy (Windows)
