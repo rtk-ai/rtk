@@ -3123,6 +3123,7 @@ mod tests {
                 "rtk pint",
                 "rtk pio",
                 "rtk pip",
+                "rtk pm2",
                 "rtk poetry",
                 "rtk pre-commit",
                 "rtk prettier",

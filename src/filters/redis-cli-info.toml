@@ -1,0 +1,24 @@
+[filters.redis-cli-info]
+description = "Compact bare `redis-cli info` — drop blank lines and zero-valued internal counters; explicit sections pass through"
+# Only a bare `info` (no section argument): `info keyspace`, `info all`, `info commandstats` are explicit requests.
+match_command = "(?i)^redis-cli(?:\\s+-\\S+(?:\\s+[^-\\s]\\S*)?)*\\s+info\\s*$"
+strip_lines_matching = [
+  "^\\s*$",
+  "^(?:allocator_|active_defrag|current_(?:cow|fork|save|eviction|active_defrag)|total_(?:active_defrag|eviction|forks)|module_fork|tracking_|io_threaded_|reply_buffer_|sync_|latest_fork|migrate_cached|slave_expires|lazyfree|number_of_|unexpected_error|dump_payload|expire_cycle|expired_time_cap|aof_(?:rewrite|last_cow|current)|rdb_last_(?:load|cow)|rdb_saves|repl_backlog_(?:histlen|first)|mem_(?:clients|cluster|replication|total_replication|aof|not_counted))[a-z_]*:(?:0|0\\.0+|-1)$",
+  "^used_cpu_[a-z_]*children:0\\.0+$",
+]
+
+[[tests.redis-cli-info]]
+name = "drops blank lines and zero-valued internal counters, keeps the rest"
+input = "# Memory\r\nused_memory:1053680\r\nused_memory_human:1.00M\r\nallocator_frag_bytes:0\r\nactive_defrag_hits:0\r\nmem_clients_normal:0\r\nmaxmemory_policy:noeviction\r\n\r\n# Stats\r\nevicted_keys:0\r\nkeyspace_hits:0\r\nsync_full:0\r\nexpired_keys:12\r\n\r\n# Keyspace\r\ndb0:keys=122,expires=0,avg_ttl=0\r\n"
+expected = "# Memory\nused_memory:1053680\nused_memory_human:1.00M\nmaxmemory_policy:noeviction\n# Stats\nevicted_keys:0\nkeyspace_hits:0\nexpired_keys:12\n# Keyspace\ndb0:keys=122,expires=0,avg_ttl=0"
+
+[[tests.redis-cli-info]]
+name = "non-zero values of dropped families are kept"
+input = "sync_full:3\nallocator_frag_bytes:187040\nrdb_saves:0\nrdb_changes_since_last_save:200"
+expected = "sync_full:3\nallocator_frag_bytes:187040\nrdb_changes_since_last_save:200"
+
+[[tests.redis-cli-info]]
+name = "empty input passes through"
+input = ""
+expected = ""
