@@ -32,8 +32,9 @@ fn is_rtk_binary(binary: &str) -> bool {
 fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
     let mut tokens = crate::discover::lexer::tokenize_with_newlines(command);
     // Ignore only literal LF operator tokens at the command's boundaries.
-    // Inspecting the source byte keeps CRLF and LF inside quotes or escapes
-    // visible to the ownership guard.
+    // The lexer also reports the CR of a CRLF pair as an LF operator; checking
+    // the source byte leaves that token for the guard below, and the word check
+    // after shell_split would reject the CR anyway.
     while tokens.first().is_some_and(|token| {
         matches!(token.kind, crate::discover::lexer::TokenKind::Operator)
             && token.value == "\n"

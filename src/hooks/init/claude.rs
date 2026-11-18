@@ -1155,7 +1155,7 @@ mod tests {
         ] {
             assert!(
                 !is_claude_hook_command(command),
-                "compound command was claimed as RTK-owned: {command}"
+                "user command was claimed as RTK-owned: {command:?}"
             );
         }
 
@@ -1168,7 +1168,7 @@ mod tests {
         ] {
             assert!(
                 is_claude_hook_command(command),
-                "boundary newline changed RTK ownership: {command:?}"
+                "RTK hook command was not recognised: {command:?}"
             );
         }
 
@@ -1179,7 +1179,7 @@ mod tests {
         ] {
             assert!(
                 is_claude_hook_command(command),
-                "literal operator character changed RTK path: {command}"
+                "literal operator character changed RTK path: {command:?}"
             );
         }
     }
