@@ -961,3 +961,36 @@ mod rewrite_host_scoping {
         assert!(!denied.recorded_a_recall());
     }
 }
+
+#[test]
+fn claude_upload_trailing_glob_keeps_deny_visible_to_host() {
+    for flag in ["-d", "--data", "--data-binary", "--data-raw"] {
+        let rule = format!("curl {flag} @*");
+        let command = format!("curl {flag} @f.txt http://127.0.0.1:9/");
+        // Only inspect the hook protocol: no curl subprocess or network request.
+        for allow in [&[][..], &["curl *"][..]] {
+            let sandbox = Sandbox::with_rules(&[&rule], &[], allow);
+            assert!(sandbox.hook_claude(&command).trim().is_empty(), "{command}");
+            assert_eq!(
+                sandbox.hook_claude_rewrite(&format!("curl {flag} value http://127.0.0.1:9/")),
+                Some(format!("rtk curl {flag} value http://127.0.0.1:9/"))
+            );
+        }
+        let sandbox = Sandbox::with_rules(&[], &[&rule], &["curl *"]);
+        let output: serde_json::Value =
+            serde_json::from_str(&sandbox.hook_claude(&command)).unwrap();
+        // Ordinary AskRewrite leaves the decision to the host rather than
+        // emitting an affirmative allow (or forcing a hook-owned ask).
+        assert!(
+            output
+                .pointer("/hookSpecificOutput/permissionDecision")
+                .is_none()
+        );
+        assert_eq!(
+            output
+                .pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(|v| v.as_str()),
+            Some(format!("rtk {command}").as_str())
+        );
+    }
+}
