@@ -1738,8 +1738,8 @@ mod tests {
     }
 
     // rtk-ai/rtk#3206 review: set_owner_only now skips the chmod syscall once
-    // permissions already match, since Tracker::new() (which calls this via
-    // create_private_dir/open_private/restrict_db_files) is on the PreToolUse
+    // permissions already match, since Tracker::new() (which calls this through
+    // db::open_and_migrate: create_private_dir/open_private/restrict_file) is on the PreToolUse
     // hook's hot path for every Bash tool call. These don't observe the skipped
     // syscall directly, but confirm the already-correct case stays correct
     // (idempotent) across repeated calls, on both a directory and a file.
