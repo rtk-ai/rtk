@@ -66,9 +66,11 @@ listing into `head`, `tail`, or `cat`.
 | `eslint` | Violations grouped by rule |
 | `pnpm list` | Compact dependency tree |
 | `pnpm outdated` | Package + current + latest only |
+| `yarn install` / `yarn add` | Classic and Berry: banner, phase markers and dependency trees dropped; warnings, errors and results kept |
 | `next build` | Route summary + errors only |
 | `ng build` | Compact Angular build tables; every bundle and diagnostic retained |
 | `prisma migrate` | Migration status only |
+| `sequelize db:migrate` / `sequelize-cli db:migrate` | CLI banner, config and environment lines dropped; migrations and errors kept |
 | `playwright test` | Failures + trace links only |
 
 ## Python

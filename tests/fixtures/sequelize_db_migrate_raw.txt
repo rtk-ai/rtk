@@ -1,0 +1,11 @@
+
+Sequelize CLI [Node: 20.20.2, CLI: 6.6.5, ORM: 6.37.8]
+
+Loaded configuration file "config/config.json".
+Using environment "development".
+== 20261118024104-create-user: migrating =======
+== 20261118024104-create-user: migrated (0.008s)
+
+== 20261118024105-add-age: migrating =======
+== 20261118024105-add-age: migrated (0.006s)
+

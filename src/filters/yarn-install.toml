@@ -1,0 +1,91 @@
+[filters.yarn-install]
+description = "Compact yarn install/add/remove/upgrade output (classic and berry) - drop banners, phase markers and dependency trees; keep warnings, errors and results"
+match_command = "^yarn(\\s+(install|add|remove|upgrade|up|dedupe)(\\s|$)|\\s*$)"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  # yarn classic: version banner, [n/m] phase markers, dependency trees
+  "^yarn (install|add|remove|upgrade|up|dedupe) v\\d",
+  "^\\[\\d+/\\d+\\] ",
+  "^info (No lockfile found|Direct dependencies|All dependencies)\\.?$",
+  "^[├└]─ ",
+  # yarn berry: banner and step open/close markers (│ detail lines and coded warnings stay)
+  "^➤ YN0000: · Yarn \\d",
+  "^➤ YN0000: [┌└] ",
+]
+
+[[tests.yarn-install]]
+name = "classic add: strips banner, phases and dependency trees, keeps warning and results"
+input = """
+yarn add v1.22.22
+[1/4] Resolving packages...
+warning left-pad@1.3.0: use String.prototype.padStart()
+[2/4] Fetching packages...
+[3/4] Linking dependencies...
+[4/4] Building fresh packages...
+success Saved lockfile.
+success Saved 2 new dependencies.
+info Direct dependencies
+├─ express@4.19.2
+└─ left-pad@1.3.0
+info All dependencies
+├─ express@4.19.2
+├─ left-pad@1.3.0
+└─ ms@2.0.0
+Done in 3.10s.
+"""
+expected = """
+warning left-pad@1.3.0: use String.prototype.padStart()
+success Saved lockfile.
+success Saved 2 new dependencies.
+Done in 3.10s."""
+
+[[tests.yarn-install]]
+name = "classic add failure keeps error, stack and documentation hint"
+input = """
+yarn add v1.22.22
+[1/4] Resolving packages...
+error Error: https://registry.yarnpkg.com/nope-zzz: Not found
+    at params.callback [as _callback] (/home/user/.npm/yarn/lib/cli.js:66680:18)
+info Visit https://yarnpkg.com/en/docs/cli/add for documentation about this command.
+"""
+expected = """
+error Error: https://registry.yarnpkg.com/nope-zzz: Not found
+    at params.callback [as _callback] (/home/user/.npm/yarn/lib/cli.js:66680:18)
+info Visit https://yarnpkg.com/en/docs/cli/add for documentation about this command."""
+
+[[tests.yarn-install]]
+name = "berry install: strips banner and step markers, keeps coded results and warnings"
+input = """
+➤ YN0000: · Yarn 4.5.3
+➤ YN0000: ┌ Resolution step
+➤ YN0085: │ + react-dom@npm:18.2.0, js-tokens@npm:4.0.0
+➤ YN0000: └ Completed in 1s 51ms
+➤ YN0000: ┌ Post-resolution validation
+➤ YN0002: │ demo@workspace:. doesn't provide react (pe20cf), requested by react-dom.
+➤ YN0000: └ Completed
+➤ YN0000: ┌ Link step
+➤ YN0000: └ Completed
+➤ YN0000: · Done with warnings in 1s 306ms
+"""
+expected = """
+➤ YN0085: │ + react-dom@npm:18.2.0, js-tokens@npm:4.0.0
+➤ YN0002: │ demo@workspace:. doesn't provide react (pe20cf), requested by react-dom.
+➤ YN0000: · Done with warnings in 1s 306ms"""
+
+[[tests.yarn-install]]
+name = "berry error lines are kept"
+input = """
+➤ YN0027: nope@unknown can't be resolved to a satisfying range
+➤ YN0035: Package not found
+➤ YN0000: · Failed with errors in 0s 200ms
+"""
+expected = """
+➤ YN0027: nope@unknown can't be resolved to a satisfying range
+➤ YN0035: Package not found
+➤ YN0000: · Failed with errors in 0s 200ms"""
+
+[[tests.yarn-install]]
+name = "ANSI colour codes are stripped before matching"
+input = "\u001b[1myarn install v1.22.22\u001b[22m\n\u001b[2m[1/4]\u001b[22m Resolving packages...\nsuccess Already up-to-date.\nDone in 0.06s."
+expected = "success Already up-to-date.\nDone in 0.06s."

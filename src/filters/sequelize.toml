@@ -1,0 +1,76 @@
+[filters.sequelize]
+description = "Compact sequelize-cli output - drop the CLI banner, config and environment lines; keep migration progress, results and errors"
+match_command = "^sequelize(-cli)?\\b"
+strip_ansi = true
+# `== <name>: migrating ===` lines stay: when a migration throws, that line is the
+# only place the failing migration is named, and a line filter cannot tell it apart
+# from the ones followed by `migrated`.
+strip_lines_matching = [
+  "^\\s*$",
+  "^Sequelize CLI \\[",
+  "^Loaded configuration file ",
+  "^Using environment ",
+]
+
+[[tests.sequelize]]
+name = "strips banner, config and environment lines, keeps migration results"
+input = """
+
+Sequelize CLI [Node: 20.20.2, CLI: 6.6.5, ORM: 6.37.8]
+
+Loaded configuration file "config/config.json".
+Using environment "development".
+== 20261118024104-create-user: migrating =======
+== 20261118024104-create-user: migrated (0.009s)
+
+== 20261118024105-add-age: migrating =======
+== 20261118024105-add-age: migrated (0.005s)
+
+"""
+expected = """
+== 20261118024104-create-user: migrating =======
+== 20261118024104-create-user: migrated (0.009s)
+== 20261118024105-add-age: migrating =======
+== 20261118024105-add-age: migrated (0.005s)"""
+
+[[tests.sequelize]]
+name = "failed migration stays identifiable and its error is kept"
+input = """
+
+Sequelize CLI [Node: 20.20.2, CLI: 6.6.5, ORM: 6.37.8]
+
+Loaded configuration file "config/config.json".
+Using environment "development".
+== 20261118024106-bad: migrating =======
+
+ERROR: SQLITE_ERROR: no such table: NoSuchTable
+
+"""
+expected = """
+== 20261118024106-bad: migrating =======
+ERROR: SQLITE_ERROR: no such table: NoSuchTable"""
+
+[[tests.sequelize]]
+name = "nothing to migrate"
+input = """
+
+Sequelize CLI [Node: 20.20.2, CLI: 6.6.5, ORM: 6.37.8]
+
+Loaded configuration file "config/config.json".
+Using environment "development".
+No migrations were executed, database schema was already up to date.
+"""
+expected = "No migrations were executed, database schema was already up to date."
+
+[[tests.sequelize]]
+name = "db:migrate:status keeps every up/down row"
+input = """
+
+Sequelize CLI [Node: 20.20.2, CLI: 6.6.5, ORM: 6.37.8]
+
+Loaded configuration file "config/config.json".
+Using environment "development".
+up 20261118024104-create-user.js
+down 20261118024106-bad.js
+"""
+expected = "up 20261118024104-create-user.js\ndown 20261118024106-bad.js"

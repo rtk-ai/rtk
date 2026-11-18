@@ -2489,6 +2489,62 @@ mod tests {
     }
 
     #[test]
+    fn yarn_rewrite_covers_package_management_only() {
+        for (cmd, expected) in [
+            ("yarn", "rtk yarn"),
+            ("yarn install", "rtk yarn install"),
+            (
+                "yarn install --frozen-lockfile",
+                "rtk yarn install --frozen-lockfile",
+            ),
+            ("yarn add express@4 -D", "rtk yarn add express@4 -D"),
+            ("yarn remove left-pad", "rtk yarn remove left-pad"),
+            ("yarn up react", "rtk yarn up react"),
+            ("yarn install | tail -5", "rtk yarn install | tail -5"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                Some(expected),
+                "{cmd}"
+            );
+        }
+        // Scripts run user code, watchers and servers included: never filtered.
+        for cmd in [
+            "yarn dev",
+            "yarn start",
+            "yarn build",
+            "yarn test",
+            "yarn run dev",
+            "yarn add-peer",
+            "yarn why ms",
+            "yarn list",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).filter(|c| c.starts_with("rtk yarn ")),
+                None,
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn sequelize_rewrite_keeps_the_invoked_binary_name() {
+        assert_eq!(
+            rewrite_command_no_prefixes("sequelize db:migrate", &[]).as_deref(),
+            Some("rtk sequelize db:migrate")
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("sequelize-cli db:migrate:undo:all", &[]).as_deref(),
+            Some("rtk sequelize-cli db:migrate:undo:all")
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("sequelizer db:migrate", &[])
+                .filter(|c| c.starts_with("rtk sequelize")),
+            None
+        );
+    }
+
+    #[test]
     fn ng_build_rewrite_keeps_native_arguments_and_a_narrow_command_scope() {
         assert_eq!(
             rewrite_command_no_prefixes("ng build app --output-path 'dist folder'", &[]),
@@ -3134,6 +3190,8 @@ mod tests {
                 "rtk rspec",
                 "rtk rubocop",
                 "rtk ruff",
+                "rtk sequelize",
+                "rtk sequelize-cli",
                 "rtk shellcheck",
                 "rtk shopify",
                 "rtk swift",
@@ -3144,6 +3202,7 @@ mod tests {
                 "rtk trunk",
                 "rtk wc",
                 "rtk yamllint",
+                "rtk yarn",
             ]
         );
     }

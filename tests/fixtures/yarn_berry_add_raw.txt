@@ -1,0 +1,10 @@
+➤ YN0000: · Yarn 4.5.3
+➤ YN0000: ┌ Resolution step
+➤ YN0085: │ + express@npm:4.19.2, left-pad@npm:1.3.0, accepts@npm:1.3.8, array-flatten@npm:1.1.1, async-function@npm:1.0.0, async-generator-function@npm:1.0.0, and 66 more.
+➤ YN0000: └ Completed in 1s 337ms
+➤ YN0000: ┌ Fetch step
+➤ YN0013: │ 72 packages were added to the project (+ 2.23 MiB).
+➤ YN0000: └ Completed in 0s 282ms
+➤ YN0000: ┌ Link step
+➤ YN0000: └ Completed
+➤ YN0000: · Done in 1s 690ms
