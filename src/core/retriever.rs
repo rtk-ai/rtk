@@ -368,8 +368,10 @@ enum RecallSchema {
     Recalled = 2,
     /// Immutable identities for individual capture events.
     CaptureIds = 3,
+    /// Other preview features also used stamp 3; establish our additive table.
+    CaptureIdsRecheck = 4,
     /// Per-capture immutable snapshots, without guessing legacy metadata.
-    ImmutableCaptures = 4,
+    ImmutableCaptures = 5,
     // New schema changes go directly above this line.
     Next,
 }
@@ -390,6 +392,7 @@ const MIGRATIONS: &[(RecallSchema, Migration)] = &[
     (RecallSchema::Initial, migrate_initial),
     (RecallSchema::Recalled, migrate_recalled),
     (RecallSchema::CaptureIds, migrate_capture_ids),
+    (RecallSchema::CaptureIdsRecheck, migrate_capture_ids),
     (RecallSchema::ImmutableCaptures, migrate_immutable_captures),
 ];
 
@@ -1160,6 +1163,132 @@ mod tests {
     }
 
     #[test]
+    fn legacy_version_four_immutable_snapshots_survive_renumbering() {
+        let conn = Connection::open_in_memory().expect("db");
+        migrate_initial(&conn).expect("initial");
+        migrate_recalled(&conn).expect("recalled");
+        migrate_immutable_captures(&conn).expect("legacy immutable schema");
+        conn.execute(
+            "INSERT INTO recall_captures (capture_id, invocation_id, hash,
+            created_at, command, shown_upto) VALUES ('old', 'source', 'hash', 1, 'original', 7)",
+            [],
+        )
+        .expect("snapshot");
+        conn.pragma_update(None, "application_id", DbKind::Recall.application_id())
+            .expect("tag");
+        conn.pragma_update(None, "user_version", 4)
+            .expect("old immutable stamp");
+        for _ in 0..2 {
+            db::apply_migrations(&conn, &SCHEMA, MigrationMode::GatedByVersion).expect("upgrade");
+            assert_eq!(user_version(&conn), SCHEMA_VERSION);
+            let snapshot: (String, String, i64) = conn.query_row(
+                "SELECT invocation_id, command, shown_upto FROM recall_captures WHERE capture_id='old'",
+                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).expect("snapshot");
+            assert_eq!(snapshot, ("source".into(), "original".into(), 7));
+        }
+    }
+
+    #[test]
+    fn version_three_preview_without_captures_gains_capture_schema() {
+        // Exact additive schemas from the stats-cap and storage-budget previews.
+        let previews = [
+            r#"CREATE TRIGGER IF NOT EXISTS recall_stats_cap
+         AFTER INSERT ON recall_stats
+         WHEN (SELECT COUNT(*) FROM recall_stats) > 500
+         BEGIN
+             DELETE FROM recall_stats WHERE rowid IN (
+                 SELECT rowid FROM recall_stats WHERE rowid != NEW.rowid
+                 ORDER BY elisions + recalls ASC, rowid ASC
+                 LIMIT (SELECT COUNT(*) FROM recall_stats) - 500
+             );
+         END;
+         DELETE FROM recall_stats WHERE rowid IN (
+             SELECT rowid FROM recall_stats
+             ORDER BY elisions + recalls ASC, rowid ASC
+             LIMIT MAX((SELECT COUNT(*) FROM recall_stats) - 500, 0)
+         );"#,
+            r#"CREATE TABLE IF NOT EXISTS recall_storage (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            entries INTEGER NOT NULL,
+            blob_bytes INTEGER NOT NULL
+        );
+        INSERT INTO recall_storage (id, entries, blob_bytes)
+        SELECT 1, (SELECT COUNT(*) FROM recall),
+                  (SELECT COALESCE(SUM(length(blob)), 0) FROM recall)
+        WHERE NOT EXISTS (SELECT 1 FROM recall_storage WHERE id = 1);
+        CREATE TRIGGER IF NOT EXISTS recall_storage_insert AFTER INSERT ON recall BEGIN
+            UPDATE recall_storage SET entries = entries + 1,
+                blob_bytes = blob_bytes + length(NEW.blob) WHERE id = 1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS recall_storage_update AFTER UPDATE OF blob ON recall BEGIN
+            UPDATE recall_storage SET blob_bytes = blob_bytes + length(NEW.blob) - length(OLD.blob)
+            WHERE id = 1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS recall_storage_delete AFTER DELETE ON recall BEGIN
+            UPDATE recall_storage SET entries = entries - 1,
+                blob_bytes = blob_bytes - length(OLD.blob) WHERE id = 1;
+        END;"#,
+        ];
+        for (kind, sql) in previews.iter().enumerate() {
+            let conn = Connection::open_in_memory().expect("db");
+            migrate_initial(&conn).expect("initial");
+            migrate_recalled(&conn).expect("recalled");
+            conn.execute_batch(sql).expect("preview schema");
+            conn.execute_batch(
+                "INSERT INTO recall VALUES
+                ('payload','cmd','',0,0,1,1,3,0,'raw',X'616263',0);
+                INSERT INTO recall_stats VALUES ('cmd','sqlite',8,2);",
+            )
+            .expect("preview data");
+            conn.pragma_update(None, "application_id", DbKind::Recall.application_id())
+                .expect("tag");
+            conn.pragma_update(None, "user_version", 3)
+                .expect("preview stamp");
+            for _ in 0..2 {
+                db::apply_migrations(&conn, &SCHEMA, MigrationMode::GatedByVersion)
+                    .expect("upgrade");
+                assert_eq!(user_version(&conn), SCHEMA_VERSION);
+                assert_eq!(
+                    conn.query_row("SELECT COUNT(*) FROM recall_captures", [], |row| row
+                        .get::<_, i64>(0))
+                        .expect("capture table"),
+                    0
+                );
+                assert_eq!(
+                    conn.query_row("SELECT blob FROM recall WHERE hash='payload'", [], |row| {
+                        row.get::<_, Vec<u8>>(0)
+                    })
+                    .expect("payload"),
+                    b"abc"
+                );
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT elisions+recalls FROM recall_stats WHERE slug='cmd'",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .expect("stats"),
+                    10
+                );
+                if kind == 0 {
+                    assert_eq!(conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='recall_stats_cap'", [],
+                        |row| row.get::<_, i64>(0)).expect("stats trigger"), 1);
+                } else {
+                    assert_eq!(
+                        conn.query_row(
+                            "SELECT entries, blob_bytes FROM recall_storage WHERE id=1",
+                            [],
+                            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                        )
+                        .expect("storage totals"),
+                        (1, 3)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn version_three_captures_upgrade_without_inventing_snapshots() {
         let conn = Connection::open_in_memory().expect("db");
         migrate_initial(&conn).expect("initial");
@@ -1412,8 +1541,8 @@ mod tests {
     fn capture_snapshots_metadata_and_invocation_across_deduplicated_payloads() {
         let dir = tempfile::tempdir().expect("directory");
         let cfg = temp_cfg(dir.path());
-        let cwd_a = tempfile::tempdir_in(super::super::test_isolation::root()).expect("cwd a");
-        let cwd_b = tempfile::tempdir_in(super::super::test_isolation::root()).expect("cwd b");
+        let cwd_a = super::super::test_isolation::tempdir();
+        let cwd_b = super::super::test_isolation::tempdir();
         let first = {
             let _cwd = super::super::test_isolation::enter(cwd_a.path());
             super::super::invocation::initialize(None);
