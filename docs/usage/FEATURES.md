@@ -1494,6 +1494,7 @@ When a command fails (or a filter truncates a list), RTK saves the complete raw 
 rtk recall <hash>            # Part not shown (delta)
 rtk recall <hash> --full     # Complete output
 rtk recall <hash> --grep RE  # Filter by regex
+rtk recall <hash> --grep RE -C 3  # Include surrounding diagnostic lines
 rtk recall --list            # List entries
 rtk gain --recalls           # Retrieval rate per filter
 rtk config recall <mode>     # Change mode without editing the config (sqlite|tee|disabled)

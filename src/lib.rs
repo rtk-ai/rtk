@@ -843,6 +843,9 @@ enum Commands {
         /// Filter recalled lines by regex
         #[arg(long)]
         grep: Option<String>,
+        /// Include N lines before and after each --grep match
+        #[arg(short = 'C', long, requires = "grep", default_value_t = 0)]
+        context: usize,
         /// List stored entries
         #[arg(long)]
         list: bool,
@@ -3779,6 +3782,7 @@ fn run_cli() -> Result<i32> {
             from,
             lines,
             grep,
+            context,
             list,
         } => core::retriever::run_recall(core::retriever::RecallArgs {
             hash: hash.as_deref(),
@@ -3786,6 +3790,7 @@ fn run_cli() -> Result<i32> {
             from,
             lines,
             grep: grep.as_deref(),
+            context,
             list,
         })?,
 

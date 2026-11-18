@@ -139,7 +139,7 @@ fn slice_first_lines(bytes: &[u8], n: usize) -> &[u8] {
     bytes
 }
 
-fn grep_bytes(input: &[u8], pattern: &str) -> Vec<u8> {
+fn grep_bytes(input: &[u8], pattern: &str, context: usize) -> Vec<u8> {
     use regex::bytes::Regex;
     let re = Regex::new(pattern)
         .or_else(|_| Regex::new(&regex::escape(pattern)))
@@ -147,11 +147,24 @@ fn grep_bytes(input: &[u8], pattern: &str) -> Vec<u8> {
     let Some(re) = re else {
         return input.to_vec();
     };
+    let lines: Vec<&[u8]> = input.split_inclusive(|&b| b == b'\n').collect();
     let mut out = Vec::new();
-    for line in input.split_inclusive(|&b| b == b'\n') {
+    let mut emitted = 0;
+    for (index, line) in lines.iter().enumerate() {
         let body = line.strip_suffix(b"\n").unwrap_or(line);
         if re.is_match(body) {
-            out.extend_from_slice(line);
+            let start = index.saturating_sub(context).max(emitted);
+            let end = index
+                .saturating_add(context)
+                .saturating_add(1)
+                .min(lines.len());
+            if context > 0 && start > emitted && !out.is_empty() {
+                out.extend_from_slice(b"--\n");
+            }
+            for line in &lines[start..end] {
+                out.extend_from_slice(line);
+            }
+            emitted = end;
         }
     }
     out
@@ -847,6 +860,7 @@ pub struct RecallArgs<'a> {
     pub from: Option<usize>,
     pub lines: Option<usize>,
     pub grep: Option<&'a str>,
+    pub context: usize,
     pub list: bool,
 }
 
@@ -917,7 +931,7 @@ fn recall_from(conn: &Connection, args: &RecallArgs) -> Result<i32> {
                     "rtk recall: note: --grep pattern is not a valid regex, matching it literally"
                 );
             }
-            grep_bytes(&sliced, pat)
+            grep_bytes(&sliced, pat, args.context)
         }
         None => sliced,
     };
@@ -1132,16 +1146,33 @@ mod tests {
     #[test]
     fn test_grep_match_all_roundtrips_byte_exact() {
         let input = b"a\nb\nc\n".to_vec();
-        assert_eq!(grep_bytes(&input, "^"), input);
+        assert_eq!(grep_bytes(&input, "^", 0), input);
         let no_trailing = b"a\nb\nno-eol".to_vec();
-        assert_eq!(grep_bytes(&no_trailing, "^"), no_trailing);
+        assert_eq!(grep_bytes(&no_trailing, "^", 0), no_trailing);
+    }
+
+    #[test]
+    fn test_grep_context_merges_windows_and_preserves_bytes() {
+        let input = b"head\r\nerror one\r\n\xffsource\r\nerror two\r\nend";
+        assert_eq!(grep_bytes(input, "error", 1), input);
+        assert_eq!(grep_bytes(input, "missing", 4), b"");
+        assert_eq!(grep_bytes(input, "error", usize::MAX), input);
+        assert_eq!(
+            grep_bytes(b"a\nb\nc\nd\ne\nf\ng\n", "b|f", 1),
+            b"a\nb\nc\n--\ne\nf\ng\n"
+        );
+        assert_eq!(
+            grep_bytes(b"a\nb\nc\nd\ne\nf\n", "b|e", 1),
+            b"a\nb\nc\nd\ne\nf\n"
+        );
+        assert_eq!(grep_bytes(b"before\n[\nafter", "[", 1), b"before\n[\nafter");
     }
 
     #[test]
     fn test_grep_bytes() {
         let input = b"alpha\nbeta\ngamma\n";
-        assert_eq!(grep_bytes(input, "et"), b"beta\n");
-        assert_eq!(grep_bytes(input, "^g"), b"gamma\n");
+        assert_eq!(grep_bytes(input, "et", 0), b"beta\n");
+        assert_eq!(grep_bytes(input, "^g", 0), b"gamma\n");
     }
 
     #[test]
