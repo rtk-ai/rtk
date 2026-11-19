@@ -46,6 +46,9 @@ pub struct AppState {
     pub config: Arc<config::Config>,
     /// HTTP client to the upstream providers (rustls, streaming).
     pub http: reqwest::Client,
+    /// HTTP client for buffered upstream calls: no read timeout, bounded per
+    /// call by `upstream_timeout_secs`. Reached through [`Self::buffered_post`].
+    pub http_buffered: reqwest::Client,
     /// The request-transform pipeline. Empty = passthrough.
     pub pipeline: pipeline::Pipeline,
     /// Usage store for stats. `None` when recording is disabled (`RTK_PROXY_DB`
@@ -96,7 +99,8 @@ const CONNECT_TIMEOUT_SECS: u64 = 10;
 /// Seconds of silence tolerated WITHIN a response before it is abandoned.
 /// Applies to streams too, where a total timeout must not: providers send
 /// keep-alives, so a gap this long means the far end is gone. Without it a
-/// half-open socket holds the agent's turn open indefinitely.
+/// half-open socket holds the agent's turn open indefinitely. Not applied to
+/// buffered calls, which are silent until done (see [`buffered_http_client`]).
 const READ_TIMEOUT_SECS: u64 = 120;
 
 /// The upstream client. `reqwest::Client::new()` sets no timeouts of any
@@ -113,6 +117,17 @@ fn http_client_with(connect: std::time::Duration, read: std::time::Duration) -> 
     reqwest::Client::builder()
         .connect_timeout(connect)
         .read_timeout(read)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// The client for BUFFERED upstream calls. It has no read timeout: a
+/// non-streaming completion sends no byte until it is done, so a long
+/// generation looks exactly like silence. Each call is bounded by
+/// `upstream_timeout_secs` instead (see [`AppState::buffered_post`]).
+fn buffered_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }
@@ -291,6 +306,7 @@ impl AppState {
         Self {
             config: Arc::new(config),
             http: http_client(),
+            http_buffered: buffered_http_client(),
             pipeline,
             store,
             runtime: Arc::new(RwLock::new(runtime)),
@@ -303,6 +319,20 @@ impl AppState {
             ccr_boot_gate,
             shutdown: Arc::new(Notify::new()),
             pipeline_name: None,
+        }
+    }
+
+    /// A POST for a BUFFERED (non-streaming) upstream call, bounded by
+    /// `upstream_timeout_secs` rather than by [`READ_TIMEOUT_SECS`]. With that
+    /// total timeout disabled (0), it falls back to the read-timeout client so
+    /// a dead socket still cannot hold the turn open forever.
+    pub(crate) fn buffered_post(&self, url: &str) -> reqwest::RequestBuilder {
+        match self.config.upstream_timeout_secs {
+            0 => self.http.post(url),
+            secs => self
+                .http_buffered
+                .post(url)
+                .timeout(std::time::Duration::from_secs(secs)),
         }
     }
 
@@ -336,7 +366,50 @@ mod tests {
 }
 
 #[cfg(test)]
-mod http_client_tests {
+pub(crate) mod http_client_tests {
+    /// An upstream that reads the whole request, stays silent for `delay`
+    /// (a buffered completion still generating), then answers 200 `body`.
+    pub(crate) fn slow_upstream(delay: std::time::Duration, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { continue };
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        let Ok(n) = conn.read(&mut chunk) else { return };
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&buf).to_ascii_lowercase();
+                        if let Some(end) = text.find("\r\n\r\n") {
+                            let len = text[..end]
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length:"))
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if buf.len() >= end + 4 + len {
+                                break;
+                            }
+                        }
+                    }
+                    std::thread::sleep(delay);
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = conn.write_all(resp.as_bytes());
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
     /// The upstream client must abandon a socket that goes
     /// silent. A listener that accepts and never writes would hold the
     /// request forever; with a read timeout it errors out.
