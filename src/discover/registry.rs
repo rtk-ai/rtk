@@ -19,6 +19,9 @@ use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 use super::shell_wrapper::parse_shell_wrapper;
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
+const PYTHON_TOOL_NAMES: [&str; 4] = ["pytest", "ruff", "mypy", "sqlfluff"];
+const PYTHON_LOCAL_VENV_BINS: [&str; 4] =
+    [".venv/bin", "venv/bin", ".venv/Scripts", "venv/Scripts"];
 
 /// Result of classifying a command.
 #[derive(Debug, PartialEq)]
@@ -203,8 +206,12 @@ pub fn classify_command(cmd: &str) -> Classification {
         return Classification::Ignored;
     }
 
+    // Normalize Python local-venv and `-m <tool>` forms before path stripping
+    // so `.venv/bin/ruff` and `.venv/bin/python -m pytest` classify and rewrite
+    // identically, while unresolvable relative venvs (`api/.venv/bin/…`) do not.
+    let cmd_normalized = normalize_python_tool_command(cmd_clean);
     // Normalize absolute binary paths: /usr/bin/grep → grep (#485)
-    let cmd_normalized = strip_absolute_path(cmd_clean);
+    let cmd_normalized = strip_absolute_path(&cmd_normalized);
     // Strip git global options: git -C /tmp status → git status (#163)
     let cmd_normalized = strip_git_global_opts(&cmd_normalized);
     // Normalize PHP tool paths: vendor/bin/phpunit, bin/phpunit, or composer
@@ -452,6 +459,79 @@ fn normalize_php_tool_path(path: &str) -> String {
     normalized
 }
 
+fn is_python_interpreter_name(name: &str) -> bool {
+    name == "python"
+        || name.strip_prefix("python3").is_some_and(|rest| {
+            rest.is_empty()
+                || rest
+                    .strip_prefix('.')
+                    .is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
+        })
+}
+
+fn matches_local_python_venv_bin(word: &str, cwd: Option<&Path>) -> Option<String> {
+    let normalized_word = normalize_php_tool_path(word);
+    let (dir_part, bin_name) = normalized_word.rsplit_once('/')?;
+    let cwd_norm = cwd
+        .map(|p| normalize_php_tool_path(&p.to_string_lossy()))
+        .filter(|s| !s.is_empty() && s != ".");
+
+    let is_local_venv = PYTHON_LOCAL_VENV_BINS.contains(&dir_part)
+        || cwd_norm.as_deref().is_some_and(|cwd_str| {
+            let trimmed_cwd = cwd_str.trim_end_matches('/');
+            PYTHON_LOCAL_VENV_BINS
+                .iter()
+                .any(|vb| dir_part == format!("{trimmed_cwd}/{vb}"))
+        });
+
+    is_local_venv.then(|| bin_name.to_string())
+}
+
+fn normalize_python_tool_command(cmd: &str) -> String {
+    let cwd = crate::core::user_dirs::in_working_dir(".");
+    normalize_python_tool_command_with_cwd(cmd, Some(&cwd))
+}
+
+fn normalize_python_tool_command_with_cwd(cmd: &str, cwd: Option<&Path>) -> String {
+    let first_space = cmd.find(char::is_whitespace);
+    let first_word = match first_space {
+        Some(pos) => &cmd[..pos],
+        None => cmd,
+    };
+
+    if let Some(bin_name) = matches_local_python_venv_bin(first_word, cwd)
+        && let Some(&tool) = PYTHON_TOOL_NAMES.iter().find(|&&t| t == bin_name)
+    {
+        return match first_space {
+            Some(pos) => format!("{}{}", tool, &cmd[pos..]),
+            None => tool.to_string(),
+        };
+    }
+
+    let first_norm = normalize_php_tool_path(first_word);
+    let is_py = is_python_interpreter_name(&first_norm)
+        || matches_local_python_venv_bin(first_word, cwd)
+            .is_some_and(|bin_name| is_python_interpreter_name(&bin_name));
+
+    if is_py
+        && let Some(pos) = first_space
+        && let Some(after_m) = cmd[pos..]
+            .trim_start()
+            .strip_prefix("-m")
+            .and_then(|s| s.strip_prefix(char::is_whitespace))
+            .map(str::trim_start)
+    {
+        let tool_word = after_m
+            .find(char::is_whitespace)
+            .map_or(after_m, |i| &after_m[..i]);
+        if PYTHON_TOOL_NAMES.contains(&tool_word) {
+            return after_m.to_string();
+        }
+    }
+
+    cmd.to_string()
+}
+
 /// Strip git global options before the subcommand (#163).
 /// `git -C /tmp status` → `git status`, preserving the rest.
 /// Returns the original string unchanged if not a git command.
@@ -583,8 +663,16 @@ fn parse_golangci_run_parts(cmd: &str) -> Option<GolangciRunParts<'_>> {
 }
 
 /// Normalize absolute binary paths: `/usr/bin/grep -rn foo` → `grep -rn foo` (#485)
-/// Only strips if the first word contains a `/` (Unix path).
+/// Only strips if the first word starts with `/` (Unix absolute path).
 fn strip_absolute_path(cmd: &str) -> String {
+    if cmd.starts_with('/') {
+        strip_first_word_path(cmd)
+    } else {
+        cmd.to_string()
+    }
+}
+
+fn strip_first_word_path(cmd: &str) -> String {
     let first_space = cmd.find(' ');
     let first_word = match first_space {
         Some(pos) => &cmd[..pos],
@@ -2314,11 +2402,13 @@ fn rewrite_command_part(rule: &RtkRule, cmd_part: &str) -> Option<String> {
     // (php wrapper + ini flags, ./, vendor/bin, composer bin-dir) exactly as
     // classify_command does, so a small canonical prefix list matches every
     // invocation form instead of enumerating each literal spelling.
-    let php_normalized;
-    let strip_target: &str = match php_tool_form(cmd_part, rule.rtk_cmd) {
+    let tool_normalized;
+    let strip_target: &str = match php_tool_form(cmd_part, rule.rtk_cmd)
+        .or_else(|| python_tool_form(cmd_part, rule.rtk_cmd))
+    {
         Some(normalized) => {
-            php_normalized = normalized;
-            &php_normalized
+            tool_normalized = normalized;
+            &tool_normalized
         }
         None => cmd_part,
     };
@@ -2377,11 +2467,22 @@ fn php_tool_form(cmd: &str, rtk_cmd: &str) -> Option<String> {
     Some(normalize_php_tool_command(unwrapped))
 }
 
+fn python_tool_form(cmd: &str, rtk_cmd: &str) -> Option<String> {
+    rtk_cmd
+        .strip_prefix("rtk ")
+        .filter(|t| PYTHON_TOOL_NAMES.contains(t))?;
+    let normalized = normalize_python_tool_command(cmd);
+    (normalized != cmd).then_some(normalized)
+}
+
 fn tool_form(cmd_clean: &str, rtk_equivalent: &str) -> String {
     // Same normalization the rewrite path applies, so the exclusion sees the tool
-    // whichever way it was spelled — including `php vendor/bin/phpunit`.
-    let normalized = strip_absolute_path(
-        &php_tool_form(cmd_clean, rtk_equivalent).unwrap_or_else(|| cmd_clean.to_string()),
+    // whichever way it was spelled — including `php vendor/bin/phpunit` and
+    // `.venv/bin/python -m pytest`.
+    let normalized = strip_first_word_path(
+        &php_tool_form(cmd_clean, rtk_equivalent)
+            .or_else(|| python_tool_form(cmd_clean, rtk_equivalent))
+            .unwrap_or_else(|| cmd_clean.to_string()),
     );
     if rtk_equivalent == "rtk cargo" {
         return normalize_cargo_command(&normalized);
@@ -6191,6 +6292,101 @@ mod tests {
             rewrite_command_no_prefixes("sqlfluff lint models/", &[]),
             Some("rtk sqlfluff lint models/".into())
         );
+    }
+
+    #[test]
+    fn test_python_module_and_local_venv_rewrites() {
+        let cases = [
+            ("python3 -m ruff check .", "rtk ruff check ."),
+            ("python -m ruff format src/", "rtk ruff format src/"),
+            ("python3.12 -m ruff check .", "rtk ruff check ."),
+            ("python3.12 -m pytest -q tests/", "rtk pytest -q tests/"),
+            ("python3.11 -m mypy --strict src/", "rtk mypy --strict src/"),
+            (
+                "python3 -m sqlfluff lint models/",
+                "rtk sqlfluff lint models/",
+            ),
+            (".venv/bin/ruff check .", "rtk ruff check ."),
+            ("./.venv/bin/ruff format src/", "rtk ruff format src/"),
+            ("venv/bin/pytest tests/", "rtk pytest tests/"),
+            ("./venv/bin/mypy src/", "rtk mypy src/"),
+            (
+                ".venv/bin/sqlfluff lint models/",
+                "rtk sqlfluff lint models/",
+            ),
+            (".venv/Scripts/pytest.exe tests/", "rtk pytest tests/"),
+            (".venv/bin/python -m pytest tests/", "rtk pytest tests/"),
+            ("./.venv/bin/python3 -m ruff check .", "rtk ruff check ."),
+            (".venv/bin/python3.12 -m mypy src/", "rtk mypy src/"),
+            (
+                "venv/bin/python -m sqlfluff lint models/",
+                "rtk sqlfluff lint models/",
+            ),
+            (
+                "uv run --extra dev python3 -m ruff check .",
+                "uv run --extra dev rtk ruff check .",
+            ),
+        ];
+
+        for (cmd, expected) in cases {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.to_string()),
+                "rewrite failed for: {cmd}"
+            );
+            assert!(
+                matches!(classify_command(cmd), Classification::Supported { .. }),
+                "classify failed for: {cmd}"
+            );
+        }
+
+        // Subcommands ruff/sqlfluff do not filter and unrelated modules stay untouched.
+        for untouched in [
+            "python3 -m ruff --version",
+            ".venv/bin/ruff rule E501",
+            "python3 -m http.server 8000",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(untouched, &[]),
+                None,
+                "must stay untouched: {untouched}"
+            );
+        }
+
+        // Exclusions apply across module and local-venv spellings.
+        let excluded = vec!["ruff".to_string()];
+        for cmd in [
+            "python3 -m ruff check .",
+            ".venv/bin/ruff check .",
+            ".venv/bin/python -m ruff check .",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &excluded),
+                None,
+                "exclusion failed for: {cmd}"
+            );
+        }
+
+        // Non-root or custom relative venv paths cannot be resolved by `rtk <tool>`
+        // without changing directory, so neither rewrite nor classify claims them.
+        for unresolvable in [
+            "api/.venv/bin/ruff check .",
+            "api/.venv/bin/python -m pytest",
+            ".polybotenv/bin/python -m pytest",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(unresolvable, &[]),
+                None,
+                "must not rewrite unresolvable relative venv: {unresolvable}"
+            );
+            assert!(
+                matches!(
+                    classify_command(unresolvable),
+                    Classification::Unsupported { .. }
+                ),
+                "classify must not claim unresolvable relative venv: {unresolvable}"
+            );
+        }
     }
 
     #[test]

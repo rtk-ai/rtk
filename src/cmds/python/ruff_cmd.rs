@@ -1,5 +1,6 @@
 //! Filters Ruff linter and formatter output.
 
+use super::utils::python_tool_command;
 use crate::core::arg_tokenizer::{
     Dialect, Token, TokenKind, ValueSpec, before_dashdash, dashdash_index, tokenize_grammar,
 };
@@ -8,7 +9,7 @@ use crate::core::config;
 use crate::core::runner;
 use crate::core::shell::display_args;
 use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::{resolved_command, truncate};
+use crate::core::utils::truncate;
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -57,7 +58,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let route = route_ruff_args(args);
     let is_check = matches!(route, RuffRoute::Check { .. });
 
-    let mut cmd = resolved_command("ruff");
+    let mut cmd = python_tool_command("ruff");
 
     // Both spellings: injecting a second --output-format makes ruff reject the call.
     let user_set_output_format = args
