@@ -3139,6 +3139,8 @@ fn run_cli() -> Result<i32> {
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
         Commands::Gain(gain_args) => {
+            #[cfg(windows)]
+            analytics::gain::configure_console_color();
             let GainArgs {
                 project,
                 graph,
