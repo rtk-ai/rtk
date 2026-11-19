@@ -271,7 +271,7 @@ fn with_cached<T>(
         let before = file_id(&path);
         if let Some((cached, id, opened)) = cache.as_ref()
             && *cached == path
-            && before == Some(*id)
+            && before.as_ref() == Some(id)
         {
             return query(opened, f).map(Some);
         }

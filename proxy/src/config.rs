@@ -87,11 +87,12 @@ fn move_file(from: &std::path::Path, to: &std::path::Path) -> Option<()> {
     let _ = std::fs::remove_file(from);
     Some(())
 }
-/// Total timeout for a BUFFERED upstream call. Ten minutes is far above any
-/// real non-streaming completion and still finite: without a bound, a wedged
-/// socket holds the agent's turn open with no exit but Ctrl-C.
-/// Streamed responses are never subject to it (see `forward`); they are
-/// bounded by the client's read timeout instead.
+/// Total timeout for a BUFFERED upstream call, retries included. Ten minutes
+/// is far above any real non-streaming completion and still finite: without a
+/// bound, a wedged socket holds the agent's turn open with no exit but Ctrl-C.
+/// A streamed response is never subject to it once it flows (see `forward`);
+/// it is bounded by the client's read timeout instead. An error answer to a
+/// streaming request is a buffered body and is bounded like one.
 const DEFAULT_UPSTREAM_TIMEOUT_SECS: u64 = 600;
 /// CCR cache entries older than this are pruned (boot + daily). A retrieve
 /// a week after the conversation died serves nobody, and the cache stores
@@ -141,13 +142,15 @@ pub struct Config {
     pub icm_db: String,
     /// Seconds a CCR cache entry lives before pruning; 0 keeps entries forever.
     pub icm_ttl_secs: u64,
-    /// Total request timeout (seconds) applied to **buffered** (non-streaming)
-    /// upstream calls; 0 disables. Never applied to a streamed SSE response
-    /// (which is long-lived and must not be cut).
+    /// Total request timeout (seconds) applied to **buffered** upstream calls,
+    /// all retries included; 0 disables. Never applied to a streamed SSE
+    /// response (which is long-lived and must not be cut), but it does bound
+    /// the error body a streaming request can be answered with.
     pub upstream_timeout_secs: u64,
-    /// Retries on a transient upstream failure (429/5xx or a connect/timeout
-    /// error), with exponential backoff, before the response starts streaming.
-    /// 0 disables.
+    /// Retries on a transient upstream failure (429/5xx or a failed connect),
+    /// with exponential backoff, before the response starts streaming. A
+    /// request the provider accepted and then went silent on is not re-sent:
+    /// it may still be generating, and billing. 0 disables.
     pub upstream_retries: u32,
 }
 
