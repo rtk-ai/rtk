@@ -198,6 +198,49 @@ fn options_ls_rejects_never_turn_into_an_empty_success() {
 }
 
 #[test]
+fn flags_that_change_each_entry_print_what_ls_printed() {
+    let home = common::tempdir();
+    home_like(home.path());
+    let small = common::tempdir();
+    fs::create_dir(small.path().join("dir1")).expect("create dir");
+    file(small.path(), "a.txt", 0);
+    file(small.path(), "b.txt", 0);
+    for dir in [&small, &home] {
+        assert_entry_flags_match_native(dir.path());
+    }
+}
+
+fn assert_entry_flags_match_native(dir: &Path) {
+    for args in [
+        &["-F"][..],
+        &["-p"],
+        &["-i"],
+        &["-s"],
+        &["-il"],
+        &["-sl"],
+        &["-Q"],
+        &["--classify"],
+        &["--indicator-style=slash"],
+        &["--file-type"],
+        &["--inode"],
+        &["--size"],
+        &["--quote-name"],
+    ] {
+        let native = native_ls(dir, args);
+        if !native.status.success() {
+            continue;
+        }
+        let rtk = rtk_ls(dir, args);
+        assert_eq!(rtk.status.code(), native.status.code(), "ls {args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&rtk.stdout),
+            String::from_utf8_lossy(&native.stdout),
+            "rtk ls {args:?}"
+        );
+    }
+}
+
+#[test]
 fn bare_ls_of_an_empty_directory_prints_nothing_like_ls() {
     let dir = common::tempdir();
     let (rtk, native) = compare(dir.path(), &[]);
