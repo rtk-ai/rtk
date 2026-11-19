@@ -60,6 +60,14 @@ fn attribution_json(
     }
     if by_rule {
         out.insert("by_rule".into(), json!(rows("hook", "rule")?));
+        if let Some(proxy) = crate::llm_proxy::read_gain_summary() {
+            let rules: Vec<serde_json::Value> = proxy
+                .by_rule
+                .iter()
+                .map(|(name, saved)| json!({"name": name, "saved": saved}))
+                .collect();
+            out.insert("by_rule_proxy".into(), json!(rules));
+        }
     }
     if by_pipeline {
         out.insert("by_pipeline".into(), json!(rows("hook", "pipeline")?));
@@ -107,12 +115,38 @@ pub fn run_reset(yes: bool) -> Result<bool> {
     tracker
         .reset_all()
         .context("Failed to reset token savings")?;
-    crate::core::retriever::reset_stats().context("Failed to reset recall stats")?;
+    // The reset replays the steps, so only a new open knows whether that worked.
+    if let Ok(tracker) = Tracker::new() {
+        report_not_upgraded(tracker.not_upgraded());
+    }
+    // The tracking history is already gone, so that is said before the failure of an
+    // unusable recall store (another database's file, a locked or failed migration,
+    // read-only) is returned.
+    if let Err(e) = crate::core::retriever::reset_stats() {
+        crate::core::retriever::report_missing_table(&e);
+        println!("{}", styled("Token savings reset to zero.", true));
+        return Err(e.context("recall stats were not reset"));
+    }
+    report_not_upgraded(crate::core::retriever::not_upgraded());
     println!(
         "{}",
         styled("Token savings and recall stats reset to zero.", true)
     );
     Ok(true)
+}
+
+/// A database that failed to upgrade is used as it is, so a report says so.
+fn report_not_upgraded(note: Option<String>) {
+    if let Some(note) = note {
+        eprintln!("rtk: {note}");
+    }
+}
+
+/// The tracking database for a report.
+fn tracker_for_report(context: &'static str) -> Result<Tracker> {
+    let tracker = Tracker::new().context(context)?;
+    report_not_upgraded(tracker.not_upgraded());
+    Ok(tracker)
 }
 
 pub fn run_attribution(
@@ -123,7 +157,7 @@ pub fn run_attribution(
     shadow: bool,
     format: &str,
 ) -> Result<()> {
-    let tracker = Tracker::new().context("Failed to open tracking database")?;
+    let tracker = tracker_for_report("Failed to open tracking database")?;
     const DAYS: u32 = 30;
 
     if format == "json" {
@@ -194,7 +228,11 @@ pub fn run_attribution(
                 let layer = rtk_engine::registry::info_of(name)
                     .and_then(|info| info.saves_on.first().copied())
                     .map(|l| l.as_str())
-                    .unwrap_or("history");
+                    .unwrap_or(if name == crate::llm_proxy::RULES_METHOD {
+                        "tool_result"
+                    } else {
+                        "history"
+                    });
                 #[cfg(not(feature = "engine"))]
                 let layer = "history";
                 let slot = per_layer.entry(layer).or_default();
@@ -274,6 +312,19 @@ pub fn run_attribution(
             &format!("By Rule — hook site (last {DAYS}d)"),
             &tracker.attribution_site("hook", "rule", DAYS)?,
         );
+        if let Some(proxy) = crate::llm_proxy::read_gain_summary()
+            && !proxy.by_rule.is_empty()
+        {
+            println!("{}", "By Rule — proxy site (all time)".bold());
+            for (rule, saved) in &proxy.by_rule {
+                println!(
+                    "  {:<28} {:>10} saved",
+                    truncate(rule, 28),
+                    format_tokens((*saved).max(0) as usize)
+                );
+            }
+            println!();
+        }
     }
 
     if by_pipeline {
@@ -368,7 +419,7 @@ pub fn hook_slices_for(
 pub fn run_pipeline_detail(name: &str) -> Result<()> {
     let sanitized = crate::core::utils::sanitize_for_terminal(name);
     let name = sanitized.as_str();
-    let tracker = Tracker::new().context("Failed to open tracking database")?;
+    let tracker = tracker_for_report("Failed to open tracking database")?;
     const DAYS: u32 = 30;
 
     let hook_total = tracker
@@ -620,13 +671,14 @@ pub fn run(
     if recalls && !reset {
         return show_recall_stats();
     }
-    let tracker = Tracker::new().context("Failed to initialize tracking database")?;
     let project_scope = resolve_project_scope(project)?; // added: resolve project path
 
     if reset {
         run_reset(yes)?;
         return Ok(());
     }
+
+    let tracker = tracker_for_report("Failed to initialize tracking database")?;
 
     if failures {
         return show_failures(&tracker);
@@ -850,12 +902,29 @@ pub fn run(
             // Skipped entirely when there is only one, since the "Tokens
             // saved" line above already says the same number.
             let by_method = proxy.savings_by_method();
-            if by_method.len() > 1 {
+            if by_method.len() > 1 || !proxy.by_rule.is_empty() {
                 for (method, saved) in by_method {
                     print_kpi(
                         &format!("  via {method}"),
                         format_tokens(saved.max(0) as usize),
                     );
+                    if method == crate::llm_proxy::RULES_METHOD {
+                        for (rule, saved) in proxy.by_rule.iter().take(PANEL_RULES) {
+                            print_kpi(
+                                &format!("    {rule}"),
+                                format_tokens((*saved).max(0) as usize),
+                            );
+                        }
+                        if proxy.by_rule.len() > PANEL_RULES {
+                            print_kpi(
+                                "    …",
+                                format!(
+                                    "{} more · rtk gain --by-rule",
+                                    proxy.by_rule.len() - PANEL_RULES
+                                ),
+                            );
+                        }
+                    }
                 }
             }
             // Printed next to the savings because the two must be read
@@ -1096,6 +1165,10 @@ pub fn run(
             println!("      Actual limits use rolling 5-hour windows, not monthly caps.");
         }
 
+        if stdout_is_tty {
+            print_pro_hint_if_due(&tracker);
+        }
+
         return Ok(());
     }
 
@@ -1268,6 +1341,8 @@ fn styled(text: &str, strong: bool) -> String {
 }
 
 /// Print a key-value pair in KPI layout. // added
+const PANEL_RULES: usize = 5;
+
 fn print_kpi(label: &str, value: String) {
     println!("{:<18} {}", format!("{label}:"), value);
 }
@@ -1396,7 +1471,10 @@ fn show_recall_stats() -> Result<()> {
         RecoveryMode::Tee => "tee",
         RecoveryMode::Disabled => "disabled",
     };
-    let stats = crate::core::retriever::stats_snapshot()?;
+    let stats = crate::core::retriever::stats_snapshot()
+        .inspect_err(crate::core::retriever::report_missing_table)
+        .context("Recall store unavailable")?;
+    report_not_upgraded(crate::core::retriever::not_upgraded());
 
     println!("{}", styled("RTK Recall Efficiency", true));
     println!("{}", "═".repeat(60));
@@ -1832,9 +1910,70 @@ pub(crate) fn share_cta_available() -> bool {
     cfg!(feature = "engine")
 }
 
+const PRO_HINT_MIN_DAYS: i64 = 7;
+const PRO_HINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+const PRO_HINT_MARKER: &str = "pro-hint-shown";
+
+fn pro_hint_due(
+    enabled: bool,
+    env_off: bool,
+    first_seen_days: i64,
+    since_last_shown: Option<std::time::Duration>,
+) -> bool {
+    let interval_passed = match since_last_shown {
+        Some(elapsed) => elapsed >= PRO_HINT_INTERVAL,
+        None => true,
+    };
+    enabled && !env_off && first_seen_days >= PRO_HINT_MIN_DAYS && interval_passed
+}
+
+fn print_pro_hint_if_due(tracker: &Tracker) {
+    let enabled = crate::core::config::cached_config().display.pro_hint;
+    let env_off = matches!(
+        crate::core::user_env::var("RTK_PRO_HINT").as_deref(),
+        Some("0")
+    );
+    let first_seen_days = tracker.first_seen_days().unwrap_or(0);
+    let marker = crate::core::tracking::get_db_path()
+        .ok()
+        .map(|db| db.with_file_name(PRO_HINT_MARKER));
+    let since_last_shown = marker
+        .as_ref()
+        .and_then(|m| std::fs::metadata(m).ok())
+        .and_then(|md| md.modified().ok())
+        .and_then(|t| t.elapsed().ok());
+    if !pro_hint_due(enabled, env_off, first_seen_days, since_last_shown) {
+        return;
+    }
+    println!(
+        "{}",
+        "Across a team? Spend by team and person, budgets, audit: pro.rtk-ai.app".dimmed()
+    );
+    println!();
+    if let Some(m) = marker {
+        let _ = std::fs::write(m, b"");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pro_hint_waits_a_week_then_once_a_day() {
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        assert!(!pro_hint_due(true, false, 0, None));
+        assert!(!pro_hint_due(true, false, 6, None));
+        assert!(pro_hint_due(true, false, 7, None));
+        assert!(!pro_hint_due(true, false, 30, Some(day / 2)));
+        assert!(pro_hint_due(true, false, 30, Some(day)));
+    }
+
+    #[test]
+    fn pro_hint_respects_config_and_env() {
+        assert!(!pro_hint_due(false, false, 30, None));
+        assert!(!pro_hint_due(true, true, 30, None));
+    }
 
     #[test]
     fn share_cta_only_when_pipeline_command_exists() {

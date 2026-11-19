@@ -699,8 +699,9 @@ enum Commands {
 
     /// Cargo commands with compact output
     Cargo {
-        #[command(subcommand)]
-        command: CargoCommands,
+        /// Cargo arguments, including toolchain selectors and global options
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
     },
 
     /// npm run with filtered output (strip boilerplate)
@@ -1616,49 +1617,6 @@ enum PrismaMigrateCommands {
 }
 
 #[derive(Debug, Subcommand)]
-enum CargoCommands {
-    /// Build with compact output (strip Compiling lines, keep errors)
-    Build {
-        /// Additional cargo build arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Test with failures-only output
-    Test {
-        /// Additional cargo test arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Clippy with warnings grouped by lint rule
-    Clippy {
-        /// Additional cargo clippy arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Check with compact output (strip Checking lines, keep errors)
-    Check {
-        /// Additional cargo check arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Install with compact output (strip dep compilation, keep installed/errors)
-    Install {
-        /// Additional cargo install arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Nextest with failures-only output
-    Nextest {
-        /// Additional cargo nextest arguments (e.g., run, list, --lib)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Passthrough: runs any unsupported cargo subcommand directly
-    #[command(external_subcommand)]
-    Other(Vec<OsString>),
-}
-
-#[derive(Debug, Subcommand)]
 enum DotnetCommands {
     /// Build with compact output
     Build {
@@ -1912,19 +1870,27 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let matches = rtk_command().try_get_matches_from(args)?;
-    <Cli as clap::FromArgMatches>::from_arg_matches(&matches)
+    let raw_args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let matches = rtk_command().try_get_matches_from(&raw_args)?;
+    let mut cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches)?;
+    if let Commands::Cargo { args } = &mut cli.command {
+        // A flat trailing-args field preserves -- after its first argument, but clap
+        // consumes a leading --. Restore that separator from the raw OS argv suffix.
+        let start = raw_args.len() - args.len();
+        if start > 0 && raw_args[start - 1] == "--" {
+            args.insert(0, OsString::from("--"));
+        }
+    }
+    Ok(cli)
 }
 
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     use crate::core::utils::ChildArgExt;
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
-
-    // No args → show Clap's error (user ran just "rtk" with bad syntax)
-    if args.is_empty() {
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let Some(args) = fallback_command_args(&raw_args) else {
         parse_error.exit();
-    }
+    };
 
     // RTK meta-commands should never fall back to raw execution.
     // e.g. `rtk gain --badtypo` should show Clap's error, not try to run `gain` from $PATH.
@@ -1932,21 +1898,9 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
         parse_error.exit();
     }
 
-    // `rtk test` deliberately shadows the POSIX `test` binary, so it cannot join
-    // that list — but a misused `--shell` is RTK's own flag, not something to
-    // hand to `test`. Without this, `rtk test --shell` execs the real `test`
-    // with no arguments and exits 0, silently ignoring the request (#4125).
-    //
-    // Scoped to `test` alone: `--shell` is a flag other tools carry too, and an
-    // argv-wide scan would refuse to run `just --shell bash` or
-    // `hyperfine --shell=none` — including the spellings the hook itself emits.
-    if args[0] == "test"
-        && args
-            .iter()
-            .any(|arg| arg == "--shell" || arg.starts_with("--shell="))
-    {
-        parse_error.exit();
-    }
+    // Fallbacks execute tools too, including TOML filters and typed commands
+    // whose native arguments clap rejects. Keep meta diagnostics above the gate.
+    hooks::integrity::runtime_check()?;
 
     // Dynamic task subcommands: `rtk bulk-read ...` resolves from
     // the active pipeline before anything falls back to raw execution.
@@ -2113,6 +2067,44 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
             }
         }
     }
+}
+
+fn fallback_command_args(args: &[String]) -> Option<Vec<String>> {
+    // Derive the valueless root options from the same clap command used to parse Cli.
+    // A removed flag must never silently turn a filtered command into raw passthrough.
+    let command = rtk_command();
+    let root_flags: Vec<_> = command
+        .get_arguments()
+        .filter(|arg| arg.get_index().is_none() && !arg.get_action().takes_values())
+        .collect();
+
+    let mut command_index = 0;
+    while let Some(arg) = args.get(command_index) {
+        let long_flag = arg
+            .strip_prefix("--")
+            .is_some_and(|name| root_flags.iter().any(|flag| flag.get_long() == Some(name)));
+        let short_flags = arg.strip_prefix('-').is_some_and(|cluster| {
+            !cluster.is_empty()
+                && !cluster.starts_with('-')
+                && cluster.chars().all(|short| {
+                    root_flags
+                        .iter()
+                        .any(|flag| flag.get_short() == Some(short))
+                })
+        });
+        if long_flag || short_flags {
+            command_index += 1;
+        } else {
+            break;
+        }
+    }
+
+    let command = args.get(command_index)?;
+    if command.starts_with('-') {
+        return None;
+    }
+
+    Some(args[command_index..].to_vec())
 }
 
 #[derive(Debug, Subcommand)]
@@ -3401,27 +3393,7 @@ fn run_cli() -> Result<i32> {
 
         Commands::Playwright { args } => playwright_cmd::run(&args, cli.verbose)?,
 
-        Commands::Cargo { command } => match command {
-            CargoCommands::Build { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Build, &args, cli.verbose)?
-            }
-            CargoCommands::Test { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Test, &args, cli.verbose)?
-            }
-            CargoCommands::Clippy { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Clippy, &args, cli.verbose)?
-            }
-            CargoCommands::Check { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Check, &args, cli.verbose)?
-            }
-            CargoCommands::Install { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Install, &args, cli.verbose)?
-            }
-            CargoCommands::Nextest { args } => {
-                cargo_cmd::run(cargo_cmd::CargoCommand::Nextest, &args, cli.verbose)?
-            }
-            CargoCommands::Other(args) => cargo_cmd::run_passthrough(&args, cli.verbose)?,
-        },
+        Commands::Cargo { args } => cargo_cmd::run(&args, cli.verbose)?,
 
         Commands::Bun { command } => match command {
             BunCommands::Install { args } => bun_cmd::run_pkg("install", &args, cli.verbose)?,
@@ -4124,6 +4096,33 @@ mod tests {
     use super::*;
     use crate::core::test_isolation;
     use std::cell::Cell;
+
+    #[test]
+    fn test_cargo_cli_preserves_global_options_and_separators() {
+        for args in [
+            vec!["+stable", "--locked", "check"],
+            vec!["--config", "check", "test", "--", "--nocapture"],
+            vec![
+                "+nightly",
+                "-Z",
+                "unstable-options",
+                "-C",
+                "some path",
+                "check",
+            ],
+            vec!["+stable", "--help"],
+            vec!["--", "check"],
+            vec!["--", "--", "check"],
+            vec!["check", "--", "--nocapture"],
+        ] {
+            let cli = try_parse_cli_from(["rtk", "cargo"].into_iter().chain(args.iter().copied()))
+                .unwrap();
+            let Commands::Cargo { args: parsed } = cli.command else {
+                panic!("expected cargo")
+            };
+            assert_eq!(parsed, args.iter().map(OsString::from).collect::<Vec<_>>());
+        }
+    }
 
     #[test]
     fn test_jest_and_vitest_get_the_hook_integrity_check() {
@@ -5738,6 +5737,36 @@ mod tests {
                 Commands::Ng { args } => assert_eq!(args, flags),
                 _ => panic!("expected Angular command"),
             }
+        }
+    }
+
+    #[test]
+    fn test_fallback_skips_supported_global_flags_before_command() {
+        for flags in [
+            vec!["-v"],
+            vec!["--verbose"],
+            vec!["-vv"],
+            vec!["-v", "-v"],
+            vec!["--skip-env"],
+            vec!["-vvv", "--skip-env"],
+        ] {
+            let args: Vec<String> = flags
+                .into_iter()
+                .chain(["echo", "--help"])
+                .map(str::to_string)
+                .collect();
+            assert_eq!(
+                fallback_command_args(&args),
+                Some(vec!["echo".to_string(), "--help".to_string()])
+            );
+        }
+    }
+
+    #[test]
+    fn test_fallback_rejects_unrecognized_leading_flag() {
+        for flag in ["-u", "-vx", "-", "--ultra-compact", "--verbose=1"] {
+            let args = [flag.to_string(), "echo".to_string(), "hi".to_string()];
+            assert_eq!(fallback_command_args(&args), None, "accepted {flag}");
         }
     }
 

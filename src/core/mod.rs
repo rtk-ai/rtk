@@ -8,9 +8,11 @@ pub mod call_context;
 pub mod classify;
 pub mod config;
 pub mod constants;
+pub mod db;
 pub mod display_helpers;
 pub mod filter;
 pub mod guard;
+pub mod http;
 #[cfg(feature = "engine")]
 pub mod pipeline_cmd;
 #[cfg(feature = "engine")]
