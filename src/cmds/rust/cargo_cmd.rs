@@ -466,7 +466,40 @@ fn run_build(args: &[OsString], command_args: &[String], verbose: u8) -> Result<
     )
 }
 
+/// Cargo's first `--` forwards to libtest; an unclaimed `--` ends its options.
+fn lists_tests(args: &[String]) -> bool {
+    // Cargo never consumes `--` as a flag value, so structural tokenization is
+    // sufficient to locate its forwarding boundary.
+    let cargo_tokens = arg_tokenizer::tokenize(args);
+    let Some(boundary) = arg_tokenizer::dashdash_index(&cargo_tokens) else {
+        return false;
+    };
+    let harness_args = &args[cargo_tokens[boundary].source_index + 1..];
+    let harness_tokens = arg_tokenizer::tokenize_grammar(
+        harness_args,
+        &|kind, name| match (kind, name) {
+            (
+                TokenKind::Long,
+                "logfile" | "test-threads" | "skip" | "color" | "format" | "shuffle-seed",
+            )
+            // Unlike Cargo, libtest lets a required value consume `--`.
+            | (TokenKind::Short, "Z") => Some(ValueSpec::value().claiming_dash_dash()),
+            _ => None,
+        },
+        Dialect::Posix,
+    );
+    arg_tokenizer::has_flag(&harness_tokens, Dialect::Posix, "list")
+}
+
 fn run_test(args: &[OsString], verbose: u8) -> Result<i32> {
+    // Inspect a textual view only; forward the original OS argv unchanged.
+    let words: Vec<String> = args
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    if lists_tests(&words) {
+        return runner::run_passthrough("cargo", args, verbose);
+    }
     // No json branch here on purpose: --message-format=json only reformats the
     // build phase, the test harness output stays human-readable. CargoTestHandler
     // reads both — it aggregates the `test result:` lines and, on a compile error,
@@ -1578,6 +1611,33 @@ mod tests {
         "    Finished dev [unoptimized + debuginfo] target(s) in 0.01s\n";
 
     use super::*;
+
+    #[test]
+    fn list_detection_respects_cargo_and_libtest_boundaries() {
+        for args in [
+            vec!["--", "--list"],
+            vec!["--all-targets", "--", "--list", "--format=terse"],
+            vec!["filter", "--", "--skip", "other", "--list"],
+            vec!["--", "--skip", "--", "--list"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            assert!(lists_tests(&args), "{args:?}");
+        }
+        for args in [
+            vec![],
+            vec!["--list"],
+            vec!["--", "--", "--list"],
+            vec!["--", "--skip", "--", "--", "--list"],
+            vec!["--", "--skip", "--list"],
+            vec!["--", "--skip=--list"],
+            vec!["--", "--format", "--list"],
+            vec!["--", "-Z", "--list"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            assert!(!lists_tests(&args), "{args:?}");
+        }
+    }
+
     use crate::core::args_utils::restore_double_dash_with_raw;
 
     #[test]
