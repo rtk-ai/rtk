@@ -48,11 +48,12 @@ const RTK_MD_UNMARKED_PAYLOAD_DIGESTS: [&str; 3] = [
 /// dropped first: a checkout or an editor may have rewritten the line endings of a file RTK
 /// wrote, which does not make it the user's.
 fn rtk_md_payload_digest(content: &str) -> String {
+    use base16ct::HexDisplay;
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
     hasher.update(content.replace('\r', "").as_bytes());
-    format!("{:x}", hasher.finalize())
+    format!("{:x}", HexDisplay(&hasher.finalize()))
 }
 
 /// Whether `content` is an RTK.md that RTK itself wrote.
@@ -446,7 +447,13 @@ fn lexically_normalized(path: &Path) -> PathBuf {
     normalized
 }
 
-pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UninstallCodexOutcome {
+    Clean,
+    HookRefused,
+}
+
+pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<UninstallCodexOutcome> {
     let InitContext { dry_run, .. } = ctx;
     let mut hook_left_in_place = None;
     let removed = if global {
@@ -483,7 +490,11 @@ pub(super) fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
         codex_uninstall_report(&removed, hook_left_in_place.as_ref(), dry_run)
     );
 
-    Ok(())
+    if hook_left_in_place.is_some() {
+        Ok(UninstallCodexOutcome::HookRefused)
+    } else {
+        Ok(UninstallCodexOutcome::Clean)
+    }
 }
 
 /// Everything `rtk init --codex --uninstall` says it did, as one block.
@@ -1013,6 +1024,7 @@ mod tests {
         assert!(is_codex_hook_command(
             "\"C:\\Program Files\\rtk.exe\" hook codex"
         ));
+        assert!(is_codex_hook_command("rtk hook codex\n"));
     }
 
     #[test]
@@ -1252,14 +1264,22 @@ mod tests {
     fn test_patch_codex_hooks_is_idempotent_and_preserves_existing_hooks() {
         let temp = TempDir::new().unwrap();
         let hooks_json = temp.path().join(HOOKS_JSON);
+        let user_hook = serde_json::json!({
+            "type": "command",
+            "command": "audit;/usr/local/bin/rtk hook codex",
+            "timeout": 11,
+            "metadata": { "owner": "user", "labels": ["keep"] }
+        });
+        let user_group = serde_json::json!({
+            "matcher": "Bash",
+            "description": "user group",
+            "hooks": [user_hook.clone()]
+        });
         fs::write(
             &hooks_json,
             serde_json::to_string_pretty(&serde_json::json!({
                 "hooks": {
-                    "PreToolUse": [{
-                        "matcher": "Bash",
-                        "hooks": [{ "type": "command", "command": "echo existing" }]
-                    }],
+                    "PreToolUse": [user_group.clone()],
                     "Stop": [{
                         "hooks": [{ "type": "command", "command": "echo stop" }]
                     }]
@@ -1276,12 +1296,23 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&hooks_json).unwrap()).unwrap();
         assert!(codex_hook_already_present(&root));
         assert_eq!(root["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
-        assert_eq!(
-            root["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
-            "echo existing"
-        );
+        assert_eq!(root["hooks"]["PreToolUse"][0], user_group,);
         assert_eq!(root["hooks"]["Stop"][0]["hooks"][0]["command"], "echo stop");
         assert!(hooks_json.with_extension("json.bak").exists());
+
+        assert!(remove_codex_hook_from_file(&hooks_json, InitContext::default()).unwrap());
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_json).unwrap()).unwrap();
+        assert!(!codex_hook_already_present(&after));
+        assert_eq!(
+            after["hooks"]["PreToolUse"].as_array().unwrap(),
+            std::slice::from_ref(&user_group)
+        );
+        assert_eq!(
+            after["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "echo stop"
+        );
+        assert_eq!(after["hooks"]["PreToolUse"][0]["hooks"][0], user_hook);
     }
 
     #[test]
@@ -2053,8 +2084,9 @@ mod tests {
         .expect("symlink");
 
         let _entered = test_isolation::enter(project.path());
-        uninstall_codex(false, InitContext::default())
+        let outcome = uninstall_codex(false, InitContext::default())
             .expect("uninstall still reports what it did");
+        assert!(matches!(outcome, UninstallCodexOutcome::HookRefused));
 
         assert!(
             !elsewhere.path().join("stolen.json").exists(),
@@ -2205,9 +2237,12 @@ mod tests {
         .expect("RTK.md");
 
         let _entered = test_isolation::enter(project.path());
-        let result = uninstall_codex(false, InitContext::default());
+        let outcome = uninstall_codex(false, InitContext::default());
 
-        result.expect("uninstall still cleans the project");
+        assert!(matches!(
+            outcome.expect("uninstall still cleans the project"),
+            UninstallCodexOutcome::HookRefused
+        ));
         assert_eq!(
             fs::read_to_string(elsewhere.path().join(HOOKS_JSON)).expect("read"),
             registered,

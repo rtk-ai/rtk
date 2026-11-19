@@ -149,7 +149,7 @@ pub(crate) fn is_crlf_at(bytes: &[u8], i: usize) -> bool {
 /// into single words — e.g. `*.yml` tokenizes as `Shellism("*")` +
 /// `Arg(".yml")` but is one bash word. For callers that only need "was there
 /// a space here", not full shell-operator awareness.
-pub(crate) fn coalesce_words<'a>(cmd: &'a str, tokens: &[ParsedToken]) -> Vec<(&'a str, usize)> {
+fn coalesce_words<'a>(cmd: &'a str, tokens: &[ParsedToken]) -> Vec<(&'a str, usize)> {
     let mut words = Vec::new();
     let mut run_start: Option<usize> = None;
     let mut run_end: usize = 0;
@@ -170,6 +170,21 @@ pub(crate) fn coalesce_words<'a>(cmd: &'a str, tokens: &[ParsedToken]) -> Vec<(&
         words.push((&cmd[start..run_end], start));
     }
     words
+}
+
+/// A command's words (quote-aware, see [`coalesce_words`]) split from their byte offsets in
+/// `cmd`. The words are *unresolved*: they are slices of `cmd` with quote characters and
+/// backslash escapes still literal, so `--config "a path/x.yml"` yields the word
+/// `"a path/x.yml"` with its quotes. A caller that reads a word as a value must put it through
+/// [`resolve_word_text`] first; [`shell_split`] resolves but drops the offsets. Comparing an
+/// unresolved word to a keyword matches only the unquoted spelling -- fine when the miss means
+/// passthrough, not when it means a wrong rewrite.
+///
+/// Callers that hand the words to `core::arg_tokenizer` keep the offsets alongside:
+/// `Token::source_index` indexes the slice that was tokenized, so add that slice's own start
+/// offset before indexing `spans` -- tokenizing `&words[1..]` means `spans[source_index + 1]`.
+pub(crate) fn words_and_spans(cmd: &str) -> (Vec<&str>, Vec<usize>) {
+    coalesce_words(cmd, &tokenize(cmd)).into_iter().unzip()
 }
 
 fn tokenize_inner(input: &str, newline_mode: NewlineMode) -> Vec<ParsedToken> {
@@ -495,9 +510,10 @@ pub(crate) enum ShellDialect {
 
 /// True for constructs the permission gate can't decompose, so they must never
 /// be auto-allowed: command/process substitution, quoting the lexer reads
-/// differently from bash, or a real file-target redirect (fd-dup like `2>&1`
-/// and `/dev/null` are exempt). Separators and subshells are handled by
-/// [`split_for_permissions`], not flagged here.
+/// differently from bash, a heredoc or herestring whatever its delimiter, or a
+/// real file-target redirect (fd-dup like `2>&1` and `/dev/null` are exempt).
+/// Separators and subshells are handled by [`split_for_permissions`], not
+/// flagged here.
 pub fn contains_unattestable_construct(cmd: &str) -> bool {
     contains_unattestable_construct_in(cmd, ShellDialect::Posix)
 }
@@ -659,14 +675,188 @@ pub(crate) fn redirect_takes_operand(value: &str) -> bool {
 
 // A redirect that takes an operand names a file unless that operand is
 // `/dev/null`; a bare `>&` before a word is `>word 2>&1` — a file target too.
+// A heredoc or herestring also returns true, whatever its delimiter: its body
+// is inline data that no caller can attest.
 pub(crate) fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool {
-    if !redirect_takes_operand(&tokens[i].value) {
+    let value = &tokens[i].value;
+    // A heredoc operator arrives as `<<` with any fd digits folded in front
+    // (`3<<`); the `-` of `<<-` stays in the next word, and a herestring `<<<`
+    // arrives as `<<` then `<`. Its operand is a delimiter, so a delimiter
+    // spelled `/dev/null` must not reach the exemption below.
+    if value
+        .trim_start_matches(|ch: char| ch.is_ascii_digit())
+        .starts_with("<<")
+    {
+        return true;
+    }
+    if !redirect_takes_operand(value) {
         return false;
     }
     match tokens.get(i + 1) {
         Some(next) if next.kind == TokenKind::Arg => next.value != "/dev/null",
         _ => true,
     }
+}
+
+/// How a policy treats redirect tokens.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RedirectPolicy {
+    /// Ordinary text: the segment keeps the redirect and its operand.
+    Keep,
+    /// The command is what matters, not its plumbing: a redirect before any
+    /// command text is stepped over, and one after it ends the segment.
+    Excise,
+    /// A redirect before any command text is stepped over, and one after it
+    /// stays in the segment: a shell wrapper's quoted script is read up to the
+    /// end of its words, plumbing included, as the rewrite reads it.
+    SkipLeading,
+}
+
+/// What counts as the end of a segment, and what the segment keeps.
+///
+/// The permission gate, analytics classification and the rewrite each need a
+/// different answer, and the gate's must be the most conservative — a segment
+/// it never sees is a command its rules never check. Naming the differences
+/// here keeps them chosen rather than emergent.
+#[derive(Clone, Copy)]
+pub(crate) struct Policy {
+    newline: NewlineMode,
+    /// `&`, `(` and `)` end a segment.
+    group_boundaries: bool,
+    redirects: RedirectPolicy,
+    stop_at_pipe: bool,
+}
+
+impl Policy {
+    /// The permission gate: breaks on everything a command could hide behind.
+    pub(crate) const PERMISSIONS: Self = Self {
+        newline: NewlineMode::Conservative,
+        group_boundaries: true,
+        redirects: RedirectPolicy::Excise,
+        stop_at_pipe: false,
+    };
+
+    /// The permission gate's look for a quoted shell wrapper: its boundaries,
+    /// without cutting a segment at a trailing redirect, so the wrapper's
+    /// script is the text the rewrite reads.
+    pub(crate) const WRAPPERS: Self = Self {
+        redirects: RedirectPolicy::SkipLeading,
+        ..Self::PERMISSIONS
+    };
+
+    /// Classification only, never a security decision.
+    pub(crate) const CLASSIFY: Self = Self {
+        newline: NewlineMode::None,
+        group_boundaries: false,
+        redirects: RedirectPolicy::Keep,
+        stop_at_pipe: false,
+    };
+
+    pub(crate) const fn stopping_at_pipe(self, stop_at_pipe: bool) -> Self {
+        Self {
+            stop_at_pipe,
+            ..self
+        }
+    }
+}
+
+/// One command's text within a compound command, with the byte range it came
+/// from so a caller can splice around it rather than rebuild it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Segment<'a> {
+    pub(crate) text: &'a str,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+fn push_segment<'a>(out: &mut Vec<Segment<'a>>, input: &'a str, start: usize, end: usize) {
+    let raw = &input[start..end];
+    let text = raw.trim();
+    if text.is_empty() {
+        return;
+    }
+    let lead = raw.len() - raw.trim_start().len();
+    out.push(Segment {
+        text,
+        start: start + lead,
+        end: start + lead + text.len(),
+    });
+}
+
+/// Split a compound command into the commands it runs, under `policy`.
+///
+/// Offsets are relative to `cmd.trim()`, which is what every caller matches
+/// against.
+pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return vec![];
+    }
+
+    let tokens = tokenize_inner(trimmed, policy.newline);
+    let mut out = Vec::new();
+    let mut seg_start: usize = 0;
+    let mut seg_end: Option<usize> = None;
+    let mut seg_has_text = false;
+
+    let mut i = 0;
+    while let Some(tok) = tokens.get(i) {
+        let is_boundary = match tok.kind {
+            TokenKind::Operator | TokenKind::Pipe(_) => true,
+            TokenKind::Shellism => {
+                policy.group_boundaries && matches!(tok.value.as_str(), "&" | "(" | ")")
+            }
+            _ => false,
+        };
+
+        if is_boundary {
+            let end = seg_end.take().unwrap_or(tok.offset);
+            push_segment(&mut out, trimmed, seg_start, end);
+            if policy.stop_at_pipe && matches!(tok.kind, TokenKind::Pipe(_)) {
+                return out;
+            }
+            seg_start = tok.offset + tok.value.len();
+            seg_has_text = false;
+        } else if tok.kind == TokenKind::Redirect && policy.redirects != RedirectPolicy::Keep {
+            if !seg_has_text {
+                // A redirect before the command word is stepped over instead of
+                // truncating the segment at it, together with the operand
+                // attached to the operator: the tokens that follow it with no
+                // gap, up to a boundary. `>$HOME/x` is several tokens but one
+                // word, and in `>a|rm -rf /` the `|` starts the next command
+                // rather than continuing the filename. A token after a gap
+                // belongs to the segment.
+                let mut end = tok.offset + tok.value.len();
+                let mut next = i + 1;
+                while let Some(part) = tokens.get(next) {
+                    let ends_operand = matches!(
+                        part.kind,
+                        TokenKind::Operator | TokenKind::Pipe(_) | TokenKind::Shellism
+                    );
+                    if part.offset != end || ends_operand {
+                        break;
+                    }
+                    end = part.offset + part.value.len();
+                    next += 1;
+                }
+                seg_start = end;
+                i = next;
+                continue;
+            } else if policy.redirects == RedirectPolicy::Excise && seg_end.is_none() {
+                seg_end = Some(tok.offset);
+            }
+        } else if tok.kind == TokenKind::Arg
+            || (tok.kind == TokenKind::Shellism && !is_grammar_word(&tok.value))
+        {
+            seg_has_text = true;
+        }
+
+        i += 1;
+    }
+
+    let end = seg_end.unwrap_or(trimmed.len());
+    push_segment(&mut out, trimmed, seg_start, end);
+    out
 }
 
 /// Segments `cmd` for the **permission gate** (`permissions.rs::check_command_with_rules`):
@@ -694,85 +884,20 @@ pub(crate) fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool
 /// hiding behind a construct another segmenter would leave intact.
 /// Callers must still gate on [`contains_unattestable_construct`] first.
 pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
-    split_segments(cmd, true)
+    segment(cmd, Policy::PERMISSIONS)
+        .into_iter()
+        .map(|s| s.text)
+        .collect()
 }
 
+/// [`split_for_permissions`]'s boundaries, without cutting a segment at a
+/// trailing redirect: where the gate looks for a quoted shell wrapper, whose
+/// script runs to the end of its words as the rewrite reads it.
 pub fn split_for_wrappers(cmd: &str) -> Vec<&str> {
-    split_segments(cmd, false)
-}
-
-fn split_segments(cmd: &str, truncate_at_redirect: bool) -> Vec<&str> {
-    let trimmed = cmd.trim();
-    if trimmed.is_empty() {
-        return vec![];
-    }
-
-    let tokens = tokenize_inner(trimmed, NewlineMode::Conservative);
-    let mut results = Vec::new();
-    let mut seg_start: usize = 0;
-    let mut seg_end: Option<usize> = None;
-    let mut seg_has_text = false;
-
-    let mut i = 0;
-    while let Some(tok) = tokens.get(i) {
-        let is_boundary = match tok.kind {
-            TokenKind::Operator | TokenKind::Pipe(_) => true,
-            TokenKind::Shellism => matches!(tok.value.as_str(), "&" | "(" | ")"),
-            _ => false,
-        };
-
-        if is_boundary {
-            let end = seg_end.take().unwrap_or(tok.offset);
-            let segment = trimmed[seg_start..end].trim();
-            if !segment.is_empty() {
-                results.push(segment);
-            }
-            seg_start = tok.offset + tok.value.len();
-            seg_has_text = false;
-        } else if tok.kind == TokenKind::Redirect {
-            if !seg_has_text {
-                // A redirect before the command word is stepped over instead of
-                // truncating the segment at it, together with the operand
-                // attached to the operator: the tokens that follow it with no
-                // gap, up to a boundary. `>$HOME/x` is several tokens but one
-                // word, and in `>a|rm -rf /` the `|` starts the next command
-                // rather than continuing the filename. A token after a gap
-                // belongs to the segment.
-                let mut end = tok.offset + tok.value.len();
-                let mut next = i + 1;
-                while let Some(part) = tokens.get(next) {
-                    let ends_operand = matches!(
-                        part.kind,
-                        TokenKind::Operator | TokenKind::Pipe(_) | TokenKind::Shellism
-                    );
-                    if part.offset != end || ends_operand {
-                        break;
-                    }
-                    end = part.offset + part.value.len();
-                    next += 1;
-                }
-                seg_start = end;
-                i = next;
-                continue;
-            } else if truncate_at_redirect && seg_end.is_none() {
-                seg_end = Some(tok.offset);
-            }
-        } else if tok.kind == TokenKind::Arg
-            || (tok.kind == TokenKind::Shellism && !is_grammar_word(&tok.value))
-        {
-            seg_has_text = true;
-        }
-
-        i += 1;
-    }
-
-    let end = seg_end.unwrap_or(trimmed.len());
-    let tail = trimmed[seg_start..end].trim();
-    if !tail.is_empty() {
-        results.push(tail);
-    }
-
-    results
+    segment(cmd, Policy::WRAPPERS)
+        .into_iter()
+        .map(|s| s.text)
+        .collect()
 }
 
 /// Split a shell command on operators (`&&`, `||`, `;`, and the `case`
@@ -786,44 +911,10 @@ fn split_segments(cmd: &str, truncate_at_redirect: bool) -> Vec<&str> {
 /// function's comparison table), so it must not be repurposed for
 /// permission/security decisions.
 pub fn split_on_operators(cmd: &str, stop_at_pipe: bool) -> Vec<&str> {
-    let trimmed = cmd.trim();
-    if trimmed.is_empty() {
-        return vec![];
-    }
-
-    let tokens = tokenize(trimmed);
-    let mut results = Vec::new();
-    let mut seg_start: usize = 0;
-
-    for tok in &tokens {
-        match tok.kind {
-            TokenKind::Operator => {
-                let segment = trimmed[seg_start..tok.offset].trim();
-                if !segment.is_empty() {
-                    results.push(segment);
-                }
-                seg_start = tok.offset + tok.value.len();
-            }
-            TokenKind::Pipe(_) => {
-                let segment = trimmed[seg_start..tok.offset].trim();
-                if !segment.is_empty() {
-                    results.push(segment);
-                }
-                if stop_at_pipe {
-                    return results;
-                }
-                seg_start = tok.offset + tok.value.len();
-            }
-            _ => {}
-        }
-    }
-
-    let tail = trimmed[seg_start..].trim();
-    if !tail.is_empty() {
-        results.push(tail);
-    }
-
-    results
+    segment(cmd, Policy::CLASSIFY.stopping_at_pipe(stop_at_pipe))
+        .into_iter()
+        .map(|s| s.text)
+        .collect()
 }
 
 #[cfg(test)]
@@ -841,7 +932,7 @@ pub fn strip_quotes(s: &str) -> String {
 /// Turns a coalesced word's raw text (quotes/escapes still literal, as
 /// `tokenize()` preserves them) into argv-ready text: quote chars that
 /// open/close a span are stripped, backslash escapes resolved.
-fn resolve_word_text(raw: &str) -> String {
+pub(super) fn resolve_word_text(raw: &str) -> String {
     let mut result = String::new();
     let mut chars = raw.chars().peekable();
     let mut quote: Option<char> = None;
@@ -906,6 +997,19 @@ mod tests {
             .map(|(w, _)| w)
             .collect();
         assert_eq!(words, vec!["golangci-lint", "--config", "*.yml", "run"]);
+    }
+
+    #[test]
+    fn test_words_and_spans_keeps_words_unresolved() {
+        let cmd = r#"golangci-lint --config "a path/x.yml" run"#;
+        let (words, _) = words_and_spans(cmd);
+        assert_eq!(words[2], r#""a path/x.yml""#);
+        assert_eq!(resolve_word_text(words[2]), "a path/x.yml");
+
+        let escaped = r"golangci-lint --config=a\ b run";
+        let (words, _) = words_and_spans(escaped);
+        assert_eq!(words[1], r"--config=a\ b");
+        assert_eq!(resolve_word_text(words[1]), "--config=a b");
     }
 
     #[test]
@@ -1638,9 +1742,9 @@ mod tests {
     #[test]
     fn test_shell_split_coalesces_unquoted_glob_next_to_quoted_segment() {
         // An unquoted metacharacter directly adjacent to a quoted segment
-        // (no space between them) must stay one word — the same
-        // token-coalescing gap that split_token_spans needed for golangci-lint,
-        // now exercised through shell_split's output shape (quotes stripped).
+        // (no space between them) must stay one word — the token-coalescing gap
+        // `coalesce_words` closes, here through shell_split's output shape
+        // (quotes stripped).
         assert_eq!(
             shell_split(r#"echo *.yml"quoted end""#),
             vec!["echo", "*.ymlquoted end"]
@@ -1874,6 +1978,19 @@ mod tests {
     }
 
     #[test]
+    fn test_bugfix_issue_3980_heredoc_devnull_not_exempt() {
+        // Heredocs with /dev/null as delimiter should be unattestable
+        // because /dev/null is the delimiter, not a file target
+        assert!(contains_unattestable_construct("git status << /dev/null"));
+        assert!(contains_unattestable_construct("git status <</dev/null"));
+        assert!(contains_unattestable_construct("git status <<-EOF"));
+        assert!(contains_unattestable_construct("git status <<- /dev/null"));
+        assert!(contains_unattestable_construct("git status 3<< /dev/null"));
+        assert!(contains_unattestable_construct("git status 3<</dev/null"));
+        assert!(contains_unattestable_construct("git status 3<<- /dev/null"));
+    }
+
+    #[test]
     fn test_attestable_subshell_and_separators() {
         assert!(!contains_unattestable_construct(
             "(git status; cargo build)"
@@ -1896,6 +2013,112 @@ mod tests {
     }
 
     // --- split_for_permissions ---------------------------------------------
+
+    /// `segment()` replaced two hand-rolled walkers. This is the contract for
+    /// that replacement: over a generated corpus of compound commands, both
+    /// policies must return exactly what the walker they replaced returned.
+    ///
+    /// The corpus is built from the constructs each walker treats specially,
+    /// crossed rather than listed, because the shapes that broke the gate in
+    /// practice were spacing variants nobody thought to write out.
+    #[test]
+    fn test_segment_matches_the_walkers_it_replaced() {
+        const COMMANDS: &[&str] = &["ls", "rm -rf /", "git status", "echo a b", ""];
+        const JOINERS: &[&str] = &[
+            " && ", "&&", " || ", "||", "; ", ";", " | ", "|", " |& ", "|&", " & ", "&", " ;; ",
+            ";;", ";&", ";;&", "\n", "\r\n", "\r", " ",
+        ];
+        const WRAPPERS: &[&str] = &["", "( ", "(", "{ ", "! ", ") ", "} "];
+        const REDIRECTS: &[&str] = &[
+            "",
+            "2>&1 ",
+            ">out ",
+            "<in ",
+            "0<&1 ",
+            ">a|",
+            "2>/dev/null ",
+            ">$HOME/x ",
+            "2>&1",
+        ];
+
+        let mut corpus: Vec<String> = Vec::new();
+        for left in COMMANDS {
+            for joiner in JOINERS {
+                for right in COMMANDS {
+                    corpus.push(format!("{left}{joiner}{right}"));
+                    for wrapper in WRAPPERS {
+                        corpus.push(format!("{wrapper}{left}{joiner}{right}"));
+                    }
+                    for redirect in REDIRECTS {
+                        corpus.push(format!("{redirect}{left}{joiner}{right}"));
+                        corpus.push(format!("{left}{joiner}{redirect}{right}"));
+                    }
+                }
+            }
+        }
+        // Quoting, escapes and trailing plumbing, which change tokenization
+        // rather than segmentation.
+        for extra in [
+            "echo 'a; b'",
+            "echo \"a && b\"",
+            "echo a\\;b",
+            "echo $'\\''; rm -rf /",
+            "cat <<EOF\nls\nEOF",
+            "ls 2>&1 | grep x",
+            "ls \\\n rm -rf /",
+            "case x in a) ls;; esac",
+            "  ls  ;  ls  ",
+            "café;;fin",
+        ] {
+            corpus.push(extra.to_string());
+        }
+
+        assert!(corpus.len() > 5000, "corpus collapsed to {}", corpus.len());
+
+        for cmd in &corpus {
+            assert_eq!(
+                split_for_permissions(cmd),
+                legacy_segmenters::split_for_permissions_legacy(cmd),
+                "permission segmentation changed for {cmd:?}"
+            );
+            for stop_at_pipe in [true, false] {
+                assert_eq!(
+                    split_on_operators(cmd, stop_at_pipe),
+                    legacy_segmenters::split_on_operators_legacy(cmd, stop_at_pipe),
+                    "classify segmentation changed for {cmd:?} (stop_at_pipe={stop_at_pipe})"
+                );
+            }
+        }
+    }
+
+    /// The spans exist so a caller can splice around a segment instead of
+    /// rebuilding it, which is only sound if they address the exact text.
+    #[test]
+    fn test_segment_spans_address_their_own_text() {
+        for cmd in [
+            "ls && rm -rf /",
+            "  ls  ;  ls  ",
+            "café;;fin",
+            "(ls; cargo build)",
+            "2>&1 ls | grep x",
+            "ls\r\nls -la",
+        ] {
+            let trimmed = cmd.trim();
+            for policy in [Policy::PERMISSIONS, Policy::CLASSIFY] {
+                for seg in segment(cmd, policy) {
+                    assert_eq!(
+                        &trimmed[seg.start..seg.end],
+                        seg.text,
+                        "span {}..{} does not address {:?} in {cmd:?}",
+                        seg.start,
+                        seg.end,
+                        seg.text
+                    );
+                    assert_eq!(seg.text.trim(), seg.text, "segment text was not trimmed");
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_split_perms_operators() {
@@ -2017,5 +2240,136 @@ mod tests {
             .map(|t| t.value)
             .collect();
         assert_eq!(args, vec!["git", "status\r", "git", "log"]);
+    }
+}
+
+#[cfg(test)]
+mod legacy_segmenters {
+    //! The hand-rolled segmenters `segment()` replaced, kept so the
+    //! differential test can prove the replacement changed nothing.
+    //!
+    //! **Do not edit this module.** It is an oracle, not code: its value is
+    //! that it is what shipped before the refactor. Tidying it, or "keeping it
+    //! in sync" with `segment()`, leaves the test passing while it stops
+    //! proving anything. Delete it outright when the refactor is old enough
+    //! that the comparison no longer earns its keep.
+    use super::*;
+
+    #[allow(dead_code)]
+    pub fn split_for_permissions_legacy(cmd: &str) -> Vec<&str> {
+        let trimmed = cmd.trim();
+        if trimmed.is_empty() {
+            return vec![];
+        }
+
+        let tokens = tokenize_inner(trimmed, NewlineMode::Conservative);
+        let mut results = Vec::new();
+        let mut seg_start: usize = 0;
+        let mut seg_end: Option<usize> = None;
+        let mut seg_has_text = false;
+
+        let mut i = 0;
+        while let Some(tok) = tokens.get(i) {
+            let is_boundary = match tok.kind {
+                TokenKind::Operator | TokenKind::Pipe(_) => true,
+                TokenKind::Shellism => matches!(tok.value.as_str(), "&" | "(" | ")"),
+                _ => false,
+            };
+
+            if is_boundary {
+                let end = seg_end.take().unwrap_or(tok.offset);
+                let segment = trimmed[seg_start..end].trim();
+                if !segment.is_empty() {
+                    results.push(segment);
+                }
+                seg_start = tok.offset + tok.value.len();
+                seg_has_text = false;
+            } else if tok.kind == TokenKind::Redirect {
+                if !seg_has_text {
+                    // A redirect may precede the command it applies to, and that
+                    // command still has to reach the deny rules, so step over the
+                    // redirect instead of truncating the segment at it.
+                    //
+                    // The operand runs to the first gap or boundary. `>$HOME/x` is
+                    // several tokens but one word, and a boundary ends the operand
+                    // even with no gap — in `>a|rm -rf /` the `|` starts the next
+                    // command rather than continuing the filename.
+                    let mut end = tok.offset + tok.value.len();
+                    let mut next = i + 1;
+                    while let Some(part) = tokens.get(next) {
+                        let ends_operand = matches!(
+                            part.kind,
+                            TokenKind::Operator | TokenKind::Pipe(_) | TokenKind::Shellism
+                        );
+                        if part.offset != end || ends_operand {
+                            break;
+                        }
+                        end = part.offset + part.value.len();
+                        next += 1;
+                    }
+                    seg_start = end;
+                    i = next;
+                    continue;
+                } else if seg_end.is_none() {
+                    seg_end = Some(tok.offset);
+                }
+            } else if tok.kind == TokenKind::Arg
+                || (tok.kind == TokenKind::Shellism && !is_grammar_word(&tok.value))
+            {
+                seg_has_text = true;
+            }
+
+            i += 1;
+        }
+
+        let end = seg_end.unwrap_or(trimmed.len());
+        let tail = trimmed[seg_start..end].trim();
+        if !tail.is_empty() {
+            results.push(tail);
+        }
+
+        results
+    }
+
+    #[allow(dead_code)]
+    pub fn split_on_operators_legacy(cmd: &str, stop_at_pipe: bool) -> Vec<&str> {
+        let trimmed = cmd.trim();
+        if trimmed.is_empty() {
+            return vec![];
+        }
+
+        let tokens = tokenize(trimmed);
+        let mut results = Vec::new();
+        let mut seg_start: usize = 0;
+
+        for tok in &tokens {
+            match tok.kind {
+                TokenKind::Operator => {
+                    let segment = trimmed[seg_start..tok.offset].trim();
+                    if !segment.is_empty() {
+                        results.push(segment);
+                    }
+                    seg_start = tok.offset + tok.value.len();
+                }
+                TokenKind::Pipe(_) => {
+                    let segment = trimmed[seg_start..tok.offset].trim();
+                    if !segment.is_empty() {
+                        results.push(segment);
+                    }
+                    if stop_at_pipe {
+                        return results;
+                    }
+                    seg_start = tok.offset + tok.value.len();
+                }
+                _ => {}
+            }
+        }
+
+        let tail = trimmed[seg_start..].trim();
+        if !tail.is_empty() {
+            results.push(tail);
+        }
+
+        results
     }
 }
