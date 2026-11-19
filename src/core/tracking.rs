@@ -57,14 +57,21 @@ fn current_project_path_string() -> String {
 }
 
 /// Build SQL filter params for project-scoped queries.
-/// Returns (exact_match, glob_prefix) for WHERE clause.
-/// Uses GLOB instead of LIKE to avoid `_` and `%` in paths acting as wildcards. // changed: GLOB
+/// Returns an exact path and a GLOB that matches only its descendants.
+/// Bracket quoting keeps metacharacters in the path literal; only the final `*` is a wildcard.
 fn project_filter_params(project_path: Option<&str>) -> (Option<String>, Option<String>) {
     match project_path {
-        Some(p) => (
-            Some(p.to_string()),
-            Some(format!("{}{}*", p, std::path::MAIN_SEPARATOR)), // changed: GLOB pattern with * wildcard
-        ),
+        Some(path) => {
+            let literal = path
+                .replace('[', "[[]")
+                .replace('*', "[*]")
+                .replace('?', "[?]");
+            let separator = std::path::MAIN_SEPARATOR;
+            (
+                Some(path.to_string()),
+                Some(format!("{literal}{separator}*")),
+            )
+        }
         None => (None, None),
     }
 }
@@ -3945,6 +3952,52 @@ mod tests {
             glob_val,
             format!("/home/user/project{}*", std::path::MAIN_SEPARATOR)
         );
+    }
+
+    #[test]
+    fn test_project_filter_treats_glob_metacharacters_literally() {
+        for (name, neighbor) in [
+            ("demo[1]", "demo1"),
+            ("demo*", "demo-sibling"),
+            ("demo?", "demo2"),
+        ] {
+            let tracker = Tracker::new_in_memory().expect("create tracker");
+            let root = PathBuf::from("projects");
+            let project = root.join(name);
+            for (path, hour, command, input) in [
+                (project.clone(), "09", "rtk ls root", 100),
+                (project.join("child"), "10", "rtk ls child", 200),
+                (
+                    root.join(neighbor).join("child"),
+                    "11",
+                    "rtk ls sibling",
+                    400,
+                ),
+            ] {
+                insert_weekly_command(
+                    &tracker,
+                    &format!("2026-09-28T{hour}:00:00Z"),
+                    &path.to_string_lossy(),
+                    command,
+                    input,
+                    0,
+                    0,
+                );
+            }
+
+            let project = project.to_string_lossy();
+            let summary = tracker
+                .get_summary_filtered(Some(&project))
+                .expect("read project summary");
+            assert_eq!(summary.total_commands, 2, "{name}");
+            assert_eq!(summary.total_input, 300, "{name}");
+
+            let recent = tracker
+                .get_recent_filtered(10, Some(&project))
+                .expect("read project history");
+            let commands: Vec<&str> = recent.iter().map(|row| row.rtk_cmd.as_str()).collect();
+            assert_eq!(commands, ["rtk ls child", "rtk ls root"], "{name}");
+        }
     }
 
     // 10. project_filter_params returns None for None input // added
