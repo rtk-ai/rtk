@@ -60,11 +60,9 @@ fn is_rtk_usage(text: &str) -> bool {
 
 /// Windows ships a `find.exe` and a `tree.com` that are unrelated programs, and `ls`,
 /// `grep` and `wc` only exist there if a Unix toolchain is on PATH. Comparing RTK against
-/// those proves nothing about the filters, which assume the Unix tools. On Windows,
-/// Git defaults to `help.format=html`, which opens the default browser for `git <cmd> --help`
-/// instead of printing a man page to stdout.
+/// those proves nothing about the filters, which assume the Unix tools.
 #[cfg(windows)]
-const UNIX_ONLY: &[&str] = &["grep", "ls", "tree", "wc", "find", "git"];
+const UNIX_ONLY: &[&str] = &["grep", "ls", "tree", "wc", "find"];
 #[cfg(not(windows))]
 const UNIX_ONLY: &[&str] = &[];
 
@@ -281,7 +279,12 @@ fn a_wrapped_tools_own_help_survives_rtk() {
     // The cases of one tool, in `CASES` order, with the tool's resolved path.
     let mut by_tool: Vec<(PathBuf, Vec<&Case>)> = Vec::new();
     for case in CASES {
-        if UNIX_ONLY.contains(&case.tool) {
+        // Git for Windows renders `--help` as an HTML page in the default browser
+        // (`help.format=html` is compiled in, so the scratch git config cannot change
+        // it, and there is no `man` to fall back on). `-h` still prints text there.
+        let opens_browser =
+            cfg!(windows) && case.tool == "git" && case.native_args.contains(&"--help");
+        if UNIX_ONLY.contains(&case.tool) || opens_browser {
             skipped.push(case.tool);
             continue;
         }
@@ -646,19 +649,4 @@ fn rtks_own_help_is_still_rtks() {
             &out.text[..out.text.len().min(200)]
         );
     }
-}
-
-/// Git for Windows opens HTML help in the default browser when `--help` is requested,
-/// so it is excluded from the fuzz run on Windows to avoid spawning browser windows.
-#[cfg(windows)]
-#[test]
-fn git_is_skipped_on_windows_to_prevent_browser_launch() {
-    assert!(UNIX_ONLY.contains(&"git"));
-}
-
-/// On non-Windows platforms, git help passthrough must be checked against native git.
-#[cfg(not(windows))]
-#[test]
-fn git_is_not_skipped_on_unix() {
-    assert!(!UNIX_ONLY.contains(&"git"));
 }
