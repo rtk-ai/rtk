@@ -1964,11 +1964,6 @@ fn print_pro_hint_if_due(tracker: &Tracker) {
         "{}",
         "Across a team? Spend by team and person, budgets, audit: pro.rtk-ai.app".dimmed()
     );
-    println!(
-        "{}",
-        "(once a day at most; pro_hint = false under [display] in config.toml turns it off)"
-            .dimmed()
-    );
     println!();
     if let Some(m) = marker {
         let _ = std::fs::write(m, b"");
