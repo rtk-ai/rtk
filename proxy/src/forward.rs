@@ -461,6 +461,7 @@ async fn buffered_relay(
         tokens_output: usage.output,
         cache_creation_tokens: usage.cache_creation,
         cache_read_tokens: usage.cache_read,
+        chat_prompt_tokens: usage.chat_prompt_tokens,
         ccr_retrieve_calls: 0,
         latency_ms,
         error_body,
@@ -503,6 +504,7 @@ fn stream_outcome(
         tokens_output: usage.output,
         cache_creation_tokens: usage.cache_creation,
         cache_read_tokens: usage.cache_read,
+        chat_prompt_tokens: usage.chat_prompt_tokens,
         ccr_retrieve_calls: 0,
         latency_ms,
         error_body,
@@ -658,6 +660,9 @@ impl SseAccumulator {
         }
         if u.cache_creation > 0 {
             self.usage.cache_creation = u.cache_creation;
+        }
+        if u.chat_prompt_tokens.is_some() {
+            self.usage.chat_prompt_tokens = u.chat_prompt_tokens;
         }
         if u.cache_read > 0 {
             self.usage.cache_read = u.cache_read;
@@ -836,6 +841,7 @@ mod stream_outcome {
             output: 20,
             cache_creation: 0,
             cache_read: 0,
+            chat_prompt_tokens: None,
         };
         let clean = stream_outcome(200, usage, vec![], None, 10, Some(1), Some(9));
         assert_eq!(clean.status, 200);
@@ -1044,6 +1050,7 @@ mod tests {
         acc.feed(b"data: [DONE]\n\n");
         let u = acc.finish();
         assert_eq!(u.input, 42);
+        assert_eq!(u.chat_prompt_tokens, Some(42));
         assert_eq!(u.output, 17);
     }
 

@@ -453,6 +453,7 @@ fn record_usage(
         cost_without,
         latency_ms: outcome.latency_ms,
         cache_read_tokens: outcome.cache_read_tokens,
+        chat_prompt_tokens: outcome.chat_prompt_tokens,
         cache_creation_tokens: outcome.cache_creation_tokens,
         ccr_retrieve_calls: outcome.ccr_retrieve_calls,
         path: path.to_string(),

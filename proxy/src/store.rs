@@ -48,6 +48,8 @@ pub struct UsageRow {
     pub latency_ms: i64,
     /// Tokens served from the provider prompt cache (when reported).
     pub cache_read_tokens: i64,
+    /// Inclusive Chat Completions prompt total. NULL on old rows or missing usage.
+    pub chat_prompt_tokens: Option<i64>,
     /// Tokens written to the provider prompt cache (when reported).
     pub cache_creation_tokens: i64,
     /// `rtk_retrieve` calls the proxy resolved for this request -- how often
@@ -100,6 +102,7 @@ CREATE TABLE IF NOT EXISTS usage_records (
     client       TEXT,
     latency_ms            INTEGER NOT NULL DEFAULT 0,
     cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+    chat_prompt_tokens    INTEGER,
     cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
     ccr_retrieve_calls    INTEGER NOT NULL DEFAULT 0,
     path            TEXT,
@@ -157,6 +160,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
 const MIGRATIONS: &[&str] = &[
     "ALTER TABLE usage_records ADD COLUMN latency_ms INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE usage_records ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE usage_records ADD COLUMN chat_prompt_tokens INTEGER",
     "ALTER TABLE usage_records ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE usage_records ADD COLUMN ccr_retrieve_calls INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE usage_records ADD COLUMN path TEXT",
@@ -246,8 +250,8 @@ impl Store {
                     path,
                     compression_level, ctx_total, ctx_tool_result, ctx_tool_use, ctx_duplicate, ctx_image,
                     saved_ingest_filter, saved_pixel_compress, saved_ccr, saved_normalize, project, session, pipeline,
-                    routed_from, cost_without, saved_engine_methods, saved_rules)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31)",
+                    routed_from, cost_without, saved_engine_methods, saved_rules, chat_prompt_tokens)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32)",
                 params![
                     row.ts, row.provider, row.model, row.tokens_in, row.tokens_out,
                     row.tokens_saved, row.cost_usd, row.status, row.client,
@@ -257,7 +261,7 @@ impl Store {
                     row.ctx_total, row.ctx_tool_result, row.ctx_tool_use, row.ctx_duplicate, row.ctx_image,
                     row.saved_ingest_filter, row.saved_pixel_compress, row.saved_ccr,
                     row.saved_normalize, row.project, row.session, row.pipeline,
-                    row.routed_from, row.cost_without, row.saved_engine_methods, row.saved_rules
+                    row.routed_from, row.cost_without, row.saved_engine_methods, row.saved_rules, row.chat_prompt_tokens
                 ],
             )?;
             Ok(())
@@ -498,8 +502,8 @@ pub struct MetricsSnapshot {
 /// that visible instead of invisible.
 #[derive(Debug, Clone, Default)]
 pub struct CacheHealth {
-    /// `read / (read + created)` over all recorded requests. A healthy corpus
-    /// sits near 1; sustained decline means the prefix is churning.
+    /// Token-weighted hit share: Chat Completions reports total prompt tokens;
+    /// other providers use reads + writes. Rows without a denominator are skipped.
     pub hit_ratio: f64,
     /// Mid-session prefix invalidations: the previous request in the session
     /// read a large cached prefix, this one read nothing and rewrote one.
@@ -585,18 +589,20 @@ impl Store {
             let c = conn.lock().expect("store mutex");
             let mut snap = MetricsSnapshot::default();
 
-            if let Ok(t) = c.query_row(
+            if let Ok((totals, hit_ratio)) = c.query_row(
                 "SELECT count(*),
                         COALESCE(sum(CASE WHEN status >= 400 THEN 1 ELSE 0 END),0),
                         COALESCE(sum(tokens_in),0), COALESCE(sum(tokens_out),0),
                         COALESCE(sum(cache_read_tokens),0), COALESCE(sum(cache_creation_tokens),0),
                         COALESCE(sum(tokens_saved),0),
                         COALESCE(sum(CASE WHEN status < 400 THEN cost_usd ELSE 0 END),0),
-                        COALESCE(sum(latency_ms),0)
+                        COALESCE(sum(latency_ms),0),
+                        1.0 * SUM(cache_read_tokens) FILTER (WHERE provider <> 'openai' OR chat_prompt_tokens IS NOT NULL)
+                        / SUM(CASE WHEN provider = 'openai' THEN chat_prompt_tokens ELSE cache_read_tokens + cache_creation_tokens END)
                  FROM usage_records",
                 [],
                 |r| {
-                    Ok(MetricTotals {
+                    let totals = MetricTotals {
                         requests: r.get(0)?,
                         errors: r.get(1)?,
                         tokens_in: r.get(2)?,
@@ -606,10 +612,12 @@ impl Store {
                         tokens_saved: r.get(6)?,
                         cost_usd: r.get(7)?,
                         latency_ms_sum: r.get(8)?,
-                    })
+                    };
+                    Ok((totals, r.get::<_, Option<f64>>(9)?))
                 },
             ) {
-                snap.totals = t;
+                snap.totals = totals;
+                snap.cache.hit_ratio = hit_ratio.unwrap_or_default();
             }
 
             if let Ok(mut stmt) = c.prepare(
@@ -640,11 +648,6 @@ impl Store {
                 }) {
                     snap.by_client = rows.flatten().collect();
                 }
-            }
-
-            let denom = snap.totals.cache_read + snap.totals.cache_creation;
-            if denom > 0 {
-                snap.cache.hit_ratio = snap.totals.cache_read as f64 / denom as f64;
             }
 
             if let Ok((fractures, sessions)) = c.query_row(
@@ -784,6 +787,24 @@ mod tests {
         assert_eq!(snap.cache.fractures, 1);
         assert_eq!(snap.cache.sessions, 1);
         assert!(snap.cache.hit_ratio > 0.0 && snap.cache.hit_ratio < 1.0);
+    }
+
+    #[tokio::test]
+    async fn chat_cache_metrics_keep_all_reads_but_only_rate_measured_prompts() {
+        let store = Store::open(":memory:").unwrap();
+        for (read, prompt) in [(1700, None), (800, Some(900)), (0, Some(100))] {
+            store
+                .record(UsageRow {
+                    provider: "openai".into(),
+                    cache_read_tokens: read,
+                    chat_prompt_tokens: prompt,
+                    ..Default::default()
+                })
+                .await;
+        }
+        let snap = store.metrics().await;
+        assert_eq!(snap.totals.cache_read, 2500);
+        assert_eq!(snap.cache.hit_ratio, 0.8);
     }
 
     #[tokio::test]

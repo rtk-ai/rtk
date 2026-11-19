@@ -373,7 +373,7 @@ fn draw_proxy_panel(f: &mut Frame, area: Rect, summary: Option<&ProxyGainSummary
     if p.retrieve_calls > 0 {
         lines.push(kpi_line("Recovery", format!("{} calls", p.retrieve_calls)));
     }
-    if let Some(hit) = p.cache_hit_ratio() {
+    if let Some(hit) = p.cache_hit_ratio {
         // A compressed body that is not byte-stable across turns invalidates
         // the upstream prefix, which costs more than the compression saves.
         // Surfaced next to Saved so the two are read together.
@@ -387,14 +387,14 @@ fn draw_proxy_panel(f: &mut Frame, area: Rect, summary: Option<&ProxyGainSummary
             format!("{:.1}%", hit * 100.0)
         };
         lines.push(kpi_line("Cache hit", health));
-        // The cache is usually the session's largest saver; the bare hit
-        // ratio hides that. One user-agnostic percentage, est.-labeled.
-        if let Some(effect) = p.cache_effect_pct() {
-            lines.push(kpi_line(
-                "Cache effect",
-                format!("input billed at ~{:.0}% of raw est.", 100.0 - effect),
-            ));
-        }
+    }
+    // The cache is usually the session's largest saver; the bare hit
+    // ratio hides that. One user-agnostic percentage, est.-labeled.
+    if let Some(effect) = p.cache_effect_pct() {
+        lines.push(kpi_line(
+            "Cache effect",
+            format!("input billed at ~{:.0}% of raw est.", 100.0 - effect),
+        ));
     }
     f.render_widget(Paragraph::new(lines), text_area);
     // The gauge shows the panel's real lever: the share of input the cache

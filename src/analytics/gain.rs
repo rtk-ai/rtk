@@ -545,18 +545,21 @@ pub fn run_pipeline_detail(name: &str) -> Result<()> {
                 format_tokens(saved.max(0) as usize)
             );
         }
-        if row.cache_read + row.cache_created > 0 {
-            let hit = row.cache_read as f64 / (row.cache_read + row.cache_created) as f64 * 100.0;
+        if row.cache_read + row.cache_created > 0 || row.cache_hit_ratio.is_some() {
+            let hit = row
+                .cache_hit_ratio
+                .map(|hit| format!("  (hit {:.0}%)", hit * 100.0))
+                .unwrap_or_default();
             print_kpi(
                 "  prompt cache",
                 format!(
-                    "{} read · {} written  (hit {hit:.0}%)",
+                    "{} read · {} written{hit}",
                     format_tokens(row.cache_read.max(0) as usize),
                     format_tokens(row.cache_created.max(0) as usize),
                 ),
             );
             let cache_raw = row.tokens_in + row.cache_read + row.cache_created;
-            if cache_raw > 0 {
+            if cache_raw > 0 && row.cache_read + row.cache_created > 0 {
                 let billed = row.tokens_in as f64
                     + row.cache_read as f64 * 0.1
                     + row.cache_created as f64 * 1.25;
@@ -934,30 +937,30 @@ pub fn run(
             if proxy.retrieve_calls > 0 {
                 print_kpi("Recovery calls", proxy.retrieve_calls.to_string());
             }
-            if let Some(hit) = proxy.cache_hit_ratio() {
+            if let Some(hit) = proxy.cache_hit_ratio {
                 print_kpi("Cache hit", format!("{:.1}%", hit * 100.0));
-                // The cache is usually the largest saver in the whole session,
-                // and the bare hit ratio hides that. Shown as a
-                // percentage of raw input: user-agnostic, provider-reported
-                // counts, published multipliers.
-                if let Some(effect) = proxy.cache_effect_pct() {
-                    print_kpi(
-                        "Cache effect",
-                        format!(
-                            "input billed at ~{:.0}% of raw (-{:.0}%) est.",
-                            100.0 - effect,
-                            effect
-                        ),
-                    );
-                }
-                if proxy.cache_fractures > 0 {
-                    print_kpi(
-                        "  fractures",
-                        format!("{} recent", proxy.cache_fractures)
-                            .yellow()
-                            .to_string(),
-                    );
-                }
+            }
+            // The cache is usually the largest saver in the whole session,
+            // and the bare hit ratio hides that. Shown as a
+            // percentage of raw input: user-agnostic, provider-reported
+            // counts, published multipliers.
+            if let Some(effect) = proxy.cache_effect_pct() {
+                print_kpi(
+                    "Cache effect",
+                    format!(
+                        "input billed at ~{:.0}% of raw (-{:.0}%) est.",
+                        100.0 - effect,
+                        effect
+                    ),
+                );
+            }
+            if proxy.cache_fractures > 0 {
+                print_kpi(
+                    "  fractures",
+                    format!("{} recent", proxy.cache_fractures)
+                        .yellow()
+                        .to_string(),
+                );
             }
             println!();
         }

@@ -308,6 +308,8 @@ pub struct Usage {
     /// Tokens served from the prompt cache (Anthropic `cache_read_input_tokens`
     /// / OpenAI `prompt_tokens_details.cached_tokens`).
     pub cache_read: i64,
+    /// Chat Completions prompt total, including the cached prefix, when reported.
+    pub chat_prompt_tokens: Option<i64>,
 }
 
 /// Token usage extracted from a non-streaming JSON response body.
@@ -334,6 +336,7 @@ pub fn usage_from_obj(provider: &Provider, usage: &serde_json::Value) -> Usage {
             output: get("output_tokens"),
             cache_creation: get("cache_creation_input_tokens"),
             cache_read: get("cache_read_input_tokens"),
+            chat_prompt_tokens: None,
         },
         Provider::Google => {
             // Gemini `usageMetadata`: promptTokenCount INCLUDES the cached prefix;
@@ -347,6 +350,7 @@ pub fn usage_from_obj(provider: &Provider, usage: &serde_json::Value) -> Usage {
                 output: get("candidatesTokenCount") + get("thoughtsTokenCount"),
                 cache_creation: 0,
                 cache_read,
+                chat_prompt_tokens: None,
             }
         }
         Provider::Openai => {
@@ -365,6 +369,7 @@ pub fn usage_from_obj(provider: &Provider, usage: &serde_json::Value) -> Usage {
                 output: get("completion_tokens"),
                 cache_creation: 0,
                 cache_read,
+                chat_prompt_tokens: usage["prompt_tokens"].as_i64().filter(|&n| n >= cache_read),
             }
         }
     }
@@ -566,6 +571,7 @@ mod tests {
         // prefix at both the full and the cache rate.
         assert_eq!((u.input, u.output), (18, 70));
         assert_eq!((u.cache_creation, u.cache_read), (0, 12));
+        assert_eq!(u.chat_prompt_tokens, Some(u.input + 12));
     }
 
     #[test]

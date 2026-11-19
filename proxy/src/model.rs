@@ -213,6 +213,8 @@ pub struct UsageOutcome {
     pub cache_creation_tokens: i64,
     /// Tokens served from the provider prompt cache.
     pub cache_read_tokens: i64,
+    /// Reported Chat Completions prompt tokens (fresh + cached).
+    pub chat_prompt_tokens: Option<i64>,
     /// `rtk_retrieve` calls the proxy resolved for this request -- how often
     /// the model had to go back for content CCR removed.
     pub ccr_retrieve_calls: i64,
