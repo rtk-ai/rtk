@@ -535,7 +535,10 @@ fn filter_cargo_install(output: &str) -> String {
     let mut ignored_line = String::new();
 
     for line in output.lines() {
-        let trimmed = line.trim_start();
+        // Cargo may emit ANSI color codes (CARGO_TERM_COLOR=always); strip them
+        // before matching prefixes so errors and crate info are not lost.
+        let plain = crate::core::utils::strip_ansi(line);
+        let trimmed = plain.trim_start();
 
         // Strip noise: dep compilation, downloading, locking, etc.
         if trimmed.starts_with("Compiling") {
@@ -595,16 +598,16 @@ fn filter_cargo_install(output: &str) -> String {
 
         // Keep: actionable warnings (e.g., "be sure to add `/path` to your PATH")
         // Skip summary lines like "warning: `crate` generated N warnings"
-        if line.starts_with("warning:") {
-            if !(line.contains("generated") && line.contains("warning")) {
-                replaced_lines.push(line.to_string());
+        if plain.starts_with("warning:") {
+            if !(plain.contains("generated") && plain.contains("warning")) {
+                replaced_lines.push(plain.clone());
             }
             continue;
         }
 
         // Detect error blocks
-        if line.starts_with("error[") || line.starts_with("error:") {
-            if line.contains("aborting due to") || line.contains("could not compile") {
+        if plain.starts_with("error[") || plain.starts_with("error:") {
+            if plain.contains("aborting due to") || plain.contains("could not compile") {
                 continue;
             }
             if in_error && !current_error.is_empty() {
@@ -613,14 +616,14 @@ fn filter_cargo_install(output: &str) -> String {
             }
             error_count += 1;
             in_error = true;
-            current_error.push(line.to_string());
+            current_error.push(plain.clone());
         } else if in_error {
-            if line.trim().is_empty() && current_error.len() > 3 {
+            if plain.trim().is_empty() && current_error.len() > 3 {
                 errors.push(current_error.join("\n"));
                 current_error.clear();
                 in_error = false;
             } else {
-                current_error.push(line.to_string());
+                current_error.push(plain.clone());
             }
         }
     }
@@ -2189,6 +2192,57 @@ error: aborting due to 2 previous errors
         assert!(result.contains("E0308"), "got: {}", result);
         assert!(result.contains("E0425"), "got: {}", result);
         assert!(!result.contains("aborting"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_cargo_install_forced_color_keeps_errors_and_crate() {
+        // CARGO_TERM_COLOR=always wraps the verb and diagnostics in ANSI codes.
+        let output = "\x1b[1;32m  Installing\x1b[0m rtk-color-repro v0.1.0\n\
+                      \x1b[1;32m   Compiling\x1b[0m rtk-color-repro v0.1.0\n\
+                      \x1b[1;31merror\x1b[0m\x1b[1m[E0308]\x1b[0m: install diagnostic\n\
+                       \x1b[1;34m--> \x1b[0msrc/main.rs:1:1\n\
+                      \x1b[1;31merror\x1b[0m: aborting due to 1 previous error\n";
+        let result = filter_cargo_install(output);
+        assert!(
+            result.contains("1 error"),
+            "should report the error: {}",
+            result
+        );
+        assert!(
+            result.contains("install diagnostic"),
+            "compiler error must survive: {}",
+            result
+        );
+        assert!(
+            result.contains("rtk-color-repro"),
+            "crate name must survive: {}",
+            result
+        );
+        assert!(!result.contains("aborting"), "got: {}", result);
+        assert!(
+            !result.contains('\x1b'),
+            "ANSI codes must be stripped: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_install_forced_color_keeps_package_on_success() {
+        let output = "\x1b[1;32m  Installing\x1b[0m rtk v0.11.0\n\
+                      \x1b[1;32m   Compiling\x1b[0m rtk v0.11.0\n\
+                      \x1b[1;32m    Finished\x1b[0m `release` profile [optimized] target(s) in 10.0s\n\
+                      \x1b[1;32m   Installed\x1b[0m package `rtk v0.11.0`\n";
+        let result = filter_cargo_install(output);
+        assert!(
+            result.contains("rtk v0.11.0"),
+            "package name must survive forced color: {}",
+            result
+        );
+        assert!(
+            !result.contains('\x1b'),
+            "ANSI codes must be stripped: {}",
+            result
+        );
     }
 
     #[test]
