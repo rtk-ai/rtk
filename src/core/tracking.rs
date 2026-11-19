@@ -1962,12 +1962,9 @@ impl Tracker {
             .map_err(|e| anyhow::anyhow!("Failed to query first seen timestamp: {e}"))?;
         match oldest {
             Some(ts) => {
-                let first = chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%dT%H:%M:%S")
-                    .or_else(|_| chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%d %H:%M:%S"))
-                    .map(|dt| dt.and_utc())
-                    .unwrap_or_else(|_| chrono::Utc::now());
-                let days = (chrono::Utc::now() - first).num_days();
-                Ok(days.max(0))
+                let now = Utc::now();
+                let first = parse_stored_timestamp(&ts).unwrap_or(now);
+                Ok((now - first).num_days().max(0))
             }
             None => Ok(0),
         }
@@ -2755,6 +2752,18 @@ mod command_label_tests {
     }
 }
 
+fn parse_stored_timestamp(ts: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(ts)
+        .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S").map(|dt| dt.and_utc())
+        })
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S").map(|dt| dt.and_utc())
+        })
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2799,6 +2808,56 @@ mod tests {
                 ],
             )
             .expect("Failed to insert weekly command fixture");
+    }
+
+    #[test]
+    fn parse_stored_timestamp_reads_what_record_writes() {
+        let written = Utc::now().to_rfc3339();
+        let parsed = parse_stored_timestamp(&written).expect("rfc3339 timestamp");
+        assert_eq!(parsed.to_rfc3339(), written);
+        assert_eq!(
+            parse_stored_timestamp("2026-11-01T20:13:04.981917+00:00")
+                .expect("fractional seconds and offset")
+                .to_rfc3339(),
+            "2026-11-01T20:13:04.981917+00:00"
+        );
+        assert_eq!(
+            parse_stored_timestamp("2026-11-01T22:13:04+02:00")
+                .expect("non-utc offset")
+                .to_rfc3339(),
+            "2026-11-01T20:13:04+00:00"
+        );
+    }
+
+    #[test]
+    fn parse_stored_timestamp_keeps_the_legacy_formats() {
+        for legacy in ["2026-11-01T20:13:04", "2026-11-01 20:13:04"] {
+            assert_eq!(
+                parse_stored_timestamp(legacy)
+                    .expect("legacy timestamp")
+                    .to_rfc3339(),
+                "2026-11-01T20:13:04+00:00"
+            );
+        }
+        assert!(parse_stored_timestamp("not a timestamp").is_none());
+    }
+
+    #[test]
+    fn first_seen_days_counts_from_the_oldest_recorded_command() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+        assert_eq!(tracker.first_seen_days().expect("empty db"), 0);
+        let oldest = (Utc::now() - chrono::Duration::days(17)).to_rfc3339();
+        insert_weekly_command(&tracker, &oldest, "/p", "rtk git status", 100, 10, 1);
+        insert_weekly_command(
+            &tracker,
+            &Utc::now().to_rfc3339(),
+            "/p",
+            "rtk ls",
+            100,
+            10,
+            1,
+        );
+        assert_eq!(tracker.first_seen_days().expect("first seen"), 17);
     }
 
     #[test]
