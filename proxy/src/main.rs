@@ -222,7 +222,7 @@ async fn run_start(args: StartArgs) {
     let listener = match tokio::net::TcpListener::bind(&bind).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::error!(error = %e, bind, "failed to bind");
+            tracing::error!(error = %e, bind, "{}", bind_failure(&e));
             std::process::exit(1);
         }
     };
@@ -568,5 +568,39 @@ fn run_service_logs() {
     if let Err(e) = rtk_proxy::service::logs() {
         eprintln!("{e:#}");
         std::process::exit(1);
+    }
+}
+
+/// Why `start` could not listen. A port already in use is the usual case on a
+/// machine with several accounts: every installed service binds the same
+/// default, and loopback is shared by every session, so the second account's
+/// proxy fails here once a minute. Say so, and what to change.
+fn bind_failure(e: &std::io::Error) -> &'static str {
+    if e.kind() == std::io::ErrorKind::AddrInUse {
+        "port already in use: another rtk-proxy (possibly another user's on this machine) \
+         or another program holds it; set a different `bind` in rtk-proxy.toml"
+    } else {
+        "failed to bind"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_port_held_by_another_listener_is_explained() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = held.local_addr().expect("addr");
+        let err = std::net::TcpListener::bind(addr).expect_err("port is held");
+        let msg = bind_failure(&err);
+        assert!(msg.contains("already in use"), "{msg}");
+        assert!(msg.contains("bind"), "{msg}");
+    }
+
+    #[test]
+    fn other_bind_errors_keep_the_generic_message() {
+        let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(bind_failure(&err), "failed to bind");
     }
 }
