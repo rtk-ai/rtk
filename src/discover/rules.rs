@@ -1119,6 +1119,15 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^jq(\s|$)",
+        rtk_cmd: "rtk jq",
+        pipeline_safety: PipelineSafety::FinalOnly,
+        rewrite_prefixes: &["jq"],
+        category: "Files",
+        savings_pct: 50.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^gt\s+",
         rtk_cmd: "rtk gt",
         rewrite_prefixes: &["gt"],

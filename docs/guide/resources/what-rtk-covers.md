@@ -132,6 +132,7 @@ listing into `head`, `tail`, or `cat`.
 | `ast-grep` | Grouped by file, capped overflow; `--json` passes through |
 | `diff` | Context reduced |
 | `wc` | Compact counts |
+| `jq` | Large JSON results truncated (arrays head/tail, raw mode line-capped) |
 | `cat <file>` | Smart file reading via `rtk read` |
 | `head <file>` | First 10 lines via `rtk read --head-lines 10` |
 | `tail -n <N> <file>` | Last N lines via `rtk read --tail-lines <N>` |

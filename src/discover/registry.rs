@@ -3127,7 +3127,21 @@ mod tests {
             .map(|rule| rule.rtk_cmd)
             .collect();
 
-        assert_eq!(safe_rules, vec!["rtk grep", "rtk rg"]);
+        assert_eq!(safe_rules, vec!["rtk grep", "rtk rg", "rtk jq"]);
+    }
+
+    #[test]
+    fn test_jq_pipeline_rewrites_final_stage_only() {
+        assert_eq!(
+            rewrite_command_no_prefixes("curl -s https://api.example.com | jq '.items'", &[]),
+            Some("curl -s https://api.example.com | rtk jq '.items'".into())
+        );
+        // As a producer (`jq ... | tail -5`), truncating middle lines or appending
+        // a tee recovery hint would corrupt the slice `tail` sees.
+        assert_eq!(
+            rewrite_command_no_prefixes("jq -r '.items[]' data.json | tail -5", &[]),
+            None
+        );
     }
 
     #[test]
