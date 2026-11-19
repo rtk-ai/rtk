@@ -4,12 +4,13 @@
 //! reads the result back; both `rtk sqlfluff ...` and `rtk lint sqlfluff ...`
 //! go through it so the two entry points cannot drift apart.
 
+use super::utils::python_tool_command;
 use crate::core::arg_tokenizer::{self, TokenKind};
 use crate::core::config;
 use crate::core::runner;
 use crate::core::shell::display_args;
 use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::{resolved_command, truncate};
+use crate::core::utils::truncate;
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -176,7 +177,7 @@ impl Invocation {
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let plan = plan(args);
 
-    let mut cmd = resolved_command("sqlfluff");
+    let mut cmd = python_tool_command("sqlfluff");
     cmd.args(&plan.args);
 
     if verbose > 0 {
