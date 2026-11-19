@@ -107,12 +107,11 @@ static PNPM_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
 static HEAD_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap());
 static HEAD_LINES: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap());
-// `-n N` and `--lines N` are the spellings `tail` already accepted below; `head`
-// silently fell through to no rewrite at all without them.
+// `-n N`, `-nN`, and `--lines N` are accepted alongside `-N` and `--lines=N`.
 static HEAD_N_SPACE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^head\s+-n\s+(\d+)\s+(\S+)$").unwrap());
+    LazyLock::new(|| Regex::new(r"^head\s+-n\s*(\d+)\s+(\S+)$").expect("valid regex"));
 static HEAD_LINES_SPACE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^head\s+--lines\s+(\d+)\s+(\S+)$").unwrap());
+    LazyLock::new(|| Regex::new(r"^head\s+--lines\s+(\d+)\s+(\S+)$").expect("valid regex"));
 // Bare `head FILE` means ten lines, not the whole file. Restricted to a single
 // operand: multi-file and optioned forms stay with the native binary.
 static HEAD_BARE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^head\s+(\S+)$").unwrap());
@@ -166,7 +165,7 @@ fn is_single_file_operand(operand: &str) -> bool {
 }
 static TAIL_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^tail\s+-(\d+)\s+(\S+)$").unwrap());
 static TAIL_N_SPACE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap());
+    LazyLock::new(|| Regex::new(r"^tail\s+-n\s*(\d+)\s+(\S+)$").expect("valid regex"));
 static TAIL_LINES_EQ: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap());
 static TAIL_LINES_SPACE: LazyLock<Regex> =
@@ -5322,6 +5321,26 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("head -n 50 src/lib.rs", &[]),
             Some("rtk read src/lib.rs --head-lines 50".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_and_tail_attached_n_flag() {
+        assert_eq!(
+            rewrite_command_no_prefixes("head -n50 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --head-lines 50".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -n50 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --tail-lines 50".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -n+50 src/lib.rs", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("head -n-50 src/lib.rs", &[]),
+            None
         );
     }
 
