@@ -3893,9 +3893,11 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(result.exit_code);
     }
 
-    let filtered = filter_branch_output(&result.stdout);
-    let filtered = never_worse(&result.stdout, &filtered).to_string();
-    println!("{}", filtered);
+    let filtered = never_worse(&result.stdout, &filter_branch_output(&result.stdout)).to_string();
+    // Git prints nothing for an empty listing (unborn repo, no matching --list pattern).
+    if !filtered.is_empty() {
+        println!("{}", filtered);
+    }
 
     timer.track(
         &tracked,
@@ -5884,6 +5886,12 @@ mod tests {
         let cmd = branch_list_cmd(&user, &[]);
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, ["branch", "--no-color", "-a"]);
+    }
+
+    #[test]
+    fn branch_listing_with_nothing_to_show_stays_empty() {
+        // `never_worse` falls back to the raw (empty) output, which run_branch must not print as "\n"
+        assert_eq!(never_worse("", &filter_branch_output("")), "");
     }
 
     #[test]
