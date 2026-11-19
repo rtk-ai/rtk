@@ -202,6 +202,25 @@ rtk cc-economics
 
 `rtk gain` reports token savings only; the cache breakdown lives in `rtk cc-economics`.
 
+## Network calls fail behind a proxy
+
+RTK's own HTTP calls (`rtk pipeline add <url>`, `rtk pipeline search`, task workers with a remote upstream, the telemetry ping) follow `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`. Filtered commands and the hook make no network call.
+
+If one of these calls reports `Connection refused` while the target is reachable, check the proxy variables in that shell:
+
+```bash
+env | grep -i _proxy
+```
+
+- A stale or unreachable proxy makes the call fail. The error names the target, not the proxy.
+- SOCKS proxies are not supported. `socks5h://` fails the call; `socks5://` and `socks4://` are ignored and the call connects directly.
+- `localhost` and loopback addresses always connect directly.
+- To bypass the proxy for one host, add it to `NO_PROXY` as the exact host name or as a `.suffix`, with no spaces after commas:
+
+```bash
+NO_PROXY=internal.example.com,.corp.example.com rtk pipeline add https://internal.example.com/p.toml
+```
+
 ## Run the diagnostic script
 
 From the RTK repository root:
