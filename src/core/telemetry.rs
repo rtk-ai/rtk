@@ -747,6 +747,7 @@ mod tests {
     fn the_marker_is_claimed_after_the_payload_and_before_the_request() {
         let dir = tempfile::tempdir().expect("tempdir");
         let marker = dir.path().join(".telemetry_last_ping");
+        let mut posted = None;
 
         let sent = run_ping(
             &marker,
@@ -758,16 +759,17 @@ mod tests {
                 "payload"
             },
             |payload| {
-                assert_eq!(payload, "payload");
                 assert!(
                     marker.exists(),
                     "the marker must be written before the request goes out"
                 );
+                posted = Some(payload);
                 Ok::<(), ()>(())
             },
         );
 
         assert_eq!(sent, Ok(true));
+        assert_eq!(posted, Some("payload"), "the claimed ping must be sent");
         assert!(!ping_due(&marker));
     }
 
