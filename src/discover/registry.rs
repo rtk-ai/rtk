@@ -228,6 +228,19 @@ pub fn classify_command(cmd: &str) -> Classification {
         } else {
             cmd_normalized
         };
+    // Global uv options before `run` (`uv --directory api run pytest`) only
+    // rewrite when the inner command itself matches a rule (`rtk uv` requires
+    // `run` as its first argument), so adopt the inner command only then.
+    let cmd_normalized = if cmd_normalized.starts_with("uv ")
+        && !cmd_normalized.starts_with("uv run")
+        && let Some((_, rest)) = strip_uv_run_prefix(&cmd_normalized)
+        && !rest.is_empty()
+        && matches!(classify_command(rest), Classification::Supported { .. })
+    {
+        rest.to_string()
+    } else {
+        cmd_normalized
+    };
     // Match on the canonical Cargo command, but emit the original shell text when rewriting.
     let cmd_normalized = normalize_cargo_command(&cmd_normalized);
     let cmd_clean = cmd_normalized.as_str();
@@ -1568,13 +1581,179 @@ fn is_safe_pipe_consumer(stage: &str) -> bool {
     !words.any(|arg| arg_matches_unsafe_flag(consumer, arg))
 }
 
-/// Every built-in transparent wrapper, paired with whether it may fall through.
-/// Derived from the two lists above so they cannot drift apart.
-fn builtin_transparent_prefixes() -> impl Iterator<Item = (&'static str, bool)> {
-    ROUTABLE_WRAPPER_PREFIXES
-        .iter()
-        .map(|prefix| (*prefix, true))
-        .chain(SHELL_KEYWORD_PREFIXES.iter().map(|prefix| (*prefix, false)))
+const UV_FLAG_OPTS: &[&str] = &[
+    "--all-extras",
+    "--no-default-extras",
+    "--no-dev",
+    "--only-dev",
+    "--all-groups",
+    "--no-default-groups",
+    "--all-packages",
+    "--isolated",
+    "--active",
+    "--inexact",
+    "--exact",
+    "--no-sync",
+    "--locked",
+    "--frozen",
+    "--offline",
+    "--no-cache",
+    "-n",
+    "--no-project",
+    "--no-config",
+    "--no-env-file",
+    "--no-build-isolation",
+    "--no-build",
+    "--no-binary",
+    "--reinstall",
+    "--refresh",
+    "--upgrade",
+    "-U",
+    "--compile-bytecode",
+    "--no-compile-bytecode",
+    "--quiet",
+    "-q",
+    "-qq",
+    "--verbose",
+    "-v",
+    "-vv",
+    "-vvv",
+    "--native-tls",
+    "--managed-python",
+    "--no-managed-python",
+    "--no-python-downloads",
+];
+
+const UV_VALUE_OPTS: &[&str] = &[
+    "--extra",
+    "--no-extra",
+    "--group",
+    "--no-group",
+    "--only-group",
+    "--package",
+    "--project",
+    "--directory",
+    "--python",
+    "-p",
+    "--with",
+    "--with-editable",
+    "--with-requirements",
+    "--env-file",
+    "--config-file",
+    "--cache-dir",
+    "--index",
+    "--default-index",
+    "--index-url",
+    "--extra-index-url",
+    "--find-links",
+    "-f",
+    "--constraints",
+    "-c",
+    "--build-constraints",
+    "-b",
+    "--color",
+    "--resolution",
+    "--prerelease",
+    "--fork-strategy",
+    "--exclude-newer",
+    "--link-mode",
+    "--keyring-provider",
+    "--allow-insecure-host",
+];
+
+fn uv_takes_attached_value(arg: &str) -> bool {
+    if let Some((name, _)) = arg.split_once('=') {
+        return UV_VALUE_OPTS.contains(&name);
+    }
+    arg.len() > 2 && arg.starts_with("-p")
+}
+
+/// Peel `uv [global_opts] run [run_opts]` off `cmd` when every option is in
+/// the known table above. Unknown options (such as `-m`/`--module` or `-s`)
+/// return `None` so `uv run …` falls through to `rtk uv`. Incomplete `uv run`
+/// invocations with no inner command return an empty remainder so the caller
+/// drops the rewrite cleanly.
+fn strip_uv_run_prefix(cmd: &str) -> Option<(&str, &str)> {
+    let tokens = tokenize(cmd);
+    let first = tokens.first()?;
+    if first.kind != TokenKind::Arg || first.value != "uv" {
+        return None;
+    }
+
+    let mut idx = 1;
+    loop {
+        let token = arg_token(&tokens, idx)?;
+        let arg = token.value.as_str();
+        if arg == "run" {
+            idx += 1;
+            break;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            if UV_FLAG_OPTS.contains(&arg) || uv_takes_attached_value(arg) {
+                idx += 1;
+                continue;
+            }
+            if UV_VALUE_OPTS.contains(&arg) {
+                arg_token(&tokens, idx + 1)?;
+                idx += 2;
+                continue;
+            }
+        }
+        return None;
+    }
+
+    let mut options_done = false;
+    loop {
+        if idx >= tokens.len() {
+            return Some((cmd, ""));
+        }
+        let token = tokens.get(idx)?;
+        if token.kind != TokenKind::Arg {
+            return None;
+        }
+        let arg = token.value.as_str();
+        if !options_done && arg == "--" {
+            options_done = true;
+            idx += 1;
+            continue;
+        }
+        if !options_done && arg.starts_with('-') && arg != "-" {
+            if UV_FLAG_OPTS.contains(&arg) || uv_takes_attached_value(arg) {
+                idx += 1;
+                continue;
+            }
+            if UV_VALUE_OPTS.contains(&arg) {
+                let Some(_) = arg_token(&tokens, idx + 1) else {
+                    return Some((cmd, ""));
+                };
+                idx += 2;
+                continue;
+            }
+            return None;
+        }
+        let prefix = cmd[..token.offset].trim_end();
+        let rest = cmd[token.offset..].trim_start();
+        return Some((prefix, rest));
+    }
+}
+
+/// Peel one built-in transparent wrapper (`ROUTABLE_WRAPPER_PREFIXES` including
+/// `uv run` options, or `SHELL_KEYWORD_PREFIXES`), returning `(prefix, rest, routable)`.
+fn strip_builtin_transparent_prefix(cmd: &str) -> Option<(&str, &str, bool)> {
+    if let Some((prefix, rest)) = strip_uv_run_prefix(cmd) {
+        return Some((prefix, rest, true));
+    }
+    for &prefix in ROUTABLE_WRAPPER_PREFIXES {
+        if let Some(rest) = strip_word_prefix(cmd, prefix) {
+            return Some((prefix, rest, true));
+        }
+    }
+    for &prefix in SHELL_KEYWORD_PREFIXES {
+        if let Some(rest) = strip_word_prefix(cmd, prefix) {
+            return Some((prefix, rest, false));
+        }
+    }
+    None
 }
 
 const MAX_PREFIX_DEPTH: usize = 10;
@@ -1765,6 +1944,22 @@ fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
     })
 }
 
+fn inner_command_is_excluded(rest: &str, excluded: &[ExcludePattern]) -> bool {
+    if excluded.is_empty() {
+        return false;
+    }
+    let clean = ENV_PREFIX.replace(rest, "");
+    let clean = clean.trim();
+    if is_excluded(clean, excluded) {
+        return true;
+    }
+    let (cmd_part, _) = strip_trailing_redirects(clean);
+    if let Classification::Supported { rtk_equivalent, .. } = classify_command(cmd_part) {
+        return is_excluded(&tool_form(cmd_part, rtk_equivalent), excluded);
+    }
+    false
+}
+
 /// Whether `cmd` is a quoted shell wrapper whose script runs a command the
 /// user opted out of, through an `RTK_DISABLED=` prefix or `exclude_commands`.
 /// A routable wrapper must not fall through to its own filter then, since that
@@ -1834,16 +2029,13 @@ fn collect_shell_wrapper_positions<'a>(
         return;
     }
 
-    for (prefix, routable) in builtin_transparent_prefixes() {
-        if let Some(rest) = strip_word_prefix(trimmed, prefix) {
-            if rest.is_empty() {
-                return;
-            }
-            collect_shell_wrapper_positions(rest, transparent_prefixes, depth + 1, positions);
-            if !routable {
-                return;
-            }
-            break;
+    if let Some((_, rest, routable)) = strip_builtin_transparent_prefix(trimmed) {
+        if rest.is_empty() {
+            return;
+        }
+        collect_shell_wrapper_positions(rest, transparent_prefixes, depth + 1, positions);
+        if !routable {
+            return;
         }
     }
 
@@ -1912,40 +2104,37 @@ fn rewrite_segment_inner(
         return Some(format!("{}{}", env_prefix, rewritten));
     }
 
-    for (prefix, routable) in builtin_transparent_prefixes() {
-        if let Some(rest) = strip_word_prefix(trimmed, prefix) {
-            if rest.is_empty() {
-                return None;
-            }
-            if let Some(rewritten) = rewrite_segment_inner(
-                rest,
-                excluded,
-                transparent_prefixes,
-                context,
-                depth + 1,
-                shell_wrapper_depth,
-            ) {
-                return Some(format!(
-                    "{}{}{}",
-                    prefix,
-                    prefix_gap(trimmed, prefix, rest),
-                    rewritten
-                ));
-            }
-            // #2768: falling through re-tests the full prefixed string, which is
-            // only valid when the wrapper is itself a routable command.
-            if !routable {
-                return None;
-            }
-            // The inner command may have been dropped because it is excluded.
-            // Re-testing the wrapped form would route it through the wrapper's
-            // own filter, defeating the exclusion.
-            if is_excluded(ENV_PREFIX.replace(rest, "").trim(), excluded)
-                || shell_wrapper_script_opts_out(rest, excluded, 0)
-            {
-                return None;
-            }
-            break;
+    if let Some((prefix, rest, routable)) = strip_builtin_transparent_prefix(trimmed) {
+        if rest.is_empty() {
+            return None;
+        }
+        if let Some(rewritten) = rewrite_segment_inner(
+            rest,
+            excluded,
+            transparent_prefixes,
+            context,
+            depth + 1,
+            shell_wrapper_depth,
+        ) {
+            return Some(format!(
+                "{}{}{}",
+                prefix,
+                prefix_gap(trimmed, prefix, rest),
+                rewritten
+            ));
+        }
+        // #2768: falling through re-tests the full prefixed string, which is
+        // only valid when the wrapper is itself a routable command.
+        if !routable {
+            return None;
+        }
+        // The inner command may have been dropped because it is excluded.
+        // Re-testing the wrapped form would route it through the wrapper's
+        // own filter, defeating the exclusion.
+        if inner_command_is_excluded(rest, excluded)
+            || shell_wrapper_script_opts_out(rest, excluded, 0)
+        {
+            return None;
         }
     }
 
@@ -6156,6 +6345,115 @@ mod tests {
                 command
             );
         }
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_with_known_leading_options() {
+        let cases = [
+            (
+                "uv run --extra dev pytest -q",
+                "uv run --extra dev rtk pytest -q",
+            ),
+            (
+                "uv run --extra=dev ruff check .",
+                "uv run --extra=dev rtk ruff check .",
+            ),
+            (
+                "uv run --all-extras --no-sync pytest tests/",
+                "uv run --all-extras --no-sync rtk pytest tests/",
+            ),
+            (
+                "uv run --group dev --frozen mypy src/",
+                "uv run --group dev --frozen rtk mypy src/",
+            ),
+            (
+                "uv run --project backend --extra dev pytest -q",
+                "uv run --project backend --extra dev rtk pytest -q",
+            ),
+            ("uv run -p 3.12 pytest", "uv run -p 3.12 rtk pytest"),
+            ("uv run -p3.12 pytest", "uv run -p3.12 rtk pytest"),
+            (
+                "uv run --with pytest-cov pytest",
+                "uv run --with pytest-cov rtk pytest",
+            ),
+            (
+                "uv run --isolated --no-dev pytest",
+                "uv run --isolated --no-dev rtk pytest",
+            ),
+            (
+                "uv run --extra dev -- pytest -q",
+                "uv run --extra dev -- rtk pytest -q",
+            ),
+            (
+                "uv run --extra dev  pytest -q",
+                "uv run --extra dev  rtk pytest -q",
+            ),
+            (
+                "uv --directory api run pytest -q",
+                "uv --directory api run rtk pytest -q",
+            ),
+            (
+                "uv --project backend run --extra dev ruff check .",
+                "uv --project backend run --extra dev rtk ruff check .",
+            ),
+            (
+                "uv run --extra dev bash -c 'git status'",
+                "uv run --extra dev bash -c 'rtk git status'",
+            ),
+        ];
+
+        for (command, expected) in cases {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.to_string()),
+                "Failed for command: {command}"
+            );
+        }
+
+        // Excluded or RTK_DISABLED inner commands must drop rather than fall through to `rtk uv`.
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run --extra dev pytest", &["pytest".to_string()]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "uv run --extra dev python -m pytest -q",
+                &["pytest".to_string()]
+            ),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "uv run --extra dev bash -c 'RTK_DISABLED=1 python script.py'",
+                &[]
+            ),
+            None
+        );
+
+        // Incomplete invocations with no inner command must not rewrite.
+        for incomplete in ["uv run", "uv run --extra dev", "uv run --extra"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(incomplete, &[]),
+                None,
+                "Incomplete command should not rewrite: {incomplete}"
+            );
+        }
+
+        // Shell wrapper position collector must see past `uv run` options too.
+        assert!(
+            shell_wrapper_positions("uv run --extra dev bash -c 'git status'", &[])
+                .into_iter()
+                .any(|pos| parse_shell_wrapper(pos).is_some())
+        );
+
+        // Global uv options before `run` classify consistently with rewrite.
+        assert!(matches!(
+            classify_command("uv --directory api run pytest -q"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pytest",
+                ..
+            }
+        ));
     }
 
     // --- Go tooling ---
