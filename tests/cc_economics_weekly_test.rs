@@ -59,7 +59,7 @@ impl Sandbox {
         cmd
     }
 
-    fn seed(&self, rows: &[(&str, u64)]) {
+    fn seed(&self, rows: &[(&str, i64)]) {
         let conn = Connection::open(self.root.path().join("data/history.db"))
             .expect("open isolated production tracker schema");
         for &(date, multiplier) in rows {
