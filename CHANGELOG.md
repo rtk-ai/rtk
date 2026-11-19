@@ -5,6 +5,43 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1](https://github.com/rtk-ai/rtk/compare/v1.2.0...v1.2.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **cargo:** filter toolchain and global-prefix invocations ([6c94fc5](https://github.com/rtk-ai/rtk/commit/6c94fc51026937ff880a5b5a0eadd4b6de71bdf1))
+* **cargo:** honor exclusions for prefixed invocations ([5297383](https://github.com/rtk-ai/rtk/commit/52973837ece9ad2b6d3142cac9b5a3ed8c80c602))
+* **cargo:** narrow prefix routing and pin integration behavior ([17f5fdd](https://github.com/rtk-ai/rtk/commit/17f5fdda4474f3521e6c66c58560177a4ae78083))
+* **copilot:** let the repository's Copilot hook run without rtk installed ([fc2d2a8](https://github.com/rtk-ai/rtk/commit/fc2d2a8c0b8df5aa63e4e4135d052adab9e45849))
+* **core:** encode sha2 digests as hex ([49b1af7](https://github.com/rtk-ai/rtk/commit/49b1af73bf01f8946c88f46e64e569630bc4216d))
+* **core:** send the classifier key and reach local hosts directly on ureq 3 ([4ae7693](https://github.com/rtk-ai/rtk/commit/4ae769382d6b90a1d83b7d1ed484b13e61ac50c5))
+* **db:** version the tracking and recall schema migrations ([76be19c](https://github.com/rtk-ai/rtk/commit/76be19c59eff38b395fc6e2c891b7b32474da224))
+* **db:** version the tracking and recall schema migrations ([94aa52e](https://github.com/rtk-ai/rtk/commit/94aa52ec9aaa76c8d8d29de4fb6b135083229350))
+* **deps:** migrate ureq 3 API usage ([546e9df](https://github.com/rtk-ai/rtk/commit/546e9df9c14e105d30cb8b78201ae2be134bb81c))
+* **dotnet:** count distinct test projects, not path mentions ([2a786dc](https://github.com/rtk-ai/rtk/commit/2a786dca60fa4759f4f8381262a6a3b98256667a))
+* **dotnet:** support quick-xml 0.42 APIs ([36016cf](https://github.com/rtk-ai/rtk/commit/36016cfda4c8f7fb237f8112dfc635a88413e50a))
+* **gain:** print the Pro line alone, without the opt-out reminder ([8ac73d6](https://github.com/rtk-ai/rtk/commit/8ac73d64f402cb2b300cc46620c2663ac5204638))
+* **hook:** check integrity before fallback execution ([7600285](https://github.com/rtk-ai/rtk/commit/76002855a391bf36d84c62dcd802589606694781))
+* **hooks:** preserve compound user hook entries ([eb710be](https://github.com/rtk-ai/rtk/commit/eb710be4719657e8717301caf0eef9a8d8a9e153))
+* **init:** match legacy rtk-rewrite hook as executable invocation ([#4427](https://github.com/rtk-ai/rtk/issues/4427)) ([011c522](https://github.com/rtk-ai/rtk/commit/011c522cf4a1a4fc563df41366d2b84fd1ab4f26))
+* **opencode:** resolve rtk binary path for GUI-launched OpenCode ([#4462](https://github.com/rtk-ai/rtk/issues/4462)) ([2f90f4a](https://github.com/rtk-ai/rtk/commit/2f90f4a901496ba41c0d168921fd6417c4195ad8))
+* **opencode:** resolve the rtk the shell runs, PATH before RTK_BIN ([5b62da0](https://github.com/rtk-ai/rtk/commit/5b62da028a031b153b7ab6870619c12ff202ad77))
+* preserve fallback commands after global flags ([9ec581d](https://github.com/rtk-ai/rtk/commit/9ec581d225e8d670c6590a816015c6b0d49b9a23))
+* Pro line in rtk gain, stale proxy lockfile, proxy variable docs ([2304fc6](https://github.com/rtk-ai/rtk/commit/2304fc6d77c50489db3ab27a927869003dcda946))
+* **proxy:** bound the whole upstream request and stop re-sending a silent one ([6fc6d28](https://github.com/rtk-ai/rtk/commit/6fc6d281d265bd87f745a4964a104cee2d6b458a)), closes [#5048](https://github.com/rtk-ai/rtk/issues/5048)
+* **proxy:** bound upstream requests and relaunch a dead proxy on Windows ([2443068](https://github.com/rtk-ai/rtk/commit/244306815d4f39048c63d4fda5d8f40370ef858f))
+* **proxy:** credit proxy.request rule savings to the rule ([9cc447b](https://github.com/rtk-ai/rtk/commit/9cc447b2a63487cc031f924673fbcbe626ca842a))
+* **proxy:** explain a bind failure caused by a port already in use ([6817373](https://github.com/rtk-ai/rtk/commit/6817373cd677c0442bb76ba8918dbda04904bd56))
+* **proxy:** keep a late upstream error's status on a streaming request ([638d998](https://github.com/rtk-ai/rtk/commit/638d99888f2eb5c67ff4e145bbdf03258b0f6620)), closes [#5048](https://github.com/rtk-ai/rtk/issues/5048)
+* **proxy:** name the Windows task per user so a second account can install ([f0a5b7a](https://github.com/rtk-ai/rtk/commit/f0a5b7ae8d4de661938de79ffca22479820f9342))
+* **proxy:** only remove a legacy Windows task the current user owns ([0377db9](https://github.com/rtk-ai/rtk/commit/0377db9b4c281cc65d386f5c179b5d21b8e4c0b6))
+* **proxy:** relaunch a dead rtk-proxy on Windows without a new logon ([fdb54c0](https://github.com/rtk-ai/rtk/commit/fdb54c009be8ac8db0a21ec94fb6eafdada9aa3d)), closes [#5047](https://github.com/rtk-ai/rtk/issues/5047)
+* **recall:** keep clippy clean on Windows, where FileId is () ([24ff226](https://github.com/rtk-ai/rtk/commit/24ff22670aa03f94bc7eb8165179d9f4a91d28e5))
+* **recall:** keep clippy clean on Windows, where FileId is () ([86dae67](https://github.com/rtk-ai/rtk/commit/86dae67f3fe813ad963f6dc487fbd8d96979ac99))
+* **tracking:** honor tracking.history_days instead of the hardcoded default ([65f96f8](https://github.com/rtk-ai/rtk/commit/65f96f8bf1f0d8f17e687da2f45c15c4dc861718))
+* **tracking:** read RFC 3339 timestamps in first_seen_days ([02b1b64](https://github.com/rtk-ai/rtk/commit/02b1b64827334172aab6a4b8c15544ae41db4a11))
+
 ## [1.2.0](https://github.com/rtk-ai/rtk/compare/v1.1.0...v1.2.0) (2026-11-08)
 
 
