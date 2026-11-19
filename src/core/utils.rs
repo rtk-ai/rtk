@@ -789,6 +789,18 @@ pub fn decode_process_output(bytes: &[u8]) -> String {
     }
 }
 
+/// Decode output that is file content (`grep` matches, `git diff`/`show` hunks) as
+/// lossy UTF-8, the same on every platform.
+///
+/// The console code page describes the messages a tool prints, not the files it
+/// reads: a Latin-1 `caf\xe9` decoded as CP850 becomes `cafÚ`, a valid-looking
+/// character that is not in the file, and every single-byte OEM table maps every
+/// byte, so nothing flags it (#4822). An invalid byte becomes U+FFFD instead, as
+/// on Linux, and `curl_cmd` treats a response body the same way.
+pub fn decode_file_content(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 /// Decode `bytes` line by line, keeping valid UTF-8 lines verbatim and passing
 /// the rest through code page `cp` (lossy UTF-8 when `cp` is `None`).
 ///

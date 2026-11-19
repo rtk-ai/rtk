@@ -7,7 +7,7 @@ use crate::core::runner::{self, RunOptions};
 use crate::core::shell::{display_args, quote_word, with_args};
 use crate::core::stream::{
     self, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode, exec_capture,
-    exec_capture_stdin, exec_capture_unguarded,
+    exec_capture_content, exec_capture_stdin, exec_capture_unguarded,
 };
 use crate::core::tracking;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
@@ -359,7 +359,7 @@ fn run_diff(
             cmd.arg(arg);
         }
 
-        let result = exec_capture(&mut cmd).context("Failed to run git diff")?;
+        let result = exec_capture_content(&mut cmd).context("Failed to run git diff")?;
 
         // A non-zero exit does not mean there was nothing to say: `git diff --check` reports
         // every whitespace error on stdout and *then* exits 2. Printed verbatim, since the
@@ -404,7 +404,7 @@ fn run_diff(
         diff_cmd.arg(arg);
     }
 
-    let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git diff")?;
+    let diff_result = exec_capture_content(&mut diff_cmd).context("Failed to run git diff")?;
 
     if !diff_result.success() {
         if !diff_result.stderr.trim().is_empty() {
@@ -429,7 +429,7 @@ fn run_diff(
         cmd.arg(arg);
     }
 
-    let result = exec_capture(&mut cmd).context("Failed to run git diff")?;
+    let result = exec_capture_content(&mut cmd).context("Failed to run git diff")?;
 
     if verbose > 0 {
         eprintln!("Git diff summary:");
@@ -549,7 +549,7 @@ fn run_show(
         for arg in args {
             cmd.arg(arg);
         }
-        let result = exec_capture(&mut cmd).context("Failed to run git show")?;
+        let result = exec_capture_content(&mut cmd).context("Failed to run git show")?;
         // Verbatim, and before the exit check: `git show --check` reports on stdout and then
         // exits 2, so returning early on failure threw the whole report away.
         print!("{}", result.stdout);
@@ -693,7 +693,7 @@ fn run_show(
     for arg in args {
         raw_cmd.arg(arg);
     }
-    let raw_result = exec_capture(&mut raw_cmd).context("Failed to run git show")?;
+    let raw_result = exec_capture_content(&mut raw_cmd).context("Failed to run git show")?;
     // git's verdict on the command as the user typed it, before the steps below run it again
     // with RTK's own flags -- the stat step strips the patch-shape flags, so it succeeds where
     // git refused (`git show -pq HEAD` exits 128 raw) and the compaction looked like success.
@@ -765,7 +765,8 @@ fn run_show(
     // No `--patch` here: a patch is `show`'s default, and forcing it would override a user
     // `-s`/`--no-patch`, whose whole point is that there is no body to print.
     let mut diff_cmd = show_cmd(global_args, args, &tokens, &["--pretty=format:"], false);
-    let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git show (diff)")?;
+    let diff_result =
+        exec_capture_content(&mut diff_cmd).context("Failed to run git show (diff)")?;
     let diff_text = diff_result.stdout.trim();
 
     if !diff_text.is_empty() {
