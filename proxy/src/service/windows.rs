@@ -12,7 +12,9 @@ use std::process::Command;
 
 pub const MECHANISM: &str = "Task Scheduler (log-on trigger, relaunched when it exits)";
 
-use super::windows_task::LEGACY_TASK_NAME;
+use super::windows_task::{
+    Account, LEGACY_TASK_NAME, decode_output, owned_by, principal_user_id, sid_from_whoami,
+};
 
 fn current_user() -> Option<String> {
     let name = std::env::var("USERNAME").ok().filter(|n| !n.is_empty())?;
@@ -47,10 +49,44 @@ fn delete_task(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+fn current_account() -> Option<Account> {
+    let sid = Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| sid_from_whoami(&String::from_utf8_lossy(&out.stdout)));
+    Some(Account {
+        sid,
+        domain: env_nonempty("USERDOMAIN"),
+        name: env_nonempty("USERNAME")?,
+        computer: env_nonempty("COMPUTERNAME"),
+    })
+}
+
 /// Our own task under the pre-per-user name would launch a second proxy every
-/// minute next to the new one, so it goes when we install or uninstall.
+/// minute next to the new one, so it goes when we install or uninstall. Being
+/// able to see it is not enough: an elevated terminal sees every account's
+/// tasks, so the task's principal must be us.
 fn has_own_legacy_task(name: &str) -> Result<bool> {
-    Ok(name != LEGACY_TASK_NAME && task_exists(LEGACY_TASK_NAME)?)
+    if name == LEGACY_TASK_NAME {
+        return Ok(false);
+    }
+    let out = Command::new("schtasks")
+        .args(["/Query", "/TN", LEGACY_TASK_NAME, "/XML"])
+        .output()
+        .context("running schtasks /Query /XML")?;
+    if !out.status.success() {
+        return Ok(false);
+    }
+    let Some(me) = current_account() else {
+        return Ok(false);
+    };
+    Ok(principal_user_id(&decode_output(&out.stdout)).is_some_and(|id| owned_by(&id, &me)))
 }
 
 pub fn install(bin: &Path, config_path: &Path, log_path: &Path) -> Result<PathBuf> {
