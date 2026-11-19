@@ -12,7 +12,7 @@
   summary cap keep their descriptions beside each location.
 - `pip_cmd.rs` auto-detects `uv` as a pip alternative and routes accordingly
 - `uv_cmd.rs` preserves `uv run` environment semantics: the program's own output passes through on success (bounded, with a tee hint), diagnostics are extracted on failure
-- `python -m pytest` and `python3 -m mypy` are rewritten by the hook registry to `rtk pytest` / `rtk mypy`
+- `python -m` (`pytest`, `mypy`, `ruff`, `sqlfluff`) and local `.venv`/`venv` tool paths are rewritten by the hook registry to `rtk <tool>`, with `utils::python_tool_command` resolving local `.venv`/`venv` binaries when no virtual environment is active on `PATH`
 
 ## Cross-command
 

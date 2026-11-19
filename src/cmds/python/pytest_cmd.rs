@@ -1,11 +1,12 @@
 //! Filters pytest output to show only failures and the summary line.
 
+use super::utils::python_tool_command;
 use crate::core::arg_tokenizer::{Dialect, Flag, Grammar, TokenKind, ValueSpec, tokenize_grammar};
 use crate::core::config;
 use crate::core::runner;
 use crate::core::shell::display_args;
 use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
+use crate::core::utils::{strip_ansi, truncate};
 use anyhow::Result;
 use regex::Regex;
 use std::sync::LazyLock;
@@ -30,13 +31,7 @@ enum ParseState {
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = if tool_exists("pytest") {
-        resolved_command("pytest")
-    } else {
-        let mut c = resolved_command("python");
-        c.arg("-m").arg("pytest");
-        c
-    };
+    let mut cmd = python_tool_command("pytest");
 
     let injected = injected_args(args);
     cmd.args(&injected);
