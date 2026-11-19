@@ -1099,6 +1099,20 @@ Removes table borders and compresses the output.
 
 ---
 
+## System services
+
+### `rtk launchctl` -- macOS launchd jobs
+
+```bash
+rtk launchctl list
+```
+
+Keeps the `PID Status Label` header and every job whose label is not `com.apple.*`, verbatim and in order, and replaces Apple's own system services with one count line (`… N com.apple.* system services not shown`) followed by a `[full output: ...]` hint when recall is enabled, or `rtk bypass launchctl list` otherwise. User-launched Apple apps (`application.com.apple.*`) stay visible. On a stock macOS listing, 530 of 545 jobs are Apple services: ~95% reduction.
+
+Only a bare `list` is filtered, and the hook rewrites it only when it is the whole command, never inside a pipeline (`launchctl list | grep com.apple.Finder` must still find it). `list <label>`, `print`, `load`/`unload`, `bootstrap`/`bootout` and every other subcommand pass through unchanged, as does a listing with any line outside the expected shape.
+
+---
+
 ## Stacked PRs (Graphite)
 
 ### `rtk gt` -- Graphite
@@ -1334,6 +1348,7 @@ rtk verify
 | `ls` | `rtk ls` |
 | `tree` | `rtk tree` |
 | `wc` | `rtk wc` |
+| `launchctl list` | `rtk launchctl list` |
 | `jest` | `rtk jest` |
 | `vitest` | `rtk vitest` |
 | `tsc` | `rtk tsc` |
