@@ -1827,12 +1827,19 @@ mod tests {
     "Arn": "arn:aws:iam::123456789012:user/dev-user"
 }"#;
         let result = filter_sts_identity(json).unwrap();
+        assert_eq!(
+            result.text,
+            "AWS: 123456789012 arn:aws:iam::123456789012:user/dev-user"
+        );
         let input_tokens = count_tokens(json);
         let output_tokens = count_tokens(&result.text);
+        assert_eq!((input_tokens, output_tokens), (32, 15));
+        // This fixture saves 53.1% by the production estimate (62.5% by words).
+        // Keep the CONTRIBUTING.md 20% admission bar and pin the output above.
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
         assert!(
-            savings >= 60.0,
-            "STS identity filter: expected >=60% savings, got {:.1}%",
+            savings >= 20.0,
+            "STS identity filter: expected >=20% savings, got {:.1}%",
             savings
         );
     }

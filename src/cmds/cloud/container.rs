@@ -1054,8 +1054,8 @@ api-1  | Connected to database";
         let input_str = include_str!("../../../tests/fixtures/oc_pods.json");
         let input: Value = serde_json::from_str(input_str).expect("fixture should parse");
         let output = format_kubectl_pods(&input);
-        let input_tokens = input_str.split_whitespace().count();
-        let output_tokens = output.split_whitespace().count();
+        let input_tokens = crate::core::tracking::estimate_tokens(input_str);
+        let output_tokens = crate::core::tracking::estimate_tokens(&output);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
         assert!(
             savings >= 60.0,

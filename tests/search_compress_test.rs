@@ -242,9 +242,7 @@ fn column_flag_output_has_no_nul() {
 
 // --- token savings (the compression gain) ---
 
-fn count_tokens(s: &str) -> usize {
-    s.split_whitespace().count()
-}
+use common::estimate_tokens as count_tokens;
 
 // Covers #545: grep savings are measured against the real grep output.
 #[test]

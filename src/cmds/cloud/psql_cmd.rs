@@ -330,9 +330,7 @@ name | bob
         assert!(!result.contains("(1 row)"));
     }
 
-    fn count_tokens(text: &str) -> usize {
-        text.split_whitespace().count()
-    }
+    use crate::core::tracking::estimate_tokens as count_tokens;
 
     #[test]
     fn test_table_token_savings() {
@@ -352,12 +350,28 @@ name | bob
     fn test_expanded_token_savings() {
         let input = "-[ RECORD 1 ]-------------------------------\nid            | 1\nusername      | alice_smith\nemail         | alice@example.com\nstatus        | active\nrole          | admin\ncreated_at    | 2024-01-01 09:00:00\nupdated_at    | 2024-01-15 14:30:00\nlast_login    | 2024-02-01 08:00:00\nlogin_count   | 42\npreferences   | {\"theme\":\"dark\",\"notifications\":true}\n-[ RECORD 2 ]-------------------------------\nid            | 2\nusername      | bob_jones\nemail         | bob.jones@company.org\nstatus        | active\nrole          | user\ncreated_at    | 2024-01-02 10:15:00\nupdated_at    | 2024-01-16 09:00:00\nlast_login    | 2024-02-02 09:30:00\nlogin_count   | 17\npreferences   | {\"theme\":\"light\",\"notifications\":false}\n(2 rows)\n";
         let result = filter_expanded(input);
+        assert_eq!(
+            result,
+            concat!(
+                "[1] id=1 username=alice_smith email=alice@example.com status=active role=admin ",
+                "created_at=2024-01-01 09:00:00 updated_at=2024-01-15 14:30:00 ",
+                "last_login=2024-02-01 08:00:00 login_count=42 ",
+                "preferences={\"theme\":\"dark\",\"notifications\":true}\n",
+                "[2] id=2 username=bob_jones email=bob.jones@company.org status=active role=user ",
+                "created_at=2024-01-02 10:15:00 updated_at=2024-01-16 09:00:00 ",
+                "last_login=2024-02-02 09:30:00 login_count=17 ",
+                "preferences={\"theme\":\"light\",\"notifications\":false}"
+            )
+        );
         let input_tokens = count_tokens(input);
         let output_tokens = count_tokens(&result);
+        assert_eq!((input_tokens, output_tokens), (179, 119));
+        // This fixture saves 33.5% by the production estimate (63.2% by words).
+        // Preserve every field, pin the output, and enforce the 20% admission bar.
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
         assert!(
-            savings >= 60.0,
-            "Expanded filter: expected >=60% savings, got {:.1}%",
+            savings >= 20.0,
+            "Expanded filter: expected >=20% savings, got {:.1}%",
             savings
         );
     }
