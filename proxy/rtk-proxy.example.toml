@@ -47,12 +47,14 @@ ccr = true
 # 0 keeps entries forever.      (default 604800 = 7 days, env: RTK_PROXY_ICM_TTL_SECS)
 # icm_ttl_secs = 604800
 
-# Resilience: retry a transient upstream failure (429/5xx or a connect/timeout
-# error) with exponential backoff, before the response streams. (default 2)
+# Resilience: retry a transient upstream failure (429/5xx or a failed connect)
+# with exponential backoff, before the response streams. A request the
+# provider accepted and then went silent on is not re-sent.     (default 2)
 # upstream_retries = 2
-# Total timeout (seconds) for buffered (non-streaming) upstream calls; 0
-# disables. Streamed SSE responses are instead bounded by a 120s silence
-# (read) timeout on the client.                              (default 600)
+# Total timeout (seconds) for buffered (non-streaming) upstream calls, retries
+# included; 0 disables. Streamed SSE responses are instead bounded by a 120s
+# silence (read) timeout on the client; an error answer to a streaming request
+# is bounded by this total.                                   (default 600)
 # upstream_timeout_secs = 600
 
 # Capture the request prompt + response completion text on each usage row, for
