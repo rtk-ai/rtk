@@ -987,18 +987,27 @@ mod tests {
         }
     }
 
-    /// #5132: the jj filter is tuned for `jj log` (and bare `jj`, which runs
-    /// it); its 30-line cap hid the changes in diffs and file contents.
+    /// #5132: the jj filter is tuned for `jj log`; its 30-line cap hid the
+    /// changes in diffs and file contents. Bare `jj` runs whatever
+    /// `ui.default-command` names, and `jj log-file` can be an alias, so both
+    /// stay unfiltered.
     #[test]
     fn jj_filter_covers_log_only() {
-        for cmd in ["jj", "jj log", "jj log -r @"] {
+        for cmd in ["jj log", "jj log -r @", "jj log\t-n 5"] {
             assert_eq!(
                 find_matching_filter(cmd).map(|f| f.name.as_str()),
                 Some("jj"),
                 "{cmd:?}"
             );
         }
-        for cmd in ["jj diff", "jj show", "jj file show a.py", "jj logs"] {
+        for cmd in [
+            "jj",
+            "jj diff",
+            "jj show",
+            "jj file show a.py",
+            "jj logs",
+            "jj log-file",
+        ] {
             assert!(find_matching_filter(cmd).is_none(), "{cmd:?}");
             assert!(!command_matches_filter(cmd), "{cmd:?}");
         }
