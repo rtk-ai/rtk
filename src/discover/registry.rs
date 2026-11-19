@@ -5875,6 +5875,23 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_launchctl_list_only_when_bare() {
+        assert_eq!(
+            rewrite_command_no_prefixes("launchctl list", &[]),
+            Some("rtk launchctl list".into())
+        );
+        for cmd in [
+            "launchctl list com.example.server",
+            "launchctl list | grep com.apple.Finder",
+            "launchctl load ~/Library/LaunchAgents/com.example.server.plist",
+            "launchctl print gui/501",
+        ] {
+            let rewritten = rewrite_command_no_prefixes(cmd, &[]).unwrap_or_default();
+            assert!(!rewritten.contains("rtk launchctl"), "{cmd} -> {rewritten}");
+        }
+    }
+
+    #[test]
     fn test_rewrite_psql() {
         assert_eq!(
             rewrite_command_no_prefixes("psql -U postgres -d mydb", &[]),
