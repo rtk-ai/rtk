@@ -11,7 +11,7 @@ tracking before calling `stream::die_by_relayed_signal`.
 
 Domain-agnostic building blocks with **no knowledge of any specific command, hook, or agent**. If a module references "git", "cargo", "claude", or any external tool by name, it does not belong here. Core is a leaf in the dependency graph — it is consumed by all other components but imports from none of them.
 
-Owns: configuration loading, token tracking persistence, TOML filter engine, tee output recovery, display formatting, explicit shell/direct command construction, telemetry, per-request HTTP settings (`http.rs`: timeout, direct connection to this machine), and shared utilities.
+Owns: configuration loading, token tracking persistence, the SQLite open and migrations shared by the tracking and recall databases, TOML filter engine, tee output recovery, display formatting, explicit shell/direct command construction, telemetry, per-request HTTP settings (`http.rs`: timeout, direct connection to this machine), and shared utilities.
 
 Does **not** own: command-specific filtering logic (that's `cmds/`), hook lifecycle management (that's `src/hooks/`), or analytics dashboards (that's `analytics/`).
 
@@ -86,6 +86,16 @@ CREATE TABLE parse_failures (
 ```
 
 Project-scoped queries use GLOB patterns (not LIKE) to avoid `_`/`%` wildcard issues in paths.
+
+## Database Versions
+
+`db.rs` opens and migrates both SQLite databases; each keeps its versions enum and its steps (`SchemaVersion` in `tracking.rs`, `RecallSchema` in `retriever.rs`).
+
+- **A schema change** is a new variant above the marker line and its step in `MIGRATIONS`. Two changes adding one at once conflict. A released step never changes the schema it produces, and every step stays idempotent, because `rtk init` replays them all.
+- **A database stamped N** (`PRAGMA user_version`) applies the steps above N, each in its own `IMMEDIATE` transaction. A current database costs one read.
+- **A file's owner** is its `application_id`, `0x5254_4B00 | DbKind`. A file that is another database's is refused.
+- **A step that fails** rolls back and keeps the stamp, and the next open tries again. Meanwhile the database is used as it is: `rtk gain` reports the cause, a query that needs what is missing says so, and `rtk init` warns.
+- **A file that cannot be opened normally** is read without its sidecars first, so one that is not rtk's is refused as it is. Then its owner gets back a directory or a file they cannot use, and a file that only this made readable and that is refused gets its modes back. On a read-only filesystem a WAL-mode file that holds nothing in its `-wal` is read with `immutable=1`.
 
 ## Config Sections
 
@@ -182,6 +192,12 @@ Everything that is not per-flag is per-tool, and stays a parameter: `tokenize_gr
 Gradle gets no preset: its parser is `org.gradle.cli` (`gradle:jdk21` ships `gradle-cli-*.jar` and no commons-cli), used by nothing else. It is `Posix` with `dash_dash: EndsGlobalOptions`, composed as a `const` in `gradlew_cmd.rs`. The axis value is shared infrastructure; the one-tool combination is not.
 
 `src/core/arg_tokenizer/frozen.rs` is the pre-axes implementation, kept as the oracle for the differential test in `differential.rs`: every arg vector up to four tokens over an alphabet covering each construct the scanner branches on, asserted token-for-token identical under `Posix` and `Msbuild`. Never edit `frozen.rs` to match new behaviour — a diff against it is the only proof the presets have not moved.
+
+**Tokenizing a shell string, not an argv.** `discover` starts from a raw command line, one layer below: shell string → `discover::lexer::words_and_spans` (quote-aware words plus each word's byte offset) → `tokenize_grammar`.
+
+Those words are **unresolved shell words, not an argv**: word splitting has happened, but each word is still a slice of the original string with its quote characters and backslash escapes literal. `--config "a path/x.yml"` is one word, and that word is `"a path/x.yml"` — quotes included; `--config=a\ b` stays `--config=a\ b`. So `Token::text`, `Token::attached` and `Token::value()` carry the quoting too. **Reading a token as a value needs resolving** — put it through `discover::lexer::resolve_word_text` first, or a `--config` path is looked up with literal quote characters in it. Slicing `cmd` by offset needs no resolving. Comparing a token against a keyword is in between: it is sound for the unquoted spelling but misses a quoted one, so `golangci-lint "run"` matches no keyword and falls through to passthrough — acceptable when the fallback is "unfiltered but correct", not when a missed match would rewrite the command wrongly. `shell_split` returns a real argv but discards the offsets, so it is not a substitute when you need both.
+
+Keep the span vector alongside the words — `Token::source_index` indexes the slice you passed in, so add that slice's own start offset before indexing `spans`: `discover::registry::parse_golangci_run_parts` tokenizes `&words[1..]` and so reads `spans[source_index + 1]`. Note that `discover::lexer::TokenKind` and `arg_tokenizer::TokenKind` are different types with the same name.
 
 ## Consumer Contracts
 
