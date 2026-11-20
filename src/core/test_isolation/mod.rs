@@ -16,6 +16,29 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
 
+/// Run `f` with the process umask set to `mask`, and put the old one back
+/// after. The umask belongs to the whole process, so every test that changes it
+/// goes through here: two of them interleaving would otherwise leave it at
+/// whichever was restored last.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub fn with_umask<R>(mask: u32, f: impl FnOnce() -> R) -> R {
+    static UMASK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct Restore(libc::mode_t);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // nosemgrep: unsafe-block
+            unsafe { libc::umask(self.0) };
+        }
+    }
+    let _lock = UMASK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // nosemgrep: unsafe-block
+    let _restore = Restore(unsafe { libc::umask(mask as libc::mode_t) });
+    f()
+}
+
 /// This thread's stand-in for the user's directories: the directory a test
 /// gave [`with_root`], or else `home` in the process's scratch directory.
 ///
@@ -431,10 +454,18 @@ fn call_text<'a>(code: &'a str, head: regex::Match<'_>) -> (&'a str, &'a str) {
 
 /// The environment reads that stay direct, as written, each with its reason.
 /// Each covers one read: a second identical call in the same file is refused.
-const DIRECT_READS: [(&str, &str); 8] = [
+const DIRECT_READS: [(&str, &str); 10] = [
     // Builds the `PATH` a Windows test hands a child, extending the one it runs
     // under so the child still finds its tools.
     ("src/core/utils.rs", r#"var_os("PATH")"#),
+    // The same, for the Windows test that runs itself again with a `.cmd`
+    // wrapper's directory in front of its `PATH`.
+    ("src/core/task_cmd.rs", r#"var_os("PATH")"#),
+    // Tells that re-run apart from the test that spawned it. The parent sets
+    // it on the child's command, and the child is the test binary itself, so
+    // the process environment is the only place it arrives: `user_env` holds
+    // what the calling thread set, and nothing more, in a test build.
+    ("src/core/task_cmd.rs", "var_os(WRAPPER_DIR)"),
     // Only `rtk hook audit` reaches it, and no test runs that in-process.
     // `user_dirs::home` would move it to the Windows profile folder, which is
     // #1681's question, not this scan's.
@@ -586,6 +617,18 @@ fn a_child_keeps_none_of_the_shell_settings() {
         "IFS",
     ] {
         assert!(!scratch::kept(name), "{name} reaches a child's tools");
+    }
+}
+
+/// A proto or volta shim on PATH finds its toolchain through these roots when
+/// the developer exports them, and under the scratch home finds none. Without
+/// them only the go -json help test fails, and only on a machine with such a
+/// toolchain; the help comparisons pass on the manager's error against itself.
+/// This pins the roots on every machine.
+#[test]
+fn a_child_keeps_where_version_managers_keep_their_toolchains() {
+    for name in ["PROTO_HOME", "VOLTA_HOME"] {
+        assert!(scratch::kept(name), "{name} does not reach a child's shims");
     }
 }
 
@@ -743,4 +786,32 @@ fn entered_restores_after_a_panic() {
         before,
         "a panic must not leave the thread in the test directory"
     );
+}
+
+/// Two tests that change the umask at once must not see each other's.
+#[test]
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn with_umask_serialises_its_callers() {
+    fn current_umask() -> u32 {
+        // nosemgrep: unsafe-block
+        let seen = unsafe { libc::umask(0) };
+        // nosemgrep: unsafe-block
+        unsafe { libc::umask(seen) };
+        seen as u32
+    }
+    let seen: Vec<u32> = [0o022, 0o000]
+        .map(|mask| {
+            std::thread::spawn(move || {
+                with_umask(mask, || {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    current_umask()
+                })
+            })
+        })
+        .into_iter()
+        .map(|handle| handle.join().expect("the caller should not panic"))
+        .collect();
+
+    assert_eq!(seen, [0o022, 0o000], "each caller sees its own umask");
 }

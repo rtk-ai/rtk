@@ -69,6 +69,19 @@ impl Sandbox {
         Self::with_rules(&[], &[], &[])
     }
 
+    /// Write rtk's own `config.toml` where `dirs::config_dir()` resolves it
+    /// under this sandbox's HOME and XDG_CONFIG_HOME on Linux and macOS.
+    #[cfg(unix)]
+    fn write_config(&self, contents: &str) {
+        for dir in [
+            self.home.join(".config/rtk"),
+            self.home.join("Library/Application Support/rtk"),
+        ] {
+            std::fs::create_dir_all(&dir).expect("mkdir rtk config");
+            std::fs::write(dir.join("config.toml"), contents).expect("write rtk config");
+        }
+    }
+
     fn run(&self, args: &[&str]) -> (i32, String, String) {
         self.run_with_env(args, &[])
     }
@@ -520,6 +533,29 @@ mod hook_check {
         }
     }
 
+    /// Claude Code's hook reads a shell wrapper behind a configured
+    /// transparent prefix the way the rewrite reaches it: a script holding a
+    /// denied command is left alone (a defer) by the hook and by `hook check`,
+    /// while an allowed one is rewritten through the prefix.
+    #[cfg(unix)]
+    #[test]
+    fn claude_hook_defers_a_denied_script_behind_a_configured_transparent_prefix() {
+        let sb = Sandbox::with_rules(&["git push:*"], &[], &["*"]);
+        sb.write_config("[hooks]\ntransparent_prefixes = [\"mywrap\"]\n");
+
+        // The control: the prefix is read, or nothing below is reached.
+        assert_eq!(
+            sb.hook_claude_rewrite("mywrap bash -c 'git status'")
+                .as_deref(),
+            Some("mywrap bash -c 'rtk git status'")
+        );
+
+        let denied = "mywrap bash -c 'git push'";
+        assert_eq!(sb.hook_claude_rewrite(denied), None, "rtk hook claude");
+        let (code, stdout, _) = sb.run(&["hook", "check", "--agent", "claude", denied]);
+        assert_eq!((code, stdout.trim()), (1, ""), "rtk hook check");
+    }
+
     /// An already-RTK-prefixed command rewrites to itself, and no agent applies
     /// that: the in-process hosts discard it in `hook_cmd`, and the ones whose
     /// plugin shells out to `rtk rewrite` discard it themselves. Only the bare
@@ -701,6 +737,57 @@ mod rewrite_host_scoping {
             (3, "rtk git status".into()),
             "an explicit ask rule must survive the host-name relaxation"
         );
+    }
+
+    /// A settings file that exists but cannot be read or parsed may hold deny
+    /// rules RTK can no longer apply, so it asks: `git push origin main`, which
+    /// the unparseable file denies, exits 3 in both cases even for a delegate
+    /// that relaxes the default ask, with a warning naming the file.
+    #[test]
+    fn openclaw_asks_when_a_settings_file_cannot_be_read_or_parsed() {
+        let unreadable = Sandbox::bare();
+        let settings = unreadable.project.join(".claude/settings.json");
+        std::fs::remove_file(&settings).expect("remove settings");
+        std::fs::create_dir(&settings).expect("a directory in place of settings.json");
+
+        let unparseable = Sandbox::bare();
+        std::fs::write(
+            unparseable.project.join(".claude/settings.json"),
+            r#"{"permissions":{"deny":["Bash(git push *)"],}}"#,
+        )
+        .expect("write settings");
+
+        let file = std::path::Path::new("project")
+            .join(".claude")
+            .join("settings.json")
+            .display()
+            .to_string();
+        for (sandbox, warning) in [
+            (
+                &unreadable,
+                "[rtk] warning: failed to read permissions from ",
+            ),
+            (
+                &unparseable,
+                "[rtk] warning: failed to parse permissions from ",
+            ),
+        ] {
+            let (code, stdout, stderr) = sandbox.run_with_env(
+                &["rewrite", "git push origin main"],
+                &[("RTK_REWRITE_HOST", "openclaw")],
+            );
+            assert_eq!(
+                (code, stdout.as_str()),
+                (3, "rtk git push origin main"),
+                "{warning}: {stderr}"
+            );
+            assert!(
+                stderr
+                    .lines()
+                    .any(|line| line.starts_with(warning) && line.contains(&file)),
+                "{warning}: {stderr}"
+            );
+        }
     }
 
     /// The suite is hermetic against the variable: `run_with_env` scrubs it, so
