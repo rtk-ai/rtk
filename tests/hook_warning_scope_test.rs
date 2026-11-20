@@ -95,6 +95,33 @@ fn a_meta_command_leaves_the_daily_reminder_for_the_next_filtered_command() {
     );
 }
 
+#[test]
+fn other_meta_commands_do_not_spend_the_daily_reminder() {
+    for args in [
+        vec!["config"],
+        vec!["trust"],
+        vec!["untrust"],
+        vec!["hook-audit"],
+        vec!["discover"],
+        vec!["session"],
+        vec!["telemetry", "status"],
+        vec!["learn"],
+    ] {
+        let home = fresh_home();
+        let stderr = run(home.path(), &args);
+        assert!(
+            !stderr.contains(REMINDER),
+            "rtk {} must not print the daily reminder: {stderr}",
+            args.join(" ")
+        );
+        let stderr = run(home.path(), &["ls"]);
+        assert!(
+            stderr.contains(REMINDER),
+            "the reminder must survive rtk {}: {stderr}",
+            args.join(" ")
+        );
+    }
+}
 /// Writes `hooks.suppress_hook_warning` into every location the config loader
 /// may pick for this home: `dirs::config_dir` is `$XDG_CONFIG_HOME` on Linux but
 /// `~/Library/Application Support` on macOS, so writing only one of them passes
