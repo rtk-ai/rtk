@@ -52,6 +52,7 @@ expected = "expected filtered output"
 | `match_command` | regex | Matches the command string (e.g. `"^docker\\s+inspect"`) |
 | `strip_ansi` | bool | Strip ANSI escape codes before processing |
 | `filter_stderr` | bool | Capture and merge stderr into stdout before filtering (use for tools like liquibase that emit banners to stderr) |
+| `raw_on_failure` | bool | Show the output unfiltered when the command exits non-zero (use for installers, whose failure text must reach the user as printed) |
 | `strip_lines_matching` | regex[] | Drop lines matching any regex |
 | `keep_lines_matching` | regex[] | Keep only lines matching at least one regex |
 | `replace` | array | Regex substitutions (`{ pattern, replacement }`) |

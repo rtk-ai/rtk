@@ -5,7 +5,7 @@ use crate::core::runner;
 use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
 use crate::core::tracking;
 use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
-use crate::core::utils::{join_with_overflow, resolved_command, truncate};
+use crate::core::utils::{join_with_overflow, resolved_command, strip_ansi, truncate};
 use anyhow::Result;
 use serde::Deserialize;
 use std::cmp::Ordering;
@@ -358,11 +358,15 @@ impl BlockHandler for CargoTestHandler {
 
 /// Generic cargo command runner with filtering.
 /// Forwards the complete original argv, including the prefix and any `--` separator.
+///
+/// `raw_on_failure` prints the child's stdout and stderr unfiltered when it exits
+/// non-zero, unless it failed to compile: the filter keeps those errors.
 fn run_cargo_filtered<F>(
     subcommand: &str,
     args: &[OsString],
     verbose: u8,
     filter_fn: F,
+    raw_on_failure: bool,
 ) -> Result<i32>
 where
     F: Fn(&str) -> String,
@@ -375,13 +379,20 @@ where
         eprintln!("Running: cargo {}", args_display);
     }
 
-    runner::run_filtered(
-        cmd,
-        "cargo",
-        &args_display,
-        filter_fn,
-        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
-    )
+    let tee_label = format!("cargo_{}", subcommand);
+    let mut opts = runner::RunOptions::with_tee(&tee_label);
+    if raw_on_failure {
+        opts = opts.early_exit_on_failure_unless(is_cargo_compile_failure);
+    }
+
+    runner::run_filtered(cmd, "cargo", &args_display, filter_fn, opts)
+}
+
+/// Cargo's own build-failure summary line; the phrase elsewhere (a path, a wrapper) is not one.
+fn is_cargo_compile_failure(raw: &str) -> bool {
+    strip_ansi(raw)
+        .lines()
+        .any(|line| line.starts_with("error: could not compile "))
 }
 
 /// Same as `run_cargo_filtered` but the filter also receives the child exit code,
@@ -483,7 +494,7 @@ fn run_clippy(args: &[OsString], command_args: &[String], verbose: u8) -> Result
     if has_json_message_format(command_args) {
         return run_cargo_filtered_with_exit("clippy", args, verbose, filter_cargo_clippy_json);
     }
-    run_cargo_filtered("clippy", args, verbose, filter_cargo_clippy)
+    run_cargo_filtered("clippy", args, verbose, filter_cargo_clippy, false)
 }
 
 fn run_check(args: &[OsString], command_args: &[String], verbose: u8) -> Result<i32> {
@@ -503,11 +514,13 @@ fn run_check(args: &[OsString], command_args: &[String], verbose: u8) -> Result<
 }
 
 fn run_install(args: &[OsString], verbose: u8) -> Result<i32> {
-    run_cargo_filtered("install", args, verbose, filter_cargo_install)
+    // The filter keeps only `error:` blocks, so a failure that explains itself any
+    // other way (a registry or policy refusal, a wrapper's message) would vanish.
+    run_cargo_filtered("install", args, verbose, filter_cargo_install, true)
 }
 
 fn run_nextest(args: &[OsString], verbose: u8) -> Result<i32> {
-    run_cargo_filtered("nextest", args, verbose, filter_cargo_nextest)
+    run_cargo_filtered("nextest", args, verbose, filter_cargo_nextest, false)
 }
 
 /// Format crate name + version into a display string
@@ -1578,6 +1591,19 @@ mod tests {
         "    Finished dev [unoptimized + debuginfo] target(s) in 0.01s\n";
 
     use super::*;
+
+    #[test]
+    fn compile_failure_is_cargos_summary_line_only() {
+        assert!(is_cargo_compile_failure(
+            "\x1b[1m\x1b[31merror\x1b[0m\x1b[1m: could not compile `demo` (lib) due to 1 previous error\x1b[0m\n"
+        ));
+        assert!(!is_cargo_compile_failure(
+            "error: `./could not compile` is not a directory.\n"
+        ));
+        assert!(!is_cargo_compile_failure(
+            "wrapper: this registry could not compile the package metadata\n"
+        ));
+    }
     use crate::core::args_utils::restore_double_dash_with_raw;
 
     #[test]
