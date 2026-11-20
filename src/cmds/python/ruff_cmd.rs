@@ -88,10 +88,6 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
-fn is_analyze_graph_invocation(args: &[String]) -> bool {
-    matches!(args, [subcommand, action, ..] if subcommand == "analyze" && action == "graph")
-}
-
 /// Choose the output treatment for a routed invocation: check runs get the
 /// JSON summary, format runs the format summary, help and version requests
 /// stay complete, and everything else is a bounded passthrough.
@@ -123,12 +119,12 @@ fn filter_ruff_output(args: &[String], stdout: &str) -> String {
     }
 }
 
-/// Help and version requests must keep their full stdout.
+/// Help, version and analyze graph requests must keep their full stdout.
 fn ruff_output_is_complete(route: RuffRoute, args: &[String]) -> bool {
     match route {
-        RuffRoute::TopLevel => true,
+        RuffRoute::TopLevel | RuffRoute::AnalyzeGraph => true,
         RuffRoute::Subcommand { at } => {
-            matches!(args[at].as_str(), "help" | "version") || is_analyze_graph_invocation(args)
+            matches!(args[at].as_str(), "help" | "version")
         }
         RuffRoute::Check { .. } => false,
     }
@@ -139,7 +135,7 @@ fn ruff_output_is_complete(route: RuffRoute, args: &[String]) -> bool {
 /// for the subcommand or a path.
 fn route_ruff_args(args: &[String]) -> RuffRoute {
     let tokens = tokenize_grammar(args, &ruff_takes_value, Dialect::Posix);
-    for token in before_dashdash(&tokens) {
+    for (index, token) in before_dashdash(&tokens).iter().enumerate() {
         if token.kind == TokenKind::Positional {
             // The separate value of a global option is not the subcommand.
             if !token.is_free_positional() {
@@ -148,6 +144,25 @@ fn route_ruff_args(args: &[String]) -> RuffRoute {
             // The first free positional decides: a known subcommand routes,
             // anything else is a path and the invocation is an implicit check.
             if RUFF_SUBCOMMANDS.contains(&token.text) {
+                if token.text == "analyze" {
+                    // Reuse the same tokens and global grammar at the nested
+                    // command level. Values and text past `--` cannot be the
+                    // action, and a non-global option ends the search.
+                    for action in &before_dashdash(&tokens)[index + 1..] {
+                        if action.kind == TokenKind::Positional {
+                            if !action.is_free_positional() {
+                                continue;
+                            }
+                            if action.text == "graph" {
+                                return RuffRoute::AnalyzeGraph;
+                            }
+                            break;
+                        }
+                        if requests_top_level(*action) || !ruff_is_global_token(*action) {
+                            break;
+                        }
+                    }
+                }
                 if token.text == "check" {
                     return RuffRoute::Check {
                         explicit_at: Some(token.source_index),
@@ -212,6 +227,8 @@ fn ruff_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
 /// How an invocation routes once global option values are consumed.
 #[derive(Clone, Copy, Debug)]
 enum RuffRoute {
+    /// Forward the complete JSON graph, including global-option forms.
+    AnalyzeGraph,
     /// Run `ruff check`. `explicit_at` is the index of the user's `check`
     /// token when present, so it can be forwarded without duplication.
     Check { explicit_at: Option<usize> },
@@ -630,11 +647,13 @@ mod tests {
             .expect("analyze graph output must remain valid JSON");
     }
 
-    /// Only invocations starting `analyze graph` are exempt from the passthrough cap:
+    /// Only invocations routed to `analyze graph` are exempt from the passthrough cap:
     /// `analyze help graph` and every other passthrough subcommand still get it.
     #[test]
     fn only_analyze_graph_skips_the_passthrough_cap() {
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let is_analyze_graph_invocation =
+            |args: &[String]| matches!(route_ruff_args(args), RuffRoute::AnalyzeGraph);
         assert!(is_analyze_graph_invocation(&args(&["analyze", "graph"])));
         assert!(is_analyze_graph_invocation(&args(&[
             "analyze",
@@ -1188,5 +1207,51 @@ Would reformat: tests/test_utils.py
             filter_ruff_output(&owned(&["format", "--check", "dirty.py"]), mixed)
                 .contains("1 files need formatting")
         );
+    }
+    #[test]
+    fn graph_routing_skips_global_options_at_both_command_levels() {
+        let raw = include_str!("../../../tests/fixtures/ruff_analyze_graph_raw.json");
+        for args in [
+            vec!["--isolated", "analyze", "graph", "big"],
+            vec!["--color", "never", "analyze", "graph", "big"],
+            vec!["--config", "ruff.toml", "analyze", "graph", "big"],
+            vec!["--config=ruff.toml", "analyze", "graph", "big"],
+            vec!["-q", "analyze", "graph", "big"],
+            vec!["analyze", "-v", "graph", "big"],
+            vec!["analyze", "--isolated", "graph", "big"],
+            vec!["analyze", "--config", "ruff.toml", "graph", "big"],
+            vec![
+                "--config", "format", "analyze", "--config", "check", "graph", "big",
+            ],
+        ] {
+            let args = owned(&args);
+            assert!(
+                matches!(route_ruff_args(&args), RuffRoute::AnalyzeGraph),
+                "{args:?}"
+            );
+            assert_eq!(plan_ruff_command(&args), args, "forward original argv");
+            assert_eq!(filter_ruff_output(&args, raw), raw.trim(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn graph_action_is_not_an_option_value_help_argument_or_path() {
+        for args in [
+            vec!["analyze", "--config", "graph", "help"],
+            vec!["analyze", "--", "graph"],
+            vec!["help", "analyze", "graph"],
+            vec!["--config", "analyze", "help", "graph"],
+            vec!["check", "--", "analyze", "graph"],
+            vec!["--select", "F401", "analyze", "graph"],
+            vec!["--output-file", "analyze", "graph"],
+            vec!["analyze", "--select", "F401", "graph"],
+            vec!["analyze", "--help", "graph"],
+            vec!["analyze", "--direction", "graph"],
+        ] {
+            assert!(
+                !matches!(route_ruff_args(&owned(&args)), RuffRoute::AnalyzeGraph),
+                "{args:?}"
+            );
+        }
     }
 }
