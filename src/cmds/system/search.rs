@@ -382,6 +382,13 @@ fn unparsed_signal(stdout: &str) -> usize {
         .count()
 }
 
+fn is_unsupported_parse_flag_stderr(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("unrecognized option")
+        || lower.contains("invalid option")
+        || lower.contains("illegal option")
+}
+
 /// Run real grep so matches and the savings baseline match the agent's command;
 /// rg is the fallback when grep is absent, rejects a flag, or `--type` is used.
 /// The search engine the agent actually invoked. RTK runs this binary verbatim
@@ -774,6 +781,16 @@ pub fn run(
     // Unparseable shape re-runs verbatim below (with its own stderr), so handle it
     // before surfacing this run's stderr (#2333).
     if unparsed_signal(&raw_output) > 0 {
+        return passthrough(&timer, engine, args, &real_cmd, false, false);
+    }
+
+    // BusyBox/non-GNU grep rejects RTK's injected parse aids (`--null`, `-I`) with
+    // exit 2 and no stdout; fall back to the agent's original command verbatim (#5192).
+    if engine == Engine::Grep
+        && exit_code == 2
+        && raw_output.trim().is_empty()
+        && is_unsupported_parse_flag_stderr(&result.stderr)
+    {
         return passthrough(&timer, engine, args, &real_cmd, false, false);
     }
 
@@ -2355,5 +2372,21 @@ mod tests {
         assert!(f(&["--before-context=2"]));
         assert!(f(&["--context=1"]));
         assert!(!f(&["--color", "auto"]));
+    }
+
+    #[test]
+    fn test_is_unsupported_parse_flag_stderr() {
+        assert!(is_unsupported_parse_flag_stderr(
+            "/bin/grep: unrecognized option: null\nBusyBox v1.36.1"
+        ));
+        assert!(is_unsupported_parse_flag_stderr(
+            "grep: invalid option -- 'I'"
+        ));
+        assert!(is_unsupported_parse_flag_stderr(
+            "grep: illegal option -- I"
+        ));
+        assert!(!is_unsupported_parse_flag_stderr(
+            "grep: missing.txt: No such file or directory"
+        ));
     }
 }
