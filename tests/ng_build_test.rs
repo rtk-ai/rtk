@@ -228,7 +228,7 @@ fn tracking_preserves_argv_labels_and_counts_both_streams() {
     .expect("run tracked build");
     assert!(out.status.success());
     let conn = rusqlite::Connection::open(db).expect("open tracking DB");
-    let (original, rtk, input, output): (String, String, usize, usize) = conn
+    let (original, rtk, input, output): (String, String, i64, i64) = conn
         .query_row(
             "SELECT original_cmd, rtk_cmd, input_tokens, output_tokens FROM commands ORDER BY id DESC LIMIT 1",
             [],
@@ -237,8 +237,14 @@ fn tracking_preserves_argv_labels_and_counts_both_streams() {
         .expect("tracked ng build");
     assert_eq!(original, "ng build 'my app' --output-path 'dist folder'");
     assert_eq!(rtk, format!("rtk {original}"));
-    assert_eq!(input, (TABLE.len() + stderr.len()).div_ceil(4));
-    assert_eq!(output, (out.stdout.len() + out.stderr.len()).div_ceil(4));
+    assert_eq!(
+        usize::try_from(input).expect("input tokens must be non-negative"),
+        (TABLE.len() + stderr.len()).div_ceil(4)
+    );
+    assert_eq!(
+        usize::try_from(output).expect("output tokens must be non-negative"),
+        (out.stdout.len() + out.stderr.len()).div_ceil(4)
+    );
 }
 
 #[test]

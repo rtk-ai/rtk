@@ -108,7 +108,12 @@ fn busybox_grep_preserves_genuine_error_exit_code() {
     std::fs::write(&file, "hello\n").unwrap();
 
     let out = rtk_with_fake_grep(&bin_dir)
-        .args(["grep", "hello", file.to_str().unwrap(), missing.to_str().unwrap()])
+        .args([
+            "grep",
+            "hello",
+            file.to_str().unwrap(),
+            missing.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
