@@ -1,23 +1,20 @@
 //! Differential fuzzer for `rtk git show` blob classification.
 //!
-//! The blob-windowing bug ("is this `git show` arg a blob to window, or a commit-diff /
-//! flag value?") was reopened three times because the classifier tried to mirror git's
-//! flag grammar. The fix asks git instead: `git cat-file -t <arg>` is the authority, and
-//! `rtk` only ever windows an arg git calls a `blob`.
+//! The classifier ("is this `git show` arg a blob, or a commit-diff / flag value?") was
+//! reopened three times because it tried to mirror git's flag grammar. The fix asks git
+//! instead: `git cat-file -t <arg>` is the authority, and `rtk` only takes the byte-safe
+//! blob path for an arg git calls a `blob`.
 //!
 //! This test is the standing guarantee that no misroute class is hiding. It builds a
 //! hermetic git repo with objects of every relevant type, then — with a FIXED seed so CI
 //! is deterministic — generates hundreds of `git show <random flags> <arg>` invocations,
 //! runs each distinct one once (rtk's answer depends only on its argv in this fixed repo),
-//! and checks rtk's CLASSIFICATION (did it window? pass through? render a commit-diff?)
-//! against ground truth from `git cat-file -t`. It asserts:
-//! - 0 misroutes: rtk never windows anything git does not call a `blob`;
-//! - 0 silent losses: a large, byte-recoverable UTF-8 blob is ALWAYS windowed — INCLUDING
-//!   when a colon-carrying short-flag CLUSTER (`-wG x:y`, `-pS url:1`, …) precedes it, the
-//!   exact cross the old fuzzer never generated so the blocker hid for three rounds;
-//! - byte fidelity: a blob rtk declines to window (Latin-1 / UTF-16 / small text, a
-//!   Latin-1 blob behind a cluster flag, or a blob with `--textconv` / a trailing
-//!   `-- <path>`) is emitted byte-identically to `git show` — no U+FFFD mojibake.
+//! and checks rtk's output against ground truth from `git cat-file -t`. It asserts:
+//! - 0 truncations: rtk never cuts a `git show` dump to a window with a recovery hint;
+//! - byte fidelity: every blob dump (large or small UTF-8, Latin-1, UTF-16, a blob behind
+//!   a colon-carrying short-flag CLUSTER such as `-wG x:y`, or with `--textconv` / a
+//!   trailing `-- <path>`) is emitted byte-identically to `git show` with the same args —
+//!   no prefix cut (#5070) and no U+FFFD mojibake.
 //!
 //! It shells out to the real `git` and the built `rtk` binary, matching the repo's other
 //! integration tests (e.g. `diff_byte_accuracy_test.rs`).
@@ -123,7 +120,7 @@ fn setup_repo() -> Repo {
 
     git_ok(&path, &home, &["init", "-q"]);
 
-    // A large, valid-UTF-8 text blob (~90 KB): the one thing that MUST be windowed.
+    // A large, valid-UTF-8 text blob (~90 KB): far past the old 8 KiB window (#5070).
     let mut large = String::new();
     for i in 0..2000 {
         large.push_str(&format!(
@@ -132,15 +129,14 @@ fn setup_repo() -> Repo {
     }
     std::fs::write(path.join("large.txt"), &large).expect("write large.txt");
 
-    // A small UTF-8 blob: below the byte budget, always passed through.
+    // A small UTF-8 blob.
     std::fs::write(path.join("small.txt"), "alpha\nbeta\ngamma\n").expect("write small.txt");
 
     // A directory → its `git show <rev>:<dir>` renders a tree listing (type tree).
     std::fs::create_dir_all(path.join("dir")).expect("mkdir dir");
     std::fs::write(path.join("dir/inner.txt"), "inner\n").expect("write inner");
 
-    // A large Latin-1 (ISO-8859-1) blob: invalid UTF-8, so exact recovery after a
-    // transcode is impossible → must pass through byte-identically, never windowed.
+    // A large Latin-1 (ISO-8859-1) blob: invalid UTF-8, so any decode would corrupt it.
     let mut latin1: Vec<u8> = Vec::new();
     for i in 0..1200 {
         latin1.extend_from_slice(b"M\xC9TODO n"); // "MÉTODO n" in Latin-1
@@ -153,8 +149,7 @@ fn setup_repo() -> Repo {
     );
     std::fs::write(path.join("latin1.pck"), &latin1).expect("write latin1.pck");
 
-    // A large UTF-16LE-with-BOM blob: `tail`-sliced bytes cannot concatenate with a
-    // UTF-8 head, so it must pass through byte-identically, never windowed.
+    // A large UTF-16LE-with-BOM blob: also invalid UTF-8.
     let mut utf16: Vec<u8> = vec![0xFF, 0xFE]; // UTF-16LE BOM
     for i in 0..3000 {
         for u in format!("row {i} of the utf-16 blob\n").encode_utf16() {
@@ -182,46 +177,43 @@ fn setup_repo() -> Repo {
 
 // ---- classification ------------------------------------------------------------------
 
-/// rtk windowed the blob iff its recovery hint is present (unique to blob windowing).
+/// rtk cut the dump iff the old blob window's recovery hint is present.
 fn was_windowed(out: &Output) -> bool {
     String::from_utf8_lossy(&out.stdout).contains("[see remaining: rtk proxy git ")
 }
 
-/// The object categories the fuzzer draws from, with their expected classification.
+/// The object categories the fuzzer draws from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
-    /// Large valid-UTF-8 blob → MUST window.
+    /// Large valid-UTF-8 blob → byte-identical, never cut (#5070).
     LargeUtf8,
-    /// Small blob → passthrough, byte-identical.
+    /// Small blob → byte-identical.
     Small,
-    /// Latin-1 blob → passthrough, byte-identical.
+    /// Latin-1 blob → byte-identical.
     Latin1,
-    /// UTF-16 blob → passthrough, byte-identical.
+    /// UTF-16 blob → byte-identical.
     Utf16,
-    /// A tree (directory) → never windowed.
+    /// A tree (directory) → never cut.
     Tree,
     /// A commit ref, usually paired with a colon-carrying flag VALUE (the misroute
     /// stress: git re-parses `-pS`/`-wG`/… clusters, the colon token is a pickaxe/regex
-    /// value, and there is NO blob) → never windowed.
+    /// value, and there is NO blob) → never cut.
     CommitMisroute,
-    /// A bogus `rev:path` (nonexistent object) → git errors, never windowed.
+    /// A bogus `rev:path` (nonexistent object) → git errors, never cut.
     Bogus,
-    /// THE BLOCKER: a colon-carrying short-flag CLUSTER (`-wG x:y`, `-pS url:1`, …)
-    /// placed BEFORE a large UTF-8 blob. git consumes the colon token as the flag's
-    /// value and dumps ONLY the blob, so it MUST still window (0 silent loss). The old
-    /// walker knew only single-letter flags, so it read the colon value as the object,
-    /// the probe rejected it, and the real blob fell through un-windowed.
+    /// A colon-carrying short-flag CLUSTER (`-wG x:y`, `-pS url:1`, …) placed BEFORE a
+    /// large UTF-8 blob. git consumes the colon token as the flag's value and dumps ONLY
+    /// the blob, so rtk must take the byte-safe blob path and match git exactly.
     ClusterLargeUtf8,
     /// The same cluster before a Latin-1 blob. The old misroute sent it through the
     /// commit-diff path's lossy UTF-8 decode → `0xF1` became U+FFFD mojibake. Must pass
     /// through BYTE-IDENTICALLY to git.
     ClusterLatin1,
-    /// A content-transforming flag (`--textconv`) before a large blob (MINOR 1). The
-    /// `git show rev:path | tail` recovery hint omits the flag, so rtk must NOT window;
-    /// it passes the bytes through byte-identically to `git show <same args>`.
+    /// A content-transforming flag (`--textconv`) before a large blob → byte-identical
+    /// to `git show <same args>`.
     TextconvLargeUtf8,
-    /// A trailing `-- <pathspec>` beside a large blob (MINOR 2). Also omitted from the
-    /// hint, so rtk must NOT window; byte-identical passthrough.
+    /// A trailing `-- <pathspec>` beside a large blob → byte-identical to
+    /// `git show <same args>`.
     PathspecLargeUtf8,
 }
 
@@ -242,7 +234,7 @@ fn kind_object(kind: Kind) -> &'static str {
 }
 
 // Valueless / colon-free flags that git ignores for a blob (still dumping the file), so
-// the blob stays the sole `rev:path` positional and must still window.
+// the blob stays the sole `rev:path` positional.
 const BLOB_SAFE_FLAGS: &[&str] = &[
     "-p",
     "-w",
@@ -271,12 +263,10 @@ const COLON_VALUE_FLAGS: &[(&str, &str)] = &[
 
 // The subset of `COLON_VALUE_FLAGS` the cluster-aware walker resolves WITHOUT needing a
 // long-flag table entry: short single-letter value flags and their clusters. For these,
-// the walker skips the colon value and the following blob is the sole positional, so a
-// large UTF-8 blob after one of them MUST window. (`--ignore-matching-lines` is a long
-// flag absent from the value table, so its space-form value stays a phantom positional
-// and the blob passes through byte-identically instead — correct, just uncompacted; it
-// is exercised via `CommitMisroute` and the byte-fidelity cross below, not here.)
-const WINDOWING_CLUSTER_FLAGS: &[(&str, &str)] = &[
+// the walker skips the colon value and the following blob is the sole positional.
+// (`--ignore-matching-lines` is a long flag absent from the value table, so its
+// space-form value stays a phantom positional; it is exercised via `CommitMisroute`.)
+const CLUSTER_FLAGS: &[(&str, &str)] = &[
     ("-pS", "url:1"),
     ("-wG", "x:y"),
     ("-pI", "a:b"),
@@ -317,7 +307,7 @@ fn build_invocation(rng: &mut Rng, kind: Kind) -> Vec<String> {
             if rng.chance(1, 2) {
                 args.push(rng.pick(BLOB_SAFE_FLAGS).to_string());
             }
-            let (flag, val) = *rng.pick(WINDOWING_CLUSTER_FLAGS);
+            let (flag, val) = *rng.pick(CLUSTER_FLAGS);
             args.push(flag.to_string());
             args.push(val.to_string());
         }
@@ -379,12 +369,10 @@ fn git_show_blob_classification_differential() {
     assert_eq!(truths["HEAD:dir"].as_deref(), Some("tree"));
     assert_eq!(truths["HEAD"].as_deref(), Some("commit"));
     assert_eq!(truths["HEAD:does-not-exist.txt"], None);
-    let mut plain_shows: HashMap<&str, Vec<u8>> = HashMap::new();
 
     // Collect failures instead of panicking mid-loop, so the incidence is measured
     // across ALL invocations (KuSh: a measured incidence is what proves no class hides).
-    let mut misroutes: Vec<String> = Vec::new();
-    let mut silent_losses: Vec<String> = Vec::new();
+    let mut truncations: Vec<String> = Vec::new();
     let mut fidelity_breaks: Vec<String> = Vec::new();
 
     for (kind, args) in &invocations {
@@ -394,310 +382,96 @@ fn git_show_blob_classification_differential() {
         let object = kind_object(kind);
         let truth = &truths[object];
         let out = rtk_show(path, home, &arg_refs);
-        let windowed = was_windowed(&out);
 
-        // 0 misroutes: rtk must never window anything git does not call a `blob`. The
-        // only blob among our objects is the one the invocation targets, so a window
-        // implies the targeted object is that blob (and truly a blob per cat-file).
-        if windowed && truth.as_deref() != Some("blob") {
-            misroutes.push(format!(
-                "windowed a non-blob (type {truth:?}) for `git show {}`",
+        // 0 truncations: `git show` output is never cut to a window, blob or not.
+        if was_windowed(&out) {
+            truncations.push(format!(
+                "cut the dump (type {truth:?}) for `git show {}`",
                 args.join(" ")
             ));
         }
 
-        match kind {
-            // 0 silent losses: a large, recoverable UTF-8 blob must ALWAYS window.
-            Kind::LargeUtf8 => {
-                if !windowed {
-                    silent_losses.push(format!(
-                        "large UTF-8 blob not windowed for `git show {}`",
-                        args.join(" ")
-                    ));
-                } else {
-                    assert!(out.status.success(), "windowed blob show should exit 0");
-                }
-            }
-            // Blobs rtk declines to window must be byte-identical to plain `git show`.
-            Kind::Small | Kind::Latin1 | Kind::Utf16 => {
-                assert!(
-                    !windowed,
-                    "small/latin1/utf16 blobs must not window: {args:?}"
-                );
-                let plain = plain_shows
-                    .entry(object)
-                    .or_insert_with(|| git(path, home, &["show", object]).stdout);
-                if out.stdout != *plain {
-                    fidelity_breaks.push(format!(
-                        "`git show {}` differs from git (rtk {} vs git {} bytes)",
-                        args.join(" "),
-                        out.stdout.len(),
-                        plain.len()
-                    ));
-                }
-            }
-            // Trees, commit-misroutes and bogus objects must never window.
-            Kind::Tree | Kind::CommitMisroute | Kind::Bogus => {
-                assert!(!windowed, "non-blob must not window: {args:?}");
-            }
-            // BLOCKER: a colon-cluster before a large UTF-8 blob must STILL window — git
-            // dumps only the blob, so failing to window is a silent savings loss. (Old
-            // code misrouted this to the commit-diff path: not windowed → this fails.)
-            Kind::ClusterLargeUtf8 => {
-                if !windowed {
-                    silent_losses.push(format!(
-                        "cluster + large UTF-8 blob not windowed for `git show {}`",
-                        args.join(" ")
-                    ));
-                } else {
-                    assert!(out.status.success(), "windowed blob show should exit 0");
-                }
-            }
-            // BLOCKER: a colon-cluster before a Latin-1 blob must pass through
-            // byte-identically to git — the old misroute lossily decoded it to U+FFFD
-            // mojibake (not byte-identical → this fails on old code).
-            Kind::ClusterLatin1 => {
-                assert!(!windowed, "latin-1 blob must never window: {args:?}");
-                // Compare against git run with the SAME args, not just `git show object`:
-                // the strongest invariant is "rtk == git for this exact command".
-                let mut full: Vec<&str> = vec!["show"];
-                full.extend(arg_refs.iter().copied());
-                let plain = git(path, home, &full);
-                if out.stdout != plain.stdout {
-                    fidelity_breaks.push(format!(
-                        "cluster + latin1 `git show {}` differs from git (rtk {} vs git {} bytes)",
-                        args.join(" "),
-                        out.stdout.len(),
-                        plain.stdout.len()
-                    ));
-                }
-            }
-            // MINOR 1/2: a content-transforming flag or a trailing pathspec makes the
-            // recovery hint diverge from git's bytes, so rtk must NOT window; it passes
-            // through byte-identically to git run with the SAME args.
-            Kind::TextconvLargeUtf8 | Kind::PathspecLargeUtf8 => {
-                assert!(
-                    !windowed,
-                    "transform-flag / trailing-pathspec must not window: {args:?}"
-                );
-                let mut full: Vec<&str> = vec!["show"];
-                full.extend(arg_refs.iter().copied());
-                let plain = git(path, home, &full);
-                if out.stdout != plain.stdout {
-                    fidelity_breaks.push(format!(
-                        "`git show {}` differs from git (rtk {} vs git {} bytes)",
-                        args.join(" "),
-                        out.stdout.len(),
-                        plain.stdout.len()
-                    ));
-                }
+        // Byte fidelity: a blob dump is the file itself, so rtk must print exactly what
+        // git prints for the SAME args -- the strongest invariant is "rtk == git for this
+        // exact command". Trees, commit-misroutes and bogus objects take the other routes.
+        if truth.as_deref() == Some("blob") {
+            let mut full: Vec<&str> = vec!["show"];
+            full.extend(arg_refs.iter().copied());
+            let plain = git(path, home, &full);
+            if out.stdout != plain.stdout || out.status.code() != plain.status.code() {
+                fidelity_breaks.push(format!(
+                    "`git show {}` differs from git (rtk {} bytes, exit {:?} vs git {} bytes, exit {:?})",
+                    args.join(" "),
+                    out.stdout.len(),
+                    out.status.code(),
+                    plain.stdout.len(),
+                    plain.status.code()
+                ));
             }
         }
     }
 
     // Report incidence (KuSh: the fuzzer establishes there are no other classes hiding).
     eprintln!(
-        "differential fuzzer: {} distinct of {ITERATIONS} drawn invocations — misroutes={}, silent_losses={}, fidelity_breaks={}",
+        "differential fuzzer: {} distinct of {ITERATIONS} drawn invocations — truncations={}, fidelity_breaks={}",
         invocations.len(),
-        misroutes.len(),
-        silent_losses.len(),
+        truncations.len(),
         fidelity_breaks.len()
     );
-    assert!(misroutes.is_empty(), "misroutes: {misroutes:#?}");
-    assert!(
-        silent_losses.is_empty(),
-        "silent losses: {silent_losses:#?}"
-    );
+    assert!(truncations.is_empty(), "truncations: {truncations:#?}");
     assert!(
         fidelity_breaks.is_empty(),
         "fidelity breaks: {fidelity_breaks:#?}"
     );
 }
 
-/// Split a hint's shell words, undoing the POSIX single-quoting `compact_blob_show` applies.
-/// Only the quoting rtk itself emits is handled -- enough to run the hint as it is printed.
-fn split_hint_words(cmd: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut started = false;
-    let mut quoted = false;
-    for c in cmd.chars() {
-        match c {
-            '\'' => {
-                quoted = !quoted;
-                started = true;
-            }
-            c if c.is_whitespace() && !quoted => {
-                if started {
-                    words.push(std::mem::take(&mut current));
-                    started = false;
-                }
-            }
-            c => {
-                current.push(c);
-                started = true;
-            }
-        }
-    }
-    if started {
-        words.push(current);
-    }
-    words
-}
-
-/// The hint must be *runnable*, not merely well-formed: run the command it names and check it
-/// returns exactly the lines the window held back.
-///
-/// Parsing `N` out of the hint and slicing git's own output (as the byte-exactness check below
-/// does) cannot see the failure this guards -- a hint naming a command that re-windows the blob
-/// and hands `tail` nothing but the hint itself.
-///
-/// One half of that guarantee. This runs the hint's argv directly and applies the `tail` in
-/// process, so it establishes that the named command returns the rest of the blob -- not that
-/// the hook leaves the hint alone, since no hook runs here. The other half is the unit test
-/// `test_compact_blob_show_hint_survives_rtks_own_hook`, which puts the emitted hint through
-/// the real `rewrite_command`. Neither test is sufficient on its own: a hint the hook rewrites
-/// would still pass this one, and a hint the hook ignores but that returns nothing would still
-/// pass that one.
+/// #5070: `git show <rev>:<path>` of a file past the old 8 KiB window, read as data by a
+/// script, must come back whole and exit 0 -- the reporter's exact fixtures (700 short
+/// lines, 50 long lines) and a JSON document that must still parse.
 #[test]
-fn windowed_blob_hint_command_returns_the_rest() {
-    let repo = setup_repo();
-    let (path, home) = (repo.path.as_path(), repo.home.as_path());
-
-    let out = rtk_show(path, home, &["HEAD:large.txt"]);
-    assert!(out.status.success());
-    let shown = String::from_utf8(out.stdout).expect("windowed head is UTF-8");
-    let hint = shown
-        .rsplit_once("[see remaining: ")
-        .map(|(_, rest)| rest.trim_end().trim_end_matches(']'))
-        .expect("a windowed head carries a hint");
-    let (recall, tail_part) = hint.split_once(" | tail -n +").expect("tail hint");
-    let n: usize = tail_part.trim().parse().expect("N parses");
-
-    let words = split_hint_words(recall);
-    assert_eq!(words.first().map(String::as_str), Some("rtk"), "{hint}");
-    let mut cmd = common::rtk_command();
-    cmd.args(&words[1..]).current_dir(path);
-    isolate(&mut cmd, home);
-    let recalled = cmd.output().expect("run the hint's own command");
-    assert!(
-        recalled.status.success(),
-        "the hint's command failed: {}",
-        String::from_utf8_lossy(&recalled.stderr)
-    );
-    let recalled = String::from_utf8(recalled.stdout).expect("recalled blob is UTF-8");
-
-    let head = &shown[..shown.find("... (+").expect("truncation marker")];
-    let tail: String = recalled
-        .lines()
-        .skip(n - 1)
-        .map(|l| format!("{l}\n"))
+fn large_blob_show_is_not_truncated() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path();
+    let home = path.join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    git_ok(path, &home, &["init", "-q"]);
+    std::fs::write(
+        path.join("C.txt"),
+        format!("{}\n", "y".repeat(19)).repeat(700),
+    )
+    .expect("write C.txt");
+    std::fs::write(
+        path.join("A.txt"),
+        format!("{}\n", "x".repeat(400)).repeat(50),
+    )
+    .expect("write A.txt");
+    let entries: Vec<String> = (0..450)
+        .map(|i| format!("  \"key{i}\": \"{}\"", "v".repeat(20)))
         .collect();
-    let full = String::from_utf8(git(path, home, &["show", "HEAD:large.txt"]).stdout)
-        .expect("blob is UTF-8");
+    std::fs::write(
+        path.join("snapshot.json"),
+        format!("{{\n{}\n}}\n", entries.join(",\n")),
+    )
+    .expect("write snapshot.json");
+    git_ok(path, &home, &["add", "-A"]);
+    git_ok(path, &home, &["commit", "-q", "-m", "seed"]);
 
-    assert!(
-        tail.lines().count() > 1,
-        "the hint returned {} line(s) -- it must return the rest of the blob, not just itself",
-        tail.lines().count()
-    );
-    assert_eq!(
-        format!("{head}{tail}"),
-        full,
-        "running the hint must reconstruct the blob byte-for-byte"
-    );
-}
-
-/// A companion check that the recovery hint reconstructs a windowed blob BYTE-for-byte:
-/// `head_shown` ++ `git show <rev:path> | tail -n +N` == full `git show <rev:path>`.
-#[test]
-fn windowed_blob_recovery_is_byte_exact() {
-    let repo = setup_repo();
-    let (path, home) = (repo.path.as_path(), repo.home.as_path());
-
-    let out = rtk_show(path, home, &["HEAD:large.txt"]);
-    assert!(out.status.success());
-    let shown = String::from_utf8(out.stdout).expect("windowed head is UTF-8");
-    assert!(
-        shown.contains("[see remaining: rtk proxy git "),
-        "expected a windowed head"
-    );
-
-    // The head is everything before the hint marker.
-    let head = &shown[..shown.find("... (+").expect("truncation marker")];
-
-    // Extract N from `| tail -n +N]`.
-    let n: usize = {
-        let after = shown.split("| tail -n +").nth(1).expect("tail hint");
-        after
-            .trim_end_matches(|c: char| !c.is_ascii_digit())
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>()
-            .parse()
-            .expect("N parses")
-    };
-
-    let full = git(path, home, &["show", "HEAD:large.txt"]).stdout;
-    let full = String::from_utf8(full).expect("blob is UTF-8");
-    // Recovery: the shown head must be a byte-exact prefix, and lines from N onward are
-    // exactly the remainder.
-    assert!(
-        full.starts_with(head),
-        "shown head is not a byte-exact prefix of git's bytes"
-    );
-    let tail: String = full.lines().skip(n - 1).map(|l| format!("{l}\n")).collect();
-    let reconstructed = format!("{head}{tail}");
-    assert_eq!(
-        reconstructed, full,
-        "head + `tail -n +{n}` must reconstruct the blob byte-for-byte"
-    );
-}
-
-/// The BLOCKER, end-to-end: `-wG x:y HEAD:large.txt` (a colon-cluster whose value the
-/// walker skips) must window the real blob, and its hint — which names only the blob
-/// arg, not the cluster flags — must still reconstruct the blob byte-for-byte.
-#[test]
-fn cluster_flag_before_blob_windows_and_recovers_byte_exact() {
-    let repo = setup_repo();
-    let (path, home) = (repo.path.as_path(), repo.home.as_path());
-
-    let out = rtk_show(path, home, &["-wG", "x:y", "HEAD:large.txt"]);
-    assert!(out.status.success());
-    let shown = String::from_utf8(out.stdout).expect("windowed head is UTF-8");
-    assert!(
-        shown.contains("[see remaining: rtk proxy git "),
-        "cluster + blob must still window (blocker regression)"
-    );
-    // The hint points at the blob arg alone — verify it names `HEAD:large.txt`, not the
-    // `x:y` pickaxe value that the old walker mistook for the object.
-    assert!(
-        shown.contains("show HEAD:large.txt | tail"),
-        "hint must target the real blob arg, not the flag value"
-    );
-
-    let head = &shown[..shown.find("... (+").expect("truncation marker")];
-    let n: usize = {
-        let after = shown.split("| tail -n +").nth(1).expect("tail hint");
-        after
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>()
-            .parse()
-            .expect("N parses")
-    };
-    // git dumps ONLY the blob for this invocation (the colon token is `-G`'s value), so
-    // the recovery target is a plain `git show HEAD:large.txt`.
-    let full = String::from_utf8(git(path, home, &["show", "HEAD:large.txt"]).stdout)
-        .expect("blob is UTF-8");
-    assert!(
-        full.starts_with(head),
-        "shown head is not a byte-exact prefix of git's bytes"
-    );
-    let tail: String = full.lines().skip(n - 1).map(|l| format!("{l}\n")).collect();
-    assert_eq!(
-        format!("{head}{tail}"),
-        full,
-        "head + `tail -n +{n}` must reconstruct the blob byte-for-byte"
-    );
+    for object in ["HEAD:C.txt", "HEAD:A.txt", "HEAD~0:snapshot.json"] {
+        let plain = git(path, &home, &["show", object]);
+        assert!(
+            plain.stdout.len() > 8192,
+            "{object} must exceed the old window"
+        );
+        let out = rtk_show(path, &home, &[object]);
+        assert!(out.status.success(), "{object}: rtk should exit 0");
+        assert_eq!(
+            out.stdout.len(),
+            plain.stdout.len(),
+            "{object}: rtk truncated the blob"
+        );
+        assert!(
+            out.stdout == plain.stdout,
+            "{object}: bytes differ from git"
+        );
+    }
 }
