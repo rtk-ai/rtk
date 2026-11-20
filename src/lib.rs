@@ -5987,6 +5987,27 @@ mod tests {
     }
 
     #[test]
+    fn test_cargo_cli_hands_the_message_format_lookup_its_double_dash() {
+        // The lookup reads the arguments after the subcommand and stops at the `--` it finds
+        // there: `cargo clippy -- --message-format=json` gives that flag to rustc, not cargo.
+        // The flat `args` must therefore keep the separator, whatever precedes it. This pins
+        // the shape of the `Commands::Cargo` argument spec and clap's handling of it; the
+        // lookup itself is guarded by the unit tests in `cargo_cmd` and the stub-cargo
+        // integration tests.
+        for args in [
+            vec!["clippy", "--", "--message-format=json"],
+            vec!["clippy", "--message-format=json", "--", "-D", "warnings"],
+        ] {
+            let cli = try_parse_cli_from(["rtk", "cargo"].into_iter().chain(args.iter().copied()))
+                .expect("parse");
+            let Commands::Cargo { args: parsed } = cli.command else {
+                panic!("expected cargo")
+            };
+            assert_eq!(parsed, args.iter().map(OsString::from).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
     fn test_bun_build_parses_to_arg_vector() {
         let cli = try_parse_cli_from(["rtk", "bun", "build", "--outdir", "dist"]).unwrap();
         match cli.command {
