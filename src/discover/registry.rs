@@ -7445,6 +7445,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_rewrite_rules_reject_additional_prefix_lookalikes() {
+        // Keep only cases absent from the existing wider
+        // test_subcommand_rules_require_token_boundaries regression.
+        for command in [
+            "git branchless",
+            "git statuses",
+            "git logger",
+            "git showcase",
+            "cargo installer",
+            "gh issues",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "unexpected rewrite for {command:?}"
+            );
+        }
+
+        // Guard against a trivial implementation that disables rewrites.
+        for command in ["git status", "cargo test", "gh pr list"] {
+            assert!(
+                rewrite_command_no_prefixes(command, &[]).is_some(),
+                "expected rewrite for {command:?}"
+            );
+        }
+    }
+
     // --- exclude_commands (#243) ---
 
     #[test]
