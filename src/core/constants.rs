@@ -41,6 +41,7 @@ pub const RTK_META_COMMANDS: &[&str] = &[
     // it is RTK's own: `rtk test --shell` reports the error instead of running `test`.
     "test",
     "format",
+    "completions",
     // `err` and `summary` name no real binary, and since they grew `--shell`
     // they have a flag to get wrong. Falling through would try to exec a
     // program called `err` instead of reporting the flag error (#4125 review).
