@@ -183,11 +183,21 @@ fn patch_gemini_settings(
                 settings_path.display()
             );
         } else {
-            print!("Patch {} with RTK hook? [y/N] ", settings_path.display());
-            std::io::Write::flush(&mut std::io::stdout())?;
-            let mut answer = String::new();
-            std::io::stdin().read_line(&mut answer)?;
-            if !answer.trim().eq_ignore_ascii_case("y") {
+            let question = format!("Patch {} with RTK hook?", settings_path.display());
+            let accepted = if crate::core::ask::interactive() {
+                crate::core::ask::confirm(
+                    &question,
+                    "add the RTK BeforeTool hook",
+                    "add the hook by hand later",
+                )?
+            } else {
+                print!("{question} [y/N] ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                answer.trim().eq_ignore_ascii_case("y")
+            };
+            if !accepted {
                 println!("Skipped. Add hook manually later.");
                 return Ok(false);
             }

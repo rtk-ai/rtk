@@ -2,6 +2,7 @@
 
 pub mod arg_tokenizer;
 pub mod args_utils;
+pub mod ask;
 #[cfg(feature = "engine")]
 pub mod call_context;
 #[cfg(feature = "engine")]

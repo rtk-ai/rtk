@@ -193,7 +193,7 @@ RTK_DISABLED=1 git rebase main
 
 ## Telemetry
 
-Telemetry is **off by default** and only runs after you opt in — `rtk init` asks once (`[y/N]`, default no), or run `rtk telemetry enable`. Once enabled, RTK sends at most one anonymous ping per day. No personal data, no file paths, no command content.
+Telemetry is **off by default** and only runs after you opt in — `rtk init` asks once (Yes/No, default No), or run `rtk telemetry enable`. Once enabled, RTK sends at most one anonymous ping per day. No personal data, no file paths, no command content.
 
 Data sent: device hash, version, OS, architecture, command count/24h, top commands, savings %.
 

@@ -1524,7 +1524,7 @@ field for manual editing is `[retriever] mode`.
 
 ## Telemetry
 
-RTK can send one anonymous ping per day (23-hour interval) for usage statistics. Telemetry is opt-in and **disabled by default**; it requires explicit consent (GDPR Art. 6, 7). `rtk init` asks for consent with a `[y/N]` prompt.
+RTK can send one anonymous ping per day (23-hour interval) for usage statistics. Telemetry is opt-in and **disabled by default**; it requires explicit consent (GDPR Art. 6, 7). `rtk init` asks for consent with a Yes/No question that defaults to No.
 
 **Data sent:** device hash (SHA-256 of a random salt), version, OS, architecture, command count over 24h, top commands, bash output reduction percentage, recall counters per filter family (elisions/retrievals -- names taken from a closed allowlist, never a hash, path, argument or content).
 

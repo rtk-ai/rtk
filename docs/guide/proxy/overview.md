@@ -61,8 +61,13 @@ Two independent ways in. `rtk init` configures your agent once and persists it; 
 On a Claude Code init, RTK asks:
 
 ```
-Set up the RTK proxy (routes Claude Code's API traffic through a local daemon)? [y/N]
+  Set up the RTK proxy (routes Claude Code's API traffic through a local daemon)?
+    Yes  next, choose how the daemon comes back after a reboot
+  ▶ No  nothing changes
+  ↑/↓ choose · y/n answer · enter confirm · esc cancel
 ```
+
+In a terminal both questions are menus (arrow keys, `y`/`n`, or the option number). With stdout redirected they are plain `[y/N]` and `[1/2/3]` prompts, and without a terminal on stdin the proxy is not offered.
 
 Say yes and it writes `env.ANTHROPIC_BASE_URL` into `settings.json` and adds `extends = "rtk:proxy"` to your pipeline. Then it asks how the daemon should come back after a reboot:
 

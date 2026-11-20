@@ -7,7 +7,7 @@ sidebar:
 
 # Telemetry & Privacy
 
-Telemetry is **off by default**. RTK sends nothing until you give explicit consent, either at the `rtk init` prompt (`[y/N]`, default no) or with `rtk telemetry enable`. Once enabled, RTK sends anonymous, aggregate usage metrics at most once per day.
+Telemetry is **off by default**. RTK sends nothing until you give explicit consent, either at the `rtk init` question (Yes/No, default No) or with `rtk telemetry enable`. Once enabled, RTK sends anonymous, aggregate usage metrics at most once per day.
 
 ## Data Collector
 

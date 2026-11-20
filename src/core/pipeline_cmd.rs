@@ -475,9 +475,8 @@ pub(crate) fn publish_gist(
     force: bool,
 ) -> Result<i32> {
     print_publish_warning();
-    if crate::core::pipeline_remote::interactive() {
-        if !crate::core::pipeline_remote::prompt("I understand — continue? [y/N] ")?
-            .eq_ignore_ascii_case("y")
+    if crate::core::ask::interactive() {
+        if !crate::core::ask::prompt("I understand — continue? [y/N] ")?.eq_ignore_ascii_case("y")
         {
             println!("not published");
             return Ok(1);
@@ -800,7 +799,7 @@ fn choose_install_mode(updating: bool, force: bool, shadow: bool) -> Result<Inst
     if force {
         return Ok(InstallMode::Live);
     }
-    if !crate::core::pipeline_remote::interactive() {
+    if !crate::core::ask::interactive() {
         if updating {
             anyhow::bail!(
                 "refusing to replace an installed pipeline non-interactively — pass --force \
@@ -840,13 +839,11 @@ fn choose_install_mode(updating: bool, force: bool, shadow: bool) -> Result<Inst
             0,
         )
     };
-    Ok(
-        match crate::core::pipeline_remote::select_menu(items, default)? {
-            Some(0) => InstallMode::Live,
-            Some(1) => InstallMode::Shadow,
-            _ => InstallMode::Quit,
-        },
-    )
+    Ok(match crate::core::ask::select_menu(items, default)? {
+        Some(0) => InstallMode::Live,
+        Some(1) => InstallMode::Shadow,
+        _ => InstallMode::Quit,
+    })
 }
 
 /// `rtk pipeline promote <name>` — move a shadow install live (or discard
@@ -904,10 +901,10 @@ pub fn run_promote(name: &str, discard: bool, force: bool) -> Result<i32> {
         ],
     );
     if !force {
-        if !crate::core::pipeline_remote::interactive() {
+        if !crate::core::ask::interactive() {
             anyhow::bail!("refusing to promote non-interactively — pass --force");
         }
-        if !crate::core::pipeline_remote::prompt("promote? [y/N] ")?.eq_ignore_ascii_case("y") {
+        if !crate::core::ask::prompt("promote? [y/N] ")?.eq_ignore_ascii_case("y") {
             println!("kept in shadow — nothing changed");
             return Ok(1);
         }

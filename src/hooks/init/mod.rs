@@ -853,10 +853,20 @@ fn backup_and_atomic_write(path: &Path, content: &str) -> Result<Option<PathBuf>
 }
 
 /// Prompt user for confirmation.
-/// Prints to stderr (stdout may be piped), reads from stdin, and defaults to
-/// No in non-interactive environments.
-pub(super) fn prompt_user_confirmation(prompt: &str) -> Result<bool> {
+/// A Yes/No menu when stdin and stdout are a terminal. Otherwise prints to
+/// stderr (stdout may be piped), reads from stdin, and defaults to No when
+/// stdin is not a terminal.
+pub(super) fn prompt_user_confirmation(
+    prompt: &str,
+    yes_hint: &str,
+    no_hint: &str,
+) -> Result<bool> {
     use std::io::{self, BufRead, IsTerminal};
+
+    if crate::core::ask::interactive() {
+        println!();
+        return crate::core::ask::confirm(prompt, yes_hint, no_hint);
+    }
 
     eprint!("\n{} [y/N] ", prompt);
     io::stderr().flush().context("Failed to flush prompt")?;
@@ -1037,6 +1047,7 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
         return Ok(());
     }
     let base_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
+    let menu = crate::core::ask::interactive();
 
     let mut root: serde_json::Value = if settings_path.exists() {
         let content = fs::read_to_string(settings_path)?;
@@ -1079,44 +1090,89 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
         );
     } else {
         eprintln!();
-        if let Some(foreign) = already.as_deref() {
+        let read_yes = || -> Result<bool> {
+            let mut line = String::new();
+            let n = std::io::stdin().lock().read_line(&mut line)?;
+            Ok(n > 0 && matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
+        };
+        let accepted = if let Some(foreign) = already.as_deref() {
             eprintln!(
                 "  settings.json already routes Claude Code through {foreign} — another proxy or gateway."
             );
-            eprint!("  Replace it with the RTK proxy? Your current routing stops working. [y/N] ");
+            if menu {
+                crate::core::ask::confirm(
+                    "  Replace it with the RTK proxy?",
+                    "your current routing stops working",
+                    "keep your current routing",
+                )?
+            } else {
+                eprint!(
+                    "  Replace it with the RTK proxy? Your current routing stops working. [y/N] "
+                );
+                read_yes()?
+            }
+        } else if menu {
+            crate::core::ask::confirm(
+                "  Set up the RTK proxy (routes Claude Code's API traffic through a local daemon)?",
+                "next, choose how the daemon comes back after a reboot",
+                "nothing changes",
+            )?
         } else {
             eprint!(
                 "  Set up the RTK proxy (routes Claude Code's API traffic through a local daemon)? [y/N] "
             );
-        }
-        let mut line = String::new();
-        let n = std::io::stdin().lock().read_line(&mut line)?;
-        if n == 0 || !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
+            read_yes()?
+        };
+        if !accepted {
             println!("  Skipped — enable later with `rtk init -g` or `rtk llm-proxy start --env`.");
             return Ok(());
         }
     }
 
-    eprintln!("  How should the daemon come back after a reboot?");
-    eprintln!(
-        "    1) SessionStart hook — start it automatically when a Claude session begins (recommended)"
-    );
-    eprintln!("    2) Background service — `rtk llm-proxy service install`");
-    eprintln!("    3) Neither — print the export line; settings.json is not touched");
-    eprint!("  [1/2/3, default 1] ");
-    let mut choice_line = String::new();
-    let n = std::io::stdin().lock().read_line(&mut choice_line)?;
-    if n == 0 {
-        println!("  No answer — nothing changed. Re-run `rtk init -g` to decide later.");
-        return Ok(());
-    }
-    let choice = match choice_line.trim() {
-        "" | "1" => 1,
-        "2" => 2,
-        "3" => 3,
-        other => {
-            println!("  Unrecognized `{other}` — nothing changed.");
+    let choice = if menu {
+        match crate::core::ask::choose(
+            "  How should the daemon come back after a reboot?",
+            &[
+                (
+                    "SessionStart hook",
+                    "start it automatically when a Claude session begins (recommended)",
+                ),
+                ("Background service", "`rtk llm-proxy service install`"),
+                (
+                    "Neither",
+                    "print the export line; settings.json is not touched",
+                ),
+            ],
+            0,
+        )? {
+            Some(i) => i + 1,
+            None => {
+                println!("  No answer — nothing changed. Re-run `rtk init -g` to decide later.");
+                return Ok(());
+            }
+        }
+    } else {
+        eprintln!("  How should the daemon come back after a reboot?");
+        eprintln!(
+            "    1) SessionStart hook — start it automatically when a Claude session begins (recommended)"
+        );
+        eprintln!("    2) Background service — `rtk llm-proxy service install`");
+        eprintln!("    3) Neither — print the export line; settings.json is not touched");
+        eprint!("  [1/2/3, default 1] ");
+        let mut choice_line = String::new();
+        let n = std::io::stdin().lock().read_line(&mut choice_line)?;
+        if n == 0 {
+            println!("  No answer — nothing changed. Re-run `rtk init -g` to decide later.");
             return Ok(());
+        }
+        match choice_line.trim() {
+            "" | "1" => 1,
+            "2" => 2,
+            "3" => 3,
+            other => {
+                println!("  Unrecognized `{other}` — nothing changed.");
+                return Ok(());
+            }
         }
     };
 
@@ -1295,10 +1351,19 @@ fn offer_delegation_onramp(patch_mode: PatchMode, ctx: InitContext) -> Result<()
     }
 
     eprintln!();
-    eprint!("  Delegate oversize reads to a cheaper model (needs a model API key)? [y/N] ");
-    let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
-    if !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
+    let accepted = if crate::core::ask::interactive() {
+        crate::core::ask::confirm(
+            "  Delegate oversize reads to a cheaper model (needs a model API key)?",
+            "adopt rtk:delegate-reads, Gemini Flash by default",
+            "nothing changes",
+        )?
+    } else {
+        eprint!("  Delegate oversize reads to a cheaper model (needs a model API key)? [y/N] ");
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line)?;
+        matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
+    };
+    if !accepted {
         println!(
             "  Skipped — adopt later with `extends = \"rtk:delegate-reads\"` (see `rtk pipeline show rtk:delegate-reads`)."
         );
@@ -1331,7 +1396,11 @@ fn offer_delegation_onramp(patch_mode: PatchMode, ctx: InitContext) -> Result<()
 
 /// Prompt user for consent to patch settings.json.
 pub(super) fn prompt_user_consent(settings_path: &Path) -> Result<bool> {
-    prompt_user_confirmation(&format!("Patch existing {}?", settings_path.display()))
+    prompt_user_confirmation(
+        &format!("Patch existing {}?", settings_path.display()),
+        "add the RTK hook entries to it",
+        "leave it alone and print the lines to add by hand",
+    )
 }
 
 pub fn save_telemetry_consent(accepted: bool) -> Result<()> {
@@ -1379,16 +1448,21 @@ fn prompt_telemetry_consent() -> Result<()> {
     eprintln!("           request erasure with `rtk telemetry forget`");
     eprintln!("  Details: https://github.com/rtk-ai/rtk/blob/master/docs/TELEMETRY.md");
     eprintln!();
-    eprint!("Enable anonymous telemetry? [y/N] ");
 
-    let stdin = io::stdin();
-    let mut line = String::new();
-    stdin
-        .lock()
-        .read_line(&mut line)
-        .context("Failed to read user input")?;
-
-    let accepted = {
+    let accepted = if crate::core::ask::interactive() {
+        crate::core::ask::confirm(
+            "Enable anonymous telemetry?",
+            "send the daily metrics described above",
+            "send nothing",
+        )?
+    } else {
+        eprint!("Enable anonymous telemetry? [y/N] ");
+        let stdin = io::stdin();
+        let mut line = String::new();
+        stdin
+            .lock()
+            .read_line(&mut line)
+            .context("Failed to read user input")?;
         let response = line.trim().to_lowercase();
         response == "y" || response == "yes"
     };
