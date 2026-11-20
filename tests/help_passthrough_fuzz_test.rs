@@ -279,7 +279,12 @@ fn a_wrapped_tools_own_help_survives_rtk() {
     // The cases of one tool, in `CASES` order, with the tool's resolved path.
     let mut by_tool: Vec<(PathBuf, Vec<&Case>)> = Vec::new();
     for case in CASES {
-        if UNIX_ONLY.contains(&case.tool) {
+        // Git for Windows renders `--help` as an HTML page in the default browser
+        // (`help.format=html` is compiled in, so the scratch git config cannot change
+        // it, and there is no `man` to fall back on). `-h` still prints text there.
+        let opens_browser =
+            cfg!(windows) && case.tool == "git" && case.native_args.contains(&"--help");
+        if UNIX_ONLY.contains(&case.tool) || opens_browser {
             skipped.push(case.tool);
             continue;
         }
