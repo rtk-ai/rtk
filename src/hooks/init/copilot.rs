@@ -35,11 +35,11 @@ pub(crate) const COPILOT_HOOK_JSON: &str = r#"{
 const COPILOT_INSTRUCTIONS: &str = r#"<!-- rtk-instructions v2 -->
 # RTK — Token-Optimized CLI
 
-**rtk** is a CLI proxy that filters and compresses command outputs, saving 60-90% tokens.
+**rtk** is a CLI proxy that filters and compresses command outputs, cutting 60-90% of bash output.
 
 ## Rule
 
-Always prefix shell commands with `rtk`:
+Prefix external programs with `rtk`:
 
 ```bash
 # Instead of:              Use:
@@ -50,13 +50,18 @@ docker ps                  rtk docker ps
 kubectl get pods           rtk kubectl get pods
 ```
 
+Do not prefix shell builtins or keywords — `test`, `[`, `read`, `cd`, `echo`,
+`export`, `eval`, `source`, `printf`. Commands such as `test`, `read`, and
+`env` also have RTK subcommands with different meanings; invoke the native
+command directly when you need it.
+
 ## Meta commands (use directly)
 
 ```bash
 rtk gain              # Token savings dashboard
 rtk gain --history    # Per-command savings history
 rtk discover          # Find missed rtk opportunities
-rtk proxy <cmd>       # Run raw (no filtering) but track usage
+rtk bypass <cmd>      # Run raw (no filtering) but track usage
 ```
 <!-- /rtk-instructions -->
 "#;
@@ -323,6 +328,14 @@ mod tests {
     use tempfile::TempDir;
 
     // Copilot tests
+
+    #[test]
+    fn test_copilot_instructions_exclude_shell_builtins_from_prefix_rule() {
+        crate::hooks::init::tests::assert_prefix_rule_spares_builtins(
+            "copilot",
+            COPILOT_INSTRUCTIONS,
+        );
+    }
 
     #[test]
     fn test_copilot_init_preserves_existing_instructions() {

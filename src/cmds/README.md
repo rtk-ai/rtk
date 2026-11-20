@@ -106,7 +106,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     if verbose > 0 { eprintln!("Running: mycmd {}", args.join(" ")); }
 
     runner::run_filtered(
-        cmd, "mycmd", &args.join(" "),
+        cmd, "mycmd", &display_args(args),
         filter_mycmd_output,
         runner::RunOptions::stdout_only().tee("mycmd"),
     )
@@ -124,6 +124,7 @@ Use `runner::run_streamed()` when the command is long-running or produces unboun
 For block-based errors where blocks start with a regex match and continue on indented lines. Handles skip prefixes, block counting, and summary automatically.
 
 ```rust
+use crate::core::shell::display_args;
 use crate::core::stream::{BlockStreamFilter, RegexBlockFilter};
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
@@ -134,7 +135,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .skip_prefixes(&["warning:", "note:"]);
 
     runner::run_streamed(
-        cmd, "mycmd", &args.join(" "),
+        cmd, "mycmd", &display_args(args),
         Box::new(BlockStreamFilter::new(filter)),
         runner::RunOptions::with_tee("mycmd"),
     )
@@ -294,7 +295,7 @@ Adding a new filter or command requires changes in multiple places. For TOML-vs-
    - Add `.tee("label")` when the filter parses structured output (enables raw output recovery on failure)
    - **Exit codes**: handled automatically by `run_filtered()` — just return its result
    - **Truncation**: if the filter caps any list at N items, emit `force_tee_tail_hint` (flat lists) or `force_tee_hint` (multi-line blocks) so the agent can recover hidden items — see [Internal Truncation Recovery](#internal-truncation-recovery). Use a named constant for the cap; derive the offset from it (`MAX_XXX + 1`)
-   - **Arguments**: if the filter inspects its args at all — which flags were passed, which are paths, what to inject or strip — classify them with [`arg_tokenizer`](../core/README.md#argument-tokenizer-arg_tokenizerrs), never a string scan. Write the `takes_value` predicate from the tool's own `--help` and check it against the real binary
+   - **Arguments**: if the filter inspects its args at all — which flags were passed, which are paths, what to inject or strip — classify them with [`arg_tokenizer`](../core/README.md#argument-tokenizer-arg_tokenizerrs), never a string scan. Declare the tool's flags once, as a `const` `Grammar` of `Flag` tables transcribed from the tool's own `--help`, check each spelling against the real binary, and test the grammar against an explicit table with `assert_takes_value_table`
 2. **Register module**:
    - Add `pub mod mycmd_cmd;` to the ecosystem `mod.rs`, keeping the list alphabetical. Modules are listed explicitly rather than generated from the directory: rustfmt only follows literal `mod` items and cannot expand macros, so a generated list hides every file under `src/cmds/` from `cargo fmt` — and therefore from CI's fmt gate. `build.rs` fails the build if a `.rs` file here is missing from its `mod.rs`, since an undeclared module is never compiled, linted, or tested.
    - Add variant to `Commands` enum in `main.rs` with `#[arg(trailing_var_arg = true, allow_hyphen_values = true)]`

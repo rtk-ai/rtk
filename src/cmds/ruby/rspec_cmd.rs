@@ -6,6 +6,7 @@
 //! fails to parse.
 
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::truncate::{CAP_WARNINGS, reduced};
 use crate::core::utils::{fallback_tail, ruby_exec, truncate};
 use anyhow::Result;
@@ -92,7 +93,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "rspec",
-        &args.join(" "),
+        &display_args(args),
         move |stdout| {
             if has_format {
                 let stripped = strip_noise(stdout);

@@ -5,7 +5,11 @@
 //! capable of state-machine parsing (block collapse, continuation tracking,
 //! mode toggle) that TOML DSL cannot express.
 
+use crate::core::arg_tokenizer::{
+    Dialect, Flag, Grammar, Token, ValueSpec, before_dashdash, has_flag, tokenize_grammar,
+};
 use crate::core::runner::{self, RunOptions};
+use crate::core::shell::display_args;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi};
 use anyhow::Result;
@@ -145,7 +149,57 @@ static FILE_COORD: LazyLock<Regex> =
 /// stack trace. The standard filters key off `[INFO]` markers and the footer
 /// guard, so they can't fire here — `filter_quiet` handles this case instead.
 fn is_quiet(args: &[String]) -> bool {
-    args.iter().any(|a| a == "-q" || a == "--quiet")
+    has_option(args, &["q", "quiet"])
+}
+
+// ── Argument grammar ────────────────────────────────────────────────────────
+
+/// Maven's grammar. Its CLI is Apache commons-cli, whose short options are whole
+/// multi-character words (`-pl`, `-gs`, `-amd`) that never cluster, so each option is one
+/// atomic flag under both its names. The value-taking ones are those `mvn --help` (3.9.16)
+/// declares `<arg>`.
+const MVN_GRAMMAR: Grammar = Grammar::new(
+    Dialect::CommonsCli,
+    &[&[
+        Flag::atomic(&["P", "activate-profiles"]).takes(ValueSpec::value()),
+        Flag::atomic(&["b", "builder"]).takes(ValueSpec::value()),
+        Flag::atomic(&["color"]).takes(ValueSpec::value()),
+        Flag::atomic(&["D", "define"]).takes(ValueSpec::value()),
+        Flag::atomic(&["emp", "encrypt-master-password"]).takes(ValueSpec::value()),
+        Flag::atomic(&["ep", "encrypt-password"]).takes(ValueSpec::value()),
+        Flag::atomic(&["f", "file"]).takes(ValueSpec::value()),
+        Flag::atomic(&["gs", "global-settings"]).takes(ValueSpec::value()),
+        Flag::atomic(&["gt", "global-toolchains"]).takes(ValueSpec::value()),
+        Flag::atomic(&["l", "log-file"]).takes(ValueSpec::value()),
+        Flag::atomic(&["pl", "projects"]).takes(ValueSpec::value()),
+        Flag::atomic(&["rf", "resume-from"]).takes(ValueSpec::value()),
+        Flag::atomic(&["s", "settings"]).takes(ValueSpec::value()),
+        Flag::atomic(&["T", "threads"]).takes(ValueSpec::value()),
+        Flag::atomic(&["t", "toolchains"]).takes(ValueSpec::value()),
+    ]],
+);
+
+fn mvn_tokens(args: &[String]) -> Vec<Token<'_>> {
+    tokenize_grammar(args, &MVN_GRAMMAR)
+}
+
+/// True if any of `names` (Maven's long and short spelling of one option) is set.
+fn has_option(args: &[String], names: &[&str]) -> bool {
+    let tokens = mvn_tokens(args);
+    let scoped = before_dashdash(&tokens);
+    names
+        .iter()
+        .any(|name| has_flag(scoped, &MVN_GRAMMAR, name))
+}
+
+/// The goals in `args`, in order — including everything past `--`, which
+/// `DashDashRole::EndsOptions` has already made positionals.
+fn goals(args: &[String]) -> Vec<&str> {
+    mvn_tokens(args)
+        .iter()
+        .filter(|t| t.is_free_positional())
+        .map(|t| t.text)
+        .collect()
 }
 
 // ── Phase detection ─────────────────────────────────────────────────────────
@@ -158,15 +212,11 @@ pub enum MvnPhase {
     Passthrough, // clean, site, plugin goals, version/help, empty
 }
 
-/// Scan args left-to-right, skip flags + `-D…` system props, pick the LAST
-/// remaining token. If empty, plugin-form (`:`), or `clean`/`site` → Passthrough.
+/// The last goal decides the filter (`clean install` is a package build). Empty,
+/// plugin-form (`:`), or `clean`/`site` → Passthrough.
 pub fn detect_phase(args: &[String]) -> MvnPhase {
-    let last = args
-        .iter()
-        .filter(|a| !a.starts_with('-'))
-        .map(|s| s.as_str())
-        .next_back()
-        .unwrap_or("");
+    let goals = goals(args);
+    let last = goals.last().copied().unwrap_or("");
 
     if last.is_empty() || last.contains(':') {
         return MvnPhase::Passthrough;
@@ -178,6 +228,32 @@ pub fn detect_phase(args: &[String]) -> MvnPhase {
         "package" | "install" | "verify" | "deploy" => MvnPhase::Package,
         _ => MvnPhase::Passthrough,
     }
+}
+
+// ── Routing ─────────────────────────────────────────────────────────────────
+
+/// Which filter, if any, wraps a run. `Raw` is unfiltered passthrough.
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum MvnRoute {
+    Raw,
+    Quiet,
+    Filtered(MvnPhase),
+}
+
+/// `-X`/`-e` mean the user asked for the full output, so nothing is filtered.
+fn is_verbose(args: &[String]) -> bool {
+    has_option(args, &["X", "debug", "e", "errors"])
+}
+
+fn route(args: &[String]) -> MvnRoute {
+    if is_verbose(args) {
+        return MvnRoute::Raw;
+    }
+    let phase = detect_phase(args);
+    if !matches!(phase, MvnPhase::Passthrough) && is_quiet(args) {
+        return MvnRoute::Quiet;
+    }
+    MvnRoute::Filtered(phase)
 }
 
 // ── Stack-frame deny-list ────────────────────────────────────────────────────
@@ -1838,64 +1914,42 @@ pub fn run_daemon(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 fn run_tool(args: &[String], daemon: bool, verbose: u8) -> Result<i32> {
-    // Verbose flags bypass filtering — user wants full output.
-    if args
-        .iter()
-        .any(|a| matches!(a.as_str(), "-X" | "--debug" | "-e" | "--errors"))
-    {
-        let osargs: Vec<OsString> = args.iter().map(OsString::from).collect();
-        return runner::run_passthrough(mvn_binary(daemon), &osargs, verbose);
-    }
-
     let tool = mvn_binary(daemon);
-    let args_display = args.join(" ");
+    let args_display = display_args(args);
 
-    // Quiet mode: standard footer guard can't fire (no `BUILD SUCCESS` line
-    // under `-q`). Route to `filter_quiet` for any non-passthrough phase so
-    // failure output gets framework frames + help boilerplate stripped.
-    if is_quiet(args) {
-        let phase = detect_phase(args);
-        if matches!(phase, MvnPhase::Passthrough) {
+    match route(args) {
+        MvnRoute::Raw | MvnRoute::Filtered(MvnPhase::Passthrough) => {
             let osargs: Vec<OsString> = args.iter().map(OsString::from).collect();
-            return runner::run_passthrough(tool, &osargs, verbose);
+            runner::run_passthrough(tool, &osargs, verbose)
         }
-        return runner::run_filtered(
+        MvnRoute::Quiet => runner::run_filtered(
             new_mvn_command(args, daemon),
             tool,
             &args_display,
             |raw: &str| filter_quiet(raw, daemon),
             RunOptions::with_tee("mvn_quiet"),
-        );
-    }
-
-    let phase = detect_phase(args);
-
-    match phase {
-        MvnPhase::Test => runner::run_filtered(
+        ),
+        MvnRoute::Filtered(MvnPhase::Test) => runner::run_filtered(
             new_mvn_command(args, daemon),
             tool,
             &args_display,
             move |raw: &str| filter_surefire(raw, daemon),
             RunOptions::with_tee("mvn_test"),
         ),
-        MvnPhase::Compile => runner::run_filtered(
+        MvnRoute::Filtered(MvnPhase::Compile) => runner::run_filtered(
             new_mvn_command(args, daemon),
             tool,
             &args_display,
             move |raw: &str| filter_compile(raw, daemon),
             RunOptions::with_tee("mvn_compile"),
         ),
-        MvnPhase::Package => runner::run_filtered(
+        MvnRoute::Filtered(MvnPhase::Package) => runner::run_filtered(
             new_mvn_command(args, daemon),
             tool,
             &args_display,
             move |raw: &str| filter_package(raw, daemon),
             RunOptions::with_tee("mvn_package"),
         ),
-        MvnPhase::Passthrough => {
-            let osargs: Vec<OsString> = args.iter().map(OsString::from).collect();
-            runner::run_passthrough(tool, &osargs, verbose)
-        }
     }
 }
 
@@ -1904,8 +1958,51 @@ fn run_tool(args: &[String], daemon: bool, verbose: u8) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::arg_tokenizer::{TokenKind, assert_takes_value_table};
     use flate2::read::GzDecoder;
     use std::io::Read;
+
+    #[test]
+    fn test_mvn_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &MVN_GRAMMAR,
+            &[(
+                TokenKind::Long,
+                &[
+                    "activate-profiles",
+                    "b",
+                    "builder",
+                    "color",
+                    "D",
+                    "define",
+                    "emp",
+                    "encrypt-master-password",
+                    "encrypt-password",
+                    "ep",
+                    "f",
+                    "file",
+                    "global-settings",
+                    "global-toolchains",
+                    "gs",
+                    "gt",
+                    "l",
+                    "log-file",
+                    "P",
+                    "pl",
+                    "projects",
+                    "resume-from",
+                    "rf",
+                    "s",
+                    "settings",
+                    "T",
+                    "t",
+                    "threads",
+                    "toolchains",
+                ],
+                Some(ValueSpec::value()),
+            )],
+        );
+    }
 
     fn count_tokens(s: &str) -> usize {
         s.split_whitespace().count()
@@ -2565,6 +2662,126 @@ mod tests {
     #[test]
     fn phase_help() {
         assert_eq!(detect_phase(&s(["--help"])), MvnPhase::Passthrough);
+    }
+
+    // ── Separate-token option values are not goals ───────────────────────────
+
+    /// `-f pom.xml`, `-pl core`, `-P prod`, `-T 1C`, `-l build.log`: the value is
+    /// a separate argument, and reading it as the last goal dropped the filter.
+    #[test]
+    fn option_value_after_the_goal_is_not_the_goal() {
+        for (args, phase) in [
+            (s(["test", "-f", "pom.xml"]), MvnPhase::Test),
+            (s(["test", "-pl", "core"]), MvnPhase::Test),
+            (s(["verify", "-P", "prod"]), MvnPhase::Package),
+            (s(["clean", "test", "-T", "1C"]), MvnPhase::Test),
+            (s(["install", "-l", "build.log"]), MvnPhase::Package),
+            (s(["test", "-s", "settings.xml"]), MvnPhase::Test),
+            (s(["test", "-rf", "core"]), MvnPhase::Test),
+        ] {
+            assert_eq!(route(&args), MvnRoute::Filtered(phase), "for {args:?}");
+        }
+    }
+
+    /// `-D test` defines a property named `test`; Maven is then left with no goal.
+    #[test]
+    fn separate_define_value_is_not_a_goal() {
+        assert_eq!(
+            route(&s(["-D", "test"])),
+            MvnRoute::Filtered(MvnPhase::Passthrough)
+        );
+    }
+
+    /// Attached values stay attached: `-DskipTests`, `-Pprod`, `-T1C`, `-f=pom.xml`.
+    #[test]
+    fn attached_option_values_do_not_swallow_the_goal() {
+        for args in [
+            s(["-DskipTests", "test"]),
+            s(["-Pprod", "test"]),
+            s(["-T1C", "test"]),
+            s(["-f=pom.xml", "test"]),
+            s(["--define", "skipTests=true", "test"]),
+        ] {
+            assert_eq!(
+                route(&args),
+                MvnRoute::Filtered(MvnPhase::Test),
+                "for {args:?}"
+            );
+        }
+    }
+
+    /// Maven's multi-character short options are atomic: `-pl` is `--projects`,
+    /// not a POSIX cluster whose `l` would be `--log-file` and eat `core`.
+    #[test]
+    fn multi_char_short_options_do_not_cluster() {
+        assert_eq!(goals(&s(["-pl", "core", "test"])), vec!["test"]);
+        assert_eq!(
+            goals(&s(["-am", "-amd", "-ntp", "install"])),
+            vec!["install"]
+        );
+    }
+
+    // ── `--` ends option parsing ─────────────────────────────────────────────
+
+    /// Verified against Maven 3.9.16: `mvn -- -X validate` reports `-X` as an
+    /// unknown lifecycle phase, so `--` ends option parsing rather than forwarding.
+    #[test]
+    fn everything_after_double_dash_is_a_goal() {
+        assert_eq!(
+            goals(&s(["test", "--", "-f", "pom.xml"])),
+            vec!["test", "-f", "pom.xml"]
+        );
+        assert_eq!(
+            route(&s(["test", "--", "-q"])),
+            MvnRoute::Filtered(MvnPhase::Passthrough)
+        );
+        assert_eq!(
+            route(&s(["--", "test"])),
+            MvnRoute::Filtered(MvnPhase::Test)
+        );
+    }
+
+    // ── Routing ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verbose_and_quiet_options_pick_their_route() {
+        assert_eq!(route(&s(["test", "-X"])), MvnRoute::Raw);
+        assert_eq!(route(&s(["test", "--errors"])), MvnRoute::Raw);
+        assert_eq!(route(&s(["test", "-q"])), MvnRoute::Quiet);
+        assert_eq!(
+            route(&s(["clean", "-q"])),
+            MvnRoute::Filtered(MvnPhase::Passthrough)
+        );
+    }
+
+    /// `-ep`/`-emp` are their own options, not `-e` with something appended.
+    #[test]
+    fn encrypt_options_are_not_the_errors_flag() {
+        assert_eq!(
+            route(&s(["-ep", "secret", "test"])),
+            MvnRoute::Filtered(MvnPhase::Test)
+        );
+        assert_eq!(
+            route(&s(["-emp", "secret", "test"])),
+            MvnRoute::Filtered(MvnPhase::Test)
+        );
+    }
+
+    /// `rtk mvnd` routes through this module, so it shares the argument handling
+    /// and forwards argv untouched.
+    #[test]
+    fn mvnd_shares_argument_handling_and_argv() {
+        let args = s(["test", "-f", "pom.xml"]);
+        assert_eq!(route(&args), MvnRoute::Filtered(MvnPhase::Test));
+        for daemon in [false, true] {
+            let cmd = new_mvn_command(&args, daemon);
+            let argv: Vec<String> = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(argv, args, "daemon={daemon}");
+        }
+        assert_eq!(mvn_binary(true), "mvnd");
     }
 
     // ── Binary selection ─────────────────────────────────────────────────────
@@ -4850,10 +5067,17 @@ mod tests {
         assert!(is_quiet(&s(["--quiet", "test"])));
     }
 
+    /// Verified against Maven 3.9.16: `mvn -quiet validate` runs quiet, so the
+    /// single-dash spelling of a long option is the option. Case is not folded.
+    #[test]
+    fn quiet_detects_single_dash_long_flag() {
+        assert!(is_quiet(&s(["-quiet", "test"])));
+    }
+
     #[test]
     fn quiet_does_not_match_unrelated_flags() {
         assert!(!is_quiet(&s(["-Q", "test"])));
-        assert!(!is_quiet(&s(["-quiet", "test"])));
+        assert!(!is_quiet(&s(["--QUIET", "test"])));
         assert!(!is_quiet(&s(["-B", "test"])));
     }
 
