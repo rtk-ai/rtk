@@ -1099,11 +1099,12 @@ fn is_format_flag_token(engine: Engine, token: &Token<'_>) -> bool {
 /// plain path and [`fold_path_prefix`] applies. Any other shape flag changes the line
 /// (`-c` appends `:count`, `-Z`/`--null` joins with NUL, `--json` wraps it) or removes it
 /// (`-q`), so the list is left verbatim.
+#[cfg(test)]
 pub(crate) fn is_bare_file_list<T: AsRef<str>>(engine: Engine, args: &[T]) -> bool {
     tokens_are_bare_file_list(engine, &tokenize_search_args(args, engine))
 }
 
-/// [`is_bare_file_list`] for args already read with the engine's grammar.
+/// Checks the bare file-list shape for args already read with the engine's grammar.
 fn tokens_are_bare_file_list(engine: Engine, tokens: &[Token<'_>]) -> bool {
     let mut file_list = false;
     for t in tokens {
