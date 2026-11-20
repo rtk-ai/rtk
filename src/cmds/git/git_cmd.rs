@@ -3876,15 +3876,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     }
 
     // List mode: show compact branch list
-    let mut cmd = git_cmd(global_args);
-    cmd.arg("branch");
-    if !has_list_flag {
-        cmd.arg("-a");
-    }
-    cmd.arg("--no-color");
-    for arg in args {
-        cmd.arg(arg);
-    }
+    let mut cmd = branch_list_cmd(args, global_args);
 
     let result = exec_capture(&mut cmd).context("Failed to run git branch")?;
 
@@ -3901,9 +3893,11 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(result.exit_code);
     }
 
-    let filtered = filter_branch_output(&result.stdout);
-    let filtered = never_worse(&result.stdout, &filtered).to_string();
-    println!("{}", filtered);
+    let filtered = never_worse(&result.stdout, &filter_branch_output(&result.stdout)).to_string();
+    // Git prints nothing for an empty listing (unborn repo, no matching --list pattern).
+    if !filtered.is_empty() {
+        println!("{}", filtered);
+    }
 
     timer.track(
         &tracked,
@@ -3913,6 +3907,14 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     );
 
     Ok(0)
+}
+
+/// Plain `git branch` lists local branches only, so `-a` is never added for the user.
+fn branch_list_cmd(args: &[String], global_args: &[String]) -> Command {
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("branch").arg("--no-color");
+    cmd.args(args);
+    cmd
 }
 
 fn filter_branch_output(output: &str) -> String {
@@ -5869,6 +5871,27 @@ mod tests {
             "a Latin-1 .pck is not valid UTF-8, so it must pass through byte-identically \
              (exact recovery is impossible once transcoded)"
         );
+    }
+
+    #[test]
+    fn branch_list_cmd_does_not_add_all_flag_for_plain_branch() {
+        let cmd = branch_list_cmd(&[], &[]);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["branch", "--no-color"]);
+    }
+
+    #[test]
+    fn branch_list_cmd_keeps_the_users_list_flags() {
+        let user = vec!["-a".to_string()];
+        let cmd = branch_list_cmd(&user, &[]);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["branch", "--no-color", "-a"]);
+    }
+
+    #[test]
+    fn branch_listing_with_nothing_to_show_stays_empty() {
+        // `never_worse` falls back to the raw (empty) output, which run_branch must not print as "\n"
+        assert_eq!(never_worse("", &filter_branch_output("")), "");
     }
 
     #[test]
