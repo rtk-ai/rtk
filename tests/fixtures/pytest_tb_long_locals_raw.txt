@@ -1,0 +1,25 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________________ test_loc ___________________________________
+
+    def test_loc():
+        seen = 2
+>       check(seen)
+
+seen       = 2
+
+test_loc.py:8: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+value = 2
+
+    def check(value):
+        expected = 3
+>       assert value == expected
+E       assert 2 == 3
+
+expected   = 3
+value      = 2
+
+test_loc.py:3: AssertionError
+1 failed in 0.01s

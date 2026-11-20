@@ -203,28 +203,99 @@ pub fn program_name<'a>(args: &'a [String], shell: Option<&'a str>) -> &'a str {
 
 /// Render argv for logging, tracking labels and ecosystem detection.
 ///
-/// Anything a shell would have interpreted is quoted, so a label reads back as
-/// the command that ran — `rtk err /bin/echo '*' 'a;b'` is recorded with its
-/// `*` and `;` intact rather than as something a shell would expand.
-pub fn display_args(args: &[String]) -> String {
+/// Each word goes through [`quote_word`], so a label reads back as the words
+/// that ran: `rtk err /bin/echo '*' 'a;b'` is recorded with its `*` and `;`
+/// intact, and `grep 'a b' f` stays apart from `grep a b f`.
+///
+/// Every tracked label builds its user-supplied words through this function,
+/// [`display_command`] when the words start with the program, or [`quote_word`]
+/// for a single word. Never join argv with `" "` for
+/// a label passed to `TimedExecution::track` or a runner: the `label_scan` test
+/// fails on one.
+pub fn display_args<S: AsRef<str>>(args: &[S]) -> String {
     args.iter()
-        .map(|arg| quote_for_display(arg))
+        .map(|arg| quote_word(arg.as_ref()))
         .collect::<Vec<_>>()
         .join(" ")
 }
 
-/// Everything a POSIX shell gives meaning to, plus the quote characters. An
-/// argument containing none of these reads back the way it was typed.
+/// `prefix` followed by already rendered words, with no trailing space when
+/// there are none: `with_args("git diff", "")` is `git diff`.
+pub fn with_args(prefix: &str, rendered: &str) -> String {
+    if rendered.is_empty() {
+        prefix.to_string()
+    } else {
+        format!("{prefix} {rendered}")
+    }
+}
+
+/// Render a whole command line, program word first: [`display_args`], with the
+/// program word through [`quote_program`].
+pub fn display_command<S: AsRef<str>>(argv: &[S]) -> String {
+    let Some((program, args)) = argv.split_first() else {
+        return String::new();
+    };
+    let program = quote_program(program.as_ref());
+    if args.is_empty() {
+        program.into_owned()
+    } else {
+        format!("{program} {}", display_args(args))
+    }
+}
+
+/// Everything a POSIX shell gives meaning to, plus the quote characters.
 const SHELL_METACHARACTERS: &[char] = &[
     ' ', '\t', '\n', '\r', '\'', '"', '\\', '*', '?', '[', ']', '{', '}', '(', ')', '$', '&', ';',
     '|', '<', '>', '`', '!', '#', '~', '=', '^',
 ];
 
-fn quote_for_display(arg: &str) -> Cow<'_, str> {
-    if !arg.is_empty() && !arg.contains(SHELL_METACHARACTERS) {
-        return Cow::Borrowed(arg);
+/// Quote one word the way Python's `shlex.quote` does.
+///
+/// A word made only of ASCII letters, digits and `-_./=:,@+%` is returned as
+/// written, unless it starts with `=`, which zsh expands to a command's path.
+/// Anything else, the empty word included, is wrapped in single quotes, with an
+/// inner `'` written as `'\''`.
+pub fn quote_word(word: &str) -> Cow<'_, str> {
+    let plain = |b: u8| b.is_ascii_alphanumeric() || b"-_./=:,@+%".contains(&b);
+    if !word.is_empty() && !word.starts_with('=') && word.bytes().all(plain) {
+        return Cow::Borrowed(word);
     }
-    Cow::Owned(format!("'{}'", arg.replace('\'', r"'\''")))
+    always_quoted(word)
+}
+
+/// The words bash reads as part of its own grammar in command position. The
+/// symbol ones (`!`, `[[`, `]]`, `{`, `}`) are left out: [`quote_word`] quotes
+/// them already.
+const BASH_RESERVED_WORDS: &[&str] = &[
+    "case", "coproc", "do", "done", "elif", "else", "esac", "fi", "for", "function", "if", "in",
+    "select", "then", "time", "until", "while",
+];
+
+/// Quote the program word of a command line: as [`quote_word`], and also when a
+/// shell would not run it as a program. That is a bash reserved word (`time`
+/// runs bash's keyword, not `/usr/bin/time`) or the shape of an assignment
+/// (`NAME=...` or `NAME+=...`), which sets a variable. An argument such as `time`, `KEY=value`
+/// or `--format=x` stays bare.
+pub fn quote_program(word: &str) -> Cow<'_, str> {
+    let is_name = |name: &str| {
+        name.bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    };
+    // `NAME+=value` appends, and is an assignment too.
+    let assignment = word
+        .split_once('=')
+        .is_some_and(|(name, _)| is_name(name.strip_suffix('+').unwrap_or(name)));
+    if assignment || BASH_RESERVED_WORDS.contains(&word) {
+        always_quoted(word)
+    } else {
+        quote_word(word)
+    }
+}
+
+fn always_quoted(word: &str) -> Cow<'_, str> {
+    Cow::Owned(format!("'{}'", word.replace('\'', r"'\''")))
 }
 
 #[cfg(windows)]
@@ -250,6 +321,9 @@ fn command_flag(shell: &str) -> &'static str {
         _ => "-c",
     }
 }
+
+#[cfg(test)]
+mod label_scan;
 
 #[cfg(test)]
 mod tests {
@@ -462,5 +536,118 @@ mod tests {
             display_args(&args),
             "/bin/echo 'a b' '*' '$HOME' 'a;b' 'x&&y' 'p|q'"
         );
+    }
+
+    #[test]
+    fn quote_word_keeps_plain_words_as_written() {
+        for word in [
+            "git",
+            "--oneline",
+            "-n",
+            "src/main.rs",
+            "--format=%H",
+            "user@host:path",
+            "a,b+c",
+            "_x.y",
+        ] {
+            assert_eq!(quote_word(word), word);
+        }
+    }
+
+    #[test]
+    fn quote_word_quotes_a_blank() {
+        assert_eq!(quote_word("a b"), "'a b'");
+        assert_eq!(quote_word("a\tb"), "'a\tb'");
+        assert_eq!(quote_word("a\nb"), "'a\nb'");
+    }
+
+    #[test]
+    fn quote_word_quotes_every_special_byte_class() {
+        for word in [
+            "foo()", "$HOME", "a;b", "x&&y", "p|q", "<in", "out>", "`id`", "\"q\"", "a\\b", "*.rs",
+            "a?", "[ab]", "{a,b}", "!x", "#c", "~", "^x", "\u{7}",
+        ] {
+            assert_eq!(quote_word(word), format!("'{word}'"), "{word:?}");
+        }
+    }
+
+    #[test]
+    fn quote_word_escapes_an_inner_single_quote() {
+        assert_eq!(quote_word("it's"), r"'it'\''s'");
+        assert_eq!(quote_word("'"), r"''\'''");
+    }
+
+    /// zsh expands a word starting with `=` to a command's path, so that word is quoted;
+    /// an `=` later in a word stays bare.
+    #[test]
+    fn quote_word_quotes_a_leading_equals_sign() {
+        assert_eq!(quote_word("=foo"), "'=foo'");
+        assert_eq!(quote_word("="), "'='");
+        assert_eq!(quote_word("--format=x"), "--format=x");
+        assert_eq!(quote_word("KEY=value"), "KEY=value");
+    }
+
+    /// A bash reserved word in command position is part of bash's grammar, so it is quoted
+    /// there and nowhere else.
+    #[test]
+    fn a_reserved_word_as_program_is_quoted() {
+        for word in ["time", "if", "while", "function"] {
+            assert_eq!(quote_program(word), format!("'{word}'"), "{word:?}");
+        }
+        for word in ["!", "[[", "]]", "{", "}"] {
+            assert_eq!(quote_word(word), format!("'{word}'"), "{word:?}");
+        }
+        assert_eq!(quote_word("time"), "time");
+        assert_eq!(quote_program("timeout"), "timeout");
+    }
+
+    /// A program word shaped like `NAME=...` reads as an assignment in a shell, so it is
+    /// quoted; the same word as an argument is not.
+    #[test]
+    fn an_assignment_shaped_program_word_is_quoted() {
+        assert_eq!(quote_program("FOO=1"), "'FOO=1'");
+        assert_eq!(quote_program("FOO+=1"), "'FOO+=1'");
+        assert_eq!(quote_program("+=1"), "+=1");
+        assert_eq!(quote_word("FOO+=1"), "FOO+=1");
+        assert_eq!(quote_program("_x2=a b"), "'_x2=a b'");
+        assert_eq!(quote_program("./a=b"), "./a=b");
+        assert_eq!(quote_program("2x=y"), "2x=y");
+        assert_eq!(quote_program("make"), "make");
+        assert_eq!(quote_program("/p/My Tools/run"), "'/p/My Tools/run'");
+        assert_eq!(
+            display_command(&["FOO=1", "KEY=value", "--format=x"]),
+            "'FOO=1' KEY=value --format=x"
+        );
+        assert_eq!(display_command(&["make"]), "make");
+        assert_eq!(display_command(&["time", "ls"]), "'time' ls");
+        assert_eq!(display_command(&["env", "time"]), "env time");
+        assert_eq!(display_command::<&str>(&[]), "");
+    }
+
+    #[test]
+    fn with_args_leaves_no_trailing_space() {
+        assert_eq!(with_args("git diff", ""), "git diff");
+        assert_eq!(
+            with_args("git diff", "--stat 'a b'"),
+            "git diff --stat 'a b'"
+        );
+    }
+
+    #[test]
+    fn quote_word_writes_the_empty_word_as_two_quotes() {
+        assert_eq!(quote_word(""), "''");
+        assert_eq!(display_args(&["grep", "", "f"]), "grep '' f");
+    }
+
+    #[test]
+    fn quote_word_quotes_non_ascii_text() {
+        assert_eq!(quote_word("héllo"), "'héllo'");
+        assert_eq!(quote_word("日本語"), "'日本語'");
+    }
+
+    #[test]
+    fn display_args_keeps_word_boundaries() {
+        assert_eq!(display_args(&["-n", "a b", "f"]), "-n 'a b' f");
+        assert_eq!(display_args(&["-n", "a", "b", "f"]), "-n a b f");
     }
 }
