@@ -60,10 +60,24 @@ See [Agent Coverage](../resources/agent-coverage.md) for the per-agent table.
 
 ## Installation by agent
 
+Run `rtk init -g` (or `rtk init` for a project) in a terminal without naming an agent and RTK
+shows a menu of the agents that scope supports, with the ones it finds on this machine already
+ticked (space toggles, enter confirms). With `-g` it then asks which
+[reviewed pipeline](https://www.rtk-ai.app/pipelines/) to run, and sets up each agent you picked.
+Every line below sets up one agent directly, with no menu.
+
+Without a terminal (CI, pipes, `--auto-patch`, `--no-patch`, `--dry-run`), a bare `rtk init`
+sets up Claude Code, as it always has, and prints one line on stderr saying how to choose
+another agent. Add `--pipeline <name>` to pick a reviewed pipeline there too:
+
+```bash
+rtk init -g --agent claude --auto-patch --pipeline laya-delegate
+```
+
 ### Claude Code
 
 ```bash
-rtk init --global    # installs hook + patches settings.json
+rtk init -g --agent claude    # installs hook + patches settings.json
 ```
 
 Restart Claude Code. Verify:
@@ -332,7 +346,7 @@ Building a harness of your own? A host can skip these hooks and call `rtk rewrit
 
 ## Windows support
 
-Since v0.37.2 the hooks for Claude Code, Cursor, Copilot, Codex, Trae, Factory Droid and Mistral Vibe are native binary commands (`rtk hook <agent>`), so auto-rewrite works on native Windows — no Unix shell, bash or jq required. `rtk init -g` installs the native hook on Windows exactly as on Linux and macOS, and adds it to Claude Code's `settings.json` once you answer `y` to the prompt (or pass `--auto-patch`).
+Since v0.37.2 the hooks for Claude Code, Cursor, Copilot, Codex, Trae, Factory Droid and Mistral Vibe are native binary commands (`rtk hook <agent>`), so auto-rewrite works on native Windows — no Unix shell, bash or jq required. `rtk init -g` installs the native hook on Windows exactly as on Linux and macOS, and adds it to Claude Code's `settings.json` once you answer Yes (or pass `--auto-patch`).
 
 The Gemini CLI hook is a small bash wrapper around `rtk hook gemini`, so it needs a bash available; [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) behaves identically to Linux.
 

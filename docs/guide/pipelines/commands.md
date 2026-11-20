@@ -183,6 +183,14 @@ A repo or gist is public, permanent, and indexable. **You** are responsible for 
 
 `add` is the other half of `share`: one command validates a shared pipeline, installs it, and tells you what it needs.
 
+The pipelines reviewed at [rtk-ai.app/pipelines](https://www.rtk-ai.app/pipelines/) can also be picked by name during setup. `rtk init -g` in a terminal lists them, with the one you run now marked `current`, and installs your choice pinned to its reviewed commit. Choosing another reviewed pipeline later replaces the reviewed one you had (your own pipeline files are never touched), and choosing `default-bash-compress` goes back to RTK's default with nothing installed. Without a terminal, pass the name:
+
+```bash
+rtk init -g --agent claude --pipeline laya-delegate
+```
+
+Init fetches the list from `rtk-ai.app/pipelines/index.json` with a 2-second limit, drops revoked entries, and keeps the last list it saw to use when the site cannot be reached.
+
 ```bash
 rtk pipeline add github:owner/repo              # a published repo (see `share publish`)
 rtk pipeline add github:owner/repo@<ref>        # a specific commit, tag, or branch

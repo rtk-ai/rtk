@@ -61,8 +61,8 @@ Two independent ways in. `rtk init` configures your agent once and persists it; 
 On a Claude Code init, RTK asks:
 
 ```
-  Set up the RTK proxy (routes Claude Code's API traffic through a local daemon)?
-    Yes  next, choose how the daemon comes back after a reboot
+  Set up the RTK daemon? It runs your pipeline on the requests Claude Code sends to the model (model routing, tool-result compression and more).
+    Yes  next, choose how it comes back after a reboot
   ▶ No  nothing changes
   ↑/↓ choose · y/n answer · enter confirm · esc cancel
 ```
@@ -81,7 +81,7 @@ Declining leaves everything alone: *"Skipped — enable later with `rtk init -g`
 
 If you already have the base URL set but nothing restarting the daemon, re-running `rtk init -g` asks only the persistence question.
 
-The question is only asked when the daemon can actually run: the `rtk-proxy` binary is installed (next to `rtk` or on `PATH`) or an rtk-proxy already answers on `127.0.0.1:8080`. Otherwise init says the proxy was not offered and leaves `settings.json` alone. `rtk init -g --uninstall` removes the `env.ANTHROPIC_BASE_URL` this flow wrote, when it still points at the RTK daemon; a base URL aimed anywhere else is kept.
+The question is only asked when the daemon can actually run: the `rtk-proxy` binary is installed (next to `rtk` or on `PATH`) or an rtk-proxy already answers on `127.0.0.1:8080`. Otherwise init says the daemon was not offered and leaves `settings.json` alone. `rtk init -g --uninstall` removes the `env.ANTHROPIC_BASE_URL` this flow wrote, when it still points at the RTK daemon; a base URL aimed anywhere else is kept.
 
 #### What the SessionStart hook actually does
 

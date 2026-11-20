@@ -15,6 +15,8 @@ pub mod filter;
 pub mod guard;
 pub mod http;
 #[cfg(feature = "engine")]
+pub mod pipeline_catalog;
+#[cfg(feature = "engine")]
 pub mod pipeline_cmd;
 #[cfg(feature = "engine")]
 pub mod pipeline_config;

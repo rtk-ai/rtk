@@ -30,6 +30,7 @@ mod copilot;
 pub(crate) mod cursor;
 pub(crate) mod droid;
 pub(crate) mod gemini;
+mod guided;
 pub(crate) mod hermes;
 mod instructions_agents;
 pub(crate) mod opencode;
@@ -63,6 +64,9 @@ pub(crate) use copilot::{COPILOT_HOOK_JSON, copilot_user_dir};
 pub use copilot::{run_copilot, run_copilot_global, uninstall_copilot, uninstall_copilot_global};
 pub use droid::{run_droid_mode, uninstall_droid};
 pub use gemini::run_gemini;
+#[cfg(feature = "engine")]
+pub use guided::pipeline_step;
+pub use guided::{guided_allowed, print_default_agent_hint, run_guided};
 pub use hermes::{run_hermes_mode, uninstall_hermes};
 pub use instructions_agents::{run_kilocode_mode, run_kimi_mode};
 pub use pi::{run_omp_mode_with_patch_mode, run_pi_mode_with_patch_mode};
@@ -1075,7 +1079,7 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
     if !crate::llm_proxy::binary_available() {
         eprintln!();
         eprintln!(
-            "  RTK proxy not offered: rtk-proxy is not installed (`rtk llm-proxy start` says where to get it)."
+            "  RTK daemon not offered: rtk-proxy is not installed (`rtk llm-proxy start` says where to get it)."
         );
         return Ok(());
     }
@@ -1101,25 +1105,25 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
             );
             if menu {
                 crate::core::ask::confirm(
-                    "  Replace it with the RTK proxy?",
+                    "  Replace it with the RTK daemon?",
                     "your current routing stops working",
                     "keep your current routing",
                 )?
             } else {
                 eprint!(
-                    "  Replace it with the RTK proxy? Your current routing stops working. [y/N] "
+                    "  Replace it with the RTK daemon? Your current routing stops working. [y/N] "
                 );
                 read_yes()?
             }
         } else if menu {
             crate::core::ask::confirm(
-                "  Set up the RTK proxy (routes Claude Code's API traffic through a local daemon)?",
-                "next, choose how the daemon comes back after a reboot",
+                "  Set up the RTK daemon? It runs your pipeline on the requests Claude Code sends to the model (model routing, tool-result compression and more).",
+                "next, choose how it comes back after a reboot",
                 "nothing changes",
             )?
         } else {
             eprint!(
-                "  Set up the RTK proxy (routes Claude Code's API traffic through a local daemon)? [y/N] "
+                "  Set up the RTK daemon? It runs your pipeline on the requests Claude Code sends to the model (model routing, tool-result compression and more). [y/N] "
             );
             read_yes()?
         };
@@ -1323,75 +1327,6 @@ fn ensure_pipeline_extends(builtin: &str, extra_body: &str) -> PipelineChange {
         Ok(()) => PipelineChange::Created(path.display().to_string()),
         Err(_) => PipelineChange::ManualNeeded,
     }
-}
-
-#[cfg(feature = "engine")]
-/// Delegation on-ramp: offer delegated reads. Writes the
-/// adoption block only into a fresh pipeline.toml; an existing file gets the
-/// block printed for the user to merge by hand.
-fn offer_delegation_onramp(patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
-    use std::io::{BufRead, IsTerminal};
-    if !matches!(patch_mode, PatchMode::Ask) {
-        return Ok(());
-    }
-    if ctx.dry_run || !std::io::stdin().is_terminal() {
-        return Ok(());
-    }
-    if crate::core::user_env::var("RTK_ONRAMP_DISABLED").as_deref() == Some("1") {
-        return Ok(());
-    }
-    let loaded = crate::core::pipeline_config::load();
-    if loaded
-        .resolved
-        .tasks
-        .values()
-        .any(|(task, _)| task.upstream.is_some())
-    {
-        return Ok(());
-    }
-
-    eprintln!();
-    let accepted = if crate::core::ask::interactive() {
-        crate::core::ask::confirm(
-            "  Delegate oversize reads to a cheaper model (needs a model API key)?",
-            "adopt rtk:delegate-reads, Gemini Flash by default",
-            "nothing changes",
-        )?
-    } else {
-        eprint!("  Delegate oversize reads to a cheaper model (needs a model API key)? [y/N] ");
-        let mut line = String::new();
-        std::io::stdin().lock().read_line(&mut line)?;
-        matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
-    };
-    if !accepted {
-        println!(
-            "  Skipped — adopt later with `extends = \"rtk:delegate-reads\"` (see `rtk pipeline show rtk:delegate-reads`)."
-        );
-        return Ok(());
-    }
-
-    const ADOPTION_BODY: &str = "\n[upstream.flash]\nprovider    = \"google\"\nmodel       = \"gemini-2.5-flash\"\napi_key_env = \"GEMINI_API_KEY\"\n\n[task.bulk-read]\nupstream = \"flash\"\n\n[task.code-write]\nupstream = \"flash\"\n";
-    match ensure_pipeline_extends("rtk:delegate-reads", ADOPTION_BODY) {
-        PipelineChange::Created(path) => {
-            println!("  {path}: created with the rtk:delegate-reads adoption block");
-            crate::core::pipeline_cmd::print_auth_guidance(
-                &crate::core::pipeline_config::load().resolved,
-            );
-            println!(
-                "  Set GEMINI_API_KEY (or edit the [upstream.flash] block), then re-run `rtk init -g`."
-            );
-        }
-        PipelineChange::AlreadyActive => {}
-        PipelineChange::ManualNeeded => {
-            println!("  Merge this into your pipeline.toml:");
-            println!("    [pipeline]");
-            println!("    extends = \"rtk:delegate-reads\"");
-            for body_line in ADOPTION_BODY.lines().filter(|l| !l.is_empty()) {
-                println!("    {body_line}");
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Prompt user for consent to patch settings.json.

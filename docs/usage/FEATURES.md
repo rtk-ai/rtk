@@ -1281,8 +1281,10 @@ Filtered output returned to Claude
 ### Installation
 
 ```bash
-rtk init -g                     # Recommended install (hook + RTK.md)
-rtk init -g --auto-patch        # Non-interactive (CI/CD)
+rtk init -g                     # Recommended install: a terminal shows a menu of agents and pipelines
+rtk init -g --agent claude      # Claude Code directly, no agent menu
+rtk init -g --auto-patch        # Non-interactive (CI/CD); with no --agent it sets up Claude Code
+rtk init -g --pipeline laya-delegate  # Also install a reviewed pipeline from rtk-ai.app/pipelines
 rtk init -g --hook-only         # Hook only, without RTK.md
 rtk init --show                 # Check the installation
 rtk init -g --uninstall         # Uninstall

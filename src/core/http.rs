@@ -61,6 +61,19 @@ pub fn get(url: &str) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
         .with_context(|| format!("GET {url}"))
 }
 
+#[cfg(feature = "engine")]
+pub fn get_within(
+    url: &str,
+    timeout: Duration,
+) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
+    use anyhow::Context;
+    // nosemgrep: ureq-outside-telemetry -- inbound GET of the reviewed-pipeline catalog, only during an interactive rtk init or --pipeline
+    let request = ureq::get(url);
+    global_timeout(request, timeout)
+        .call()
+        .with_context(|| format!("GET {url}"))
+}
+
 /// Abandons the request if the connection takes longer than `timeout` (ureq's
 /// `timeout_connect`); a slow body is left to finish.
 #[cfg(feature = "engine")]

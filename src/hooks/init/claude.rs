@@ -748,9 +748,6 @@ pub(super) fn run_default_mode(
             if let Err(e) = offer_proxy_onramp(&claude_dir.join(SETTINGS_JSON), patch_mode, ctx) {
                 eprintln!("  [warn] proxy on-ramp skipped: {e}");
             }
-            if let Err(e) = offer_delegation_onramp(patch_mode, ctx) {
-                eprintln!("  [warn] delegation on-ramp skipped: {e}");
-            }
         }
     }
 

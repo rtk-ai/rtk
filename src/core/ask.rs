@@ -224,6 +224,179 @@ pub(crate) fn prompt(question: &str) -> Result<String> {
     Ok(line.trim().to_string())
 }
 
+const PICK_HINT: &str = "  ↑/↓ move · space select · enter confirm · esc cancel";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManyStep {
+    Move(usize),
+    Toggle(usize),
+    Confirm,
+    Cancel,
+    Interrupt,
+    Ignore,
+}
+
+fn step_many(idx: usize, len: usize, key: KeyEvent) -> ManyStep {
+    if key.kind != KeyEventKind::Press {
+        return ManyStep::Ignore;
+    }
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            ManyStep::Move(if idx == 0 { len - 1 } else { idx - 1 })
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => ManyStep::Move((idx + 1) % len),
+        KeyCode::Char(' ') => ManyStep::Toggle(idx),
+        KeyCode::Char(c @ '1'..='9') => {
+            let n = c as usize - '1' as usize;
+            if n < len {
+                ManyStep::Toggle(n)
+            } else {
+                ManyStep::Ignore
+            }
+        }
+        KeyCode::Enter => ManyStep::Confirm,
+        KeyCode::Esc | KeyCode::Char('q') => ManyStep::Cancel,
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => ManyStep::Interrupt,
+        _ => ManyStep::Ignore,
+    }
+}
+
+pub(crate) fn pick_many(
+    question: &str,
+    items: &[(&str, &str)],
+    selected: &[bool],
+) -> Result<Option<Vec<usize>>> {
+    use colored::Colorize;
+    use crossterm::event::{Event, read};
+    use crossterm::{cursor, execute, terminal};
+    use std::io::Write;
+
+    println!("{question}");
+    let mut chosen: Vec<bool> = (0..items.len())
+        .map(|i| selected.get(i).copied().unwrap_or(false))
+        .collect();
+    if items.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    if terminal::enable_raw_mode().is_err() {
+        return pick_many_plain(items, &chosen);
+    }
+    let width = items
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let render = |idx: usize, chosen: &[bool]| -> Result<()> {
+        let mut out = std::io::stdout();
+        for (i, (label, hint)) in items.iter().enumerate() {
+            let pad = " ".repeat(width - label.chars().count());
+            let mark = if chosen[i] {
+                "[x]".green().to_string()
+            } else {
+                "[ ]".to_string()
+            };
+            if i == idx {
+                write!(
+                    out,
+                    "  {} {mark} {}{pad}  {}\r\n",
+                    "▶".green(),
+                    label.bold(),
+                    hint.dimmed()
+                )
+            } else {
+                write!(out, "    {mark} {label}{pad}  {}\r\n", hint.dimmed())
+            }
+            .context("render menu")?;
+        }
+        write!(out, "{}\r\n", PICK_HINT.dimmed()).context("render menu")?;
+        out.flush().context("flush menu")
+    };
+    let lines = items.len() as u16 + 1;
+    let mut idx = 0;
+    let mut run = || -> Result<ManyStep> {
+        render(idx, &chosen)?;
+        loop {
+            let Event::Key(key) = read().context("read key")? else {
+                continue;
+            };
+            match step_many(idx, items.len(), key) {
+                ManyStep::Move(next) => idx = next,
+                ManyStep::Toggle(i) => chosen[i] = !chosen[i],
+                ManyStep::Ignore => continue,
+                done => return Ok(done),
+            }
+            execute!(
+                std::io::stdout(),
+                cursor::MoveUp(lines),
+                terminal::Clear(terminal::ClearType::FromCursorDown)
+            )
+            .context("redraw menu")?;
+            render(idx, &chosen)?;
+        }
+    };
+    let result = run();
+    let _ = terminal::disable_raw_mode();
+    let result = result?;
+    execute!(
+        std::io::stdout(),
+        cursor::MoveUp(lines),
+        terminal::Clear(terminal::ClearType::FromCursorDown)
+    )
+    .ok();
+    let picked: Vec<usize> = (0..items.len()).filter(|i| chosen[*i]).collect();
+    match result {
+        ManyStep::Confirm if picked.is_empty() => println!("  ✗ nothing selected"),
+        ManyStep::Confirm => {
+            let names: Vec<&str> = picked.iter().map(|i| items[*i].0).collect();
+            println!("  {} {}", "✓".green(), names.join(", "));
+        }
+        _ => println!("  ✗ cancelled"),
+    }
+    match result {
+        ManyStep::Confirm => Ok(Some(picked)),
+        ManyStep::Interrupt => std::process::exit(130),
+        _ => Ok(None),
+    }
+}
+
+fn pick_many_plain(items: &[(&str, &str)], chosen: &[bool]) -> Result<Option<Vec<usize>>> {
+    for (i, (label, hint)) in items.iter().enumerate() {
+        let mark = if chosen[i] { "x" } else { " " };
+        println!("  {}. [{mark}] {label}  ({hint})", i + 1);
+    }
+    let defaults: Vec<String> = (0..items.len())
+        .filter(|i| chosen[*i])
+        .map(|i| (i + 1).to_string())
+        .collect();
+    let answer = prompt(&format!(
+        "numbers to select, separated by spaces [{}]: ",
+        defaults.join(" ")
+    ))?;
+    Ok(parse_numbers(&answer, items.len(), chosen))
+}
+
+fn parse_numbers(answer: &str, len: usize, chosen: &[bool]) -> Option<Vec<usize>> {
+    if answer.trim().is_empty() {
+        return Some((0..len).filter(|i| chosen[*i]).collect());
+    }
+    let mut out = Vec::new();
+    for token in answer
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+    {
+        match token.parse::<usize>() {
+            Ok(n) if (1..=len).contains(&n) => {
+                if !out.contains(&(n - 1)) {
+                    out.push(n - 1);
+                }
+            }
+            _ => return None,
+        }
+    }
+    out.sort_unstable();
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +474,33 @@ mod tests {
         assert_eq!(plain_answer("no", 2, 1, YES_NO_KEYS), Outcome::Chosen(1));
         assert_eq!(plain_answer("yep", 2, 1, YES_NO_KEYS), Outcome::Cancelled);
         assert_eq!(plain_answer("yes", 3, 0, &[]), Outcome::Cancelled);
+    }
+
+    #[test]
+    fn checkbox_keys_move_toggle_and_finish() {
+        assert_eq!(step_many(0, 3, key(KeyCode::Up)), ManyStep::Move(2));
+        assert_eq!(step_many(2, 3, key(KeyCode::Char('j'))), ManyStep::Move(0));
+        assert_eq!(
+            step_many(1, 3, key(KeyCode::Char(' '))),
+            ManyStep::Toggle(1)
+        );
+        assert_eq!(
+            step_many(0, 3, key(KeyCode::Char('3'))),
+            ManyStep::Toggle(2)
+        );
+        assert_eq!(step_many(0, 3, key(KeyCode::Char('4'))), ManyStep::Ignore);
+        assert_eq!(step_many(0, 3, key(KeyCode::Enter)), ManyStep::Confirm);
+        assert_eq!(step_many(0, 3, key(KeyCode::Esc)), ManyStep::Cancel);
+        assert_eq!(step_many(0, 3, ctrl('c')), ManyStep::Interrupt);
+    }
+
+    #[test]
+    fn checkbox_fallback_parses_numbers_and_keeps_defaults_on_enter() {
+        let chosen = [true, false, true];
+        assert_eq!(parse_numbers("", 3, &chosen), Some(vec![0, 2]));
+        assert_eq!(parse_numbers("2", 3, &chosen), Some(vec![1]));
+        assert_eq!(parse_numbers("3, 1 3", 3, &chosen), Some(vec![0, 2]));
+        assert_eq!(parse_numbers("4", 3, &chosen), None);
+        assert_eq!(parse_numbers("claude", 3, &chosen), None);
     }
 }

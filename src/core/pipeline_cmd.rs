@@ -556,6 +556,20 @@ pub fn run_add(
     force: bool,
     shadow: bool,
 ) -> Result<i32> {
+    add_pipeline(source, name_override, force, shadow, false)
+}
+
+pub fn install_from_init(source: &str) -> Result<i32> {
+    add_pipeline(source, None, true, false, true)
+}
+
+fn add_pipeline(
+    source: &str,
+    name_override: Option<&str>,
+    force: bool,
+    shadow: bool,
+    from_init: bool,
+) -> Result<i32> {
     let (raw, pin) = match crate::core::pipeline_remote::parse_github_source(source) {
         Some(src) => {
             let fetched = crate::core::pipeline_remote::fetch_github_pipeline(&src)?;
@@ -772,7 +786,7 @@ pub fn run_add(
         .keys()
         .any(|p| p.site == rtk_engine::pipeline::SiteKind::Hook && p.event == Event::AfterTool);
     let has_directives = loaded.resolved.directives.iter().any(|d| d.def.enabled);
-    if has_after_tool || has_directives {
+    if (has_after_tool || has_directives) && !from_init {
         let what = match (has_after_tool, has_directives) {
             (true, true) => "output compression and directives",
             (true, false) => "output compression",
