@@ -72,7 +72,7 @@ dirs = "7"
 # Pinned to what the proxy crate's icm-store links: libsqlite3-sys declares
 # `links = "sqlite3"`, and two versions of it cannot coexist in one workspace
 # resolve. See proxy/Cargo.toml.
-rusqlite = { version = "0.34", features = ["bundled"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
 toml = "1.2"
 toml_edit = "0.22"
 chrono = "0.4"
