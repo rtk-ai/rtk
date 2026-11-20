@@ -1,6 +1,6 @@
 //! Filters pytest output to show only failures and the summary line.
 
-use crate::core::arg_tokenizer::{Dialect, TokenKind, ValueSpec, tokenize_grammar};
+use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec, tokenize_grammar};
 use crate::core::config;
 use crate::core::runner;
 use crate::core::shell::display_args;
@@ -29,6 +29,14 @@ enum ParseState {
     Summary,
 }
 
+fn has_argument_file(args: &[String]) -> bool {
+    // pytest expands standalone @file arguments before parsing options, including
+    // separate option values and arguments after --. Attached values aren't expanded.
+    arg_tokenizer::tokenize(args)
+        .iter()
+        .any(|token| token.kind == TokenKind::Positional && token.text.starts_with('@'))
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = if tool_exists("pytest") {
         resolved_command("pytest")
@@ -37,6 +45,22 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         c.arg("-m").arg("pytest");
         c
     };
+
+    if has_argument_file(args) {
+        // Flags hidden in an argument file can override our traceback/report defaults.
+        // Preserve pytest's own reporting defaults by letting it own expansion and output.
+        cmd.args(args);
+        if verbose > 0 {
+            eprintln!("Running: pytest {}", display_args(args));
+        }
+        return runner::run(
+            cmd,
+            "pytest",
+            &display_args(args),
+            runner::RunMode::Passthrough,
+            runner::RunOptions::default(),
+        );
+    }
 
     let injected = injected_args(args);
     cmd.args(&injected);
@@ -486,6 +510,35 @@ fn parse_duration(summary: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn argument_files_are_detected_before_option_parsing() {
+        for args in [
+            vec!["@args.txt"],
+            vec!["@arguments with spaces.txt", "test_example.py"],
+            vec!["-k", "@selection.txt"],
+            vec!["--", "@args.txt"],
+            vec!["-q", "--", "@args.txt"],
+            vec!["@"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(has_argument_file(&args), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn at_sign_inside_an_argument_is_not_an_argument_file() {
+        for args in [
+            vec!["test_mail@example.py"],
+            vec!["./@literal.py"],
+            vec!["--override-ini=cache_dir=@cache"],
+            vec!["-k@example"],
+            vec!["--", "--name=@literal"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(!has_argument_file(&args), "{args:?}");
+        }
+    }
 
     #[test]
     fn test_filter_pytest_all_pass() {
