@@ -382,6 +382,13 @@ fn unparsed_signal(stdout: &str) -> usize {
         .count()
 }
 
+/// grep and rg both use exit 1 for "no match" and >=2 for a real engine error
+/// (unsupported flag, unreadable path). RTK must never turn a working command into
+/// a failure, so an engine error re-runs the agent's argv verbatim (#5192).
+fn engine_failed(exit_code: i32) -> bool {
+    exit_code > 1
+}
+
 /// Run real grep so matches and the savings baseline match the agent's command;
 /// rg is the fallback when grep is absent, rejects a flag, or `--type` is used.
 /// The search engine the agent actually invoked. RTK runs this binary verbatim
@@ -754,7 +761,7 @@ pub fn run(
     }
 
     if reads_piped_stdin {
-        return run_streaming_search(
+        let exit_code = run_streaming_search(
             &timer,
             engine,
             &extra_args,
@@ -763,7 +770,12 @@ pub fn run(
             max_results,
             &real_cmd,
             detected_flags,
-        );
+        )?;
+        return if engine_failed(exit_code) {
+            passthrough(&timer, engine, args, &real_cmd, true, false)
+        } else {
+            Ok(exit_code)
+        };
     }
 
     let result = engine_capture(engine, &extra_args, &patterns, &paths)?;
@@ -774,6 +786,12 @@ pub fn run(
     // Unparseable shape re-runs verbatim below (with its own stderr), so handle it
     // before surfacing this run's stderr (#2333).
     if unparsed_signal(&raw_output) > 0 {
+        return passthrough(&timer, engine, args, &real_cmd, false, false);
+    }
+
+    // BusyBox grep rejects RTK's `-I`/`--null` parse aids with exit 2. Re-run the
+    // agent's exact argv instead of surfacing an error the raw command never had.
+    if engine_failed(exit_code) {
         return passthrough(&timer, engine, args, &real_cmd, false, false);
     }
 
@@ -2331,6 +2349,16 @@ mod tests {
         let stdout =
             "file.txt\x003-context_before\nfile.txt\x004:match\nfile.txt\x005-context_after\n";
         assert_eq!(unparsed_signal(stdout), 0);
+    }
+
+    #[test]
+    fn test_engine_error_falls_back_but_no_match_does_not() {
+        // grep/rg: 0 match, 1 no match, >=2 real error (BusyBox rejects -I/--null
+        // with exit 2). Only the latter may trigger the verbatim re-run (#5192).
+        assert!(!engine_failed(0));
+        assert!(!engine_failed(1));
+        assert!(engine_failed(2));
+        assert!(engine_failed(127));
     }
 
     // --- has_context_flag ---
