@@ -60,9 +60,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("ruff");
 
     // Both spellings: injecting a second --output-format makes ruff reject the call.
-    let user_set_output_format = args
-        .iter()
-        .any(|a| a == "--output-format" || a.starts_with("--output-format="));
+    let user_set_output_format = ruff_has_output_format(args);
 
     let clean_outputs: &[&str] = if is_check && !user_set_output_format {
         &["[]"]
@@ -78,6 +76,17 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: ruff {}", args.join(" "));
     }
 
+    if ruff_output_is_document(route, args) {
+        // Captured filters normalize line endings and cap input at 10 MiB.
+        // Reuse the runner's native passthrough for complete documents.
+        return runner::run(
+            cmd,
+            "ruff",
+            &display_args(args),
+            runner::RunMode::Passthrough,
+            runner::RunOptions::default(),
+        );
+    }
     let owned_args = args.to_vec();
     runner::run_filtered(
         cmd,
@@ -93,24 +102,20 @@ fn is_analyze_graph_invocation(args: &[String]) -> bool {
 }
 
 /// Choose the output treatment for a routed invocation: check runs get the
-/// JSON summary, format runs the format summary, help and version requests
-/// stay complete, and everything else is a bounded passthrough.
+/// JSON summary by default, while explicitly selected formats and rule documents
+/// remain intact. Help, version and graph requests stay complete too.
 fn filter_ruff_output(args: &[String], stdout: &str) -> String {
     let route = route_ruff_args(args);
     let is_check = matches!(route, RuffRoute::Check { .. });
     let is_format = matches!(route, RuffRoute::Subcommand { at } if args[at] == "format");
     let trimmed = stdout.trim();
 
-    let user_set_output_format = args
-        .iter()
-        .any(|a| a == "--output-format" || a.starts_with("--output-format="));
-    let user_json_format = args.iter().enumerate().any(|(i, a)| {
-        a == "--output-format=json"
-            || (a == "--output-format" && args.get(i + 1).is_some_and(|n| n == "json"))
-    });
-    let use_json_filter = !user_set_output_format || user_json_format;
+    let user_set_output_format = ruff_has_output_format(args);
+    if ruff_output_is_document(route, args) {
+        return stdout.to_string();
+    }
 
-    if is_check && use_json_filter && !trimmed.is_empty() {
+    if is_check && !user_set_output_format && !trimmed.is_empty() {
         filter_ruff_check_json(stdout)
     } else if is_format {
         filter_ruff_format(stdout)
@@ -121,6 +126,32 @@ fn filter_ruff_output(args: &[String], stdout: &str) -> String {
     } else {
         truncate(trimmed, config::limits().passthrough_max_chars)
     }
+}
+
+/// An explicitly selected format is a document, including human-readable formats.
+/// Reuse #3964's tokenizer/value lookup, consuming global option values too.
+fn ruff_has_output_format(args: &[String]) -> bool {
+    let tokens = tokenize_grammar(
+        args,
+        &|kind, name| {
+            if kind == TokenKind::Long && name == "output-format" {
+                Some(ValueSpec::value())
+            } else {
+                ruff_takes_value(kind, name)
+            }
+        },
+        Dialect::Posix,
+    );
+    // Presence matters even without a value: let Ruff report the missing
+    // value instead of injecting JSON and turning it into a duplicate option.
+    before_dashdash(&tokens)
+        .iter()
+        .any(|t| t.kind == TokenKind::Long && t.text == "output-format")
+}
+
+fn ruff_output_is_document(route: RuffRoute, args: &[String]) -> bool {
+    ruff_has_output_format(args)
+        || matches!(route, RuffRoute::Subcommand { at } if matches!(args[at].as_str(), "rule" | "generate-shell-completion"))
 }
 
 /// Help and version requests must keep their full stdout.
@@ -233,9 +264,7 @@ fn requests_top_level(token: Token<'_>) -> bool {
 
 /// The complete argument vector rtk passes to ruff.
 fn plan_ruff_command(args: &[String]) -> Vec<String> {
-    let user_set_output_format = args
-        .iter()
-        .any(|a| a == "--output-format" || a.starts_with("--output-format="));
+    let user_set_output_format = ruff_has_output_format(args);
     if let RuffRoute::Check { explicit_at } = route_ruff_args(args) {
         let forwarded: Vec<&str> = args
             .iter()
@@ -248,9 +277,14 @@ fn plan_ruff_command(args: &[String]) -> Vec<String> {
             plan.push("--output-format=json".to_string());
         }
         plan.extend(forwarded.iter().map(|arg| (*arg).to_string()));
-        if forwarded
-            .iter()
-            .all(|arg| arg.starts_with('-') || arg.contains('='))
+        let tokens = tokenize_grammar(args, &ruff_takes_value, Dialect::Posix);
+        let has_path_after_separator = dashdash_index(&tokens)
+            .is_some_and(|at| tokens[at + 1..].iter().any(|t| t.is_free_positional()));
+        if !user_set_output_format
+            && !has_path_after_separator
+            && forwarded
+                .iter()
+                .all(|arg| arg.starts_with('-') || arg.contains('='))
         {
             plan.push(".".to_string());
         }
@@ -540,6 +574,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn completion_document_requires_the_routed_subcommand() {
+        let raw = "completion() { :; }\r\n".repeat(300);
+        for args in [
+            vec!["generate-shell-completion", "bash"],
+            vec!["--isolated", "generate-shell-completion", "bash"],
+            vec!["--config", "ruff.toml", "generate-shell-completion", "bash"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(String::from).collect();
+            assert!(ruff_output_is_document(route_ruff_args(&args), &args));
+            assert_eq!(filter_ruff_output(&args, &raw), raw);
+        }
+        for args in [
+            vec!["--config", "generate-shell-completion", "check", "src"],
+            vec!["check", "--", "generate-shell-completion"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(String::from).collect();
+            assert!(!ruff_output_is_document(route_ruff_args(&args), &args));
+        }
+    }
+
+    #[test]
     fn known_ruff_subcommands_do_not_route_through_check() {
         for subcommand in RUFF_SUBCOMMANDS {
             let args = vec![subcommand.to_string()];
@@ -630,10 +685,9 @@ mod tests {
             .expect("analyze graph output must remain valid JSON");
     }
 
-    /// Only invocations starting `analyze graph` are exempt from the passthrough cap:
-    /// `analyze help graph` and every other passthrough subcommand still get it.
+    /// Graph recognition stays narrow; rule documentation is independently complete.
     #[test]
-    fn only_analyze_graph_skips_the_passthrough_cap() {
+    fn graph_recognition_stays_narrow_and_rule_documentation_is_complete() {
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert!(is_analyze_graph_invocation(&args(&["analyze", "graph"])));
         assert!(is_analyze_graph_invocation(&args(&[
@@ -651,12 +705,7 @@ mod tests {
         let raw = include_str!("../../../tests/fixtures/ruff_rule_e501_raw.txt");
         assert!(raw.len() > config::limits().passthrough_max_chars);
         let result = filter_ruff_output(&args(&["rule", "E501"]), raw);
-        assert!(
-            result.ends_with("...") && raw.starts_with(result.trim_end_matches("...")),
-            "rule output must be a capped prefix of ruff's, got {} of {} bytes",
-            result.len(),
-            raw.len()
-        );
+        assert_eq!(result, raw);
     }
 
     #[test]
@@ -1169,8 +1218,8 @@ Would reformat: tests/test_utils.py
     #[test]
     fn ruff_other_subcommands_keep_the_bounded_passthrough() {
         let max_chars = config::limits().passthrough_max_chars;
-        let long = "rule F401: ".repeat(max_chars);
-        let out = filter_ruff_output(&owned(&["rule", "F401"]), &long);
+        let long = "config settings: ".repeat(max_chars);
+        let out = filter_ruff_output(&owned(&["config"]), &long);
         assert!(out.len() < long.len());
         assert!(out.ends_with("..."));
     }
@@ -1187,6 +1236,85 @@ Would reformat: tests/test_utils.py
         assert!(
             filter_ruff_output(&owned(&["format", "--check", "dirty.py"]), mixed)
                 .contains("1 files need formatting")
+        );
+    }
+    #[test]
+    fn explicit_formats_preserve_large_documents_and_line_endings() {
+        let raw = format!("  {}\n\n", "document ".repeat(1000));
+        for command in ["check", "format", "rule"] {
+            for format in ["json", "json-lines", "sarif", "junit", "gitlab", "concise"] {
+                for args in [
+                    owned(&[command, "--output-format", format, "target"]),
+                    owned(&[command, &format!("--output-format={format}"), "target"]),
+                ] {
+                    assert_eq!(filter_ruff_output(&args, &raw), raw, "{args:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn output_format_lookup_respects_option_values_and_path_boundary() {
+        for args in [
+            owned(&["check", "--", "--output-format=json"]),
+            owned(&["--config=--output-format=json", "check", "file.py"]),
+        ] {
+            assert!(!ruff_has_output_format(&args), "{args:?}");
+        }
+        let args = owned(&[
+            "--config",
+            "format",
+            "check",
+            "--output-format",
+            "sarif",
+            "big",
+        ]);
+        assert!(ruff_has_output_format(&args));
+        assert_eq!(
+            plan_ruff_command(&args),
+            owned(&[
+                "check",
+                "--config",
+                "format",
+                "--output-format",
+                "sarif",
+                "big"
+            ])
+        );
+        assert_plan(
+            &["check", "--", "--output-format=json"],
+            &[
+                "check",
+                "--output-format=json",
+                "--",
+                "--output-format=json",
+            ],
+        );
+    }
+
+    #[test]
+    fn missing_output_format_value_is_forwarded_for_native_validation() {
+        for args in [
+            owned(&["check", "--output-format"]),
+            owned(&["--output-format"]),
+        ] {
+            assert!(ruff_has_output_format(&args));
+            assert!(ruff_output_is_document(route_ruff_args(&args), &args));
+            assert_eq!(
+                plan_ruff_command(&args),
+                owned(&["check", "--output-format"])
+            );
+        }
+    }
+
+    #[test]
+    fn implicit_checks_keep_user_selected_documents() {
+        let args = owned(&["--output-format", "json-lines", "file.py"]);
+        let raw = "{\"code\":\"F401\"}\n";
+        assert_eq!(filter_ruff_output(&args, raw), raw);
+        assert_plan(
+            &["--output-format", "json-lines", "file.py"],
+            &["check", "--output-format", "json-lines", "file.py"],
         );
     }
 }
