@@ -43,7 +43,7 @@ Agent runs "cargo test"
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | Rust binary (`PreToolUse`) | Yes |
-| Kilo Code | Rules file (prompt-level) | N/A |
+| Kilo Code | TypeScript plugin (`tool.execute.before`) | Yes |
 | Google Antigravity | Rust binary (`PreToolUse` plugin) | Yes |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
 
@@ -272,10 +272,16 @@ If you install RTK into repositories you have not read, check what `AGENTS.md` a
 ### Kilo Code
 
 ```bash
-rtk init --agent kilocode    # creates .kilocode/rules/rtk-rules.md in current project
+rtk init -g --agent kilocode
 ```
 
-Kilo Code reads `.kilocode/rules/` as custom instructions. RTK adds guidance telling Kilo Code to prefer `rtk <cmd>` over raw commands.
+Installs `~/.config/kilo/plugin/rtk.ts`. The plugin intercepts eligible Bash and shell tool calls, runs `rtk rewrite`, and mutates the command in place. Commands with machine-readable output flags pass through unchanged. Re-run the command to update the plugin.
+
+Uninstall:
+
+```bash
+rtk init -g --agent kilocode --uninstall
+```
 
 ### Google Antigravity (CLI, IDE & 2.0)
 
@@ -326,7 +332,7 @@ Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any o
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Kilo Code) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Codex, Factory Droid, Antigravity) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Pi, Hermes) use in-place mutation via the agent's extension or plugin API.
+Rules file integrations (Cline, Windsurf) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Codex, Factory Droid, Antigravity) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Pi, Hermes, Kilo Code) use in-place mutation via the agent's extension or plugin API.
 
 Building a harness of your own? A host can skip these hooks and call `rtk rewrite` from its own bash tool. [Embedding rtk in your own agent harness](embedding.md) covers the exit-code contract, where the call goes, the fail-open rules, and per-session accounting.
 

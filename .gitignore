@@ -60,6 +60,8 @@ claudedocs
 # icm 
 .fastembed_cache/
 
+# Local Kilo config (may contain machine-local settings/tokens)
+.kilo/
 # Release archives, produced at the repo root by the packaging steps. Build
 # output, never committed.
 /rtk-*.tar.gz

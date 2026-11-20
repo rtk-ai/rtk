@@ -118,65 +118,6 @@ pub(super) fn run_windsurf_mode(ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
-// Kilo Code support
-
-pub fn run_kilocode_mode(ctx: InitContext) -> Result<()> {
-    run_kilocode_mode_at(&user_dirs::current_dir()?, ctx)
-}
-
-fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
-    let InitContext {
-        verbose, dry_run, ..
-    } = ctx;
-    // Kilo Code reads .kilocode/rules/ from the project root (workspace-scoped)
-    let target_dir = base_dir.join(".kilocode/rules");
-    let rules_path = target_dir.join("rtk-rules.md");
-
-    let existing = fs::read_to_string(&rules_path).unwrap_or_default();
-    if existing.contains("RTK") || existing.contains("rtk") {
-        if !dry_run {
-            println!("\nRTK already configured for Kilo Code in this project.\n");
-            println!("  Rules: .kilocode/rules/rtk-rules.md (already present)");
-        }
-    } else {
-        let new_content = if existing.trim().is_empty() {
-            RTK_AWARENESS_FULL.to_string()
-        } else {
-            format!("{}\n\n{}", existing.trim(), RTK_AWARENESS_FULL)
-        };
-        if dry_run {
-            println!(
-                "[dry-run] would write {}: (and create parent dir if missing)",
-                rules_path.display()
-            );
-            if verbose > 0 {
-                println!("[dry-run] content:\n{}", new_content);
-            }
-        } else {
-            fs::create_dir_all(&target_dir)
-                .context("Failed to create .kilocode/rules directory")?;
-            fs::write(&rules_path, &new_content)
-                .context("Failed to write .kilocode/rules/rtk-rules.md")?;
-
-            if verbose > 0 {
-                eprintln!("Wrote .kilocode/rules/rtk-rules.md");
-            }
-
-            println!("\nRTK configured for Kilo Code.\n");
-            println!("  Rules: .kilocode/rules/rtk-rules.md (installed)");
-        }
-    }
-    print_instructions_agents_awareness_note("Kilo Code", ctx);
-    if dry_run {
-        print_dry_run_footer();
-    } else {
-        println!("  Kilo Code will now use rtk commands for token savings.");
-        println!("  Test with: git status\n");
-    }
-
-    Ok(())
-}
-
 // Kimi AI support
 //
 // Kimi Code CLI has NO `.kimirules` convention — that file is never read.
@@ -218,31 +159,6 @@ mod tests {
     use super::codex::{codex_rtk_md_content, run_codex_mode_with_paths};
     use super::*;
     use tempfile::TempDir;
-
-    #[test]
-    fn test_kilocode_mode_creates_rules_file() {
-        let temp = TempDir::new().unwrap();
-        run_kilocode_mode_at(temp.path(), InitContext::default()).unwrap();
-
-        let rules_path = temp.path().join(".kilocode/rules/rtk-rules.md");
-        assert!(rules_path.exists(), "Rules file should be created");
-        let content = fs::read_to_string(&rules_path).unwrap();
-        assert_eq!(content, RTK_AWARENESS_FULL);
-    }
-
-    #[test]
-    fn test_kilocode_mode_is_idempotent() {
-        let temp = TempDir::new().unwrap();
-        run_kilocode_mode_at(temp.path(), InitContext::default()).unwrap();
-
-        let path = temp.path().join(".kilocode/rules/rtk-rules.md");
-        let first = fs::read_to_string(&path).unwrap();
-
-        // Second run should not overwrite
-        run_kilocode_mode_at(temp.path(), InitContext::default()).unwrap();
-        let second = fs::read_to_string(&path).unwrap();
-        assert_eq!(first, second, "Idempotent: content should not change");
-    }
 
     #[test]
     fn test_kimi_mode_writes_agents_md() {
@@ -288,13 +204,6 @@ mod tests {
                 ..Default::default()
             };
             let temp = TempDir::new().unwrap();
-
-            run_kilocode_mode_at(temp.path(), ctx).unwrap();
-            assert_eq!(
-                fs::read_to_string(temp.path().join(".kilocode/rules/rtk-rules.md")).unwrap(),
-                RTK_AWARENESS_FULL,
-                "kilocode with level {level}"
-            );
 
             run_kimi_mode_at(temp.path(), ctx).unwrap();
             let agents_md = fs::read_to_string(temp.path().join(AGENTS_MD)).unwrap();

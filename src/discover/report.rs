@@ -2,8 +2,9 @@
 
 use crate::core::user_dirs;
 use crate::hooks::constants::{
-    COPILOT_HOOK_FILE, CURSOR_DIR, GITHUB_DIR, HERMES_DIR, HERMES_PLUGIN_MANIFEST_FILE,
-    HERMES_PLUGIN_NAME, HERMES_PLUGINS_SUBDIR, HOOKS_SUBDIR, REWRITE_HOOK_FILE,
+    CONFIG_DIR, COPILOT_HOOK_FILE, CURSOR_DIR, GITHUB_DIR, HERMES_DIR, HERMES_PLUGIN_MANIFEST_FILE,
+    HERMES_PLUGIN_NAME, HERMES_PLUGINS_SUBDIR, HOOKS_SUBDIR, KILOCODE_PLUGIN_FILE,
+    KILOCODE_PLUGIN_SUBDIR, KILOCODE_SUBDIR, REWRITE_HOOK_FILE,
 };
 use serde::Serialize;
 use std::path::Path;
@@ -54,6 +55,7 @@ pub struct AgentIntegrationStatus {
     pub cursor_hook_installed: bool,
     pub hermes_plugin_installed: bool,
     pub copilot_hook_installed: bool,
+    pub kilocode_plugin_installed: bool,
 }
 
 impl AgentIntegrationStatus {
@@ -61,6 +63,7 @@ impl AgentIntegrationStatus {
         let mut status = user_dirs::home()
             .map(|home| Self::detect_from_home(&home))
             .unwrap_or_default();
+        status.kilocode_plugin_installed = crate::hooks::init::kilocode_plugin_installed();
         // Copilot is project-scoped (.github/hooks/), unlike the home-based agents.
         status.copilot_hook_installed = user_dirs::working_dir()
             .map(|cwd| Self::copilot_hook_installed_in(&cwd))
@@ -82,6 +85,12 @@ impl AgentIntegrationStatus {
                 .join(HERMES_PLUGIN_MANIFEST_FILE)
                 .is_file(),
             copilot_hook_installed: false,
+            kilocode_plugin_installed: home
+                .join(CONFIG_DIR)
+                .join(KILOCODE_SUBDIR)
+                .join(KILOCODE_PLUGIN_SUBDIR)
+                .join(KILOCODE_PLUGIN_FILE)
+                .is_file(),
         }
     }
 
@@ -327,6 +336,10 @@ fn append_agent_notes(out: &mut String, status: AgentIntegrationStatus) {
 
     if status.copilot_hook_installed {
         out.push_str("\nNote: GitHub Copilot sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
+    }
+
+    if status.kilocode_plugin_installed {
+        out.push_str("\nNote: Kilo Code plugin is installed; Kilo Code sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
     }
 }
 
@@ -632,6 +645,7 @@ mod tests {
             cursor_hook_installed: true,
             hermes_plugin_installed: true,
             copilot_hook_installed: true,
+            kilocode_plugin_installed: true,
         };
 
         let output = format_json(&report);
@@ -640,6 +654,37 @@ mod tests {
         assert_eq!(json["agent_status"]["cursor_hook_installed"], true);
         assert_eq!(json["agent_status"]["hermes_plugin_installed"], true);
         assert_eq!(json["agent_status"]["copilot_hook_installed"], true);
+        assert_eq!(json["agent_status"]["kilocode_plugin_installed"], true);
+    }
+
+    #[test]
+    fn test_agent_status_detects_kilocode_plugin() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let plugin = temp_home
+            .path()
+            .join(CONFIG_DIR)
+            .join(KILOCODE_SUBDIR)
+            .join(KILOCODE_PLUGIN_SUBDIR)
+            .join(KILOCODE_PLUGIN_FILE);
+        std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        std::fs::write(&plugin, "export default {}\n").unwrap();
+
+        let status = AgentIntegrationStatus::detect_from_home(temp_home.path());
+
+        assert!(status.kilocode_plugin_installed);
+    }
+
+    #[test]
+    fn test_format_text_reports_kilocode_plugin_detected() {
+        let mut report = make_report(0, 0);
+        report.agent_status = AgentIntegrationStatus {
+            kilocode_plugin_installed: true,
+            ..AgentIntegrationStatus::default()
+        };
+
+        let output = format_text(&report, 10, false);
+
+        assert!(output.contains("Kilo Code plugin is installed"));
     }
 
     #[test]

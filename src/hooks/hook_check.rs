@@ -13,7 +13,7 @@ pub enum HookStatus {
     Ok,
     /// Hook exists but is outdated or unreadable.
     Outdated,
-    /// No hook file found (but Claude Code is installed).
+    /// Claude Code is installed but its RTK hook was not found.
     Missing,
 }
 
@@ -30,6 +30,7 @@ const AGENT_PROBES: &[fn() -> bool] = &[
     super::init::hermes::is_configured,
     super::init::pi::is_configured,
     super::init::vibe::is_configured,
+    super::init::kilocode_plugin_installed,
 ];
 
 /// Returns true if at least one supported non-Claude agent has an active hook/plugin configured.
@@ -118,6 +119,9 @@ mod tests {
     use super::*;
     use crate::core::test_isolation;
     use crate::core::user_env;
+    use crate::hooks::constants::{
+        HOOKS_SUBDIR, KILOCODE_PLUGIN_FILE, KILOCODE_PLUGIN_SUBDIR, REWRITE_HOOK_FILE,
+    };
 
     #[test]
     fn test_parse_hook_version_present() {
@@ -214,6 +218,20 @@ mod tests {
         });
     }
 
+    fn with_env_overrides<F: FnOnce(&std::path::Path, &std::path::Path)>(f: F) {
+        let tmp = test_isolation::tempdir();
+        let claude_dir = tmp.path().join(".claude");
+        let kilo_dir = tmp.path().join("kilo");
+        std::fs::create_dir_all(&claude_dir).expect("create Claude directory");
+
+        test_isolation::with_agent_dir(tmp.path(), "CLAUDE_CONFIG_DIR", &claude_dir, || {
+            let _entered = test_isolation::enter(tmp.path());
+            user_env::with_path("KILO_CONFIG_DIR", Some(&kilo_dir), || {
+                f(&claude_dir, &kilo_dir)
+            });
+        });
+    }
+
     #[test]
     fn test_probes_ignore_foreign_hooks_in_agent_files() {
         let tmp = test_isolation::tempdir();
@@ -245,6 +263,60 @@ mod tests {
                 "a Vibe hook not named rtk-rewrite is not an rtk install"
             );
             assert!(!is_any_agent_configured(), "no agent is configured");
+        });
+    }
+
+    #[test]
+    fn test_status_outdated_claude_hook_not_suppressed_by_kilocode_plugin() {
+        with_env_overrides(|claude_dir, kilo_dir| {
+            let claude_hooks = claude_dir.join(HOOKS_SUBDIR);
+            std::fs::create_dir_all(&claude_hooks).expect("create Claude hooks directory");
+            std::fs::write(
+                claude_hooks.join(REWRITE_HOOK_FILE),
+                b"#!/bin/bash\n# rtk-hook-version: 2\n",
+            )
+            .expect("write outdated Claude hook");
+
+            let kilo_plugin_dir = kilo_dir.join(KILOCODE_PLUGIN_SUBDIR);
+            std::fs::create_dir_all(&kilo_plugin_dir).expect("create Kilo plugin directory");
+            std::fs::write(kilo_plugin_dir.join(KILOCODE_PLUGIN_FILE), b"// plugin")
+                .expect("write Kilo plugin");
+
+            assert_eq!(status(), HookStatus::Outdated);
+            check_and_warn();
+            assert!(warn_marker_path().expect("warning marker path").exists());
+        });
+    }
+
+    #[test]
+    fn test_missing_claude_warning_suppressed_when_kilocode_plugin_installed() {
+        with_env_overrides(|_claude_dir, kilo_dir| {
+            let kilo_plugin_dir = kilo_dir.join(KILOCODE_PLUGIN_SUBDIR);
+            std::fs::create_dir_all(&kilo_plugin_dir).expect("create Kilo plugin directory");
+            let plugin = kilo_plugin_dir.join(KILOCODE_PLUGIN_FILE);
+            std::fs::write(&plugin, b"// plugin").expect("write Kilo plugin");
+
+            assert_eq!(status(), HookStatus::Missing);
+            assert!(is_any_agent_configured());
+            let marker = warn_marker_path().expect("warning marker path");
+            check_and_warn();
+            assert!(
+                !marker.exists(),
+                "Kilo plugin suppresses missing-hook warning"
+            );
+
+            std::fs::remove_file(&plugin).expect("remove Kilo plugin");
+            assert!(!is_any_agent_configured());
+            check_and_warn();
+            assert!(marker.exists(), "removing Kilo plugin restores the warning");
+        });
+    }
+
+    #[test]
+    fn test_status_missing_claude_hook_returns_missing_when_no_kilocode_plugin() {
+        with_env_overrides(|_claude_dir, _kilo_dir| {
+            assert_eq!(status(), HookStatus::Missing);
+            assert!(!is_any_agent_configured());
         });
     }
 

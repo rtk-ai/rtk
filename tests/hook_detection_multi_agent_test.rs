@@ -195,6 +195,11 @@ fn test_init_and_uninstall_cycle_for_all_global_agents() {
             &["-g", "--agent", "antigravity"],
             &["-g", "--agent", "antigravity", "--uninstall"],
         ),
+        (
+            "kilocode-global",
+            &["-g", "--agent", "kilocode"],
+            &["-g", "--agent", "kilocode", "--uninstall"],
+        ),
     ];
 
     for (label, install_args, uninstall_args) in cases {
@@ -377,28 +382,32 @@ fn test_cursor_unregistered_legacy_script_warns() {
 
 #[test]
 fn test_outdated_claude_hook_still_warns_even_with_other_agent() {
-    let (ws, home) = fresh_env();
-    // Configure Antigravity in workspace
-    run_rtk_init(ws.path(), home.path(), &["--agent", "antigravity"]);
+    for install_args in [
+        &["--agent", "antigravity"][..],
+        &["-g", "--agent", "kilocode"][..],
+    ] {
+        let (ws, home) = fresh_env();
+        run_rtk_init(ws.path(), home.path(), install_args);
 
-    // Configure outdated Claude script hook (version 2 < 4)
-    let hooks_dir = home.path().join(".claude/hooks");
-    fs::create_dir_all(&hooks_dir).expect("create .claude/hooks");
-    fs::write(
-        hooks_dir.join("rtk-rewrite.sh"),
-        "#!/usr/bin/env bash\n# rtk-hook-version: 2\n",
-    )
-    .expect("write old hook");
+        // Configure outdated Claude script hook (version 2 < 4)
+        let hooks_dir = home.path().join(".claude/hooks");
+        fs::create_dir_all(&hooks_dir).expect("create .claude/hooks");
+        fs::write(
+            hooks_dir.join("rtk-rewrite.sh"),
+            "#!/usr/bin/env bash\n# rtk-hook-version: 2\n",
+        )
+        .expect("write old hook");
 
-    let (_, _, gain_stderr) = run_rtk_gain(ws.path(), home.path());
-    assert!(
-        gain_stderr.contains(OUTDATED_WARNING),
-        "Outdated hook must warn in rtk gain even when another agent is installed. Got:\n{gain_stderr}"
-    );
+        let (_, _, gain_stderr) = run_rtk_gain(ws.path(), home.path());
+        assert!(
+            gain_stderr.contains(OUTDATED_WARNING),
+            "Outdated hook must warn in rtk gain even with {install_args:?}. Got:\n{gain_stderr}"
+        );
 
-    let (_, _, ls_stderr) = run_rtk_ls(ws.path(), home.path());
-    assert!(
-        ls_stderr.contains(OUTDATED_WARNING),
-        "Outdated hook must warn in daily check even when another agent is installed. Got:\n{ls_stderr}"
-    );
+        let (_, _, ls_stderr) = run_rtk_ls(ws.path(), home.path());
+        assert!(
+            ls_stderr.contains(OUTDATED_WARNING),
+            "Outdated hook must warn in daily check even with {install_args:?}. Got:\n{ls_stderr}"
+        );
+    }
 }

@@ -252,13 +252,15 @@ RTK supports 18 AI coding tools. With a **hook** or **plugin**, `rtk init` insta
 | **OpenClaw** | `openclaw plugins install ./openclaw` | plugin |
 | **Pi** / **Oh My Pi** | `rtk init -g --agent pi` / `--agent omp` | plugin |
 | **Hermes** | `rtk init --agent hermes` | plugin |
+| **Kilo Code** | `rtk init -g --agent kilocode` | plugin |
 | **Windsurf** | `rtk init -g --agent windsurf` | rules file |
 | **Cline / Roo Code** | `rtk init --agent cline` | rules file |
-| **Kilo Code** | `rtk init --agent kilocode` | rules file |
 | **Google Antigravity** | `rtk init --agent antigravity` (or `-g`) | rules file |
 | **Kimi AI** | `rtk init --agent kimi` | rules file |
 
 Per-agent setup, what each hook API allows, override controls: **[Supported Agents](https://www.rtk-ai.app/docs/getting-started/supported-agents/)** · **[Agent Coverage](https://www.rtk-ai.app/docs/resources/agent-coverage/)**
+
+For Kilo Code installation from source, executable discovery, and isolated regression tests, see [hooks/kilocode/README.md](hooks/kilocode/README.md).
 
 <br>
 
