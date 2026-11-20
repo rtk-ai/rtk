@@ -145,6 +145,6 @@ jq -n \
     "hookSpecificOutput": {
       "hookEventName": "PreToolUse",
       "permissionDecision": "allow",
-      "systemMessage": ("⚡ RTK available: `" + $suggestion + "` (60-90% token savings)")
+      "systemMessage": ("⚡ RTK available: `" + $suggestion + "` (token-optimized output)")
     }
   }'

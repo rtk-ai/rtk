@@ -38,8 +38,9 @@ pub(crate) fn sanitize_slug(slug: &str) -> String {
 /// because a clash also requires the identical readable prefix *and* the same
 /// epoch second, which together scope tee writes exactly as before.
 fn short_hash(s: &str) -> String {
+    use base16ct::HexDisplay;
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(s.as_bytes()))[..6].to_string()
+    format!("{:x}", HexDisplay(&Sha256::digest(s.as_bytes())[..3]))
 }
 
 const LEGACY_ACTIVITY_WINDOW_SECS: u64 = 30 * 86_400;
@@ -101,7 +102,7 @@ pub(crate) fn resolved_tee_dir() -> Option<PathBuf> {
 /// comes from the test's own configuration. `cleanup_old_files` deletes from
 /// whatever this returns, so a test that sets either points it at a directory
 /// of its own.
-fn get_tee_dir(cfg: &RetrieverConfig) -> Option<PathBuf> {
+pub(crate) fn get_tee_dir(cfg: &RetrieverConfig) -> Option<PathBuf> {
     if let Some(dir) = user_env::var("RTK_TEE_DIR") {
         return Some(PathBuf::from(dir));
     }
@@ -144,10 +145,21 @@ fn write_tee_file(
     max_file_size: usize,
     max_files: usize,
 ) -> Option<PathBuf> {
-    create_tee_dir(dir)?;
     let slug = sanitize_slug(slug);
     let epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    let filepath = dir.join(format!("{}_{}.log", epoch, slug));
+    let filename = format!("{}_{}.log", epoch, slug);
+    write_named_tee_file(raw, &filename, dir, max_file_size, max_files)
+}
+
+pub(crate) fn write_named_tee_file(
+    raw: &str,
+    filename: &str,
+    dir: &Path,
+    max_file_size: usize,
+    max_files: usize,
+) -> Option<PathBuf> {
+    create_tee_dir(dir)?;
+    let filepath = dir.join(filename);
     let content = if raw.len() > max_file_size {
         let boundary = raw
             .char_indices()
@@ -250,9 +262,13 @@ fn write(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<PathBuf> {
     )
 }
 
+pub(crate) fn format_hint(path: &Path) -> String {
+    format!("[full output: {}]", display_shell_path(path))
+}
+
 pub fn tee_and_hint(cfg: &RetrieverConfig, raw: &str, slug: &str) -> Option<String> {
     let path = write(cfg, raw, slug)?;
-    Some(format!("[full output: {}]", display_shell_path(&path)))
+    Some(format_hint(&path))
 }
 
 pub fn force_tee_hint(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<String> {
@@ -327,17 +343,14 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    #[allow(unsafe_code)]
     fn test_write_tee_file_owner_only_under_permissive_umask() {
         use std::os::unix::fs::PermissionsExt;
 
-        // nosemgrep: unsafe-block
-        let previous = unsafe { libc::umask(0o000) };
         let tmpdir = tempfile::tempdir().unwrap();
         let tee_dir = tmpdir.path().join("tee");
-        let written = write_tee_file("secret\n", "grep", &tee_dir, MAX_FILE_SIZE, 20);
-        // nosemgrep: unsafe-block
-        unsafe { libc::umask(previous) };
+        let written = crate::core::test_isolation::with_umask(0o000, || {
+            write_tee_file("secret\n", "grep", &tee_dir, MAX_FILE_SIZE, 20)
+        });
 
         let path = written.expect("tee file written");
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;

@@ -8,7 +8,7 @@
 //! developer's shell: an exported `RTK_NO_TOML=1` would switch the TOML engine
 //! off under every test that expects it on, and an exported `CLAUDE_CONFIG_DIR`
 //! would point a test at their real settings. A test sets the ones it needs
-//! with [`with_vars`] or [`with_path`], which hold them for the calling thread
+//! with `with_vars` or `with_path`, which hold them for the calling thread
 //! only, so tests running in parallel never see each other's.
 //!
 //! Reading one anywhere else bypasses that, so

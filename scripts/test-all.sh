@@ -525,8 +525,8 @@ assert_ok      "rtk verify"                   rtk verify
 
 section "Proxy"
 
-assert_ok      "rtk proxy echo hello"         rtk proxy echo hello
-assert_contains "rtk proxy passthrough"       "hello" rtk proxy echo hello
+assert_ok      "rtk bypass echo hello"        rtk bypass echo hello
+assert_contains "rtk bypass passthrough"      "hello" rtk bypass echo hello
 
 # ── 35. Discover ──────────────────────────────────────
 
