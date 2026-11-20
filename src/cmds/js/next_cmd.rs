@@ -42,9 +42,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
 /// Filter Next.js build output - extract routes, bundles, warnings
 fn filter_next_build(output: &str) -> String {
-    // Bundle size pattern
+    // Bundle size pattern - matches lines starting with route markers (including tree prefixes)
     static BUNDLE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^[○●◐λ✓]\s+([\w/\-\.]+)\s+(\d+(?:\.\d+)?)\s*(kB|B)\s+(\d+(?:\.\d+)?)\s*(kB|B)")
+        Regex::new(r"(?:^|[┌├└])\s*[○●◐λƒ✓]\s+([\w/\-\.]+)\s+(\d+(?:\.\d+)?)\s*(kB|B)\s+(\d+(?:\.\d+)?)\s*(kB|B)")
             .unwrap()
     });
 
@@ -60,14 +60,39 @@ fn filter_next_build(output: &str) -> String {
     let clean_output = strip_ansi(output);
 
     for line in clean_output.lines() {
-        // Count route types by symbol
-        if line.starts_with("○") {
+        // Count route types by symbol (handle tree prefixes like ┌, ├, └)
+        let trimmed = line.trim_start();
+        // Check for marker after optional tree prefix (┌, ├, └ followed by space)
+        // Tree chars are 3 bytes each in UTF-8, so use char-based indexing
+        let after_prefix = if let Some(first_char) = trimmed.chars().next() {
+            if ['┌', '├', '└'].contains(&first_char) {
+                // Skip first char (tree) and next char (space)
+                trimmed.chars().skip(2).collect::<String>()
+            } else {
+                trimmed.to_string()
+            }
+        } else {
+            trimmed.to_string()
+        };
+
+        // Check if this is a route line (marker + space + path starting with /)
+        // vs a legend line (marker + spaces + explanation like (Static))
+        let is_route_line = after_prefix.chars().nth(2) == Some('/');
+
+        let is_static = is_route_line && after_prefix.starts_with("○");
+        let is_dynamic = is_route_line
+            && (after_prefix.starts_with("●")
+                || after_prefix.starts_with("◐")
+                || after_prefix.starts_with("ƒ"));
+        let is_server = is_route_line && after_prefix.starts_with("λ");
+
+        if is_static {
             routes_static += 1;
             routes_total += 1;
-        } else if line.starts_with("●") || line.starts_with("◐") {
+        } else if is_dynamic {
             routes_dynamic += 1;
             routes_total += 1;
-        } else if line.starts_with("λ") {
+        } else if is_server {
             routes_total += 1;
         }
 
@@ -157,9 +182,9 @@ fn filter_next_build(output: &str) -> String {
         result.push('\n');
     }
 
-    // Show build time and status
+    // Show build time and status (compile time, not total build duration)
     if !build_time.is_empty() {
-        result.push_str(&format!("Time: {} | ", build_time));
+        result.push_str(&format!("Compile time: {} | ", build_time));
     }
 
     result.push_str(&format!("Errors: {} | Warnings: {}\n", errors, warnings));
@@ -219,5 +244,110 @@ Route (app)                    Size     First Load JS
             Some("1250ms".to_string())
         );
         assert_eq!(extract_time("No time here"), None);
+    }
+
+    // Frozen requirement: mixed_prefixed_route_counts
+    // baseline: fail
+    // target: unit
+    // expectedBehavior: For a Next.js route table containing `┌ ƒ / 184 B 105 kB`, `├ ○ /_not-found 977 B 102 kB`, and `└ ƒ /pase/[id] 184 B 105 kB`, followed by the Static and Dynamic explanatory legend lines shown in the issue, the pure build filter must report exactly `3 routes (1 static, 2 dynamic)`. Explanatory legends are not additional routes.
+    // citation: dynamic route disappears from the summary
+    #[test]
+    fn bugfix_issue_3530_mixed_prefixed_route_counts() {
+        let output = r#"
+Route (app)                                 Size  First Load JS
+┌ ƒ /                                      184 B         105 kB
+├ ○ /_not-found                            977 B         102 kB
+└ ƒ /pase/[id]                             184 B         105 kB
+
+○  (Static)   prerendered as static content
+ƒ  (Dynamic)  server-rendered on demand
+
+✓ Compiled successfully in 1000ms
+"#;
+        let result = filter_next_build(output);
+        // Should report 3 routes (1 static, 2 dynamic)
+        assert!(
+            result.contains("3 routes (1 static, 2 dynamic)"),
+            "Expected '3 routes (1 static, 2 dynamic)', got: {}",
+            result
+        );
+        // Legends should not be counted as routes
+        assert!(!result.contains("4 routes"));
+        assert!(!result.contains("5 routes"));
+    }
+
+    // Frozen requirement: modern_dynamic_marker_counts
+    // baseline: fail
+    // target: unit
+    // expectedBehavior: For a reduced route table containing only the undecorated rows `ƒ /admin/casas 184 B 105 kB` and `ƒ /pase/[id] 184 B 105 kB`, the pure build filter must report exactly `2 routes (0 static, 2 dynamic)`. Removing tree decoration from the issue rows must not cause the modern dynamic markers to be omitted.
+    // citation: 18 routes (1 static, 17 dynamic)
+    #[test]
+    fn bugfix_issue_3530_modern_dynamic_marker_counts() {
+        let output = r#"
+ƒ /admin/casas                           184 B         105 kB
+ƒ /pase/[id]                             184 B         105 kB
+
+✓ Compiled successfully in 1000ms
+"#;
+        let result = filter_next_build(output);
+        // Should report 2 routes (0 static, 2 dynamic)
+        assert!(
+            result.contains("2 routes (0 static, 2 dynamic)"),
+            "Expected '2 routes (0 static, 2 dynamic)', got: {}",
+            result
+        );
+    }
+
+    // Frozen requirement: compile_time_label
+    // baseline: fail
+    // target: unit
+    // expectedBehavior: For pure build-filter input `✓ Compiled successfully in 1000ms`, the displayed 1000ms must be clearly identified as compile time; it must not be presented as total build duration. A value extracted only from the compiler marker is not evidence of elapsed whole-run time. This exercises the issue-permitted compile-time-label option without prescribing label punctuation or capitalization.
+    // citation: renaming the field to compile time
+    #[test]
+    fn bugfix_issue_3530_compile_time_label() {
+        let output = r#"
+✓ Compiled successfully in 1000ms
+"#;
+        let result = filter_next_build(output);
+        // The time should be labeled as compile time, not just "Time:"
+        // Accept either "Compile time:" or "Compile Time:" or "compile time:" etc.
+        let has_compile_label = result.contains("compile time")
+            || result.contains("Compile time")
+            || result.contains("Compile Time");
+        assert!(
+            has_compile_label,
+            "Time should be labeled as compile time, got: {}",
+            result
+        );
+        // Should still contain the time value
+        assert!(result.contains("1000ms"), "Should contain the time value");
+    }
+
+    // Frozen requirement: static_route_count_control
+    // baseline: pass
+    // target: unit
+    // expectedBehavior: The already-supported undecorated rows `○ / 1.2 kB 132 kB` and `○ /about 0.5 kB 89 kB` must continue to report exactly `2 routes (2 static, 0 dynamic)` and retain the /about bundle label.
+    // citation: it counts the `○` (static) marker
+    #[test]
+    fn bugfix_issue_3530_static_route_count_control() {
+        let output = r#"
+○ /                            1.2 kB        132 kB
+○ /about                       0.5 kB         89 kB
+
+✓ Compiled successfully in 1000ms
+"#;
+        let result = filter_next_build(output);
+        // Should report 2 routes (2 static, 0 dynamic)
+        assert!(
+            result.contains("2 routes (2 static, 0 dynamic)"),
+            "Expected '2 routes (2 static, 0 dynamic)', got: {}",
+            result
+        );
+        // Should retain the /about bundle label
+        assert!(
+            result.contains("/about"),
+            "Should retain /about bundle label, got: {}",
+            result
+        );
     }
 }
