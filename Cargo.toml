@@ -73,7 +73,7 @@ dirs = "7"
 # `links = "sqlite3"`, and two versions of it cannot coexist in one workspace
 # resolve. See proxy/Cargo.toml.
 rusqlite = { version = "0.42", features = ["bundled"] }
-toml = "0.8"
+toml = "1.2"
 toml_edit = "0.22"
 chrono = "0.4"
 tempfile = "3"
@@ -109,7 +109,7 @@ windows-sys = { version = "0.61", features = [
 mimalloc = { version = "0.1", features = ["no_thp"] }
 
 [build-dependencies]
-toml = "0.8"
+toml = "1.2"
 
 [dev-dependencies]
 # Safe, closure-scoped env mutation for tests. std::env::set_var is unsafe
