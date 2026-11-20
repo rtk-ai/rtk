@@ -440,17 +440,22 @@ mod tests {
 
     #[test]
     fn delegate_reads_leaves_natively_rendered_files_to_the_read_tool() {
-        for ext in ["png", "jpg", "jpeg", "gif", "webp", "pdf", "ipynb"] {
+        for ext in ["png", "jpg", "jpeg", "gif", "webp", "pdf"] {
             assert!(
                 delegate_read_decisions(ext, 1083.0).is_empty(),
                 "a .{ext} read must not be shunted by its newline-byte count"
             );
         }
+        // A notebook is text `bulk-read` can read, and verbose: it stays shunted.
+        assert_eq!(
+            delegate_read_decisions("ipynb", 1083.0),
+            vec!["shunt-large-read".to_string()]
+        );
     }
 
     #[test]
-    fn delegate_reads_extension_check_ignores_case() {
-        for ext in ["PNG", "Pdf", "JPG", "IPYNB"] {
+    fn delegate_reads_exempts_the_listed_upper_case_extensions() {
+        for ext in ["PNG", "JPG", "PDF"] {
             assert!(
                 delegate_read_decisions(ext, 1083.0).is_empty(),
                 "a .{ext} read must not be shunted"

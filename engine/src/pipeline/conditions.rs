@@ -268,22 +268,12 @@ impl Condition {
         let Some(fact) = facts.get(&self.key) else {
             return false;
         };
-        // `.PNG` and `.png` name the same kind of file; no other fact is folded.
-        let same = |want: &str, have: &str| {
-            if self.key == "extension" {
-                want.eq_ignore_ascii_case(have)
-            } else {
-                want == have
-            }
-        };
         match (&self.op, &self.value, fact) {
-            (Op::Eq, CondValue::Str(want), Fact::Str(have)) => same(want, have),
+            (Op::Eq, CondValue::Str(want), Fact::Str(have)) => want == have,
             (Op::Eq, CondValue::Bool(want), Fact::Bool(have)) => want == have,
             (Op::Eq, CondValue::Num(want), Fact::Num(have)) => want == have,
-            (Op::In, CondValue::List(list), Fact::Str(have)) => list.iter().any(|v| same(v, have)),
-            (Op::NotIn, CondValue::List(list), Fact::Str(have)) => {
-                !list.iter().any(|v| same(v, have))
-            }
+            (Op::In, CondValue::List(list), Fact::Str(have)) => list.iter().any(|v| v == have),
+            (Op::NotIn, CondValue::List(list), Fact::Str(have)) => !list.iter().any(|v| v == have),
             (Op::Matches, CondValue::Pattern(re), Fact::Str(have)) => re.is_match(have),
             (Op::StartsWith, CondValue::Str(want), Fact::Str(have)) => have.starts_with(want),
             (Op::Gt, CondValue::Num(want), Fact::Num(have)) => have > want,
@@ -329,18 +319,6 @@ mod tests {
             split_key("command_starts_with"),
             ("command".to_string(), Op::StartsWith)
         );
-    }
-
-    #[test]
-    fn extension_comparison_ignores_case() {
-        let f = facts(&[("extension", Fact::Str("PNG".into()))]);
-        assert!(cond("extension", "png".into()).matches(&f));
-        assert!(cond("extension_in", vec!["jpg", "png"].into()).matches(&f));
-        assert!(!cond("extension_not_in", vec!["png"].into()).matches(&f));
-        assert!(cond("extension_not_in", vec!["rs"].into()).matches(&f));
-        // Other string facts stay exact.
-        let g = facts(&[("basename", Fact::Str("README".into()))]);
-        assert!(!cond("basename", "readme".into()).matches(&g));
     }
 
     #[test]

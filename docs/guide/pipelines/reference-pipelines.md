@@ -115,12 +115,12 @@ kind = "generate"
 
 [[hook.before_tool.read]]
 name   = "shunt-large-read"
-when   = { file_lines_gt = 350, whole_file = true, extension_not_in = ["png", "jpg", "jpeg", "gif", "webp", "pdf", "ipynb"] }
+when   = { file_lines_gt = 350, whole_file = true, extension_not_in = ["png", "PNG", "jpg", "JPG", "jpeg", "JPEG", "gif", "GIF", "webp", "WEBP", "pdf", "PDF"] }
 action = "route"
 task   = "bulk-read"
 ```
 
-Images, PDFs and notebooks are never routed: the agent's own read tool renders them, and their newline-byte count says nothing about size. Extensions compare without regard to case (`.PNG` is `png`).
+This rule leaves images and PDFs to the agent's read tool: it renders them, and their newline-byte count says nothing about their size.
 
 Adopt it as in [the third example on the overview](./overview.md#three-files-you-might-write). Tune: `[override.shunt-large-read] when.file_lines_gt = 500`; `[task.bulk-read] temperature = 0.2 instructions = "…"`. `code-write` has no rule — denying a write wastes tokens already generated — the agent learns it from the generated `route-tasks` directive. A `cat big.java` is covered too: it is rewritten to `rtk read big.java`, which evaluates the same rule.
 
