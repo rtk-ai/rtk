@@ -514,8 +514,9 @@ fn run_show(
     // so their source order does not affect which one runs.
     let positionals = show_positionals(args);
     // Authoritative blob decision (belt-and-suspenders). `show_route` is the cheap pure
-    // pre-filter: does ANY positional look like `rev:path`? Only then do we probe with
-    // `git cat-file -t` — and we probe EVERY colon positional, not just the first. The
+    // pre-filter: does ANY positional look like it could name a blob (`rev:path`, a bare
+    // hex object id, a `^{blob}`/`^{}` peel)? Only then do we probe with
+    // `git cat-file -t` — and we probe EVERY such positional, not just the first. The
     // cluster-aware `show_positionals` already drops option-value operands (`-S 'url:1'`,
     // the `-G` value in `-wG a:b HEAD:blob`, …), but probing all candidates means that
     // even if the walker ever missed some exotic short-flag cluster, a non-object like
@@ -820,9 +821,36 @@ fn emits_word_diff(tokens: &[Token]) -> bool {
     word_diff
 }
 
-/// `rev:path` names a blob. The caller filters to free positionals first, so a flag's own
-/// value (`--pretty=format:...`) never reaches here.
+/// The shortest object-name abbreviation git resolves (its `MINIMUM_ABBREV`).
+const MIN_ABBREV_LEN: usize = 4;
+
+/// An argument that could name a blob object: `<rev>:<path>`, a bare object ID (full SHA-1 /
+/// SHA-256, or any abbreviation git accepts), or a peel that can land on a blob
+/// (`<rev>^{blob}`, `<rev>^{}`, `<rev>^{object}`).
+///
+/// This is a cheap, pure pre-filter: the caller subsequently verifies candidates with
+/// `probe_is_blob` (`git cat-file -t <arg> == "blob"`).
 fn is_blob_show_arg(arg: &str) -> bool {
+    if arg.starts_with('-') {
+        return false;
+    }
+
+    // Peels that can resolve to a blob: `^{blob}` explicitly, `^{}` (a tag peeled to
+    // whatever it points at) and `^{object}` (any object, unpeeled). `^{commit}`,
+    // `^{tree}` and `^{/text}` never name a blob, so they are not candidates.
+    if arg.ends_with("^{blob}") || arg.ends_with("^{}") || arg.ends_with("^{object}") {
+        return true;
+    }
+
+    // Bare hex object ID: full SHA-1/SHA-256 or an abbreviation down to git's minimum of
+    // 4 hex digits (`MINIMUM_ABBREV`). A commit or tree hash — or a hex-looking branch name —
+    // is rejected by the `probe_is_blob` call and falls back to the commit-diff route.
+    if (MIN_ABBREV_LEN..=SHA256_NAME_LEN).contains(&arg.len())
+        && arg.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return true;
+    }
+
     // Detect `rev:path` style arguments while ignoring flags like `--pretty=format:...`.
     // `:/text` is a commit-message search, not a blob, so it is excluded. `:path` and
     // `:N:path` (index / merge-stage blobs) start with `:` but ARE blobs, so only the
@@ -833,8 +861,7 @@ fn is_blob_show_arg(arg: &str) -> bool {
     // ever appear as pathspecs, so exclude them too. An option value with a colon
     // (`git show -S 'a:b' HEAD`) is handled by `show_positionals`, which skips a
     // flag's operand via git's argument grammar, so it never reaches here as a blob.
-    !arg.starts_with('-')
-        && !arg.starts_with(":/")
+    !arg.starts_with(":/")
         && !arg.starts_with(":(")
         && !arg.starts_with(":!")
         && !arg.starts_with(":^")
@@ -860,7 +887,7 @@ fn show_positionals(args: &[String]) -> Vec<&str> {
         .collect()
 }
 
-/// The `git show` positionals that look like `<rev>:<path>` blob objects — the
+/// The `git show` positionals that could name a blob object (see `is_blob_show_arg`) — the
 /// windowing candidates. ALL of them are returned (not just the first) so `run_show`
 /// can `cat-file`-probe every one: a value operand a missed exotic cluster might leave
 /// behind is rejected by the probe, while the real blob elsewhere on the line is found.
@@ -895,7 +922,8 @@ fn has_trailing_pathspec(args: &[String]) -> bool {
 /// Which `git show` handler an invocation routes to.
 #[derive(Debug, PartialEq, Eq)]
 enum ShowRoute {
-    /// A `<rev>:<path>` blob dump → byte-safe decode/window path.
+    /// A blob dump (`<rev>:<path>`, a bare blob id, a peel to a blob) → byte-safe
+    /// decode/window path.
     Blob,
     /// `--stat`/`--numstat`/`--shortstat`/`--pretty`/`--format` with NO blob target
     /// → summary-only passthrough.
@@ -912,8 +940,9 @@ enum ShowRoute {
 /// byte-safe path fixes, so the blob case is checked first.
 ///
 /// This is a cheap, pure PRE-FILTER: a `Blob` result here only means SOME positional
-/// *looks like* `rev:path`. The authoritative blob decision is a `git cat-file -t`
-/// probe run by `run_show` (see `probe_is_blob`) on those candidates — the pre-filter
+/// *looks like* it could name a blob (see `is_blob_show_arg`). The authoritative blob
+/// decision is a `git cat-file -t` probe run by `run_show` (see `probe_is_blob`) on
+/// those candidates — the pre-filter
 /// keeps the probe off every other invocation.
 fn show_route(args: &[String]) -> ShowRoute {
     if !blob_candidates(args).is_empty() {
@@ -952,8 +981,9 @@ fn commit_or_stat_route(args: &[String]) -> ShowRoute {
 /// Run with the SAME global args as the command (`git_cmd(global_args)`) so `-C`,
 /// `-c`, `--git-dir`, `--work-tree` resolve the object in the right repo — the same
 /// requirement the recovery hint has. Only called on the path where the arg already
-/// looks like `rev:path` (the `show_route` pre-filter), so the ~1 ms subprocess never
-/// runs on an ordinary commit show.
+/// could name a blob (the `show_route` pre-filter), so the subprocess never runs for a
+/// symbolic commit show (`HEAD`, `main`, `HEAD~1`); a bare hex id pays it, because a hex
+/// id alone cannot say whether it names a commit or a blob.
 fn probe_is_blob(global_args: &[String], arg: &str) -> bool {
     let mut cmd = git_cmd(global_args);
     cmd.args(["cat-file", "-t", arg]);
@@ -5534,6 +5564,29 @@ mod tests {
         // A colons-only token is not a blob object.
         assert!(!is_blob_show_arg(":"));
         assert!(!is_blob_show_arg("::"));
+
+        // Bare hex object IDs (40-char SHA-1, 64-char SHA-256, abbreviated 7..=64 hex).
+        assert!(is_blob_show_arg("44624a8bcb26332b298c2078d0f68675aa1ed269"));
+        assert!(is_blob_show_arg(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ));
+        assert!(is_blob_show_arg("44624a8"));
+        // git resolves abbreviations down to 4 hex digits (MINIMUM_ABBREV), any case.
+        assert!(is_blob_show_arg("44624"));
+        assert!(is_blob_show_arg("4462"));
+        assert!(is_blob_show_arg("44624A8"));
+        assert!(!is_blob_show_arg("446")); // below git's minimum abbreviation
+        assert!(!is_blob_show_arg("main"));
+        assert!(!is_blob_show_arg("HEAD~1"));
+
+        // Peels that can land on a blob.
+        assert!(is_blob_show_arg("HEAD^{blob}"));
+        assert!(is_blob_show_arg("v1.0^{blob}"));
+        assert!(is_blob_show_arg("v1.0^{}"));
+        assert!(is_blob_show_arg("44624a8^{object}"));
+        assert!(!is_blob_show_arg("HEAD^{commit}"));
+        assert!(!is_blob_show_arg("HEAD^{tree}"));
+        assert!(!is_blob_show_arg("HEAD^{/fix the bug}"));
     }
 
     /// Helper: build an args slice from string literals.
@@ -5643,6 +5696,18 @@ mod tests {
         assert_eq!(show_route(&show_args(&["HEAD"])), ShowRoute::CommitDiff);
         assert_eq!(
             show_route(&show_args(&["HEAD:src/main.rs"])),
+            ShowRoute::Blob
+        );
+        assert_eq!(
+            show_route(&show_args(&["44624a8bcb26332b298c2078d0f68675aa1ed269"])),
+            ShowRoute::Blob
+        );
+        assert_eq!(show_route(&show_args(&["HEAD^{blob}"])), ShowRoute::Blob);
+        assert_eq!(
+            show_route(&show_args(&[
+                "--stat",
+                "44624a8bcb26332b298c2078d0f68675aa1ed269"
+            ])),
             ShowRoute::Blob
         );
     }
