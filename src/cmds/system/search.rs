@@ -389,6 +389,24 @@ fn is_unsupported_parse_flag_stderr(stderr: &str) -> bool {
         || lower.contains("illegal option")
 }
 
+fn grep_supports_flags(flags: &[&str]) -> bool {
+    let mut cmd = resolved_command(Engine::Grep.bin());
+    for f in flags {
+        cmd.child_arg(f);
+    }
+    cmd.child_args(["-q", ""]);
+    let Ok(out) = cmd.stdin(std::process::Stdio::null()).output() else {
+        return true;
+    };
+    if out.status.code() == Some(2) {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if is_unsupported_parse_flag_stderr(&stderr) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Run real grep so matches and the savings baseline match the agent's command;
 /// rg is the fallback when grep is absent, rejects a flag, or `--type` is used.
 /// The search engine the agent actually invoked. RTK runs this binary verbatim
@@ -572,7 +590,10 @@ fn passthrough<T: AsRef<str>>(
     fold_file_list: bool,
 ) -> Result<i32> {
     let mut cmd = resolved_command(engine.bin());
-    if stream_stdin && !std::io::stdout().is_terminal() {
+    if stream_stdin
+        && !std::io::stdout().is_terminal()
+        && (engine != Engine::Grep || grep_supports_flags(&["--line-buffered"]))
+    {
         // Keep passthrough output live when stdout is piped.
         cmd.child_arg("--line-buffered");
     }
@@ -761,6 +782,11 @@ pub fn run(
     }
 
     if reads_piped_stdin {
+        if engine == Engine::Grep
+            && !grep_supports_flags(&["-n", "-H", "-I", "--null", "--line-buffered"])
+        {
+            return passthrough(&timer, engine, args, &real_cmd, true, false);
+        }
         return run_streaming_search(
             &timer,
             engine,
