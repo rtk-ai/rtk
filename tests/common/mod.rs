@@ -11,6 +11,8 @@
 #[path = "../../src/core/test_isolation/scratch.rs"]
 mod scratch;
 
+pub mod hook;
+
 use std::process::Command;
 
 /// A recall store (0x5254_4B02 is the recall kind) stamped at `version`, set up
