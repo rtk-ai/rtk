@@ -76,7 +76,7 @@ Declining leaves everything alone: *"Skipped — enable later with `rtk init -g`
 
 If you already have the base URL set but nothing restarting the daemon, re-running `rtk init -g` asks only the persistence question.
 
-The question is only asked when the daemon can actually run: the `rtk-proxy` binary is installed (next to `rtk` or on `PATH`) or an rtk-proxy already answers on `127.0.0.1:8080`. Otherwise init says the proxy was not offered and leaves `settings.json` alone. `rtk init -g --uninstall` removes the `env.ANTHROPIC_BASE_URL` this flow wrote, when it still points at the RTK daemon; a base URL aimed anywhere else is kept.
+The question is only asked when the `rtk-proxy` binary is installed (next to `rtk` or on `PATH`). Otherwise init says the proxy was not offered, leaves `settings.json` alone, and removes a stale RTK `env.ANTHROPIC_BASE_URL` if one was left behind. `rtk init -g --uninstall` also removes the `env.ANTHROPIC_BASE_URL` this flow wrote, when it still points at the RTK daemon; a base URL aimed anywhere else is kept.
 
 #### What the SessionStart hook actually does
 
