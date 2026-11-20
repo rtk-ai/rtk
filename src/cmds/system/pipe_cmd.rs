@@ -16,6 +16,7 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "go-test" => Some(go_test_wrapper),
         "go-build" => Some(crate::cmds::go::go_cmd::filter_go_build),
         "ctest" => Some(crate::cmds::system::ctest_cmd::filter_ctest_output),
+        "ego-browser" => Some(crate::cmds::system::ego_browser_cmd::filter_snapshot),
         "tsc" => Some(crate::cmds::js::tsc_cmd::filter_tsc_output),
         "vitest" => Some(vitest_wrapper),
         "grep" | "rg" => Some(grep_wrapper),

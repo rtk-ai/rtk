@@ -1,0 +1,178 @@
+[p1 "Learn Rust - Rust Programming Language" | space "Screenshot issue repairs"(1): 1 managed, 0 untracked — p1* "Learn Rust - Rust Programming Language"]
+root
+  container
+    anchor [ref=10, url=https://rust-lang.org/]
+      image
+      text "Rust"
+    unordered_list
+      list_item
+        anchor [ref=11, loc=href:/tools/install, url=https://rust-lang.org/tools/install]
+          text "Install"
+      list_item
+        anchor [ref=12, url=https://rust-lang.org/learn]
+          text "Learn"
+      list_item
+        anchor [ref=13, loc=href:https://play.rust-lang.org/, url=https://play.rust-lang.org/]
+          text "Playground"
+      list_item
+        anchor [ref=14, loc=href:/tools, url=https://rust-lang.org/tools]
+          text "Tools"
+      list_item
+        anchor [ref=15, loc=href:/governance, url=https://rust-lang.org/governance]
+          text "Governance"
+      list_item
+        anchor [ref=16, loc=href:/funding, url=https://rust-lang.org/funding]
+          text "Funding"
+      list_item
+        anchor [ref=17, loc=href:/community, url=https://rust-lang.org/community]
+          text "Community"
+      list_item
+        anchor [ref=18, loc=href:https://blog.rust-lang.org/, url=https://blog.rust-lang.org/]
+          text "Blog"
+    container
+      text "Language"
+      combobox [ref=19]
+        text "English (en-US)"
+  container
+    heading
+      text "Learn Rust"
+    container
+      heading
+        text "Get started with Rust"
+      container
+        container
+          paragraph
+            text "Affectionately nicknamed “the book,”"
+            text "The Rust Programming Language"
+            text "will give you an overview of the language from first principles. You’ll build a few projects along the way, and by the end, you’ll have a solid grasp of the language."
+          anchor [ref=20, loc=href:https://doc.rust-lang.org/book/, url=https://doc.rust-lang.org/book/]
+            text "READ THE BOOK!"
+        container
+          paragraph
+            text "If reading multiple hundreds of pages about a language isn’t your style, then Rust By Example has you covered. While the book talks about code with a lot of words, RBE shows off a bunch of code, and..."
+          anchor [ref=21, loc=href:https://doc.rust-lang.org/rust-by-example/, url=https://doc.rust-lang.org/rust-by-example/]
+            text "CHECK OUT RUST BY EXAMPLE!"
+        container
+          paragraph
+            text "Alternatively, Rustlings guides you through downloading and setting up the Rust toolchain, and teaches you the basics of reading and writing Rust syntax, on the command line. It's an alternative to Ru..."
+          anchor [ref=22, loc=href:https://github.com/rust-lang/rustlings/, url=https://github.com/rust-lang/rustlings/]
+            text "DO THE RUSTLINGS COURSE!"
+    container
+      heading
+        text "Documentation"
+      heading
+        text "Read the core documentation"
+      paragraph
+        text "All of this documentation is also available locally using the"
+        text "rustup doc"
+        text "command, which will open up these resources for you in your browser without requiring a network connection!"
+      container
+        anchor [ref=23, loc=href:https://doc.rust-lang.org/std/index.html, url=https://doc.rust-lang.org/std/index.html]
+          text "THE STANDARD LIBRARY"
+        paragraph
+          text "Comprehensive guide to the Rust standard library APIs."
+        anchor [ref=24, loc=href:https://doc.rust-lang.org/edition-guide/index.html, url=https://doc.rust-lang.org/edition-guide/index.html]
+          text "EDITION GUIDE"
+        paragraph
+          text "Guide to the Rust editions."
+        anchor [ref=25, loc=href:https://doc.rust-lang.org/cargo/index.html, url=https://doc.rust-lang.org/cargo/index.html]
+          text "CARGO BOOK"
+        paragraph
+          text "A book on Rust’s package manager and build system."
+        anchor [ref=26, loc=href:https://doc.rust-lang.org/rustdoc/index.html, url=https://doc.rust-lang.org/rustdoc/index.html]
+          text "RUSTDOC BOOK"
+        paragraph
+          text "Learn how to make awesome documentation for your crate."
+        anchor [ref=27, loc=href:https://doc.rust-lang.org/rustc/index.html, url=https://doc.rust-lang.org/rustc/index.html]
+          text "RUSTC BOOK"
+        paragraph
+          text "Familiarize yourself with the knobs available in the Rust compiler."
+        anchor [ref=28, loc=href:https://doc.rust-lang.org/error-index.html, url=https://doc.rust-lang.org/error-index.html]
+          text "COMPILER ERROR INDEX"
+        paragraph
+          text "In-depth explanations of the errors you may see from the Rust compiler."
+      heading
+        text "Build your skills in an application domain"
+      container
+        anchor [ref=29, loc=href:https://rust-cli.github.io/book/index.html, url=https://rust-cli.github.io/book/index.html]
+          text "COMMAND LINE BOOK"
+        paragraph
+          text "Learn how to build effective command line applications in Rust."
+        anchor [ref=30, loc=href:https://doc.rust-lang.org/embedded-book, url=https://doc.rust-lang.org/embedded-book]
+          text "EMBEDDED BOOK"
+        paragraph
+          text "Become proficient with Rust for Microcontrollers and other embedded systems."
+    container
+      heading
+        text "Master Rust"
+      paragraph
+        text "Curious about the darkest corners of the language? Here’s where you can get into the nitty-gritty:"
+      container
+        image
+        paragraph
+          text "The Reference is not a formal spec, but is more detailed and comprehensive than the book."
+        anchor [ref=31, loc=href:https://doc.rust-lang.org/reference/index.html, url=https://doc.rust-lang.org/reference/index.html]
+          text "READ THE REFERENCE"
+        image
+        paragraph
+          text "The Rustonomicon is your guidebook to the dark arts of unsafe Rust. It’s also sometimes called “the ’nomicon.”"
+        anchor [ref=32, loc=href:https://doc.rust-lang.org/nomicon/index.html, url=https://doc.rust-lang.org/nomicon/index.html]
+          text "READ THE ’NOMICON"
+        image
+        paragraph
+          text "The Unstable Book has documentation for unstable features that you can only use with nightly Rust."
+        anchor [ref=33, loc=href:https://doc.rust-lang.org/nightly/unstable-book/index.html, url=https://doc.rust-lang.org/nightly/unstable-book/index.html]
+          text "READ THE UNSTABLE BOOK"
+  container
+    heading
+      text "Get help!"
+    unordered_list
+      list_item
+        anchor [ref=34, url=https://rust-lang.org/learn]
+          text "Documentation"
+      list_item
+        anchor [ref=35, loc=href:http://forge.rust-lang.org/, url=http://forge.rust-lang.org/]
+          text "Rust Forge (Contributor Documentation)"
+      list_item
+        anchor [ref=36, loc=href:https://users.rust-lang.org/, url=https://users.rust-lang.org/]
+          text "Ask a Question on the Users Forum"
+    text "Language"
+    combobox [ref=37]
+      text "English (en-US)"
+    heading
+      text "Terms and policies"
+    unordered_list
+      list_item
+        anchor [ref=38, loc=href:/policies/code-of-conduct, url=https://rust-lang.org/policies/code-of-conduct]
+          text "Code of Conduct"
+      list_item
+        anchor [ref=39, loc=href:/policies/licenses, url=https://rust-lang.org/policies/licenses]
+          text "Licenses"
+      list_item
+        anchor [ref=40, loc=href:https://foundation.rust-lang.org/policies/logo-policy-and-media-guide/, url=https://foundation.rust-lang.org/policies/logo-policy-and-media-guide/]
+          text "Logo Policy and Media Guide"
+      list_item
+        anchor [ref=41, loc=href:/policies/security, url=https://rust-lang.org/policies/security]
+          text "Security Disclosures"
+      list_item
+        anchor [ref=42, loc=href:https://foundation.rust-lang.org/policies/privacy-policy/, url=https://foundation.rust-lang.org/policies/privacy-policy/]
+          text "Privacy Notice"
+      list_item
+        anchor [ref=43, loc=href:/policies, url=https://rust-lang.org/policies]
+          text "All Policies"
+    heading
+      text "Social"
+    anchor [ref=44, loc=href:https://social.rust-lang.org/@rust, url=https://social.rust-lang.org/@rust]
+      image
+    anchor [ref=45, loc=href:https://bsky.app/profile/rust-lang.org, url=https://bsky.app/profile/rust-lang.org]
+      image
+    anchor [ref=46, loc=href:https://www.youtube.com/channel/UCaYhcUwRBNscFNUKTjgPFiA, url=https://www.youtube.com/channel/UCaYhcUwRBNscFNUKTjgPFiA]
+      image
+    anchor [ref=47, loc=href:https://github.com/rust-lang, url=https://github.com/rust-lang]
+      image
+    paragraph
+      text "Maintained by the Rust Team. See a bug?"
+      anchor [ref=48, loc=href:https://github.com/rust-lang/www.rust-lang.org/issues/new/choose, url=https://github.com/rust-lang/www.rust-lang.org/issues/new/choose]
+        text "File an issue!"
+    paragraph
+      text "Web site built every day at 22:00 UTC"
