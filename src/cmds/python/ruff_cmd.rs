@@ -80,11 +80,26 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     let owned_args = args.to_vec();
-    runner::run_filtered(
+    runner::run_filtered_with_exit(
         cmd,
         "ruff",
         &display_args(args),
-        move |stdout| filter_ruff_output(&owned_args, stdout),
+        move |stdout, exit_code| {
+            let filtered = filter_ruff_output(&owned_args, stdout);
+            // `ruff check` exits 1 with zero diagnostics only when it fixed
+            // every violation: fix enabled via argv (`--fix`/`--fix-only` +
+            // `--exit-non-zero-on-fix`) or via config (`fix = true`), and exit
+            // 1 then reports fixed files, not failures. A config error exits 2
+            // instead of 1, and remaining violations leave non-empty
+            // diagnostics, so the green verdict can only ever be trusted on
+            // exit 1 — the diagnostics are the signal, not argv.
+            if exit_code == 1 && filtered == "Ruff: No issues found" {
+                return filtered;
+            }
+            // "All files formatted correctly" / "No issues found" must never
+            // be shown when ruff exited non-zero (config error, etc.).
+            crate::core::guard::guard_exit(stdout, exit_code, "ruff", &filtered)
+        },
         runner::RunOptions::stdout_only().clean_outputs(clean_outputs),
     )
 }
@@ -668,6 +683,33 @@ mod tests {
     }
 
     #[test]
+    fn test_ruff_check_json_zero_diagnostics_is_the_green_verdict() {
+        // `[]` — a run that left nothing to report — is what the zero-
+        // diagnostics success form (`--fix`/`--fix-only` + `--exit-non-
+        // zero-on-fix`, from argv or config) prints at exit 1. `run()` exempts
+        // that verdict only because `exit_code == 1` plus this exact string
+        // proves the fix-success form; the pinned wiring lives in the
+        // integration test (`tests/ruff_fix_exit_test.rs`).
+        let filtered = filter_ruff_check_json("[]");
+        assert_eq!(filtered, "Ruff: No issues found");
+        let guarded = crate::core::guard::guard_exit("[]", 1, "ruff", &filtered);
+        assert!(
+            guarded.contains("failed (exit 1)"),
+            "guard fires here; run() must exempt this arm, got: {}",
+            guarded
+        );
+    }
+
+    #[test]
+    fn test_ruff_config_error_exit_two_empty_stdout_refuses_green() {
+        // Config error: exit 2, empty stdout. A green verdict must still
+        // refuse to render — the exemption is pinned to exit 1.
+        let result = crate::core::guard::guard_exit("", 2, "ruff", "Ruff: No issues found");
+        assert!(result.contains("ruff: failed (exit 2)"), "got: {}", result);
+        assert!(!result.contains("No issues found"), "got: {}", result);
+    }
+
+    #[test]
     fn test_filter_ruff_check_no_issues() {
         let output = "[]";
         let result = filter_ruff_check_json(output);
@@ -835,6 +877,21 @@ mod tests {
         let result = filter_ruff_format(output);
         assert!(result.contains("Ruff format"));
         assert!(result.contains("All files formatted correctly"));
+    }
+
+    #[test]
+    fn test_ruff_format_nonzero_exit_never_says_formatted() {
+        // ruff format --check exits non-zero when it fails; a green verdict must
+        // never be shown for it.
+        let raw = "5 files left unchanged";
+        let filtered = filter_ruff_format(raw);
+        let result = crate::core::guard::guard_exit(raw, 2, "ruff", &filtered);
+        assert!(result.contains("ruff: failed (exit 2)"), "got: {}", result);
+        assert!(!result.contains("All files formatted"), "got: {}", result);
+
+        // Same input with exit 0 keeps the green verdict.
+        let ok = crate::core::guard::guard_exit(raw, 0, "ruff", &filtered);
+        assert_eq!(ok, filtered);
     }
 
     #[test]
