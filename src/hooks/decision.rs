@@ -353,6 +353,61 @@ pub(crate) fn decide_for_claude_hook_at(
     )
 }
 
+/// Decide what OpenCode's plugin should do with `cmd` against the rules
+/// OpenCode resolves for `agent`.
+///
+/// Shared by `rtk hook opencode` and `rtk hook check --agent opencode` so the
+/// diagnostic and the live plugin apply the exact same rules and
+/// verdict-preservation check (#4518).
+pub(crate) fn decide_for_opencode(cmd: &str, agent: Option<&str>) -> HookDecision {
+    // Two rule sources rtk cannot judge, and a rewrite judged without them
+    // would silence an ask: an agent markdown file whose frontmatter declares
+    // permission rules, and a legacy key only one OpenCode generation applies.
+    // Defer and let OpenCode apply its own rules.
+    if super::permissions_opencode::agent_rules_unreadable(agent) {
+        return HookDecision::Defer;
+    }
+    let Some(rules) = super::permissions_opencode::load_judgeable_opencode_rules(agent) else {
+        return HookDecision::Defer;
+    };
+    decide_for_opencode_with_rules(cmd, &rules)
+}
+
+/// Decide what the plugin should do with `cmd` under OpenCode's own rules.
+///
+/// OpenCode evaluates whatever command the plugin hands back against the
+/// user's permission rules itself, and from 1.1.4 on plugins cannot
+/// influence that verdict: there is no `permission.ask` plugin hook (1.0.142
+/// had one). So the one thing RTK must guarantee is that the rewrite never
+/// changes what those rules decide: whenever the verdict for `rtk <cmd>`
+/// differs from the verdict for `cmd` as typed, RTK steps aside and defers,
+/// trading token savings on that command for the user's own policy (#4195).
+/// An allow stays an allow, an ask stays a prompt, and a deny stays denied —
+/// RTK never blocks, lifts or silences anything.
+pub(crate) fn decide_for_opencode_with_rules(
+    cmd: &str,
+    rules: &[super::permissions_opencode::Rule],
+) -> HookDecision {
+    if cmd.trim().is_empty() {
+        return HookDecision::Defer;
+    }
+    let before = super::permissions_opencode::check_command_with_opencode_rules(cmd, rules);
+    // OpenCode re-evaluates its own patterns against whatever RTK returns, so
+    // the rule set read here is advisory rather than enforced — hence
+    // `Unattested`, and no fish script is wrapped for this host.
+    let decision = decide_for_agent(cmd, before, DenyRules::Unattested);
+    if let HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten, _) =
+        decision
+    {
+        let after =
+            super::permissions_opencode::check_command_with_opencode_rules(rewritten, rules);
+        if before != after {
+            return HookDecision::Defer;
+        }
+    }
+    decision
+}
+
 fn decide_for_agent_at_with_attestation(
     cmd: &str,
     verdict: PermissionVerdict,
@@ -568,6 +623,9 @@ impl AgentPath {
         if matches!(self, Self::ClaudeHook) {
             let permissions = super::permissions::check_claude_hook_command(cmd);
             return decide_for_claude_hook_at(cmd, &permissions, None);
+        }
+        if matches!(self, Self::InProcess(Host::OpenCode)) {
+            return decide_for_opencode(cmd, None);
         }
         let verdict = self.verdict(cmd);
         self.approval_owner().apply(
@@ -1128,6 +1186,43 @@ mod tests {
             AgentPath::lookup("opencode"),
             Some(AgentPath::InProcess(Host::OpenCode))
         ));
+    }
+
+    /// `decide_for_opencode_with_rules` steps aside whenever the rewrite would
+    /// receive a different OpenCode verdict from the typed command (#4518).
+    #[test]
+    fn decide_for_opencode_defers_when_rewrite_changes_verdict() {
+        use super::super::permissions_opencode::{Action, Rule};
+
+        let rule = |pattern: &str, action: Action| Rule {
+            permission: "bash".to_string(),
+            pattern: pattern.to_string(),
+            action,
+        };
+
+        // {"*": "deny", "git status": "allow"} — `git status` is allowed,
+        // `rtk git status` is denied, so RTK must defer rather than rewrite.
+        let allowlist = [rule("*", Action::Deny), rule("git status", Action::Allow)];
+        assert_eq!(
+            decide_for_opencode_with_rules("git status", &allowlist),
+            HookDecision::Defer
+        );
+
+        // {"git push *": "ask"} — `git push origin main` asks, `rtk git push
+        // origin main` gets Default, so RTK must defer rather than silence the prompt.
+        let ask_rule = [rule("git push *", Action::Ask)];
+        assert_eq!(
+            decide_for_opencode_with_rules("git push origin main", &ask_rule),
+            HookDecision::Defer
+        );
+
+        // A command OpenCode denies outright stays HookDecision::Deny so the
+        // diagnostic can report the denial distinctly.
+        let deny_rule = [rule("*", Action::Allow), rule("git push *", Action::Deny)];
+        assert_eq!(
+            decide_for_opencode_with_rules("git push --force", &deny_rule),
+            HookDecision::Deny
+        );
     }
 
     /// Everything advertised in the error message must actually resolve.
