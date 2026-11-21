@@ -35,7 +35,12 @@ impl HookSandbox {
     }
 
     fn run(&self, hook: &str, payload: Value) -> Value {
-        let mut child = common::rtk_command()
+        self.run_with_trust(hook, payload, None)
+    }
+
+    fn run_with_trust(&self, hook: &str, payload: Value, trust: Option<&str>) -> Value {
+        let mut command = common::rtk_command();
+        command
             .args(["hook", hook])
             .current_dir(&self.project)
             .env("HOME", &self.home)
@@ -45,9 +50,16 @@ impl HookSandbox {
             .env("RTK_DB_PATH", self.project.join("rtk.db"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn hook");
+            .stderr(Stdio::piped());
+        match trust {
+            Some(trust) => {
+                command.env("GEMINI_CLI_TRUST_WORKSPACE", trust);
+            }
+            None => {
+                command.env_remove("GEMINI_CLI_TRUST_WORKSPACE");
+            }
+        }
+        let mut child = command.spawn().expect("spawn hook");
         child
             .stdin
             .take()
@@ -96,8 +108,41 @@ impl HookSandbox {
     }
 
     #[cfg(unix)]
+    fn gemini(&self, command: &str) -> Value {
+        self.run(
+            "gemini",
+            serde_json::json!({
+                "tool_name": "run_shell_command",
+                "tool_input": {"command": command}
+            }),
+        )
+    }
+
+    #[cfg(unix)]
+    fn gemini_with_trust(&self, command: &str) -> Value {
+        self.run_with_trust(
+            "gemini",
+            serde_json::json!({
+                "tool_name": "run_shell_command",
+                "tool_input": {"command": command}
+            }),
+            Some("true"),
+        )
+    }
+
+    #[cfg(unix)]
     fn cursor_settings(&self) -> PathBuf {
         self.home.join(".cursor/cli-config.json")
+    }
+
+    #[cfg(unix)]
+    fn gemini_global_settings(&self) -> PathBuf {
+        self.home.join(".gemini/settings.json")
+    }
+
+    #[cfg(unix)]
+    fn gemini_project_settings(&self) -> PathBuf {
+        self.project.join(".gemini/settings.json")
     }
 
     fn droid_settings(&self, scope: &str, file: &str) -> PathBuf {
@@ -248,6 +293,81 @@ fn cursor_settings_keep_missing_and_empty_behavior_but_step_aside_on_failures() 
     fs::remove_file(&settings).expect("remove Cursor settings");
     fs::create_dir(&settings).expect("make unreadable Cursor settings");
     assert_eq!(sandbox.cursor("git status"), serde_json::json!({}));
+}
+
+#[test]
+#[cfg(unix)]
+fn gemini_global_settings_fail_closed_on_read_and_parse_errors() {
+    let sandbox = HookSandbox::new();
+    fs::create_dir_all(
+        sandbox
+            .gemini_global_settings()
+            .parent()
+            .expect("Gemini global settings parent"),
+    )
+    .expect("create Gemini global settings directory");
+    fs::create_dir_all(
+        sandbox
+            .gemini_project_settings()
+            .parent()
+            .expect("Gemini project settings parent"),
+    )
+    .expect("create Gemini project settings directory");
+
+    fs::write(
+        sandbox.gemini_project_settings(),
+        r#"{"tools":{"allowed":["run_shell_command(git push)"]}}"#,
+    )
+    .expect("write project Gemini settings");
+
+    let global = sandbox.gemini_global_settings();
+    fs::write(&global, r#"{"security":{"folderTrust":{"enabled":true}}}"#)
+        .expect("write valid global Gemini settings");
+    let valid = sandbox.gemini("git push origin main");
+    assert_eq!(valid["decision"], "ask_user");
+    assert_eq!(
+        valid["hookSpecificOutput"]["tool_input"]["command"],
+        "rtk git push origin main"
+    );
+
+    fs::write(&global, r#"{"security":{"folderTrust":{"enabled":true},}}"#)
+        .expect("write malformed global Gemini settings");
+    let malformed = sandbox.gemini("git push origin main");
+    assert_eq!(malformed["decision"], "ask_user");
+    assert_eq!(
+        malformed["hookSpecificOutput"]["tool_input"]["command"],
+        "rtk git push origin main"
+    );
+    let malformed_with_trust = sandbox.gemini_with_trust("git push origin main");
+    assert_eq!(malformed_with_trust["decision"], "ask_user");
+    assert_eq!(
+        malformed_with_trust["hookSpecificOutput"]["tool_input"]["command"],
+        "rtk git push origin main"
+    );
+
+    fs::remove_file(&global).expect("remove global Gemini settings");
+    let missing = sandbox.gemini("git push origin main");
+    assert_eq!(missing["decision"], "allow");
+
+    fs::write(&global, "\n").expect("write empty global Gemini settings");
+    let empty = sandbox.gemini("git push origin main");
+    assert_eq!(empty["decision"], "allow");
+
+    fs::remove_file(&global).expect("remove empty global Gemini settings");
+    fs::create_dir(&global).expect("make global Gemini settings unreadable");
+    let unreadable = sandbox.gemini("git push origin main");
+    assert_eq!(unreadable["decision"], "ask_user");
+    assert_eq!(
+        unreadable["hookSpecificOutput"]["tool_input"]["command"],
+        "rtk git push origin main"
+    );
+    let unreadable_with_trust = sandbox.gemini_with_trust("git push origin main");
+    assert_eq!(unreadable_with_trust["decision"], "ask_user");
+    assert_eq!(
+        unreadable_with_trust["hookSpecificOutput"]["tool_input"]["command"],
+        "rtk git push origin main"
+    );
+    fs::remove_dir(&global).expect("remove unreadable global Gemini settings");
 }
 
 #[test]
