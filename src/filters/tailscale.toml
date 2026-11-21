@@ -1,0 +1,20 @@
+[filters.tailscale]
+description = "Compact Tailscale status and node connectivity output"
+match_command = '^tailscale\b'
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '\boffline\b',
+  '\bidle\b.*\b(windows|linux|macos)\b'
+]
+truncate_lines_at = 140
+max_lines = 25
+
+[[tests.tailscale]]
+name = "tailscale status online nodes only"
+input = """
+100.80.20.10   windows-pc   pattisonryan6@ windows  -
+100.80.20.11   macbook-pro  pattisonryan6@ macOS    active; direct 192.168.1.10:41641
+100.80.20.12   old-desktop  pattisonryan6@ linux    offline
+"""
+expected = "100.80.20.10   windows-pc   pattisonryan6@ windows  -\n100.80.20.11   macbook-pro  pattisonryan6@ macOS    active; direct 192.168.1.10:41641"
