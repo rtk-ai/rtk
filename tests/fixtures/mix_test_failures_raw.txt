@@ -1,0 +1,438 @@
+==> mime
+Compiling 1 file (.ex)
+Generated mime app
+==> nimble_options
+Compiling 3 files (.ex)
+Generated nimble_options app
+==> fine
+Compiling 1 file (.ex)
+Generated fine app
+==> plug_crypto
+Compiling 5 files (.ex)
+Generated plug_crypto app
+==> hpax
+Compiling 4 files (.ex)
+Generated hpax app
+==> mint
+Compiling 1 file (.erl)
+Compiling 21 files (.ex)
+Generated mint app
+==> elixir_make
+Compiling 8 files (.ex)
+Generated elixir_make app
+==> decimal
+Compiling 4 files (.ex)
+Generated decimal app
+==> jason
+Compiling 10 files (.ex)
+Generated jason app
+==> esbuild
+Compiling 4 files (.ex)
+Generated esbuild app
+==> shop
+===> Analyzing applications...
+===> Compiling idna
+===> Analyzing applications...
+===> Compiling telemetry
+==> telemetry_metrics
+Compiling 7 files (.ex)
+Generated telemetry_metrics app
+==> shop
+===> Analyzing applications...
+===> Compiling telemetry_poller
+==> thousand_island
+Compiling 18 files (.ex)
+Generated thousand_island app
+==> ecto
+Compiling 56 files (.ex)
+Generated ecto app
+==> db_connection
+Compiling 18 files (.ex)
+Generated db_connection app
+==> ecto_sql
+Compiling 25 files (.ex)
+Generated ecto_sql app
+==> phoenix_html
+Compiling 6 files (.ex)
+Generated phoenix_html app
+==> phoenix_template
+Compiling 4 files (.ex)
+Generated phoenix_template app
+==> expo
+Compiling 2 files (.erl)
+Compiling 22 files (.ex)
+Generated expo app
+==> gettext
+Compiling 18 files (.ex)
+     warning: this clause in cond will never match:
+
+         not is_binary(locale)
+
+     since it has type:
+
+         dynamic(false)
+
+     where "locale" was given the types:
+
+         # type: binary()
+         # from: lib/gettext.ex:806:28
+         locale
+
+         # type: binary()
+         # from: lib/gettext.ex:806:41
+         is_binary(locale)
+
+     type warning found at:
+     │
+ 808 │       not is_binary(locale) ->
+     │                             ~
+     │
+     └─ lib/gettext.ex:808:29: Gettext.put_locale!/2
+
+     warning: the following clause is redundant:
+
+         defp ensure_empty_msgstr!(%Expo.Message.Plural{} = message)
+
+     it has type:
+
+         dynamic(%Expo.Message.Plural{})
+
+     previous clauses have already matched on the following types:
+
+         %Expo.Message.Singular{}
+         %Expo.Message.Plural{}
+
+     │
+ 391 │   defp ensure_empty_msgstr!(%Message.Plural{} = message) do
+     │        ~
+     │
+     └─ lib/gettext/extractor.ex:391:8: Gettext.Extractor.ensure_empty_msgstr!/1
+
+     warning: Kernel.ParallelCompiler.async/1 is deprecated. Use `pmap/2` instead
+     │
+ 426 │               Kernel.ParallelCompiler.async(fn ->
+     │                                       ~
+     │
+     └─ lib/gettext/compiler.ex:426:39: Gettext.Compiler.compile_po_files/3
+
+Generated gettext app
+==> phoenix_pubsub
+Compiling 13 files (.ex)
+Generated phoenix_pubsub app
+==> dns_cluster
+Compiling 1 file (.ex)
+     warning: comparison between distinct types found:
+
+         net_state.started != :no
+
+     given types:
+
+         dynamic(not :no) != :no
+
+     where "net_state" was given the types:
+
+         # type: dynamic()
+         # from: lib/dns_cluster.ex:207:8
+         net_state
+
+         # type: dynamic(not false and not nil)
+         # from: lib/dns_cluster.ex:207:8
+         net_state
+
+         # type: dynamic(%{..., started: term()})
+         # from: lib/dns_cluster.ex:210:25
+         net_state.started == :no
+
+         # type: dynamic(%{..., started: not :no})
+         # from: lib/dns_cluster.ex:220:25
+         net_state.started == :no
+
+     While Elixir can compare across all types, you are comparing across types which are always disjoint, and the result is either always true or always false
+
+     type warning found at:
+     │
+ 221 │           (!release? and net_state.started != :no and net_state[:name_domain] != :longnames) ->
+     │                                            ~
+     │
+     └─ lib/dns_cluster.ex:221:44: DNSCluster.warn_on_invalid_dist/0
+
+Generated dns_cluster app
+==> plug
+Compiling 1 file (.erl)
+Compiling 42 files (.ex)
+Generated plug app
+warning: "xref: [exclude: ...]" in your mix.exs file is deprecated, instead use: "elixirc_options: [no_warn_undefined: ...]"
+  (mix 1.20.4) lib/mix/tasks/compile.elixir.ex:243: Mix.Tasks.Compile.Elixir.xref_exclude_opts/2
+  (mix 1.20.4) lib/mix/tasks/compile.elixir.ex:142: Mix.Tasks.Compile.Elixir.run/1
+  (mix 1.20.4) lib/mix/task.ex:502: anonymous fn/3 in Mix.Task.run_task/5
+  (mix 1.20.4) lib/mix/task.compiler.ex:299: Mix.Task.Compiler.run_compiler/2
+  (mix 1.20.4) lib/mix/task.compiler.ex:287: Mix.Task.Compiler.run/4
+  (mix 1.20.4) lib/mix/tasks/compile.all.ex:75: Mix.Tasks.Compile.All.do_run/2
+
+==> phoenix_ecto
+Compiling 7 files (.ex)
+Generated phoenix_ecto app
+==> nimble_pool
+Compiling 2 files (.ex)
+Generated nimble_pool app
+==> finch
+Compiling 23 files (.ex)
+Generated finch app
+==> req
+Compiling 24 files (.ex)
+Generated req app
+==> cc_precompiler
+Compiling 3 files (.ex)
+Generated cc_precompiler app
+==> lazy_html
+Compiling 3 files (.ex)
+Generated lazy_html app
+==> exqlite
+Compiling 12 files (.ex)
+Generated exqlite app
+==> ecto_sqlite3
+Compiling 5 files (.ex)
+Generated ecto_sqlite3 app
+==> tailwind
+Compiling 3 files (.ex)
+Generated tailwind app
+==> websock
+Compiling 1 file (.ex)
+Generated websock app
+==> bandit
+Compiling 54 files (.ex)
+Generated bandit app
+==> swoosh
+Compiling 64 files (.ex)
+Generated swoosh app
+==> websock_adapter
+Compiling 4 files (.ex)
+Generated websock_adapter app
+==> phoenix
+Compiling 75 files (.ex)
+Generated phoenix app
+==> phoenix_live_view
+Compiling 55 files (.ex)
+Generated phoenix_live_view app
+warning: "xref: [exclude: ...]" in your mix.exs file is deprecated, instead use: "elixirc_options: [no_warn_undefined: ...]"
+  (mix 1.20.4) lib/mix/tasks/compile.elixir.ex:243: Mix.Tasks.Compile.Elixir.xref_exclude_opts/2
+  (mix 1.20.4) lib/mix/tasks/compile.elixir.ex:142: Mix.Tasks.Compile.Elixir.run/1
+  (mix 1.20.4) lib/mix/task.ex:502: anonymous fn/3 in Mix.Task.run_task/5
+  (mix 1.20.4) lib/mix/task.compiler.ex:299: Mix.Task.Compiler.run_compiler/2
+  (mix 1.20.4) lib/mix/task.compiler.ex:287: Mix.Task.Compiler.run/4
+  (mix 1.20.4) lib/mix/tasks/compile.all.ex:75: Mix.Tasks.Compile.All.do_run/2
+
+==> phoenix_live_dashboard
+Compiling 36 files (.ex)
+     warning: Postgrex.Interval.to_string/1 is undefined (module Postgrex.Interval is not available or is yet to be defined)
+     │
+ 281 │     do: struct.to_string(value)
+     │                ~
+     │
+     └─ lib/phoenix/live_dashboard/pages/ecto_stats_page.ex:281:16: Phoenix.LiveDashboard.EctoStatsPage.format/2
+
+Generated phoenix_live_dashboard app
+==> shop
+Compiling 23 files (.ex)
+    warning: ShopWeb.Format.price/1 is undefined (module ShopWeb.Format is not available or is yet to be defined)
+    │
+ 25 │         <:col :let={{_id, product}} label="Price">{ShopWeb.Format.price(product.price)}</:col>
+    │         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    │
+    └─ lib/shop_web/live/product_live/index.ex:25: ShopWeb.ProductLive.Index.render/1
+
+    warning: ShopWeb.Format.price/1 is undefined (module ShopWeb.Format is not available or is yet to be defined)
+    │
+ 25 │         <:item title="Price">{ShopWeb.Format.price(@product.price)}</:item>
+    │         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    │
+    └─ lib/shop_web/live/product_live/show.ex:25: ShopWeb.ProductLive.Show.render/1
+
+Generated shop app
+
+18:00:04.138 [error] Exqlite.Connection (#PID<0.5376.0> ("db_conn_2")) failed to connect: ** (Exqlite.Error) database is locked
+Running ExUnit with seed: 318496, max_cases: 4
+
+......
+
+  1) test products update_product/2 with valid data updates the product (Shop.CatalogTest)
+     test/shop/catalog_test.exs:35
+     Assertion with == failed
+     code:  assert product.name == "some renamed name"
+     left:  "some updated name"
+     right: "some renamed name"
+     stacktrace:
+       test/shop/catalog_test.exs:40: (test)
+
+....18:00:06.719 [warning] price cache miss
+..18:00:06.748 request_id=GOHXn4HXhvv3tVcAAhJC [warning] price cache miss
+18:00:06.759 request_id=GOHXn4J4h_aN3J8AAhKC [warning] price cache miss
+18:00:06.762 request_id=GOHXn4Kx6jfuftkAAhKi [warning] price cache miss
+18:00:06.776 request_id=GOHXn4N9R4aIPcAAAhLC [warning] price cache miss
+
+
+  2) test Show displays product (ShopWeb.ProductLiveTest)
+     test/shop_web/live/product_live_test.exs:89
+     ** (UndefinedFunctionError) function ShopWeb.Format.price/1 is undefined (module ShopWeb.Format is not available)
+     stacktrace:
+       ShopWeb.Format.price(42)
+       (shop 0.1.0) lib/shop_web/live/product_live/show.ex:25: anonymous fn/2 in ShopWeb.ProductLive.Show.render/1
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:454: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:159: Phoenix.LiveView.Diff.render/4
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/static.ex:291: Phoenix.LiveView.Static.to_rendered_content_tag/4
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/static.ex:171: Phoenix.LiveView.Static.do_render/4
+
+
+
+  3) test Index updates product in listing (ShopWeb.ProductLiveTest)
+     test/shop_web/live/product_live_test.exs:52
+     ** (UndefinedFunctionError) function ShopWeb.Format.price/1 is undefined (module ShopWeb.Format is not available)
+     stacktrace:
+       ShopWeb.Format.price(42)
+       (shop 0.1.0) lib/shop_web/live/product_live/index.ex:25: anonymous fn/3 in ShopWeb.ProductLive.Index.render/1
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:454: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+
+
+
+  4) test Show updates product and returns to show (ShopWeb.ProductLiveTest)
+     test/shop_web/live/product_live_test.exs:96
+     ** (UndefinedFunctionError) function ShopWeb.Format.price/1 is undefined (module ShopWeb.Format is not available)
+     stacktrace:
+       ShopWeb.Format.price(42)
+       (shop 0.1.0) lib/shop_web/live/product_live/show.ex:25: anonymous fn/2 in ShopWeb.ProductLive.Show.render/1
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:454: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:159: Phoenix.LiveView.Diff.render/4
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/static.ex:291: Phoenix.LiveView.Static.to_rendered_content_tag/4
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/static.ex:171: Phoenix.LiveView.Static.do_render/4
+
+
+
+  5) test Index saves new product (ShopWeb.ProductLiveTest)
+     test/shop_web/live/product_live_test.exs:26
+     ** (UndefinedFunctionError) function ShopWeb.Format.price/1 is undefined (module ShopWeb.Format is not available)
+     stacktrace:
+       ShopWeb.Format.price(42)
+       (shop 0.1.0) lib/shop_web/live/product_live/index.ex:25: anonymous fn/3 in ShopWeb.ProductLive.Index.render/1
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:454: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+
+
+
+  6) test Index deletes product in listing (ShopWeb.ProductLiveTest)
+     test/shop_web/live/product_live_test.exs:78
+     ** (UndefinedFunctionError) function ShopWeb.Format.price/1 is undefined (module ShopWeb.Format is not available)
+     stacktrace:
+       ShopWeb.Format.price(42)
+       (shop 0.1.0) lib/shop_web/live/product_live/index.ex:25: anonymous fn/3 in ShopWeb.ProductLive.Index.render/1
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:454: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+
+
+
+  7) test Index lists all products (ShopWeb.ProductLiveTest)
+     test/shop_web/live/product_live_test.exs:19
+     ** (UndefinedFunctionError) function ShopWeb.Format.price/1 is undefined (module ShopWeb.Format is not available)
+     stacktrace:
+       ShopWeb.Format.price(42)
+       (shop 0.1.0) lib/shop_web/live/product_live/index.ex:25: anonymous fn/3 in ShopWeb.ProductLive.Index.render/1
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:454: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:775: Phoenix.LiveView.Diff.process_keyed/5
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:715: anonymous fn/6 in Phoenix.LiveView.Diff.traverse_keyed/8
+       (elixir 1.20.4) lib/enum.ex:2622: Enum."-reduce/3-lists^foldl/2-0-"/3
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:696: Phoenix.LiveView.Diff.traverse_keyed/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:547: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:453: Phoenix.LiveView.Diff.traverse/6
+       (phoenix_live_view 1.2.13) lib/phoenix_live_view/diff.ex:647: Phoenix.LiveView.Diff.traverse_dynamic/8
+
+
+Finished in 0.4 seconds (0.3s async, 0.1s sync)
+
+Result: 12/19 passed
+Failed: 7 tests
