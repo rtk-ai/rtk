@@ -827,9 +827,9 @@ enum Commands {
         args: Vec<OsString>,
     },
 
-    /// Recall output a filter elided, by content hash
+    /// Recall output a filter elided, by capture reference or legacy hash
     Recall {
-        /// Hash from a recovery hint (a unique prefix is enough)
+        /// Exact capture reference from a hint, or a legacy hash (unique prefix accepted)
         hash: Option<String>,
         /// Return the complete output, not just the missed part
         #[arg(long)]

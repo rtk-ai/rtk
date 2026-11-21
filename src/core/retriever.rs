@@ -19,8 +19,11 @@ const DEFAULT_MAX_ENTRY_BYTES: usize = 10 * 1024 * 1024;
 const DEFAULT_MAX_ENTRIES: usize = 200;
 const DEFAULT_RETENTION_DAYS: u32 = 30;
 pub const MIN_FAILURE_BYTES: usize = 500;
+#[cfg(test)]
 const HASH_HEX_LEN: usize = 16;
 const DEFAULT_TEE_MAX_FILES: usize = 20;
+// Capture metadata is independent of deduplicated payloads and always bounded.
+const MAX_CAPTURE_RECORDS: i64 = 1000;
 const DEFAULT_TEE_MAX_FILE_SIZE: usize = 1_048_576;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -68,6 +71,9 @@ impl Default for RetrieverConfig {
 }
 
 pub struct StoredRef {
+    /// Exact immutable capture reference printed in recovery hints.
+    pub reference: String,
+    #[cfg(test)]
     pub hash: String,
     pub hidden_lines: usize,
 }
@@ -85,6 +91,7 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 fn content_hash(command: &str, content: &[u8]) -> String {
     use base16ct::HexDisplay;
     use sha2::{Digest, Sha256};
@@ -93,6 +100,17 @@ fn content_hash(command: &str, content: &[u8]) -> String {
     hasher.update([0u8]);
     hasher.update(content);
     format!("{:x}", HexDisplay(&hasher.finalize()[..HASH_HEX_LEN / 2]))
+}
+
+/// A separate namespace from legacy source hashes: only retained bytes belong
+/// to this identity. Compression is an encoding detail, not part of the key.
+fn payload_hash(command: &str, payload: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(command.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(payload);
+    format!("p_{:x}", base16ct::HexDisplay(&hasher.finalize()))
 }
 
 fn count_lines(bytes: &[u8]) -> usize {
@@ -348,6 +366,8 @@ enum RecallSchema {
     Initial = 1,
     /// `recall.recalled`, for databases created before the column existed.
     Recalled = 2,
+    /// Immutable snapshots for individual captures, leaving legacy hashes untouched.
+    ImmutableCaptures = 3,
     // New schema changes go directly above this line.
     Next,
 }
@@ -367,6 +387,7 @@ impl Version for RecallSchema {
 const MIGRATIONS: &[(RecallSchema, Migration)] = &[
     (RecallSchema::Initial, migrate_initial),
     (RecallSchema::Recalled, migrate_recalled),
+    (RecallSchema::ImmutableCaptures, migrate_immutable_captures),
 ];
 
 const _: () = {
@@ -424,6 +445,26 @@ fn migrate_initial(conn: &Connection) -> Result<()> {
 
 fn migrate_recalled(conn: &Connection) -> Result<()> {
     db::add_column_if_missing(conn, "recall", "recalled", "INTEGER NOT NULL DEFAULT 0")
+}
+
+fn migrate_immutable_captures(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS recall_captures (
+            capture_id TEXT PRIMARY KEY NOT NULL,
+            invocation_id TEXT,
+            hash TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            command TEXT NOT NULL,
+            cwd TEXT,
+            exit_code INTEGER,
+            total_lines INTEGER NOT NULL,
+            shown_upto INTEGER NOT NULL,
+            byte_size INTEGER NOT NULL,
+            truncated INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_recall_captures_hash ON recall_captures(hash);",
+    )
+    .context("Failed to create immutable recall captures")
 }
 
 fn stat_family(slug: &str) -> &str {
@@ -654,14 +695,17 @@ fn evict(conn: &Connection, cfg: &RetrieverConfig, keep_hash: &str) {
 #[cfg(feature = "engine")]
 pub fn trim_family(cfg: &RetrieverConfig, prefix: &str, keep: usize) {
     let _ = with_open(cfg, |conn| {
-        conn.execute(
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
             "DELETE FROM recall WHERE rowid IN (
                 SELECT rowid FROM recall WHERE command LIKE ?1 || '%'
                 ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?2
             )",
             params![prefix, keep as i64],
         )?;
-        Ok(())
+        prune_captures(&tx)?;
+        tx.commit().context("trim recall family")
     });
 }
 
@@ -715,7 +759,8 @@ fn store_inner(
     };
     let total_lines = count_lines(payload);
     let shown_upto = stored_shown_upto;
-    let hash = content_hash(command, content);
+    let hash = payload_hash(command, payload);
+    let capture_id = super::invocation::new_id().context("generate immutable recall capture ID")?;
     let (blob, codec): (Vec<u8>, &str) = if cfg.compression {
         match gzip(payload) {
             Ok(z) => (z, "gzip"),
@@ -729,44 +774,84 @@ fn store_inner(
         .map(|p| p.to_string_lossy().into_owned());
 
     with_open(cfg, |conn| {
-        conn.execute(
-        "INSERT INTO recall
-         (hash, command, cwd, exit_code, created_at, total_lines, shown_upto, byte_size, truncated, codec, blob)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-         ON CONFLICT(hash) DO UPDATE SET
-             command = excluded.command,
-             cwd = excluded.cwd,
-             exit_code = excluded.exit_code,
-             created_at = excluded.created_at,
-             total_lines = excluded.total_lines,
-             shown_upto = excluded.shown_upto,
-             byte_size = excluded.byte_size,
-             truncated = excluded.truncated,
-             codec = excluded.codec,
-             blob = excluded.blob",
-        params![
-            hash,
-            command,
-            cwd,
-            exit_code,
-            now_secs(),
-            total_lines as i64,
-            shown_upto as i64,
-            content.len() as i64,
-            truncated as i64,
-            codec,
-            blob
-        ],
-    )
-    .context("insert recall row")?;
-        bump_stat(conn, command, "sqlite", "elisions");
-        evict(conn, cfg, &hash);
+        let tx = conn
+            .unchecked_transaction()
+            .context("begin recall capture")?;
+        // Maintenance may have evicted payloads since the last capture. Remove
+        // their references before an identical payload can be inserted again.
+        prune_captures(&tx)?;
+        // A payload key never changes its bytes or its original metadata. The
+        // latest access time alone is refreshed for retention/LRU eviction.
+        tx.execute(
+            "INSERT INTO recall
+             (hash, command, cwd, exit_code, created_at, total_lines, shown_upto, byte_size, truncated, codec, blob)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(hash) DO UPDATE SET created_at = excluded.created_at",
+            params![hash, command, cwd, exit_code, now_secs(), total_lines as i64,
+                shown_upto as i64, content.len() as i64, truncated as i64, codec, blob],
+        ).context("insert recall payload")?;
+        tx.execute(
+            "INSERT INTO recall_captures
+             (capture_id, invocation_id, hash, created_at, command, cwd, exit_code,
+              total_lines, shown_upto, byte_size, truncated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                capture_id,
+                super::invocation::current(),
+                hash,
+                now_secs(),
+                command,
+                cwd,
+                exit_code,
+                total_lines as i64,
+                shown_upto as i64,
+                content.len() as i64,
+                truncated as i64
+            ],
+        )
+        .context("record immutable recall capture")?;
+        bump_stat(&tx, command, "sqlite", "elisions");
+        // Prune references while missing payloads are still missing. A later
+        // identical payload must never resurrect an evicted capture ID.
+        evict(&tx, cfg, &hash);
+        prune_captures(&tx)?;
+        tx.commit().context("commit recall capture")?;
 
         Ok(StoredRef {
+            reference: format!("c_{capture_id}"),
+            #[cfg(test)]
             hash: hash.clone(),
             hidden_lines: total_lines.saturating_sub(shown_upto.saturating_sub(1)),
         })
     })
+}
+
+fn prune_captures(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "DELETE FROM recall_captures WHERE hash NOT IN (SELECT hash FROM recall)",
+        [],
+    )?;
+    conn.execute(
+        "DELETE FROM recall_captures WHERE rowid NOT IN
+         (SELECT rowid FROM recall_captures ORDER BY rowid DESC LIMIT ?1)",
+        [MAX_CAPTURE_RECORDS],
+    )?;
+    Ok(())
+}
+
+/// Count bytes actually accepted by stdout, including a partial write before an
+/// error. Token estimates use exactly those bytes, never the full stored blob.
+fn emit_recall(writer: &mut impl Write, output: &[u8]) -> (usize, std::io::Result<()>) {
+    let mut written = 0;
+    while written < output.len() {
+        match writer.write(&output[written..]) {
+            Ok(0) => return (written, Err(std::io::ErrorKind::WriteZero.into())),
+            Ok(n) => written += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return (written, Err(e)),
+        }
+    }
+    (written, writer.flush())
 }
 
 #[derive(Debug)]
@@ -777,6 +862,8 @@ struct Row {
     blob: Vec<u8>,
     command: String,
     hash: String,
+    capture_id: Option<String>,
+    invocation_id: Option<String>,
 }
 
 fn map_row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
@@ -787,6 +874,8 @@ fn map_row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
         blob: r.get(3)?,
         command: r.get(4)?,
         hash: r.get(5)?,
+        capture_id: None,
+        invocation_id: None,
     })
 }
 
@@ -817,6 +906,36 @@ fn load_by_hash(conn: &Connection, hash: &str) -> Result<Option<Row>> {
     }
 }
 
+fn load_reference(conn: &Connection, reference: &str) -> Result<Option<Row>> {
+    let Some(capture_id) = reference.strip_prefix("c_") else {
+        // Legacy hashes remain unassigned, including after migration. Never
+        // guess which source invocation owns an ambiguous content identity.
+        return load_by_hash(conn, reference);
+    };
+    if capture_id.len() != 32
+        || !capture_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        anyhow::bail!("use the complete c_<capture-id> from the recovery hint");
+    }
+    conn.query_row(
+        "SELECT c.shown_upto, c.truncated, p.codec, p.blob, c.command, p.hash,
+                c.capture_id, c.invocation_id
+         FROM recall_captures c JOIN recall p ON p.hash = c.hash
+         WHERE c.capture_id = ?1",
+        [capture_id],
+        |r| {
+            let mut row = map_row(r)?;
+            row.capture_id = r.get(6)?;
+            row.invocation_id = r.get(7)?;
+            Ok(row)
+        },
+    )
+    .optional()
+    .context("load recall capture")
+}
+
 fn decode(row: &Row) -> Result<Vec<u8>> {
     match row.codec.as_str() {
         "gzip" => gunzip(&row.blob),
@@ -831,7 +950,7 @@ fn decode(row: &Row) -> Result<Vec<u8>> {
 pub(crate) fn recalled_content(hash: &str) -> Option<String> {
     let cfg = Config::load().unwrap_or_default().retriever;
     with_existing(&cfg, |conn| {
-        let row = load_by_hash(conn, hash)?.context("no matching entry")?;
+        let row = load_reference(conn, hash)?.context("no matching entry")?;
         let full = decode(&row)?;
         Ok(String::from_utf8(
             slice_from_line(&full, row.shown_upto).to_vec(),
@@ -856,7 +975,7 @@ const UNAVAILABLE: &str = "store unavailable";
 
 pub fn run_recall(args: RecallArgs) -> Result<i32> {
     if args.hash.is_none() && !args.list {
-        eprintln!("rtk recall: provide a <hash> (from a recovery hint) or --list");
+        eprintln!("rtk recall: provide a <reference> (from a recovery hint) or --list");
         return Ok(2);
     }
     let cfg = Config::load().unwrap_or_default().retriever;
@@ -864,7 +983,7 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
         with_cached(
             path,
             |path| open_existing_path(path).context(UNAVAILABLE),
-            |conn| recall_from(conn, &args),
+            |conn| recall_from(conn, &args, &mut std::io::stdout().lock()),
         )
     });
     match recalled {
@@ -885,7 +1004,7 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
     }
 }
 
-fn recall_from(conn: &Connection, args: &RecallArgs) -> Result<i32> {
+fn recall_from(conn: &Connection, args: &RecallArgs, writer: &mut impl Write) -> Result<i32> {
     if args.list {
         return list_entries(conn);
     }
@@ -895,8 +1014,12 @@ fn recall_from(conn: &Connection, args: &RecallArgs) -> Result<i32> {
     let Some(hash) = args.hash.as_ref() else {
         return Ok(2);
     };
-    let Some(row) = load_by_hash(conn, hash)? else {
-        eprintln!("rtk recall: no matching entry (try `rtk recall --list`)");
+    let Some(row) = load_reference(conn, hash)? else {
+        if hash.starts_with("c_") {
+            eprintln!("rtk recall: capture unavailable or expired (try `rtk recall --list`)");
+        } else {
+            eprintln!("rtk recall: no matching entry (try `rtk recall --list`)");
+        }
         return Ok(1);
     };
 
@@ -928,8 +1051,17 @@ fn recall_from(conn: &Connection, args: &RecallArgs) -> Result<i32> {
         );
         return Ok(1);
     }
-    let stdout = std::io::stdout();
-    let _ = stdout.lock().write_all(&out);
+    let (emitted, result) = emit_recall(writer, &out);
+    if (result.is_ok() || emitted > 0)
+        && let Ok(tracker) = super::tracking::Tracker::new()
+    {
+        let _ = tracker.record_recall_event(
+            emitted,
+            row.invocation_id.as_deref(),
+            row.capture_id.as_deref(),
+        );
+    }
+    result.context("write recalled output")?;
     mark_recalled(conn, &row.hash, &row.command);
 
     if row.truncated {
@@ -942,8 +1074,15 @@ fn recall_from(conn: &Connection, args: &RecallArgs) -> Result<i32> {
 
 fn list_entries(conn: &Connection) -> Result<i32> {
     let mut stmt = conn.prepare(
-        "SELECT hash, command, total_lines, shown_upto, exit_code, truncated, byte_size \
-         FROM recall ORDER BY created_at DESC LIMIT 50",
+        "SELECT reference, command, total_lines, shown_upto, exit_code, truncated, byte_size
+         FROM (
+             SELECT 'c_' || c.capture_id AS reference, c.command, c.total_lines,
+                    c.shown_upto, c.exit_code, c.truncated, c.byte_size, c.created_at
+             FROM recall_captures c JOIN recall p ON p.hash = c.hash
+             UNION ALL
+             SELECT hash, command, total_lines, shown_upto, exit_code, truncated,
+                    byte_size, created_at FROM recall WHERE substr(hash, 1, 2) != 'p_'
+         ) ORDER BY created_at DESC, reference DESC LIMIT 50",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -958,8 +1097,8 @@ fn list_entries(conn: &Connection) -> Result<i32> {
     })?;
 
     println!(
-        "{:<18} {:<26} {:>7} {:>7} {:>9} {:>5} TRUNC",
-        "HASH", "COMMAND", "LINES", "HIDDEN", "ORIG", "EXIT"
+        "{:<34} {:<26} {:>7} {:>7} {:>9} {:>5} TRUNC",
+        "REFERENCE", "COMMAND", "LINES", "HIDDEN", "ORIG", "EXIT"
     );
     let mut n = 0;
     for row in rows {
@@ -972,7 +1111,7 @@ fn list_entries(conn: &Connection) -> Result<i32> {
             command
         };
         println!(
-            "{:<18} {:<26} {:>7} {:>7} {:>9} {:>5} {}",
+            "{:<34} {:<26} {:>7} {:>7} {:>9} {:>5} {}",
             hash,
             cmd,
             total,
@@ -999,6 +1138,40 @@ mod tests {
         RetrieverConfig {
             database_path: Some(dir.join("recall_test.db")),
             ..RetrieverConfig::default()
+        }
+    }
+
+    #[test]
+    fn version_two_recall_adds_final_capture_schema_without_altering_legacy_rows() {
+        let conn = Connection::open_in_memory().expect("db");
+        migrate_initial(&conn).expect("initial");
+        migrate_recalled(&conn).expect("recalled");
+        conn.execute_batch(
+            "INSERT INTO recall (hash, command, created_at, total_lines, shown_upto, byte_size,
+             truncated, codec, blob, recalled)
+             VALUES ('legacy-hash','legacy command',0,1,1,3,0,'raw',X'616263',1);",
+        )
+        .expect("legacy row");
+        conn.pragma_update(None, "application_id", DbKind::Recall.application_id())
+            .expect("tag");
+        conn.pragma_update(None, "user_version", RecallSchema::Recalled.number())
+            .expect("stamp");
+        for _ in 0..2 {
+            db::apply_migrations(&conn, &SCHEMA, MigrationMode::GatedByVersion).expect("upgrade");
+            assert_eq!(user_version(&conn), 3);
+            let row = load_reference(&conn, "legacy-hash")
+                .expect("legacy lookup")
+                .unwrap();
+            assert_eq!(decode(&row).unwrap(), b"abc");
+            assert!(row.capture_id.is_none());
+            assert!(row.invocation_id.is_none());
+            assert_eq!(row.shown_upto, 1);
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM recall_captures", [], |row| row
+                    .get::<_, i64>(0))
+                    .expect("capture table"),
+                0
+            );
         }
     }
 
@@ -1030,6 +1203,105 @@ mod tests {
     }
 
     #[test]
+    fn recall_writer_retries_interrupted_and_reports_write_zero_and_flush_errors() {
+        struct Writer {
+            written: Vec<u8>,
+            interrupt: bool,
+            zero: bool,
+            fail_flush: bool,
+        }
+        impl Write for Writer {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                if std::mem::take(&mut self.interrupt) {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                if self.zero {
+                    return Ok(0);
+                }
+                self.written.extend_from_slice(data);
+                Ok(data.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                if self.fail_flush {
+                    Err(std::io::ErrorKind::BrokenPipe.into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let mut writer = Writer {
+            written: Vec::new(),
+            interrupt: true,
+            zero: false,
+            fail_flush: false,
+        };
+        let output = b"a\xff\n";
+        let (emitted, outcome) = emit_recall(&mut writer, output);
+        outcome.expect("retry interrupted write");
+        assert_eq!(emitted, output.len());
+        assert_eq!(writer.written, output);
+
+        writer.zero = true;
+        let (emitted, outcome) = emit_recall(&mut writer, b"not written");
+        assert_eq!(emitted, 0);
+        assert_eq!(outcome.unwrap_err().kind(), std::io::ErrorKind::WriteZero);
+
+        writer.zero = false;
+        writer.fail_flush = true;
+        let (emitted, outcome) = emit_recall(&mut writer, b"flush fails");
+        assert_eq!(emitted, 11);
+        assert_eq!(outcome.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn recall_records_only_the_partial_output_and_propagates_the_write_error() {
+        struct PartialWriter(usize);
+
+        impl Write for PartialWriter {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                let accepted = self.0.min(data.len());
+                self.0 -= accepted;
+                Ok(accepted)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                panic!("a failed write should not flush")
+            }
+        }
+
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let stored = store_inner(&cfg, b"first\nsecond\n", "test", Some(0), 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        let args = RecallArgs {
+            hash: Some(&stored.hash),
+            full: true,
+            from: None,
+            lines: None,
+            grep: None,
+            list: false,
+        };
+        user_env::with_path("RTK_DB_PATH", Some(dir.path().join("tracking.db")), || {
+            let error =
+                recall_from(&conn, &args, &mut PartialWriter(5)).expect_err("partial write");
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::BrokenPipe
+            );
+            let tracker = tracking::Tracker::new().expect("tracking");
+            let events = tracker.recall_event_history(10, None).unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].emitted_bytes, 5);
+            assert_eq!(events[0].output_tokens, 2);
+            assert!(events[0].invoking_id.is_some());
+            assert!(events[0].source_capture_id.is_none());
+        });
+    }
+
+    #[test]
     fn test_reset_stats_keeps_the_stored_output_recoverable() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
@@ -1048,6 +1320,323 @@ mod tests {
         let cfg = temp_cfg(dir.path());
         reset_stats_with(&cfg).unwrap();
         assert!(!cfg.database_path.as_ref().unwrap().exists());
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn family_rotation_prunes_capture_metadata_without_resurrection() {
+        let dir = tempfile::tempdir().expect("directory");
+        let cfg = temp_cfg(dir.path());
+        store_inner(&cfg, b"first\noutput\n", "posthook:read", None, 1).expect("first");
+        let conn = open(&cfg).expect("db");
+        let first_capture: String = conn
+            .query_row("SELECT capture_id FROM recall_captures LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .expect("capture");
+        drop(conn);
+        store_inner(&cfg, b"second\noutput\n", "posthook:read", None, 1).expect("second");
+        store_inner(&cfg, b"failure\n", "cargo", Some(1), 1).expect("unrelated");
+        trim_family(&cfg, "posthook:", 1);
+        let conn = open(&cfg).expect("rotated db");
+        let captures: i64 = conn
+            .query_row("SELECT COUNT(*) FROM recall_captures", [], |r| r.get(0))
+            .expect("remaining captures");
+        assert_eq!(captures, 2, "rotation prunes only evicted captures");
+        let present = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM recall_captures WHERE capture_id = ?1",
+                [&first_capture],
+                |r| r.get(0),
+            )
+            .expect("old capture count")
+        };
+        assert_eq!(present(&conn), 0);
+        drop(conn);
+        store_inner(&cfg, b"first\noutput\n", "posthook:read", None, 1).expect("recapture");
+        let conn = open(&cfg).expect("db after recapture");
+        assert_eq!(present(&conn), 0, "an expired capture must not return");
+    }
+
+    #[test]
+    fn equal_payloads_have_distinct_immutable_capture_ids() {
+        let dir = tempfile::tempdir().expect("directory");
+        let cfg = temp_cfg(dir.path());
+        let first = store_inner(&cfg, b"same\noutput\n", "cmd", None, 1).expect("store");
+        let second = store_inner(&cfg, b"same\noutput\n", "cmd", None, 2).expect("store");
+        assert_eq!(first.hash, second.hash);
+        let conn = open(&cfg).expect("db");
+        let distinct: i64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT capture_id) FROM recall_captures",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(distinct, 2);
+        let source: Option<String> = conn
+            .query_row(
+                "SELECT invocation_id FROM recall_captures LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("capture source");
+        assert_eq!(source.as_deref(), super::super::invocation::current());
+    }
+
+    #[test]
+    fn capture_metadata_is_bounded_and_prunes_payload_orphans() {
+        let conn = Connection::open_in_memory().expect("db");
+        db::apply_migrations(&conn, &SCHEMA, MigrationMode::Always).expect("schema");
+        conn.execute(
+            "INSERT INTO recall VALUES ('hash','cmd','',0,0,1,1,1,0,'raw',X'61',0)",
+            [],
+        )
+        .expect("payload");
+        for i in 0..MAX_CAPTURE_RECORDS + 5 {
+            conn.execute(
+                "INSERT INTO recall_captures (capture_id, hash, created_at, command, total_lines, shown_upto, byte_size, truncated)
+                 VALUES (?1,'hash',0,'cmd',1,1,1,0)",
+                [i.to_string()],
+            )
+            .expect("capture");
+        }
+        prune_captures(&conn).expect("prune");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM recall_captures", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, MAX_CAPTURE_RECORDS);
+        conn.execute("DELETE FROM recall", [])
+            .expect("delete payload");
+        prune_captures(&conn).expect("orphans");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM recall_captures", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn regression_same_output_keeps_original_offset() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cfg = temp_cfg(dir.path());
+        let data = b"first\nsecond\nthird\nfourth\n";
+        let original = store_inner(&cfg, data, "same", Some(1), 2).expect("first capture");
+        let _later = store_inner(&cfg, data, "same", Some(2), 4).expect("later capture");
+        let conn = open(&cfg).expect("open");
+        let row = load_reference(&conn, &original.reference)
+            .expect("lookup")
+            .expect("row");
+        assert_eq!(
+            slice_from_line(&decode(&row).expect("decode"), row.shown_upto),
+            b"second\nthird\nfourth\n"
+        );
+    }
+
+    #[test]
+    fn regression_same_output_keeps_original_capped_bytes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut cfg = temp_cfg(dir.path());
+        cfg.max_entry_bytes = 13;
+        let data = b"first\nsecond\nthird\nfourth\n";
+        let original = store_inner(&cfg, data, "same", Some(1), 2).expect("first capture");
+        cfg.max_entry_bytes = 7;
+        let _later = store_inner(&cfg, data, "same", Some(2), 4).expect("later capture");
+        let conn = open(&cfg).expect("open");
+        let row = load_reference(&conn, &original.reference)
+            .expect("lookup")
+            .expect("row");
+        assert_eq!(decode(&row).expect("decode"), b"second\nthird\n");
+    }
+
+    #[test]
+    fn capture_snapshots_metadata_and_invocation_across_deduplicated_payloads() {
+        let dir = tempfile::tempdir().expect("directory");
+        let cfg = temp_cfg(dir.path());
+        let cwd_a = super::super::test_isolation::tempdir();
+        let cwd_b = super::super::test_isolation::tempdir();
+        let first = {
+            let _cwd = super::super::test_isolation::enter(cwd_a.path());
+            store_inner(&cfg, b"a\nb\nc\n", "same", Some(1), 2).expect("first")
+        };
+        let first_invocation = super::super::invocation::current();
+        let second = {
+            let _cwd = super::super::test_isolation::enter(cwd_b.path());
+            store_inner(&cfg, b"a\nb\nc\n", "same", Some(2), 3).expect("second")
+        };
+        assert_eq!(first.hash, second.hash);
+        assert_ne!(first.reference, second.reference);
+        let conn = open(&cfg).expect("db");
+        let row = load_reference(&conn, &first.reference)
+            .expect("lookup")
+            .expect("first");
+        assert_eq!(row.invocation_id.as_deref(), first_invocation);
+        assert_eq!(row.shown_upto, 2);
+        let metadata: (String, i32, i64, i64, bool) = conn
+            .query_row(
+                "SELECT cwd, exit_code, total_lines, byte_size, truncated FROM recall_captures
+             WHERE capture_id = ?1",
+                [&first.reference[2..]],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .expect("snapshot");
+        assert_eq!(
+            metadata,
+            (cwd_a.path().to_string_lossy().into_owned(), 1, 3, 6, false)
+        );
+    }
+
+    #[test]
+    fn capped_and_uncapped_captures_can_share_bytes_without_sharing_metadata() {
+        let dir = tempfile::tempdir().expect("directory");
+        let mut cfg = temp_cfg(dir.path());
+        cfg.max_entry_bytes = 4;
+        let first = store_inner(&cfg, b"x\na\nb\n", "same", None, 2).expect("capped");
+        cfg.compression = false;
+        let second = store_inner(&cfg, b"a\nb\n", "same", None, 2).expect("uncapped");
+        assert_eq!(
+            first.hash, second.hash,
+            "keys describe saved bytes, not the source"
+        );
+        let conn = open(&cfg).expect("db");
+        let a = load_reference(&conn, &first.reference)
+            .expect("lookup")
+            .expect("first");
+        let b = load_reference(&conn, &second.reference)
+            .expect("lookup")
+            .expect("second");
+        assert!(a.truncated);
+        assert!(!b.truncated);
+        assert_eq!((a.shown_upto, b.shown_upto), (1, 2));
+        assert_eq!(decode(&a).expect("decode"), b"a\nb\n");
+        assert_eq!(decode(&a).expect("decode"), decode(&b).expect("decode"));
+    }
+
+    #[test]
+    fn evicted_capture_never_revives_when_identical_bytes_return() {
+        let dir = tempfile::tempdir().expect("directory");
+        let cfg = RetrieverConfig {
+            max_entries: 1,
+            ..temp_cfg(dir.path())
+        };
+        let first = store_inner(&cfg, b"same\n", "cmd", None, 1).expect("first");
+        store_inner(&cfg, b"different\n", "cmd", None, 1).expect("evict first");
+        let conn = open(&cfg).expect("db");
+        assert!(
+            load_reference(&conn, &first.reference)
+                .expect("lookup")
+                .is_none()
+        );
+        let later = store_inner(&cfg, b"same\n", "cmd", None, 1).expect("recapture");
+        assert_eq!(first.hash, later.hash);
+        assert!(
+            load_reference(&conn, &first.reference)
+                .expect("lookup")
+                .is_none()
+        );
+        assert!(
+            load_reference(&conn, &later.reference)
+                .expect("lookup")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn maintenance_eviction_does_not_reattach_orphaned_captures() {
+        let dir = tempfile::tempdir().expect("directory");
+        let cfg = temp_cfg(dir.path());
+        let first = store_inner(&cfg, b"same\n", "cmd", None, 1).expect("first");
+        let conn = open(&cfg).expect("db");
+        conn.execute("DELETE FROM recall", [])
+            .expect("maintenance eviction");
+        assert!(
+            load_reference(&conn, &first.reference)
+                .expect("lookup")
+                .is_none()
+        );
+        store_inner(&cfg, b"same\n", "cmd", None, 1).expect("recapture");
+        assert!(
+            load_reference(&conn, &first.reference)
+                .expect("lookup")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn captures_require_exact_namespaced_ids() {
+        let dir = tempfile::tempdir().expect("directory");
+        let cfg = temp_cfg(dir.path());
+        let stored = store_inner(&cfg, b"x\n", "cmd", None, 1).expect("capture");
+        let conn = open(&cfg).expect("db");
+        assert!(load_reference(&conn, &stored.reference[..10]).is_err());
+        assert!(
+            load_reference(&conn, &stored.reference[2..])
+                .expect("lookup")
+                .is_none()
+        );
+        assert!(
+            load_reference(&conn, &stored.reference)
+                .expect("lookup")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn capture_failure_rolls_back_payload_and_stats() {
+        let dir = tempfile::tempdir().expect("directory");
+        let cfg = temp_cfg(dir.path());
+        let conn = open(&cfg).expect("db");
+        conn.execute_batch(
+            "CREATE TRIGGER reject_capture BEFORE INSERT ON recall_captures
+                            BEGIN SELECT RAISE(FAIL, 'capture failure'); END;",
+        )
+        .expect("trigger");
+        assert!(matches!(
+            store(&cfg, b"data\n", "cmd", None, 1),
+            Stored::Unavailable
+        ));
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM recall", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 0);
+        assert!(stats_snapshot_with(&cfg).expect("stats").is_empty());
+    }
+
+    #[test]
+    fn migration_serializes_concurrent_capture_schema_openers() {
+        let dir = tempfile::tempdir().expect("directory");
+        let cfg = temp_cfg(dir.path());
+        let conn = open(&cfg).expect("db");
+        conn.execute_batch("DROP TABLE recall_captures; PRAGMA user_version = 2;")
+            .expect("develop schema");
+        drop(conn);
+        let path = cfg.database_path.expect("path");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
+        let threads: Vec<_> = (0..12)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let conn = Connection::open(path).expect("open thread db");
+                    conn.busy_timeout(std::time::Duration::from_secs(5))
+                        .expect("busy timeout");
+                    barrier.wait();
+                    db::apply_migrations(&conn, &SCHEMA, MigrationMode::GatedByVersion)
+                        .expect("concurrent migration");
+                    assert_eq!(user_version(&conn), 3);
+                    let captures: i64 = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM recall_captures WHERE shown_upto IS NOT NULL",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .expect("final table");
+                    assert_eq!(captures, 0);
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("simultaneous migration must succeed");
+        }
     }
 
     #[test]
@@ -1095,8 +1684,10 @@ mod tests {
         let cfg = temp_cfg(dir.path());
         let first = store_inner(&cfg, b"out-25833387", "cmd", Some(1), 1).unwrap();
         let second = store_inner(&cfg, b"out-36334097", "cmd", Some(1), 1).unwrap();
-        assert_eq!(first.hash, "4ce95baf880ee759");
-        assert_eq!(second.hash, "4ce95baf880e306f");
+        assert_eq!(&content_hash("cmd", b"out-25833387")[..12], "4ce95baf880e");
+        assert_eq!(&content_hash("cmd", b"out-36334097")[..12], "4ce95baf880e");
+        assert_ne!(first.hash, second.hash);
+        assert_ne!(first.reference, second.reference);
 
         let conn = open(&cfg).unwrap();
         for (stored, content) in [(&first, b"out-25833387"), (&second, b"out-36334097")] {
