@@ -1,0 +1,70 @@
+{
+  "config": {},
+  "stats": {
+    "expected": 0,
+    "unexpected": 1,
+    "skipped": 0,
+    "flaky": 0,
+    "duration": 14
+  },
+  "suites": [
+    {
+      "title": "sample.spec.ts",
+      "file": "tests/sample.spec.ts",
+      "line": 1,
+      "column": 1,
+      "specs": [
+        {
+          "title": "failing scenario",
+          "ok": false,
+          "location": {
+            "file": "tests/sample.spec.ts",
+            "line": 3,
+            "column": 1
+          },
+          "tests": [
+            {
+              "projectId": "chromium",
+              "status": "unexpected",
+              "results": [
+                {
+                  "status": "failed",
+                  "retry": 0,
+                  "errors": [
+                    {
+                      "message": "Expected 2, received 1",
+                      "stack": "at sample.spec.ts:4:9"
+                    }
+                  ],
+                  "attachments": [
+                    {
+                      "name": "trace",
+                      "contentType": "application/zip",
+                      "path": "test-results/failure/trace.zip"
+                    },
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "test-results/failure/test-failed-1.png"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "test-results/failure/error-context.md"
+                    },
+                    {
+                      "name": "allure",
+                      "contentType": "application/json",
+                      "path": "allure-results/result.json"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "suites": []
+    }
+  ]
+}
