@@ -12,6 +12,27 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  baseline-cpu:
+    name: Linux x86-64 baseline CPU
+    runs-on: ubuntu-latest
+    env:
+      CFLAGS_x86_64_unknown_linux_musl: "-march=x86-64 -mtune=generic"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools qemu-user
+      - uses: Swatinem/rust-cache@v2
+      - name: Test full edition on CPUs without AVX and AVX2
+        run: |
+          cargo build --locked --release --target x86_64-unknown-linux-musl
+          bash scripts/test-baseline-cpu.sh target/x86_64-unknown-linux-musl/release/rtk
+      - name: Test Apache edition on CPUs without AVX and AVX2
+        run: |
+          cargo build --locked --release --no-default-features --target x86_64-unknown-linux-musl
+          bash scripts/test-baseline-cpu.sh target/x86_64-unknown-linux-musl/release/rtk
+
   # ─── Fast gates (fail early, save CI minutes) ───
 
   check-test-presence:
