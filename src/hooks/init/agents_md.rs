@@ -173,9 +173,22 @@ pub(super) fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -
             eprintln!("{} reference already present in AGENTS.md", rtk_md_ref);
         }
         // ISSUE #892: Migrate old relative @RTK.md to absolute path if needed
-        if rtk_md_ref != RTK_MD_REF && content.contains(RTK_MD_REF) && !content.contains(rtk_md_ref)
+        if rtk_md_ref != RTK_MD_REF
+            && has_rtk_reference(&content, &[RTK_MD_REF])
+            && !has_rtk_reference(&content, &[rtk_md_ref])
         {
-            content = content.replace(RTK_MD_REF, rtk_md_ref);
+            // Replace only the reference line; whole-file replace rewrote
+            // unrelated user prose that merely mentioned @RTK.md (#4650).
+            content = content
+                .split_inclusive('\n')
+                .map(|line| {
+                    if normalize_reference_line(line) == RTK_MD_REF {
+                        line.replacen(RTK_MD_REF, rtk_md_ref, 1)
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<String>();
             if dry_run {
                 println!(
                     "[dry-run] would migrate {} to {} in {}",
@@ -232,10 +245,16 @@ pub(super) fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -
     Ok(true)
 }
 
+/// A reference must occupy a whole trimmed line (#4650). A BOM-prefixed
+/// first line is still a reference -- editors on Windows prepend U+FEFF.
+pub(super) fn normalize_reference_line(line: &str) -> &str {
+    line.trim().trim_start_matches('\u{FEFF}')
+}
+
 pub(super) fn has_rtk_reference(content: &str, refs: &[&str]) -> bool {
     content
         .lines()
-        .map(str::trim)
+        .map(normalize_reference_line)
         .any(|line| refs.contains(&line))
 }
 
@@ -259,10 +278,7 @@ pub(super) fn remove_rtk_reference_from_agents(
 
     let new_content = content
         .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !refs.contains(&trimmed)
-        })
+        .filter(|line| !refs.contains(&normalize_reference_line(line)))
         .collect::<Vec<_>>()
         .join("\n");
     let cleaned = clean_double_blanks(&new_content);
@@ -464,5 +480,59 @@ mod tests {
         let content = fs::read_to_string(&agents_md).unwrap();
         assert!(!content.contains("old"));
         assert_eq!(content.matches("@RTK.md").count(), 1);
+    }
+
+    #[test]
+    fn test_reference_requires_a_whole_line_not_a_mention() {
+        let prose = "Please read @RTK.md before editing this file.\n";
+        assert!(!has_rtk_reference(prose, &[RTK_MD_REF]));
+        assert!(has_rtk_reference(
+            "Notes\n@RTK.md\nMore notes\n",
+            &[RTK_MD_REF]
+        ));
+    }
+
+    #[test]
+    fn test_bom_prefixed_reference_is_still_a_reference() {
+        assert!(has_rtk_reference("\u{feff}@RTK.md\n", &[RTK_MD_REF]));
+    }
+
+    #[test]
+    fn test_migration_does_not_rewrite_user_prose() {
+        // #4650: the old whole-file replace rewrote "Read @RTK.md" in prose.
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        let absolute = "/home/user/.config/rtk/RTK.md";
+        fs::write(
+            &agents_md,
+            format!("Read @RTK.md for details.\n\n@RTK.md\n"),
+        )
+        .unwrap();
+
+        let migrated = patch_agents_md(&agents_md, absolute, InitContext::default()).unwrap();
+
+        assert!(migrated);
+        let content = fs::read_to_string(&agents_md).unwrap();
+        assert!(
+            content.contains("Read @RTK.md for details."),
+            "user prose was rewritten: {content}"
+        );
+        assert!(content.contains(&format!("\n{absolute}\n")));
+    }
+
+    #[test]
+    fn test_remove_reference_with_bom() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        fs::write(&agents_md, format!("\u{feff}{RTK_MD_REF}\nOther rules\n")).unwrap();
+
+        let removed =
+            remove_rtk_reference_from_agents(&agents_md, &[RTK_MD_REF], InitContext::default())
+                .unwrap();
+
+        assert!(removed);
+        // Existing remover joins `lines()` with "\n", so the final newline is
+        // not preserved; that behavior is out of scope for #4650.
+        assert_eq!(fs::read_to_string(&agents_md).unwrap(), "Other rules");
     }
 }
