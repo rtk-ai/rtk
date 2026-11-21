@@ -159,6 +159,20 @@ pub const VIBE_PROMPT_FILE: &str = "rtk.md";
 pub const VIBE_HOOK_NAME: &str = "rtk-rewrite";
 pub const VIBE_BASH_MATCH: &str = "bash";
 
+/// Codewhale config directory (`~/.codewhale` and `.codewhale`).
+pub const CODEWHALE_DIR: &str = ".codewhale";
+/// Global Codewhale hook registry (`~/.codewhale/config.toml`).
+pub const CODEWHALE_CONFIG_FILE: &str = "config.toml";
+/// Project Codewhale hook registry (`.codewhale/hooks.toml`).
+pub const CODEWHALE_PROJECT_HOOKS_FILE: &str = "hooks.toml";
+/// Native Rust hook command for Codewhale.
+pub const CODEWHALE_HOOK_COMMAND: &str = "rtk hook codewhale";
+/// The `name` field RTK writes into its Codewhale hook entry.
+pub const CODEWHALE_HOOK_NAME: &str = "rtk-rewrite";
+/// Tool-name condition RTK registers. Codewhale treats `bash`, `Bash` and
+/// `exec_shell` as aliases, so naming one matches all three spellings.
+pub const CODEWHALE_BASH_MATCH: &str = "bash";
+
 #[cfg(all(test, feature = "engine"))]
 mod tests {
     use super::*;

@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, and Trae
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, Codewhale, and Trae
 sidebar:
   order: 3
 ---
@@ -46,6 +46,7 @@ Agent runs "cargo test"
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rust binary (`PreToolUse` plugin) | Yes |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
+| Codewhale | Rust binary (`tool_call_before`) | Yes |
 
 Agents that rewrite transparently receive the awareness file selected by `awareness.level` in
 `config.toml` (`default` says nothing about RTK). Rules-file agents cannot rewrite, so the agent
@@ -318,6 +319,28 @@ rtk init -g --agent vibe --uninstall
 
 Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any other user-declared hooks in `hooks.toml` are preserved byte-for-byte. `hooks.toml` is removed only when the RTK entry was the sole content.
 
+### Codewhale
+
+```bash
+rtk init --agent codewhale             # project-scoped (.codewhale/hooks.toml)
+rtk init -g --agent codewhale          # user-scoped (~/.codewhale/config.toml)
+```
+
+Installs a `tool_call_before` hook entry (`condition = { type = "tool_name", name = "bash" }`, `command = "rtk hook codewhale"`) into the matching Codewhale hooks registry, following the contract in Codewhale's `docs/HOOKS.md`. Codewhale invokes the native `rtk hook codewhale` binary before every shell tool call; RTK reads the tool input from the `DEEPSEEK_TOOL_ARGS` environment variable and prints `{"decision": "allow", "updatedInput": {"command": "rtk ..."}}` to rewrite the command in place.
+
+`condition = { type = "tool_name", name = "bash" }` matches all three shell-tool spellings (`bash`, `Bash`, `exec_shell`), which Codewhale treats as aliases. Like Codex and Trae, Codewhale has no RTK-side denylist / allowlist to honor, so RTK rewrites every shell command it knows how to compress and lets Codewhale's own permission engine judge the rewritten command; commands RTK doesn't handle pass through unchanged.
+
+Project hooks are executable repository configuration, so Codewhale runs `.codewhale/hooks.toml` only after the workspace is trusted and the exact file bytes are approved — review and approve inside Codewhale with `/hooks review`, then `/hooks approve <digest>`.
+
+Uninstall:
+
+```bash
+rtk init --agent codewhale --uninstall
+rtk init -g --agent codewhale --uninstall
+```
+
+Strips only RTK's `[[hooks]]` / `[[hooks.hooks]]` block; other hook entries and unrelated configuration are preserved byte-for-byte. A project `hooks.toml` is removed only when the RTK entry was its sole content.
+
 ## Integration tiers explained
 
 | Tier | Mechanism | How rewrites work |
@@ -326,13 +349,13 @@ Strips only RTK's `[[hooks]]` block and the `~/.vibe/prompts/rtk.md` file. Any o
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Kilo Code) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Codex, Factory Droid, Antigravity) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Pi, Hermes) use in-place mutation via the agent's extension or plugin API.
+Rules file integrations (Cline, Windsurf, Kilo Code) rely on the model following instructions. Full hook integrations (Claude Code, Trae, Cursor, Gemini, Codex, Factory Droid, Antigravity, Codewhale) apply rewrites before execution whenever RTK supports and can safely attest the command. Plugin integrations (OpenCode, Pi, Hermes) use in-place mutation via the agent's extension or plugin API.
 
 Building a harness of your own? A host can skip these hooks and call `rtk rewrite` from its own bash tool. [Embedding rtk in your own agent harness](embedding.md) covers the exit-code contract, where the call goes, the fail-open rules, and per-session accounting.
 
 ## Windows support
 
-Since v0.37.2 the hooks for Claude Code, Cursor, Copilot, Codex, Trae, Factory Droid and Mistral Vibe are native binary commands (`rtk hook <agent>`), so auto-rewrite works on native Windows — no Unix shell, bash or jq required. `rtk init -g` installs the native hook on Windows exactly as on Linux and macOS, and adds it to Claude Code's `settings.json` once you answer `y` to the prompt (or pass `--auto-patch`).
+Since v0.37.2 the hooks for Claude Code, Cursor, Copilot, Codex, Trae, Factory Droid, Mistral Vibe and Codewhale are native binary commands (`rtk hook <agent>`), so auto-rewrite works on native Windows — no Unix shell, bash or jq required. `rtk init -g` installs the native hook on Windows exactly as on Linux and macOS, and adds it to Claude Code's `settings.json` once you answer `y` to the prompt (or pass `--auto-patch`).
 
 The Gemini CLI hook is a small bash wrapper around `rtk hook gemini`, so it needs a bash available; [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) behaves identically to Linux.
 

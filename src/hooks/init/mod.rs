@@ -25,6 +25,7 @@ use crate::core::user_dirs;
 mod agents_md;
 pub(crate) mod antigravity;
 pub(crate) mod claude;
+pub(crate) mod codewhale;
 pub(crate) mod codex;
 mod copilot;
 pub(crate) mod cursor;
@@ -59,6 +60,7 @@ use pi::*;
 
 pub use antigravity::{run_antigravity_mode, uninstall_antigravity_mode};
 pub use claude::claude_hook_gaps;
+pub use codewhale::{run_codewhale_mode, uninstall_codewhale};
 pub(crate) use copilot::{COPILOT_HOOK_JSON, copilot_user_dir};
 pub use copilot::{run_copilot, run_copilot_global, uninstall_copilot, uninstall_copilot_global};
 pub use droid::{run_droid_mode, uninstall_droid};

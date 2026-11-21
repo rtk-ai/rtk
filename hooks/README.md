@@ -4,7 +4,7 @@
 
 **Deployed hook artifacts** — the files and agent-specific configuration installed on user machines by `rtk init`. External scripts and plugins are thin delegates to `rtk rewrite`; native processors such as Codex call the same Rust rewrite registry directly. Zero filtering logic is duplicated in this directory.
 
-Contains per-agent hook scripts and configuration files for the supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Oh My Pi, Mistral Vibe, Trae, Google Antigravity). `rtk init` installs them.
+Contains per-agent hook scripts and configuration files for the supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Oh My Pi, Mistral Vibe, Trae, Google Antigravity, Codewhale). `rtk init` installs them.
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init/`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
@@ -49,6 +49,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
 - **[`vibe/`](vibe/README.md)** — Rust binary hook (`rtk hook vibe`), `pre_tool` entry in `~/.vibe/hooks.toml`, `hook_specific_output.tool_input` rewrite plus `system_message` for UI visibility
 - **[`antigravity/`](antigravity/README.md)** — Rust binary hook (`rtk hook antigravity`), `PreToolUse` plugin entry in `.agents/plugins/rtk/hooks.json` or `~/.gemini/config/plugins/rtk/hooks.json`, transparent rewrite via `overwrite.CommandLine`
+- **[`codewhale/`](codewhale/README.md)** — Rust binary hook (`rtk hook codewhale`), `tool_call_before` entry in `~/.codewhale/config.toml` or `.codewhale/hooks.toml`, transparent rewrite via `updatedInput.command`
 
 ## Supported Agents
 
@@ -69,6 +70,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Oh My Pi (OMP) | TypeScript extension (`tool_call` event, shared with Pi) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
 | Mistral Vibe | Rust binary (`rtk hook vibe`) | Transparent rewrite | Yes (`hook_specific_output.tool_input`) |
+| Codewhale | Rust binary (`rtk hook codewhale`) | Transparent rewrite | Yes (`updatedInput.command`) |
 
 ## JSON Formats by Agent
 
@@ -274,6 +276,38 @@ The `allow` value is required by Codex to accept `updatedInput`; Codex still run
 ```
 
 **No rewrite**: `{"decision": "allow"}`
+
+### Codewhale (Rust Binary)
+
+Codewhale passes the tool context through environment variables rather than
+stdin — the tool-input JSON preview is `DEEPSEEK_TOOL_ARGS`.
+
+**Input** (env `DEEPSEEK_TOOL_ARGS`):
+
+```json
+{
+  "command": "git status",
+  "cwd": "sub/dir",
+  "timeout_ms": 120000
+}
+```
+
+**Output** (when rewritten):
+
+```json
+{
+  "decision": "allow",
+  "updatedInput": {
+    "command": "rtk git status",
+    "cwd": "sub/dir",
+    "timeout_ms": 120000
+  }
+}
+```
+
+**No rewrite**: exit 0 with empty stdout (Codewhale treats empty/non-JSON
+stdout from a `tool_call_before` hook as allow). `updatedInput` replaces the
+whole tool input, so every field is preserved and only `command` changes.
 
 ### OpenCode (TypeScript Plugin)
 

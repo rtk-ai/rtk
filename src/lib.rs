@@ -64,6 +64,8 @@ pub enum AgentTarget {
     Droid,
     /// Mistral Vibe CLI
     Vibe,
+    /// Codewhale CLI
+    Codewhale,
     /// Oh My Pi (OMP)
     Omp,
 }
@@ -738,7 +740,7 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// Discover missed RTK savings from Claude Code history
+    /// Discover missed RTK savings from Claude Code and Codewhale history
     Discover {
         /// Filter by project path (substring match; case-insensitive on Windows)
         #[arg(short, long)]
@@ -755,6 +757,9 @@ enum Commands {
         /// Output format: text, json
         #[arg(short, long, default_value = "text")]
         format: String,
+        /// Session source to scan: claude, codewhale, or all
+        #[arg(long, default_value = "all", value_parser = ["claude", "codewhale", "all"])]
+        source: String,
     },
 
     /// Show RTK adoption across Claude Code sessions
@@ -1292,6 +1297,8 @@ enum HookCommands {
     Antigravity,
     /// Process Mistral Vibe CLI pre_tool hook (reads JSON from stdin)
     Vibe,
+    /// Process Codewhale tool_call_before hook (reads env, prints JSON)
+    Codewhale,
     /// Answer for OpenCode's plugin: the rewrite as JSON, or `{}` when
     /// rewriting would change what OpenCode's own permission rules decide
     Opencode {
@@ -2381,6 +2388,9 @@ where
     } else if agent == Some(AgentTarget::Vibe) {
         hooks::init::uninstall_vibe(ctx)?;
         Ok(0)
+    } else if agent == Some(AgentTarget::Codewhale) {
+        hooks::init::uninstall_codewhale(global, ctx)?;
+        Ok(0)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -3090,6 +3100,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_droid_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Vibe) {
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
+            } else if agent == Some(AgentTarget::Codewhale) {
+                hooks::init::run_codewhale_mode(global, patch_mode, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_cursor = agent == Some(AgentTarget::Cursor);
@@ -3462,8 +3474,17 @@ fn run_cli() -> Result<i32> {
             all,
             since,
             format,
+            source,
         } => {
-            discover::run(project.as_deref(), all, since, limit, &format, cli.verbose)?;
+            discover::run(
+                project.as_deref(),
+                all,
+                since,
+                limit,
+                &format,
+                cli.verbose,
+                &source,
+            )?;
             0
         }
 
@@ -3672,6 +3693,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Vibe => {
                 hooks::hook_cmd::run_vibe()?;
+                0
+            }
+            HookCommands::Codewhale => {
+                hooks::hook_cmd::run_codewhale()?;
                 0
             }
             HookCommands::Opencode { agent, args } => {

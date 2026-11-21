@@ -318,15 +318,15 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 
 fn append_agent_notes(out: &mut String, status: AgentIntegrationStatus) {
     if status.cursor_hook_installed {
-        out.push_str("\nNote: Cursor sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
+        out.push_str("\nNote: Cursor sessions are tracked via `rtk gain` (discover scans Claude Code and Codewhale)\n");
     }
 
     if status.hermes_plugin_installed {
-        out.push_str("\nNote: Hermes plugin is installed; Hermes sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
+        out.push_str("\nNote: Hermes plugin is installed; Hermes sessions are tracked via `rtk gain` (discover scans Claude Code and Codewhale)\n");
     }
 
     if status.copilot_hook_installed {
-        out.push_str("\nNote: GitHub Copilot sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
+        out.push_str("\nNote: GitHub Copilot sessions are tracked via `rtk gain` (discover scans Claude Code and Codewhale)\n");
     }
 }
 

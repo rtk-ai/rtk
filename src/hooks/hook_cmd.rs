@@ -612,6 +612,139 @@ fn vibe_rewrite_json(rewritten: &str) -> String {
     .to_string()
 }
 
+// ── Codewhale hook ─────────────────────────────────────────────
+
+/// One resolved decision for a Codewhale hook invocation: the command, the
+/// outcome (for `hook_decisions`), the rewritten form (if any), and the stdout
+/// document to print (if any).
+struct CodewhaleDecision {
+    cmd: String,
+    outcome: HookOutcome,
+    rewritten: Option<String>,
+    output: Option<String>,
+}
+
+/// Run the Codewhale `tool_call_before` hook.
+///
+/// Codewhale passes tool context in environment variables, not stdin:
+/// `DEEPSEEK_TOOL_ARGS` holds the tool-input JSON preview. On success RTK
+/// prints a `{"decision": "allow", "updatedInput": {...}}` document to
+/// stdout, exit 0, or nothing to leave the call untouched. The decision is
+/// also recorded to `hook_decisions` so `rtk discover` can join it against the
+/// session transcript.
+pub fn run_codewhale() -> Result<()> {
+    let Some(args) = user_env::var("DEEPSEEK_TOOL_ARGS") else {
+        return Ok(());
+    };
+    let Some(decision) = run_codewhale_decide(&args) else {
+        return Ok(());
+    };
+    if let Some(output) = &decision.output {
+        let _ = writeln!(io::stdout(), "{output}");
+    }
+    record_codewhale_decision(&decision);
+    Ok(())
+}
+
+fn run_codewhale_decide(args: &str) -> Option<CodewhaleDecision> {
+    let input: Value = serde_json::from_str(args).ok()?;
+    // `tool_call_before` fires for every tool; only shell tools carry a
+    // `command` to rewrite. Non-`run` actions (`wait`, `interact`, `cancel`)
+    // name a `task_id` instead, so the missing command already passes through.
+    let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    if cmd.is_empty() {
+        return None;
+    }
+
+    match decide_hook_action(cmd, permissions::Host::Codewhale, None) {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            Some(CodewhaleDecision {
+                cmd: cmd.to_string(),
+                outcome: HookOutcome::Deny,
+                rewritten: None,
+                output: Some(
+                    r#"{"decision":"deny","reason":"Blocked by RTK permission rule"}"#.to_string(),
+                ),
+            })
+        }
+        HookDecision::AllowRewrite(ref rewritten) | HookDecision::AskRewrite(ref rewritten, _) => {
+            // Codewhale has no RTK-side permission rules, so every rewrite is a
+            // `Default` verdict (`AskRewrite`) rendered to Codewhale as an
+            // explicit `allow` (its own policy re-checks the rewritten input).
+            // Record `Allow` to match what the host actually saw.
+            audit_log("rewrite", cmd, rewritten);
+            Some(CodewhaleDecision {
+                cmd: cmd.to_string(),
+                outcome: HookOutcome::Allow,
+                rewritten: Some(rewritten.clone()),
+                output: Some(codewhale_rewrite_json(&input, rewritten)),
+            })
+        }
+        HookDecision::Defer => Some(CodewhaleDecision {
+            cmd: cmd.to_string(),
+            outcome: HookOutcome::Defer,
+            rewritten: None,
+            output: None,
+        }),
+    }
+}
+
+/// Pure stdout rendering, kept as the unit-test entry point: it never records
+/// and returns `None` when there is nothing to print.
+#[cfg(test)]
+fn run_codewhale_inner(args: &str) -> Option<String> {
+    run_codewhale_decide(args).and_then(|decision| decision.output)
+}
+
+/// Persist the decision to `hook_decisions`, keyed by Codewhale's tool-call id.
+///
+/// `DEEPSEEK_TOOL_CALL_ID` is the tool's `execution_id`, which the session
+/// transcript also stores on the `tool_use` block — so `rtk discover` can join
+/// the two. Best-effort: a tracking failure must never affect the hook's
+/// stdout or its verdict.
+fn record_codewhale_decision(decision: &CodewhaleDecision) {
+    let Some(session_id) = user_env::var("DEEPSEEK_SESSION_ID") else {
+        return;
+    };
+    let Some(tool_use_id) = user_env::var("DEEPSEEK_TOOL_CALL_ID") else {
+        return;
+    };
+    let project_path = user_env::var("DEEPSEEK_WORKSPACE").unwrap_or_default();
+    let Ok(tracker) = crate::core::tracking::Tracker::new() else {
+        return;
+    };
+    if let Err(e) = tracker.record_hook_decision(
+        &session_id,
+        &tool_use_id,
+        &project_path,
+        &decision.cmd,
+        decision.outcome,
+        decision.rewritten.as_deref(),
+        env!("CARGO_PKG_VERSION"),
+    ) {
+        let _ = writeln!(
+            io::stderr(),
+            "[rtk hook] hook_decisions logging failed: {e}"
+        );
+    }
+}
+
+/// Codewhale's `updatedInput` replaces the whole tool input, so every field
+/// the shell tool needs (`cwd`, `timeout_ms`, …) is preserved and only
+/// `command` changes.
+fn codewhale_rewrite_json(input: &Value, rewritten: &str) -> String {
+    let mut updated = input.clone();
+    if let Some(obj) = updated.as_object_mut() {
+        obj.insert("command".into(), Value::String(rewritten.to_string()));
+    }
+    serde_json::json!({
+        "decision": "allow",
+        "updatedInput": updated,
+    })
+    .to_string()
+}
+
 fn gemini_json(decision: &str, rewrite: Option<&str>) -> String {
     let mut output = serde_json::json!({ "decision": decision });
     if let Some(cmd) = rewrite {
@@ -3482,6 +3615,87 @@ mod tests {
     fn test_vibe_substitution_defers() {
         let input = vibe_input("bash", "echo $(rm -rf /)");
         assert!(run_vibe_inner(&input).is_none());
+    }
+
+    fn codewhale_input(tool_input: Value) -> String {
+        // `rtk hook codewhale` reads the tool input from `DEEPSEEK_TOOL_ARGS`,
+        // so the unit under test is fed that JSON directly (not a wrapper).
+        tool_input.to_string()
+    }
+
+    #[test]
+    fn test_codewhale_rewrites_bash_command() {
+        let out = run_codewhale_inner(&codewhale_input(json!({ "command": "git status" })))
+            .expect("rewrite expected");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["updatedInput"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_codewhale_preserves_other_input_fields() {
+        let out = run_codewhale_inner(&codewhale_input(json!(
+            { "command": "git status", "cwd": "sub/dir", "timeout_ms": 120000 }
+        )))
+        .expect("rewrite expected");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["updatedInput"]["command"], "rtk git status");
+        assert_eq!(v["updatedInput"]["cwd"], "sub/dir");
+        assert_eq!(v["updatedInput"]["timeout_ms"], 120000);
+    }
+
+    #[test]
+    fn test_codewhale_empty_command_passthrough() {
+        assert!(run_codewhale_inner(&codewhale_input(json!({ "command": "" }))).is_none());
+        assert!(run_codewhale_inner(&codewhale_input(json!({}))).is_none());
+    }
+
+    #[test]
+    fn test_codewhale_non_run_action_passthrough() {
+        // `action = "wait"` names a task_id, not a command, so it passes through.
+        assert!(
+            run_codewhale_inner(&codewhale_input(json!(
+                { "action": "wait", "task_id": "x" }
+            )))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn test_codewhale_malformed_json_returns_none() {
+        assert!(run_codewhale_inner("not json at all").is_none());
+        assert!(run_codewhale_inner("{ unterminated").is_none());
+    }
+
+    #[test]
+    fn test_codewhale_already_prefixed_passthrough() {
+        assert!(
+            run_codewhale_inner(&codewhale_input(json!({ "command": "rtk git status" }))).is_none()
+        );
+    }
+
+    #[test]
+    fn test_codewhale_substitution_defers() {
+        assert!(
+            run_codewhale_inner(&codewhale_input(json!({ "command": "echo $(rm -rf /)" })))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_codewhale_decision_maps_to_hook_outcome() {
+        let rewrite = run_codewhale_decide(&codewhale_input(json!({ "command": "git status" })))
+            .expect("rewrite decision");
+        assert_eq!(rewrite.outcome, HookOutcome::Allow);
+        assert_eq!(rewrite.rewritten.as_deref(), Some("rtk git status"));
+        assert!(rewrite.output.is_some());
+
+        // An already-prefixed command defers: the hook ran, but rewrote nothing.
+        let defer = run_codewhale_decide(&codewhale_input(json!({ "command": "rtk git status" })))
+            .expect("defer decision");
+        assert_eq!(defer.outcome, HookOutcome::Defer);
+        assert!(defer.rewritten.is_none());
+        assert!(defer.output.is_none());
     }
 
     fn antigravity_input(cmd: &str) -> String {

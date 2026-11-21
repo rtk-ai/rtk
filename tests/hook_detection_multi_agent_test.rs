@@ -191,6 +191,11 @@ fn test_init_and_uninstall_cycle_for_all_global_agents() {
             &["-g", "--agent", "vibe", "--uninstall"],
         ),
         (
+            "codewhale-global",
+            &["-g", "--agent", "codewhale", "--auto-patch"],
+            &["-g", "--agent", "codewhale", "--uninstall"],
+        ),
+        (
             "antigravity-global",
             &["-g", "--agent", "antigravity"],
             &["-g", "--agent", "antigravity", "--uninstall"],
@@ -237,6 +242,11 @@ fn test_init_and_uninstall_cycle_for_all_project_scope_agents() {
             "omp-project",
             &["--agent", "omp", "--auto-patch"],
             &["--agent", "omp", "--uninstall"],
+        ),
+        (
+            "codewhale-project",
+            &["--agent", "codewhale", "--auto-patch"],
+            &["--agent", "codewhale", "--uninstall"],
         ),
     ];
 
