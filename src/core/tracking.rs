@@ -303,7 +303,7 @@ pub struct GainSummary {
     pub by_command: Vec<(String, usize, usize, f64, u64)>,
     /// Last 30 days of activity: (date, saved_tokens)
     pub by_day: Vec<(String, usize)>,
-    /// Rows left out of the totals above: input over [`HEADLINE_INPUT_CAP_TOKENS`]
+    /// Rows left out of the totals above: input or output over [`HEADLINE_INPUT_CAP_TOKENS`]
     pub oversized_excluded: usize,
 }
 
@@ -1367,7 +1367,7 @@ impl Tracker {
 
         for row in rows {
             let (rtk_cmd, input, output, saved, time_ms) = row?;
-            if input > HEADLINE_INPUT_CAP_TOKENS {
+            if input > HEADLINE_INPUT_CAP_TOKENS || output > HEADLINE_INPUT_CAP_TOKENS {
                 oversized_excluded += 1;
                 continue;
             }
@@ -1507,6 +1507,7 @@ impl Tracker {
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
                AND input_tokens <= ?3
+               AND output_tokens <= ?3
              GROUP BY DATE(timestamp)
              ORDER BY DATE(timestamp) DESC"
             ), // added: project filter
@@ -1590,6 +1591,7 @@ impl Tracker {
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
                AND input_tokens <= ?3
+               AND output_tokens <= ?3
              GROUP BY week_start
              ORDER BY week_start DESC"
             ), // added: project filter
@@ -1673,6 +1675,7 @@ impl Tracker {
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
                AND input_tokens <= ?3
+               AND output_tokens <= ?3
              GROUP BY month
              ORDER BY month DESC"
             ), // added: project filter
@@ -3226,6 +3229,46 @@ mod tests {
             "the oversized row must stay visible in by_command: {:?}",
             summary.by_command
         );
+    }
+
+    #[test]
+    fn oversized_output_rows_leave_the_headline_and_period_tables() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+
+        tracker
+            .record("ls", "rtk ls", 1_000, 500, 5)
+            .expect("Failed to record normal row");
+        tracker
+            .record("grep foo", "rtk grep foo", 100, 1_000_000, 5)
+            .expect("Failed to record oversized-output row");
+
+        let summary = tracker.get_summary().expect("Failed to get summary");
+        assert_eq!(summary.oversized_excluded, 1);
+        assert_eq!(summary.total_commands, 1);
+        assert_eq!(summary.total_input, 1_000);
+        assert_eq!(summary.total_output, 500);
+        assert!(summary.total_output <= summary.total_input);
+
+        let days = tracker
+            .get_all_days_filtered(None)
+            .expect("Failed to get days");
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].commands, 1);
+        assert_eq!(days[0].output_tokens, 500);
+
+        let weeks = tracker
+            .get_by_week_filtered(None)
+            .expect("Failed to get weeks");
+        assert_eq!(weeks.len(), 1);
+        assert_eq!(weeks[0].commands, 1);
+        assert_eq!(weeks[0].output_tokens, 500);
+
+        let months = tracker
+            .get_by_month_filtered(None)
+            .expect("Failed to get months");
+        assert_eq!(months.len(), 1);
+        assert_eq!(months[0].commands, 1);
+        assert_eq!(months[0].output_tokens, 500);
     }
 
     // 4. track_passthrough doesn't dilute stats (input=0, output=0)
