@@ -45,3 +45,5 @@ Token-savings tests run inline as part of `cargo test --all`. The `mvn` fixtures
 ## Gradle (`gradlew_cmd.rs`)
 
 See module docs and the gradle PR (`feat/gradlew-android-support`) for rationale. Streaming filter chosen because Gradle output is task-line-based, not block-based — unlike Maven Surefire.
+
+Wrapper detection: `./gradlew` (POSIX) and `gradlew.bat` (Windows) are preferred over `gradle` on PATH. A `./gradlew` that exists but cannot be spawned (no execute bit, or CRLF line endings that break the shebang) falls back to `gradle`, with a one-line note on stderr.
