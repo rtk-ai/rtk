@@ -74,3 +74,45 @@ fn quoted_pattern_reaches_msys_grep_intact() {
         "MSYS grep lost the quoted pattern\nstdout: {stdout:?}\nstderr: {stderr:?}"
     );
 }
+
+#[test]
+fn escaped_bracket_pattern_reaches_msys_grep_intact() {
+    let Some(grep) = msys_grep() else {
+        eprintln!("skipping: no Git for Windows grep found");
+        return;
+    };
+    if !imports_msys_runtime(&grep) {
+        eprintln!("skipping: {} is not MSYS-linked", grep.display());
+        return;
+    }
+
+    let fixture = "[a]\nx\n";
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("rx.txt"), fixture).expect("write fixture");
+
+    let grep_dir = grep.parent().expect("grep.exe has a parent directory");
+    let mut path = grep_dir.as_os_str().to_os_string();
+    path.push(";");
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+
+    for pattern in [r"^\[", r"x\|\[a"] {
+        let out = common::rtk_command()
+            .args(["grep", "-n", pattern, "rx.txt"])
+            .current_dir(dir.path())
+            .env("PATH", &path)
+            .output()
+            .expect("failed to run rtk");
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "rtk grep -n {pattern:?} exited {:?}, expected 0\nstdout: {stdout:?}\nstderr: {stderr:?}",
+            out.status.code()
+        );
+        assert!(
+            stdout.contains("[a]"),
+            "MSYS grep mangled {pattern:?}\nstdout: {stdout:?}\nstderr: {stderr:?}"
+        );
+    }
+}
