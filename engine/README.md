@@ -4,7 +4,7 @@ The RTK pipeline engine: it parses, resolves and validates `pipeline.toml`, eval
 
 ## User documentation
 
-The pipeline reference lives in the user guide, [`docs/guide/pipelines/`](../docs/guide/pipelines/overview.md), published at [rtk-ai.app/guide](https://www.rtk-ai.app/guide/pipelines/overview):
+The pipeline reference lives in the user guide, [`docs/guide/pipelines/`](../docs/guide/pipelines/overview.md), published at [rtk-ai.app/docs](https://www.rtk-ai.app/docs/pipelines/overview/):
 
 | Page | Covers |
 |---|---|

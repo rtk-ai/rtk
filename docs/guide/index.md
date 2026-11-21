@@ -78,4 +78,4 @@ Two optional layers sit on top of the hooks. Neither changes anything until you 
 - [Telemetry & Privacy](./resources/telemetry.md) — what RTK collects and how to opt out
 - [Agent Coverage](./resources/agent-coverage.md) — what each agent's hook API lets RTK do
 - [Editions and Licensing](./resources/editions.md) — the three downloads, what each contains, where the licence boundary falls
-- [ARCHITECTURE.md](https://github.com/rtk-ai/rtk/blob/master/ARCHITECTURE.md) — system design for contributors
+- [ARCHITECTURE.md](https://github.com/rtk-ai/rtk/blob/master/docs/contributing/ARCHITECTURE.md) — system design for contributors

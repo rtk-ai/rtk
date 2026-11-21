@@ -34,7 +34,7 @@ It is a **local daemon**: one background process on your machine, driven by the
 
 ## User documentation
 
-Setup, what the daemon compresses, its settings and endpoints live in the user guide, [`docs/guide/proxy/`](../docs/guide/proxy/overview.md), published at [rtk-ai.app/guide](https://www.rtk-ai.app/guide/proxy/overview):
+Setup, what the daemon compresses, its settings and endpoints live in the user guide, [`docs/guide/proxy/`](../docs/guide/proxy/overview.md), published at [rtk-ai.app/docs](https://www.rtk-ai.app/docs/proxy/overview/):
 
 | Page | Covers |
 |---|---|

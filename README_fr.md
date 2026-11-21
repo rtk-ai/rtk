@@ -17,7 +17,7 @@
 <p align="center">
   <a href="https://www.rtk-ai.app">Site web</a> &bull;
   <a href="#installation">Installer</a> &bull;
-  <a href="docs/TROUBLESHOOTING.md">Depannage</a> &bull;
+  <a href="docs/guide/resources/troubleshooting.md">Depannage</a> &bull;
   <a href="docs/contributing/ARCHITECTURE.md">Architecture</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
