@@ -21,7 +21,7 @@ use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
 use crate::core::tracking::{HookDecisionRecord, Tracker};
 use crate::core::user_dirs;
-use crate::discover::registry::prefix_contains_rtk_disabled;
+use crate::discover::registry::{is_rtk_disabled_word, prefix_contains_rtk_disabled};
 use crate::hooks::hook_check::{HookStatus, status as hook_status};
 use crate::hooks::permissions::{self, PermissionVerdict};
 
@@ -230,7 +230,7 @@ fn would_be_covered_without_bypass(
 }
 
 /// The segment `strip_disabled_prefix_for_analytics` split into `env_prefix` and
-/// `actual_cmd`, with its `RTK_DISABLED=` words removed and every other word kept
+/// `actual_cmd`, with its `RTK_DISABLED=` (or `RTK_DISABLED+=`) words removed and every other word kept
 /// verbatim, wrapper included. Words are split the way the rest of discover splits
 /// them (`lexer::words_and_spans`), so a quoted or expanded value
 /// (`RTK_DISABLED='1 2'`, `RTK_DISABLED=$CI`) goes as a whole.
@@ -240,7 +240,7 @@ fn without_rtk_disabled(env_prefix: &str, actual_cmd: &str) -> String {
     for (i, &start) in starts.iter().enumerate() {
         let end = starts.get(i + 1).copied().unwrap_or(env_prefix.len());
         let word = &env_prefix[start..end];
-        if !word.starts_with("RTK_DISABLED=") {
+        if !is_rtk_disabled_word(word) {
             line.push_str(word);
         }
     }
@@ -782,6 +782,7 @@ mod tests {
     #[test]
     fn test_without_rtk_disabled_keeps_every_other_word() {
         for (env_prefix, expected) in [
+            ("RTK_DISABLED+=1 ", "docker ps"),
             ("RTK_DISABLED=1 ", "docker ps"),
             ("sudo RTK_DISABLED=1 ", "sudo docker ps"),
             ("RTK_DISABLED=1 sudo -E ", "sudo -E docker ps"),

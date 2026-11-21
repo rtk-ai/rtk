@@ -12,8 +12,9 @@ use std::sync::LazyLock;
 
 use super::lexer::{
     ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer,
-    contains_unattestable_construct_in, is_crlf_at, redirect_has_file_target, resolve_word_text,
-    shell_split, split_on_operators, tokenize, tokenize_with_newlines, words_and_spans,
+    contains_unattestable_construct_in, is_crlf_at, is_word_boundary_whitespace,
+    redirect_has_file_target, resolve_word_text, shell_split, split_on_operators, tokenize,
+    tokenize_with_newlines, words_and_spans,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 use super::shell_wrapper::parse_shell_wrapper;
@@ -67,27 +68,20 @@ static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .map(|r| Regex::new(r.pattern).expect("invalid regex"))
         .collect()
 });
-static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
-    // NOTE: `sudo` is intentionally NOT stripped here. Rewriting `sudo docker ps`
-    // to `sudo rtk docker ps` breaks at runtime because `rtk` is not on root's
-    // secure_path, and (where it is) would run rtk itself as root. sudo commands
-    // are left untouched so they pass through unchanged. See #146.
-    Regex::new(&format!(r#"^(?:{})+"#, env_word())).unwrap()
-});
-/// One word of [`ENV_PREFIX`]: a single `env` or assignment, so the permission
-/// gate can read the command behind each in turn ([`matching_readings`]).
-static ENV_WORD: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(&format!(r#"^(?:{})"#, env_word())).unwrap());
-
-/// An `env` word or an assignment, with the blanks after it.
-fn env_word() -> String {
-    let double_quoted = r#""(?:[^"\\]|\\.)*""#;
-    let single_quoted = r#"'(?:[^'\\]|\\.)*'"#;
-    let unquoted = r#"[^\s]*"#;
-    let env_value = format!("(?:{}|{}|{})", double_quoted, single_quoted, unquoted);
-    let env_assign = format!(r#"[A-Z_][A-Z0-9_]*={}"#, env_value);
-    format!(r#"env\s+|{}\s+"#, env_assign)
-}
+/// One assignment word, in bash's own sense: a name of letters, digits and `_`
+/// not starting with a digit, then `=` or `+=`, in any case. The value is
+/// whatever the rest of the word is, since the word's end has already been
+/// found — quotes included.
+///
+/// Anything else before the `=` makes the word a command: bash runs `1a=b`,
+/// `foo-bar=x` and `"foo"=x` rather than assigning them.
+static ENV_ASSIGN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*\+?=").unwrap());
+/// The assignment words the pattern this replaced recognised: uppercase names and `=`. A value
+/// the scan cannot read ([`WordEnd::Guess`]) is read as that pattern read it for these, so a
+/// line it rewrote is still rewritten, and left alone for the names only [`ENV_ASSIGN`] knows.
+static UPPERCASE_ASSIGN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Z_][A-Z0-9_]*=").unwrap());
 // Git global options that appear before the subcommand: -C <path>, -c <key=val>,
 // --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
 static GIT_GLOBAL_OPT: LazyLock<Regex> = LazyLock::new(|| {
@@ -198,8 +192,7 @@ pub fn classify_command(cmd: &str) -> Classification {
     }
 
     // Strip env prefixes (env VAR=val, VAR=val); sudo is left untouched (#146)
-    let stripped = ENV_PREFIX.replace(trimmed, "");
-    let cmd_clean = stripped.trim();
+    let cmd_clean = split_env_prefix(trimmed).1;
     if cmd_clean.is_empty() {
         return Classification::Ignored;
     }
@@ -593,8 +586,20 @@ fn strip_absolute_path(cmd: &str) -> String {
     }
 }
 
-pub fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {
-    prefix_part.contains("RTK_DISABLED=")
+/// Whether one of the words of an env prefix is the `RTK_DISABLED=` assignment, or its
+/// appending form `RTK_DISABLED+=`. By words, because the prefix can hold a whole quoted
+/// value: `MSG='use RTK_DISABLED=1'` assigns `MSG` and disables nothing.
+pub(crate) fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {
+    env_words(prefix_part).any(|word| is_rtk_disabled_word(word.text))
+}
+
+/// The variable whose assignment bypasses the rewrite (#345).
+const RTK_DISABLED_NAME: &str = "RTK_DISABLED";
+
+/// Whether a word is the `RTK_DISABLED=` assignment or its appending form `RTK_DISABLED+=`.
+pub(crate) fn is_rtk_disabled_word(word: &str) -> bool {
+    word.strip_prefix(RTK_DISABLED_NAME)
+        .is_some_and(|rest| rest.starts_with('=') || rest.starts_with("+="))
 }
 
 /// Whether a token is allowed in an analytics env/sudo prefix before/after
@@ -626,7 +631,7 @@ pub fn strip_disabled_prefix_for_analytics(cmd: &str) -> (&str, &str) {
         if token.kind != TokenKind::Arg {
             break;
         }
-        if token.value.starts_with("RTK_DISABLED=") {
+        if is_rtk_disabled_word(&token.value) {
             disabled_index = Some(i);
             break;
         }
@@ -667,24 +672,237 @@ pub fn strip_disabled_prefix_for_analytics(cmd: &str) -> (&str, &str) {
     strip_disabled_prefix(trimmed)
 }
 
-/// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
+/// Whether some command of `cmd` has `RTK_DISABLED=` in its env prefix, with a command behind it.
+///
+/// `gain` has no coverage gate, so this stays on the syntactic rewrite-path stripper; the
+/// wrapper-aware peel is for discover, where the gate judges it. `gain` hands over a whole line,
+/// so each of its commands is read as the rewrite reads it: `RTK_DISABLED=1; git status` has a
+/// command behind the `;` that is rewritten, and `A=1;RTK_DISABLED=1 git status` has one that is
+/// not.
 pub fn cmd_has_rtk_disabled_prefix(cmd: &str) -> bool {
-    // `gain` has no coverage gate, so this stays on the syntactic rewrite-path
-    // stripper; the wrapper-aware peel is for discover, where the gate judges it.
-    let (prefix_part, _) = strip_disabled_prefix(cmd);
-    prefix_contains_rtk_disabled(prefix_part)
+    // A line without the name has no such prefix, and that is nearly every line: no need to lex it.
+    cmd.contains(RTK_DISABLED_NAME)
+        && split_command_chain(cmd)
+            .into_iter()
+            .any(|segment| prefix_contains_rtk_disabled(strip_disabled_prefix(segment).0))
+}
+
+/// Split the leading `env` and `NAME=value` assignments off a command, as
+/// `(prefix, command)`.
+///
+/// By words, because a quoted value is one word: `D='# shellcheck disable=SC2034'`
+/// is an assignment whole, and the `shellcheck` inside it is not a command. A
+/// pattern cannot hold that line — its alternation for the value backtracks into
+/// the quotes as soon as the quoted form is not followed by a blank, which is
+/// what happens at the end of a line or before a `;`, and the rewrite then edits
+/// inside the literal (#3262).
+///
+/// An assignment with no command behind it is a statement of its own and sets a shell
+/// variable, so a line that is nothing but assignments has no prefix: the whole of it comes
+/// back as the command. That is the `RTK_DISABLED=1` of `RTK_DISABLED=1 && git status` once the
+/// chain has been cut at the `&&`.
+///
+/// `sudo` is deliberately not stripped. `sudo rtk docker ps` fails at runtime
+/// because `rtk` is not on root's `secure_path`, and where it is, it would run
+/// rtk as root (#146).
+pub fn split_env_prefix(cmd: &str) -> (&str, &str) {
+    let trimmed = cmd.trim();
+    let mut pos = 0;
+    for word in env_words(trimmed) {
+        if !word.is_assignment() {
+            break;
+        }
+        // Where the command starts, not where the last assignment ends, so that
+        // whoever puts the two back together need not know what separated them.
+        pos = word.next;
+    }
+    if pos == trimmed.len() {
+        return ("", trimmed);
+    }
+    (&trimmed[..pos], trimmed[pos..].trim())
+}
+
+/// The command behind the first word of `cmd`, when that word is `env` or an
+/// assignment ([`split_env_prefix`] one word at a time), so the permission
+/// gate can read the command behind each in turn ([`matching_readings`]).
+/// `None` when the word is neither, or when no command follows it: an
+/// assignment that is a whole statement (`MSG="chore: rm -rf build"`) runs
+/// nothing.
+fn split_env_word(cmd: &str) -> Option<&str> {
+    let trimmed = cmd.trim();
+    // The gate takes a guess at its word as the word end, so that the command behind it is read.
+    let first = env_words(trimmed).next()?;
+    if !is_env_word(first.text) {
+        return None;
+    }
+    Some(trimmed[first.next..].trim()).filter(|rest| !rest.is_empty())
+}
+
+/// Whether `word` is `env` or an assignment, by any name bash accepts. The gate passes a word
+/// whose end is a guess as well, to read the command behind it; [`EnvWord::is_assignment`]
+/// asks only for the names the replaced pattern knew in that case.
+fn is_env_word(word: &str) -> bool {
+    word == "env" || ENV_ASSIGN.is_match(word)
+}
+
+/// One word of an env prefix.
+struct EnvWord<'a> {
+    text: &'a str,
+    /// Whether the scan was sure where the word ends.
+    known: bool,
+    /// Where the next word starts: after the blanks that follow this one.
+    next: usize,
+}
+
+impl EnvWord<'_> {
+    fn is_assignment(&self) -> bool {
+        if self.known {
+            is_env_word(self.text)
+        } else {
+            // The word's end is a guess, taken at the first blank as the pattern took it. A name
+            // that pattern did not know is not an assignment here either, so `a=(git diff)`
+            // stays a word and nothing in it is rewritten.
+            UPPERCASE_ASSIGN.is_match(self.text)
+        }
+    }
+}
+
+/// The words of `s`, a quoted value being one word.
+fn env_words(s: &str) -> impl Iterator<Item = EnvWord<'_>> {
+    let mut pos = skip_blanks(s, 0);
+    std::iter::from_fn(move || {
+        if pos >= s.len() {
+            return None;
+        }
+        let found = word_end_from(s, pos);
+        let end = found.end();
+        let word = EnvWord {
+            text: &s[pos..end],
+            known: matches!(found, WordEnd::Known(_)),
+            next: skip_blanks(s, end),
+        };
+        pos = word.next;
+        Some(word)
+    })
+}
+
+/// Where a word ends, and whether the scan could tell.
+#[derive(Clone, Copy)]
+enum WordEnd {
+    /// The first blank that is not inside quotes.
+    Known(usize),
+    /// The scan met something it does not read (`(`, a backtick, `${`, `$[`, a quote with no
+    /// closing), where a blank belongs to the word and where it ends is not settled. The
+    /// position is the first blank, as a pattern for the value would end it.
+    Guess(usize),
+}
+
+impl WordEnd {
+    /// The position, whether the scan was sure of it or not.
+    fn end(self) -> usize {
+        match self {
+            Self::Known(end) | Self::Guess(end) => end,
+        }
+    }
+}
+
+/// Where the word starting at `start` ends. Arrays, substitutions and expansions hold blanks
+/// in ways reading them is the lexer's job, so a word with one in it is a [`WordEnd::Guess`],
+/// taken at the first blank as the pattern this replaced took it: a word that swallowed the
+/// rest of the line would hide a command from a deny rule. The rewrite reads a guess that way
+/// only for the names that pattern knew ([`UPPERCASE_ASSIGN`]); for a name this change adds,
+/// such as `a=(git diff --stat)`, it finds no assignment and leaves the line alone.
+fn word_end_from(s: &str, start: usize) -> WordEnd {
+    match scan_word(s.as_bytes(), start) {
+        Some(end) => WordEnd::Known(end),
+        None => WordEnd::Guess(
+            s.as_bytes()[start..]
+                .iter()
+                .position(|&b| is_blank(b))
+                .map_or(s.len(), |blank| start + blank),
+        ),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Quote {
+    Double,
+    Single,
+    /// `$'…'`: a backslash escapes in it, as it does in double quotes.
+    Ansi,
+}
+
+/// The first blank that is not inside quotes, or `None` when the scan meets something it does
+/// not read.
+///
+/// A quoted value is one word however many blanks it contains, which is the whole difficulty —
+/// `D='# shellcheck disable=SC2034'` is an assignment, and the `shellcheck` within it is not a
+/// command anybody ran. A backslash escapes inside double quotes and is literal inside single
+/// ones, so `FOO="he said \"hi\""` is one word and `FOO='it\'` ends at the quote.
+fn scan_word(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = start;
+    let mut quote: Option<Quote> = None;
+    // Whether the byte before is a `$` that is neither escaped nor half of `$$`.
+    let mut dollar = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        let after_dollar = std::mem::take(&mut dollar);
+        match quote {
+            Some(Quote::Double) => {
+                if c == b'\\' {
+                    i += 1;
+                } else if c == b'"' {
+                    quote = None;
+                }
+            }
+            Some(open) => {
+                if open == Quote::Ansi && c == b'\\' {
+                    i += 1;
+                } else if c == b'\'' {
+                    quote = None;
+                }
+            }
+            None => match c {
+                b'\'' => {
+                    quote = Some(if after_dollar {
+                        Quote::Ansi
+                    } else {
+                        Quote::Single
+                    })
+                }
+                b'"' => quote = Some(Quote::Double),
+                // A backslash before a newline is a continuation, which the rewrite joins
+                // as a blank where bash joins nothing: where the word ends is not settled.
+                b'\\' if matches!(bytes.get(i + 1), Some(b'\n' | b'\r')) => return None,
+                b'\\' => i += 1,
+                b'$' => dollar = !after_dollar,
+                b'(' | b'`' => return None,
+                b'[' | b'{' if after_dollar => return None,
+                b if is_blank(b) => return Some(i),
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    quote.is_none().then_some(bytes.len())
+}
+
+fn skip_blanks(s: &str, from: usize) -> usize {
+    from + s.as_bytes()[from..]
+        .iter()
+        .take_while(|&&b| is_blank(b))
+        .count()
+}
+
+/// A blank between words of an env prefix: bash's word boundary, and a carriage return so that
+/// a CRLF line ends a word too.
+fn is_blank(b: u8) -> bool {
+    b == b'\r' || is_word_boundary_whitespace(char::from(b))
 }
 
 /// Strip RTK_DISABLED=X and other env prefixes, returns `(env_prefix, actual_command)`.
 pub fn strip_disabled_prefix(cmd: &str) -> (&str, &str) {
-    let trimmed = cmd.trim();
-    let stripped = ENV_PREFIX.replace(trimmed, "");
-    // stripped is a Cow<str> that borrows from trimmed when no replacement happens.
-    // We need to return a &str into the original, so compute the offset.
-    let prefix_len = trimmed.len() - stripped.len();
-    let prefix_part = &trimmed[..prefix_len];
-    let rest = trimmed[prefix_len..].trim();
-    (prefix_part, rest)
+    split_env_prefix(cmd)
 }
 
 fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
@@ -1785,7 +2003,7 @@ fn shell_wrapper_script_opts_out(cmd: &str, excluded: &[ExcludePattern], depth: 
         let mut seg = seg;
         loop {
             let (env_prefix, rest) = strip_disabled_prefix(seg);
-            if env_prefix.contains("RTK_DISABLED=") || is_excluded(rest, excluded) {
+            if prefix_contains_rtk_disabled(env_prefix) || is_excluded(rest, excluded) {
                 return true;
             }
             match strip_process_wrapper_prefix(rest) {
@@ -1828,7 +2046,7 @@ fn collect_shell_wrapper_positions<'a>(
 
     let (env_prefix, rest_after_env) = strip_disabled_prefix(trimmed);
     if !env_prefix.is_empty() {
-        if env_prefix.contains("RTK_DISABLED=") {
+        if prefix_contains_rtk_disabled(env_prefix) {
             return;
         }
         collect_shell_wrapper_positions(rest_after_env, transparent_prefixes, depth + 1, positions);
@@ -1894,8 +2112,10 @@ fn rewrite_segment_inner(
     let (env_prefix, rest_after_env) = strip_disabled_prefix(trimmed);
     if !env_prefix.is_empty() {
         // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
-        // #508: warn on stderr so agents learn to stop overusing it
-        if env_prefix.contains("RTK_DISABLED=") {
+        // #508: warn on stderr so agents learn to stop overusing it. Only when a command
+        // follows: `RTK_DISABLED=1; git status` assigns a shell variable, and the command
+        // behind the `;` is rewritten.
+        if prefix_contains_rtk_disabled(env_prefix) {
             eprintln!(
                 "[rtk] RTK_DISABLED=1 detected — skipping filter for this command. \
                  Remove RTK_DISABLED=1 to restore token savings."
@@ -1941,7 +2161,7 @@ fn rewrite_segment_inner(
             // The inner command may have been dropped because it is excluded.
             // Re-testing the wrapped form would route it through the wrapper's
             // own filter, defeating the exclusion.
-            if is_excluded(ENV_PREFIX.replace(rest, "").trim(), excluded)
+            if is_excluded(split_env_prefix(rest).1, excluded)
                 || shell_wrapper_script_opts_out(rest, excluded, 0)
             {
                 return None;
@@ -2030,8 +2250,7 @@ fn rewrite_segment_inner(
     // Use classify_command for correct ignore/prefix handling
     let rtk_equivalent = match classify_command(cmd_part) {
         Classification::Supported { rtk_equivalent, .. } => {
-            let stripped = ENV_PREFIX.replace(cmd_part, "");
-            let cmd_clean = stripped.trim();
+            let cmd_clean = split_env_prefix(cmd_part).1;
             if !excluded.is_empty()
                 && (is_excluded(cmd_clean, excluded)
                     || is_excluded(&tool_form(cmd_clean, rtk_equivalent), excluded))
@@ -2318,7 +2537,7 @@ impl PeelStep {
     /// none.
     fn peel(self, cmd: &str) -> Option<&str> {
         match self {
-            PeelStep::Assignments => ENV_WORD.find(cmd).map(|word| cmd[word.end()..].trim()),
+            PeelStep::Assignments => split_env_word(cmd),
             PeelStep::Keyword => SHELL_KEYWORD_PREFIXES
                 .iter()
                 .find_map(|prefix| strip_word_prefix(cmd, prefix)),
@@ -4797,6 +5016,80 @@ mod tests {
         );
     }
 
+    /// The appending spelling disables like the plain one: the command is left alone.
+    #[test]
+    fn test_rewrite_rtk_disabled_append_assignment_skips() {
+        assert_eq!(
+            rewrite_command_no_prefixes("RTK_DISABLED+=1 git status", &[]),
+            None
+        );
+    }
+
+    /// An assignment that is a statement of its own, with nothing after it to skip, only sets a
+    /// shell variable: the command behind the `;` or `&&` is rewritten as usual. So is a command
+    /// behind a quoted value that only mentions the variable.
+    #[test]
+    fn test_rewrite_rtk_disabled_statement_is_not_a_prefix() {
+        for (cmd, rewritten) in [
+            (
+                "FOO=1 RTK_DISABLED=1; git status",
+                "FOO=1 RTK_DISABLED=1; rtk git status",
+            ),
+            (
+                "MSG='use RTK_DISABLED=1' git status",
+                "MSG='use RTK_DISABLED=1' rtk git status",
+            ),
+            (
+                "MSG='use RTK_DISABLED=1'; git status",
+                "MSG='use RTK_DISABLED=1'; rtk git status",
+            ),
+            (
+                "RTK_DISABLED=1 && git status",
+                "RTK_DISABLED=1 && rtk git status",
+            ),
+            (
+                "RTK_DISABLED=1; git status",
+                "RTK_DISABLED=1; rtk git status",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(rewritten.into()),
+                "{cmd}"
+            );
+        }
+        assert_eq!(rewrite_command_no_prefixes("RTK_DISABLED=1", &[]), None);
+    }
+
+    /// `rtk rewrite` warns an agent that a command was skipped, so it stays silent when no
+    /// command followed the assignment, and when the variable is only mentioned in a quoted value
+    /// (a commit message). What it prints is pinned in process, by the rewrite tests.
+    #[test]
+    fn test_rewrite_rtk_disabled_statement_does_not_warn() {
+        if !test_isolation::rtk_binary_is_built() {
+            return;
+        }
+
+        for cmd in [
+            "FOO=1 RTK_DISABLED=1; git status",
+            "MSG='use RTK_DISABLED=1' git status",
+            "MSG='use RTK_DISABLED=1'; git status",
+            "RTK_DISABLED=1",
+            "RTK_DISABLED=1 && git status",
+            "RTK_DISABLED=1; git status",
+        ] {
+            let output = test_isolation::rtk_command()
+                .args(["rewrite", cmd])
+                .output()
+                .expect("Failed to run rtk");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !stderr.contains("RTK_DISABLED=1 detected"),
+                "no warning for {cmd:?}, got: {stderr}"
+            );
+        }
+    }
+
     #[test]
     fn test_rewrite_non_rtk_disabled_env_still_rewrites() {
         assert_eq!(
@@ -4829,6 +5122,14 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes(r#"FOO="bar baz" BAR=1 git status"#, &[]),
             Some(r#"FOO="bar baz" BAR=1 rtk git status"#.into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_concatenated_quoted_and_unquoted_value() {
+        assert_eq!(
+            rewrite_command_no_prefixes("FOO='bar baz'qux git status", &[]),
+            Some("FOO='bar baz'qux rtk git status".into())
         );
     }
 
@@ -7331,6 +7632,96 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_compound_preserves_quoted_assignment_data() {
+        let command = r#"D='# shellcheck disable=SC2034  # comment'; for f in hooks/*.sh; do sed -i '' -e "s|^TS_BACKUP=|${D}\nTS_BACKUP=|" "$f"; done"#;
+
+        assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_compound_only_rewrites_commands_outside_assignment_quotes() {
+        let command = "D='# shellcheck | git status; $(whoami)' ; cargo test";
+
+        assert_eq!(
+            rewrite_command_no_prefixes(command, &[]),
+            Some("D='# shellcheck | git status; $(whoami)' ; rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_double_quoted_assignment_data() {
+        let command = r#"D="run shellcheck later"; git status"#;
+
+        assert_eq!(
+            rewrite_command_no_prefixes(command, &[]),
+            Some(r#"D="run shellcheck later"; rtk git status"#.into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_double_quoted_prose_assignment() {
+        let command =
+            r#"T="chore(skills): make every Pocock skill model-invocable"; echo "len=${#T}""#;
+
+        assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_single_quoted_prose_assignment() {
+        let command = r#"T='please make a cake'; printf '%s' "$T""#;
+
+        assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_quoted_git_diff_with_argument() {
+        let command = "X='git diff --stat'; cargo test";
+
+        assert_eq!(
+            rewrite_command_no_prefixes(command, &[]),
+            Some("X='git diff --stat'; rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_embedded_quoted_git_diff() {
+        let command = "X='a git diff --stat b'; echo hi";
+
+        assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_bare_quoted_git_diff() {
+        let command = "X='git diff'; echo hi";
+
+        assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_single_preserves_inline_title_prose() {
+        let command =
+            r#"gh pr edit 1476 --title "chore(skills): make every Pocock skill model-invocable""#;
+
+        assert_eq!(
+            rewrite_command_no_prefixes(command, &[]),
+            Some(
+                r#"rtk gh pr edit 1476 --title "chore(skills): make every Pocock skill model-invocable""#
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_preserves_title_before_gh_edit() {
+        let command = r#"T="chore(skills): make every Pocock skill model-invocable"; echo "len=${#T}"; [ ${#T} -le 100 ] && gh pr edit 1476 --title "$T""#;
+
+        assert_eq!(
+            rewrite_command_no_prefixes(command, &[]),
+            Some(r#"T="chore(skills): make every Pocock skill model-invocable"; echo "len=${#T}"; [ ${#T} -le 100 ] && rtk gh pr edit 1476 --title "$T""#.into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_compound_pipe_raw_filter() {
         // Producers stay raw; only a pipeline-safe final stage is rewritten.
         assert_eq!(
@@ -7812,7 +8203,7 @@ mod tests {
             "RTK_DISABLED=true git log --oneline"
         ));
         // `gain`'s warning has no coverage gate, so this predicate stays purely
-        // syntactic (`ENV_PREFIX`): a `sudo`-first bypass is not counted there.
+        // syntactic (`split_env_prefix`): a `sudo`-first bypass is not counted there.
         // The wrapper-aware peel is discover-only, where the gate can judge it.
         assert!(!cmd_has_rtk_disabled_prefix(
             "sudo RTK_DISABLED=1 docker ps"
@@ -7863,6 +8254,75 @@ mod tests {
         ));
     }
 
+    /// The variable is an assignment word of the prefix, not text anywhere in it: a quoted
+    /// value that mentions it, or a name that merely ends with it, disables nothing.
+    #[test]
+    fn test_prefix_contains_rtk_disabled_reads_words() {
+        for prefix in [
+            "env RTK_DISABLED=1 ",
+            "FOO='a b' RTK_DISABLED=1 ",
+            "FOO=1 RTK_DISABLED=1 ",
+            "RTK_DISABLED+=1 ",
+            "RTK_DISABLED= ",
+            "RTK_DISABLED='1 2' ",
+            "RTK_DISABLED=1 ",
+            "RTK_DISABLED=1\\ 2 ",
+        ] {
+            assert!(prefix_contains_rtk_disabled(prefix), "{prefix:?}");
+        }
+        for prefix in [
+            "",
+            "\"RTK_DISABLED=1\" ",
+            r#"MSG="use RTK_DISABLED=1" FOO=1 "#,
+            "MSG='use RTK_DISABLED=1'",
+            "MSG='use RTK_DISABLED=1' ",
+            "MSG=use\\ RTK_DISABLED=1 ",
+            "NOT_RTK_DISABLED=1 ",
+        ] {
+            assert!(!prefix_contains_rtk_disabled(prefix), "{prefix:?}");
+        }
+    }
+
+    /// Both readers of an env prefix, `rtk gain`'s and `rtk discover`'s, see a message that
+    /// only mentions the variable as data, in a prefix with a command behind it.
+    #[test]
+    fn test_quoted_rtk_disabled_data_is_not_a_bypass() {
+        let message = "MSG='use RTK_DISABLED=1' git status";
+
+        assert!(!cmd_has_rtk_disabled_prefix(message));
+        assert!(!prefix_contains_rtk_disabled(
+            strip_disabled_prefix_for_analytics(message).0
+        ));
+        assert!(cmd_has_rtk_disabled_prefix(
+            "MSG='use RTK_DISABLED=1' RTK_DISABLED=1 git status"
+        ));
+    }
+
+    /// The readers of a quoted shell wrapper (what a rewrite reaches, what the permission gate
+    /// checks) look past an assignment that only mentions the variable.
+    #[test]
+    fn test_quoted_rtk_disabled_data_does_not_hide_a_shell_wrapper() {
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"bash -c "MSG='use RTK_DISABLED=1'; git status""#, &[]),
+            Some(r#"bash -c "MSG='use RTK_DISABLED=1'; rtk git status""#.into())
+        );
+
+        // A routable wrapper around such a script is still routed whole.
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                r#"uv run bash -c 'MSG="use RTK_DISABLED=1"; echo hi'"#,
+                &[]
+            ),
+            Some(r#"rtk uv run bash -c 'MSG="use RTK_DISABLED=1"; echo hi'"#.into())
+        );
+
+        let segment = "MSG='use RTK_DISABLED=1' bash -c 'git status'";
+        assert_eq!(
+            shell_wrapper_positions(segment, &[]),
+            vec![segment, "bash -c 'git status'"]
+        );
+    }
+
     #[test]
     fn test_strip_disabled_prefix() {
         assert_eq!(
@@ -7874,11 +8334,177 @@ mod tests {
             ("FOO=1 RTK_DISABLED=1 ", "cargo test")
         );
         assert_eq!(strip_disabled_prefix("git status"), ("", "git status"));
-        // Rewrite helper still does not strip sudo (see ENV_PREFIX / #146).
+        // Rewrite helper still does not strip sudo (see `split_env_prefix` / #146).
         assert_eq!(
             strip_disabled_prefix("sudo RTK_DISABLED=1 docker ps"),
             ("", "sudo RTK_DISABLED=1 docker ps")
         );
+    }
+
+    /// An assignment with no command after it is a statement of its own: the reader of a quoted
+    /// script and the splitter agree with `rtk rewrite` that it disables nothing. (`rtk gain`
+    /// and `rtk discover` are covered by their own tests.)
+    #[test]
+    fn test_a_bare_rtk_disabled_statement_opts_nothing_out() {
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run bash -c 'RTK_DISABLED=1; echo hi'", &[]),
+            Some("rtk uv run bash -c 'RTK_DISABLED=1; echo hi'".into())
+        );
+        assert_eq!(
+            shell_wrapper_positions("RTK_DISABLED=1", &[]),
+            vec!["RTK_DISABLED=1"]
+        );
+        assert_eq!(split_env_prefix("RTK_DISABLED=1"), ("", "RTK_DISABLED=1"));
+    }
+
+    /// An array, a substitution and an expansion hold blanks the way a quote does, and reading
+    /// them is the lexer's job. For a name this change adds the rewrite does not guess where the
+    /// value ends: it finds no assignment, and leaves the line alone rather than edit inside it.
+    #[test]
+    fn test_the_rewrite_leaves_an_array_or_expansion_value_alone() {
+        for cmd in [
+            "a+=(git diff --stat)",
+            "a=$(case x in a) git status;; esac) git diff",
+            "a=${X} git status",
+            "a=(git diff --stat)",
+            "x=$(git diff --stat) git status",
+            "x=${y:-git diff x}",
+            "x=`git diff --stat`",
+        ] {
+            assert_eq!(split_env_prefix(cmd), ("", cmd), "{cmd}");
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("cmd=(git diff --stat); \"${cmd[@]}\"", &[]),
+            None
+        );
+    }
+
+    /// For the names the pattern this replaced knew, a value the scan cannot read is read as that
+    /// pattern read it, at the first blank: a line it rewrote is still rewritten, and an
+    /// `RTK_DISABLED=` after such a value still disables the rewrite. An escaped or doubled `$`
+    /// opens nothing, so the `{` after it is an ordinary character and the value ends at its
+    /// blank.
+    #[test]
+    fn test_an_unreadable_value_is_read_as_before_for_an_uppercase_name() {
+        for (cmd, rewritten) in [
+            ("A=$${ git status", "A=$${ rtk git status"),
+            ("A=${X:-d} git status", "A=${X:-d} rtk git status"),
+            ("A=\\${ git status", "A=\\${ rtk git status"),
+            (
+                "FLAGS=${FLAGS:-\"-v\"} cargo test",
+                "FLAGS=${FLAGS:-\"-v\"} rtk cargo test",
+            ),
+            (
+                "GIT_DIR=${PWD}/.git git log",
+                "GIT_DIR=${PWD}/.git rtk git log",
+            ),
+            (
+                "OUT=${OUT:-$PWD/out} cargo test",
+                "OUT=${OUT:-$PWD/out} rtk cargo test",
+            ),
+            (
+                "RUST_LOG=${LEVEL} cargo test",
+                "RUST_LOG=${LEVEL} rtk cargo test",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(rewritten.into()),
+                "{cmd}"
+            );
+        }
+        assert!(matches!(
+            classify_command("FOO=${X} git status"),
+            Classification::Supported { .. }
+        ));
+        for cmd in [
+            "A=${arr[0]} RTK_DISABLED=1 git status",
+            "RTK_DISABLED=1 A=${X:-$Y} git status",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+    }
+
+    /// The permission gate peels an assignment one word at a time and reads the command behind
+    /// it. A word the scan cannot read ends at the first blank, so the command is never hidden;
+    /// a word it can read ends where bash ends it, and an escaped or doubled `$` opens nothing,
+    /// so the `{` after it is an ordinary character.
+    #[test]
+    fn test_the_gate_reads_the_command_behind_an_assignment_word() {
+        for (cmd, command) in [
+            ("A=$${ ls x", "ls x"),
+            ("A=$${ ls } rm -rf x", "ls } rm -rf x"),
+            ("A=$(echo hi) ls z", "hi) ls z"),
+            ("A=${B:-x y} ls z", "y} ls z"),
+            ("A=\\${ ls x", "ls x"),
+            ("A=\\${ ls } rm -rf x", "ls } rm -rf x"),
+            ("env A=\\${ ls x", "A=\\${ ls x"),
+            ("X=a\\\nls x", "ls x"),
+            ("x=\"unterminated ls x", "ls x"),
+            ("x=$(git diff git status", "diff git status"),
+        ] {
+            assert_eq!(split_env_word(cmd), Some(command), "{cmd}");
+        }
+    }
+
+    /// `gain` reads a whole line, command by command, as the rewrite does: an assignment with no
+    /// command behind it disables nothing, a newline ends an assignment as a blank does, and an
+    /// `RTK_DISABLED=` counts wherever its command sits in the line.
+    #[test]
+    fn test_gain_reads_each_command_of_a_line() {
+        for (cmd, disabled) in [
+            ("A=${arr[0]} RTK_DISABLED=1 git status", true),
+            ("A=1;RTK_DISABLED=1 git status", true),
+            ("echo hi && RTK_DISABLED=1 git status", true),
+            ("FOO=1 RTK_DISABLED=1", false),
+            ("RTK_DISABLED=1", false),
+            ("RTK_DISABLED=1 && git status", false),
+            ("RTK_DISABLED=1 A=${X:-$Y} git status", true),
+            ("RTK_DISABLED=1 git status", true),
+            ("RTK_DISABLED=1; git status", false),
+            ("X=1\nRTK_DISABLED=1 git status", true),
+        ] {
+            assert_eq!(cmd_has_rtk_disabled_prefix(cmd), disabled, "{cmd:?}");
+        }
+    }
+
+    /// A newline ends an assignment as a blank does, so the command on the next line is the
+    /// command: a line that holds a heredoc or `$((` reaches this splitter whole.
+    #[test]
+    fn test_env_prefix_ends_at_a_newline() {
+        assert_eq!(
+            split_env_prefix("FOO=1\ngit status"),
+            ("FOO=1\n", "git status")
+        );
+        assert_eq!(
+            split_env_prefix("A=1 B=2\r\ngit status"),
+            ("A=1 B=2\r\n", "git status")
+        );
+    }
+
+    /// `rtk discover` reads the appending spelling like the rewrite does, so a line the hook
+    /// skips is a bypass in the report and not a saving that was missed.
+    #[test]
+    fn test_analytics_reads_the_appending_rtk_disabled() {
+        for (cmd, prefix, command) in [
+            (
+                "RTK_DISABLED+=1 sudo docker ps",
+                "RTK_DISABLED+=1 sudo ",
+                "docker ps",
+            ),
+            (
+                "sudo RTK_DISABLED+=1 docker ps",
+                "sudo RTK_DISABLED+=1 ",
+                "docker ps",
+            ),
+        ] {
+            assert_eq!(
+                strip_disabled_prefix_for_analytics(cmd),
+                (prefix, command),
+                "{cmd}"
+            );
+        }
     }
 
     #[test]
@@ -7943,6 +8569,109 @@ mod tests {
             ),
             strip_disabled_prefix("sudo -E ls && docker run -e RTK_DISABLED=1 img git status")
         );
+    }
+
+    /// A quoted value is one word however many blanks it holds. Reading it with
+    /// a pattern let the value alternation backtrack into the quotes whenever
+    /// the quoted form was not followed by a blank — at the end of a line, or
+    /// before a `;` — so `D='# shellcheck disable=SC2034'` was read as the
+    /// assignment `D='# ` and a command `shellcheck`, and the rewrite edited
+    /// inside the literal (#3262).
+    #[test]
+    fn test_a_quoted_value_is_one_word() {
+        for (cmd, prefix, rest) in [
+            // The three shapes of the same backtrack: before a `;`, at the end
+            // of the line, either quote. Nothing follows the assignment, so it is a
+            // statement of its own and the line has no prefix.
+            (
+                "D='# shellcheck disable=SC2034'",
+                "",
+                "D='# shellcheck disable=SC2034'",
+            ),
+            ("D=\"x y\"", "", "D=\"x y\""),
+            ("D='no trailing space'", "", "D='no trailing space'"),
+            // The same holds when the last word is `env`, which has nothing behind it either.
+            ("FOO=1 env", "", "FOO=1 env"),
+            ("env", "", "env"),
+            // And the forms that always worked, which must keep working.
+            ("FOO=bar git status", "FOO=bar ", "git status"),
+            (
+                "GIT_SSH_COMMAND='ssh -o X=no' git push",
+                "GIT_SSH_COMMAND='ssh -o X=no' ",
+                "git push",
+            ),
+            ("env FOO=1 cargo test", "env FOO=1 ", "cargo test"),
+            ("FOO=a\\ b git status", "FOO=a\\ b ", "git status"),
+            // A backslash escapes inside double quotes, not inside single ones.
+            (
+                "FOO=\"he said \\\"hi\\\"\" git status",
+                "FOO=\"he said \\\"hi\\\"\" ",
+                "git status",
+            ),
+            // An assignment is bash's: any case, `+=`, and a quoted value
+            // that ends the line is still one word.
+            ("foo=bar git status", "foo=bar ", "git status"),
+            ("Foo_1=bar git status", "Foo_1=bar ", "git status"),
+            ("_x=1 git status", "_x=1 ", "git status"),
+            ("foo+=x git status", "foo+=x ", "git status"),
+            ("a=1 B=2 git status", "a=1 B=2 ", "git status"),
+            ("env foo=1 cargo test", "env foo=1 ", "cargo test"),
+            (
+                "d='# shellcheck disable=SC2034'",
+                "",
+                "d='# shellcheck disable=SC2034'",
+            ),
+            // And what bash runs as a command rather than assigning.
+            ("1a=b git status", "", "1a=b git status"),
+            ("=x git status", "", "=x git status"),
+            ("foo-bar=x git status", "", "foo-bar=x git status"),
+            ("\"foo\"=x git status", "", "\"foo\"=x git status"),
+            // `sudo` is never stripped (#146).
+            ("sudo docker ps", "", "sudo docker ps"),
+        ] {
+            assert_eq!(split_env_prefix(cmd), (prefix, rest), "{cmd}");
+        }
+    }
+
+    /// The value belongs to the assignment, so a command inside it is not a
+    /// command — but the real one after it still is.
+    #[test]
+    fn test_a_command_after_a_quoted_assignment_is_still_rewritten() {
+        assert_eq!(
+            rewrite_command_no_prefixes("D='# shellcheck disable=SC2034'; git status", &[]),
+            Some("D='# shellcheck disable=SC2034'; rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("D='x shellcheck y'; echo hi", &[]),
+            None,
+            "nothing here is a command RTK handles"
+        );
+        // The same holds for a lowercase name, which bash assigns just the same.
+        assert_eq!(
+            rewrite_command_no_prefixes("d='# shellcheck disable=SC2034'; git status", &[]),
+            Some("d='# shellcheck disable=SC2034'; rtk git status".into())
+        );
+    }
+
+    /// An assignment prefix is bash's, whatever the case of its name: the
+    /// command after it is the command, and the assignment is carried over
+    /// byte for byte. A word bash runs rather than assigns is left alone.
+    #[test]
+    fn test_any_assignment_bash_accepts_is_looked_past() {
+        for (cmd, expected) in [
+            ("foo=bar git status", Some("foo=bar rtk git status")),
+            ("foo+=x git status", Some("foo+=x rtk git status")),
+            ("a=1 B=2 git status", Some("a=1 B=2 rtk git status")),
+            ("foo='a b' git status", Some("foo='a b' rtk git status")),
+            ("1a=b git status", None),
+            ("foo-bar=x git status", None),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                expected,
+                "{cmd}"
+            );
+        }
     }
 
     // --- #485: absolute path normalization ---
