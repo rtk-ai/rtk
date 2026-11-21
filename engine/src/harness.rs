@@ -9,8 +9,12 @@ pub enum Channel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigChannel {
+    /// A base-URL environment variable. `path` is what the agent expects after
+    /// the daemon's address: Claude Code appends `/v1/messages` itself, the AI
+    /// SDK that OpenCode embeds appends only `/messages`.
     Env {
         var: &'static str,
+        path: &'static str,
     },
     ConfigKey {
         file: &'static str,
@@ -462,6 +466,7 @@ pub static HARNESSES: &[HarnessProfile] = &[
         ],
         base_url_config: Some(ConfigChannel::Env {
             var: "ANTHROPIC_BASE_URL",
+            path: "",
         }),
         wiring: Some(Wiring {
             path: ".claude/settings.json",
@@ -706,7 +711,13 @@ pub static HARNESSES: &[HarnessProfile] = &[
         unreachable: &[],
         session_start: false,
         directive_channels: &[Channel::AwarenessFile],
-        base_url_config: None,
+        // Anthropic provider only: the bundled @ai-sdk/anthropic reads
+        // ANTHROPIC_BASE_URL unless opencode.json sets its own baseURL
+        // (checked on opencode 1.19.6). Other providers are not redirected.
+        base_url_config: Some(ConfigChannel::Env {
+            var: "ANTHROPIC_BASE_URL",
+            path: "/v1",
+        }),
         wiring: Some(Wiring {
             path: ".opencode/plugin/rtk.ts",
             format: ConfigFormat::Plugin,
@@ -1590,6 +1601,7 @@ mod tests {
                 "kimi",
                 "omp",
                 "openclaw",
+                "opencode",
                 "roo",
                 "vibe",
             ]
@@ -1598,7 +1610,15 @@ mod tests {
         assert_eq!(
             channel("claude-code"),
             Some(ConfigChannel::Env {
-                var: "ANTHROPIC_BASE_URL"
+                var: "ANTHROPIC_BASE_URL",
+                path: ""
+            })
+        );
+        assert_eq!(
+            channel("opencode"),
+            Some(ConfigChannel::Env {
+                var: "ANTHROPIC_BASE_URL",
+                path: "/v1"
             })
         );
         assert_eq!(

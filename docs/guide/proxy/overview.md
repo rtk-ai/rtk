@@ -53,7 +53,7 @@ rtk llm-proxy stop      # ask it to shut down
 
 `setup` is the one to run first: it reports which AI agents on this machine can be pointed at the proxy, and how.
 
-You rarely need `start` by hand — `rtk claude`, `rtk codex` and `rtk vibe` start the daemon for you. See [Getting your agent onto the proxy](#getting-your-agent-onto-the-proxy).
+You rarely need `start` by hand — `rtk claude`, `rtk opencode`, `rtk codex` and `rtk vibe` start the daemon for you. See [Getting your agent onto the proxy](#getting-your-agent-onto-the-proxy).
 
 ## Getting your agent onto the proxy
 
@@ -62,10 +62,11 @@ Two independent ways in. `rtk init` configures your agent once and persists it; 
 | Agent | Channel | What RTK sets it to |
 |---|---|---|
 | Claude Code | `ANTHROPIC_BASE_URL` (env, or `env` in `~/.claude/settings.json`) | `http://127.0.0.1:8080` |
+| OpenCode | `ANTHROPIC_BASE_URL` (env, for the `anthropic` provider) | `http://127.0.0.1:8080/v1` |
 | Codex | `openai_base_url` in `~/.codex/config.toml`, or `-c openai_base_url=…` for one run | `http://127.0.0.1:8080/openai/v1` with an API-key login, `http://127.0.0.1:8080/chatgpt/backend-api/codex` with a ChatGPT login |
 | Mistral Vibe | the `[[providers]]` entry named `mistral` in `~/.vibe/config.toml` | `api_base = "http://127.0.0.1:8080/mistral/v1"` |
 
-Codex has no environment variable for its base URL, and Vibe has none for its provider table, so neither can be routed by `--env`; the launcher and the guided setup use the channel each agent actually reads.
+OpenCode reads the same variable as Claude Code but needs the `/v1` suffix (its SDK appends only `/messages`), so a shell-wide value cannot serve both: OpenCode is routed by `rtk opencode` alone, which also replaces a value exported for Claude Code. Only the `anthropic` provider is redirected, and a `baseURL` set in `opencode.json` wins over the variable. Codex has no environment variable for its base URL, and Vibe has none for its provider table, so neither can be routed by `--env`; the launcher and the guided setup use the channel each agent actually reads.
 
 ### `rtk init -g` — the guided setup
 
@@ -111,6 +112,7 @@ Every failure path stays quiet rather than disrupting the session.
 
 ```bash
 rtk claude
+rtk opencode
 rtk codex
 rtk vibe
 ```
@@ -120,12 +122,13 @@ One command, nothing persisted: it starts the daemon if it is not already up, po
 | Subcommand | How it redirects |
 |---|---|
 | `rtk claude` | sets `ANTHROPIC_BASE_URL` for that process |
+| `rtk opencode` | sets `ANTHROPIC_BASE_URL` to the daemon's `/v1` route for that process |
 | `rtk codex` | passes `-c openai_base_url="…"` for that run, choosing the namespace from your login mode |
 | `rtk vibe` | writes nothing: it checks that `rtk init -g --agent vibe` has pointed the `mistral` provider at the daemon, and tells you to run it otherwise |
 
 A subcommand exists only where the redirection has been verified end to end, so `rtk <agent>` resolving is itself the signal that traffic really goes through the daemon. An agent absent from the list is never *silently* unproxied — it falls through to plain passthrough. `rtk llm-proxy setup` reports what can be launched on this machine.
 
-The launcher never clobbers a route you chose: a base URL already aimed at another gateway is left alone and named. And it never launches an agent at a dead port: when the daemon cannot start, Claude Code and Codex launch unproxied with a warning, and Vibe, whose config file cannot be overridden per run, is refused with the command that fixes it.
+The launcher never clobbers a route you chose: a base URL already aimed at another gateway is left alone and named. And it never launches an agent at a dead port: when the daemon cannot start, Claude Code, OpenCode and Codex launch unproxied with a warning, and Vibe, whose config file cannot be overridden per run, is refused with the command that fixes it.
 
 :::note[Codex and WebSockets]
 Codex opens the Responses API over a WebSocket first. The proxy answers the upgrade with a plain HTTP error rather than relaying it, and Codex then falls back to HTTP for the rest of the session, which is the transport the proxy measures. The fallback is Codex's own behaviour on an exhausted retry budget, so the first turn of a proxied session can start a little later than usual.
@@ -146,7 +149,7 @@ Both facts come from the vendors' own documentation and staff answers, checked o
 eval "$(rtk llm-proxy start --env)"
 ```
 
-Any agent that reads `ANTHROPIC_BASE_URL` and is launched from that shell routes through the proxy. This is choice 3 above, done manually. Codex and Vibe do not read an environment variable for this; use `rtk codex`, `rtk vibe` or the guided setup.
+Claude Code, and any other agent that reads `ANTHROPIC_BASE_URL` without a `/v1` suffix and is launched from that shell, routes through the proxy. OpenCode needs `/v1`: use `rtk opencode`. This is choice 3 above, done manually. Codex and Vibe do not read an environment variable for this; use `rtk codex`, `rtk vibe` or the guided setup.
 
 ## Binding to another address
 
