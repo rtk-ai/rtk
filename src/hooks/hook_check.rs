@@ -148,6 +148,61 @@ mod tests {
         );
     }
 
+    /// The shipped hooks that call `rtk rewrite` refuse an older rtk. Their
+    /// floor is the release whose CHANGELOG section lists f447a3d, the commit
+    /// that added `rtk rewrite` (#5126: they said 0.23.0; it is 0.25.0).
+    #[test]
+    fn test_shipped_hooks_gate_on_the_release_that_added_rewrite() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let read = |path: &str| {
+            std::fs::read_to_string(root.join(path))
+                .unwrap_or_else(|e| panic!("read {path}: {e}"))
+                .replace("\r\n", "\n")
+        };
+        let changelog = read("CHANGELOG.md");
+        let added_at = changelog
+            .find("[f447a3d]")
+            .expect("CHANGELOG lists the commit that added rtk rewrite");
+        let heading = changelog[..added_at]
+            .rfind("\n## [")
+            .map(|i| &changelog[i + "\n## [".len()..])
+            .expect("the commit sits under a release heading");
+        let release = &heading[..heading.find(']').expect("heading closes")];
+        assert_eq!(release, "0.25.0");
+        let minor = release
+            .split('.')
+            .nth(1)
+            .expect("a major.minor.patch release");
+
+        let message = format!("too old (need >= {release})");
+        for (path, guard, messages) in [
+            (
+                "hooks/claude/rtk-rewrite.sh",
+                format!("[ \"$MINOR\" -lt {minor} ]"),
+                1,
+            ),
+            (
+                "hooks/cursor/rtk-rewrite.sh",
+                format!("[ \"$MINOR\" -lt {minor} ]"),
+                1,
+            ),
+            (
+                "hooks/pi/rtk.ts",
+                format!("const MIN_SUPPORTED_RTK_MINOR = {minor}\n"),
+                2,
+            ),
+        ] {
+            let hook = read(path);
+            assert!(hook.contains(&guard), "{path} lacks `{guard}`");
+            assert_eq!(
+                hook.matches(&message).count(),
+                messages,
+                "{path} should say `{message}` {messages} time(s)"
+            );
+            assert!(!hook.contains("0.23.0"), "{path} still names 0.23.0");
+        }
+    }
+
     #[test]
     fn test_parse_hook_version_future() {
         let content = "#!/usr/bin/env bash\n# rtk-hook-version: 5\n";

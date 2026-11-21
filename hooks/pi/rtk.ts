@@ -1,6 +1,6 @@
 // RTK Pi extension — rewrites bash commands to use rtk for token savings.
 // Shared with Oh My Pi (OMP) — OMP loads this same file via its legacy-pi-compat layer.
-// Requires: rtk >= 0.23.0 in PATH.
+// Requires: rtk >= 0.25.0 in PATH.
 //
 // This is a thin delegating extension: all rewrite logic lives in `rtk rewrite`,
 // which is the single source of truth (src/discover/registry.rs).
@@ -18,7 +18,7 @@ import type {
 } from "@earendil-works/pi-coding-agent"
 
 const REWRITE_TIMEOUT_MS = 2_000
-const MIN_SUPPORTED_RTK_MINOR = 23
+const MIN_SUPPORTED_RTK_MINOR = 25
 
 // Local reimplementation of the package's `isToolCallEventType("bash", event)` type
 // guard. That helper is a value export, so importing it pulls in the whole
@@ -102,13 +102,13 @@ export default async function (pi: ExtensionAPI) {
     return
   }
 
-  // Warn and bail if rtk predates 0.23.0 (when `rtk rewrite` was introduced).
+  // Warn and bail if rtk predates 0.25.0 (when `rtk rewrite` was introduced).
   const parsed = parseSemver(ver.stdout.replace(/^rtk\s+/, ""))
   if (parsed) {
     const [major, minor] = parsed
     if (major === 0 && minor < MIN_SUPPORTED_RTK_MINOR) {
-      reportRtkUnavailable(`rtk ${parsed.join(".")} is too old (need >= 0.23.0)`)
-      console.warn(`[rtk] rtk ${ver.stdout.trim()} is too old (need >= 0.23.0) — extension disabled`)
+      reportRtkUnavailable(`rtk ${parsed.join(".")} is too old (need >= 0.25.0)`)
+      console.warn(`[rtk] rtk ${ver.stdout.trim()} is too old (need >= 0.25.0) — extension disabled`)
       return
     }
   }

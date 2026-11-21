@@ -363,7 +363,7 @@ Hooks are **non-blocking** -- they never prevent a command from executing:
 
 - jq not installed: warning to stderr, exit 0 (command runs raw)
 - rtk binary not found: warning to stderr, exit 0
-- rtk version too old (< 0.23.0): warning to stderr, exit 0
+- rtk version too old (< 0.25.0): warning to stderr, exit 0
 - Invalid JSON input: pass through unchanged
 - `rtk rewrite` crashes: hook exits 0 (subprocess error ignored)
 - Filter logic error: fallback to raw command output
