@@ -1203,6 +1203,105 @@ mod tests {
     }
 
     #[test]
+    fn recall_writer_retries_interrupted_and_reports_write_zero_and_flush_errors() {
+        struct Writer {
+            written: Vec<u8>,
+            interrupt: bool,
+            zero: bool,
+            fail_flush: bool,
+        }
+        impl Write for Writer {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                if std::mem::take(&mut self.interrupt) {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                if self.zero {
+                    return Ok(0);
+                }
+                self.written.extend_from_slice(data);
+                Ok(data.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                if self.fail_flush {
+                    Err(std::io::ErrorKind::BrokenPipe.into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let mut writer = Writer {
+            written: Vec::new(),
+            interrupt: true,
+            zero: false,
+            fail_flush: false,
+        };
+        let output = b"a\xff\n";
+        let (emitted, outcome) = emit_recall(&mut writer, output);
+        outcome.expect("retry interrupted write");
+        assert_eq!(emitted, output.len());
+        assert_eq!(writer.written, output);
+
+        writer.zero = true;
+        let (emitted, outcome) = emit_recall(&mut writer, b"not written");
+        assert_eq!(emitted, 0);
+        assert_eq!(outcome.unwrap_err().kind(), std::io::ErrorKind::WriteZero);
+
+        writer.zero = false;
+        writer.fail_flush = true;
+        let (emitted, outcome) = emit_recall(&mut writer, b"flush fails");
+        assert_eq!(emitted, 11);
+        assert_eq!(outcome.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn recall_records_only_the_partial_output_and_propagates_the_write_error() {
+        struct PartialWriter(usize);
+
+        impl Write for PartialWriter {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                let accepted = self.0.min(data.len());
+                self.0 -= accepted;
+                Ok(accepted)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                panic!("a failed write should not flush")
+            }
+        }
+
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let stored = store_inner(&cfg, b"first\nsecond\n", "test", Some(0), 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        let args = RecallArgs {
+            hash: Some(&stored.hash),
+            full: true,
+            from: None,
+            lines: None,
+            grep: None,
+            list: false,
+        };
+        user_env::with_path("RTK_DB_PATH", Some(dir.path().join("tracking.db")), || {
+            let error =
+                recall_from(&conn, &args, &mut PartialWriter(5)).expect_err("partial write");
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::BrokenPipe
+            );
+            let tracker = tracking::Tracker::new().expect("tracking");
+            let events = tracker.recall_event_history(10, None).unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].emitted_bytes, 5);
+            assert_eq!(events[0].output_tokens, 2);
+            assert!(events[0].invoking_id.is_some());
+            assert!(events[0].source_capture_id.is_none());
+        });
+    }
+
+    #[test]
     fn test_reset_stats_keeps_the_stored_output_recoverable() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = temp_cfg(dir.path());
@@ -1314,105 +1413,6 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM recall_captures", [], |r| r.get(0))
             .expect("count");
         assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn recall_writer_retries_interrupted_and_reports_write_zero_and_flush_errors() {
-        struct Writer {
-            written: Vec<u8>,
-            interrupt: bool,
-            zero: bool,
-            fail_flush: bool,
-        }
-        impl Write for Writer {
-            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-                if std::mem::take(&mut self.interrupt) {
-                    return Err(std::io::ErrorKind::Interrupted.into());
-                }
-                if self.zero {
-                    return Ok(0);
-                }
-                self.written.extend_from_slice(data);
-                Ok(data.len())
-            }
-
-            fn flush(&mut self) -> std::io::Result<()> {
-                if self.fail_flush {
-                    Err(std::io::ErrorKind::BrokenPipe.into())
-                } else {
-                    Ok(())
-                }
-            }
-        }
-        let mut writer = Writer {
-            written: Vec::new(),
-            interrupt: true,
-            zero: false,
-            fail_flush: false,
-        };
-        let output = b"a\xff\n";
-        let (emitted, outcome) = emit_recall(&mut writer, output);
-        outcome.expect("retry interrupted write");
-        assert_eq!(emitted, output.len());
-        assert_eq!(writer.written, output);
-
-        writer.zero = true;
-        let (emitted, outcome) = emit_recall(&mut writer, b"not written");
-        assert_eq!(emitted, 0);
-        assert_eq!(outcome.unwrap_err().kind(), std::io::ErrorKind::WriteZero);
-
-        writer.zero = false;
-        writer.fail_flush = true;
-        let (emitted, outcome) = emit_recall(&mut writer, b"flush fails");
-        assert_eq!(emitted, 11);
-        assert_eq!(outcome.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
-    }
-
-    #[test]
-    fn recall_records_only_the_partial_output_and_propagates_the_write_error() {
-        struct PartialWriter(usize);
-
-        impl Write for PartialWriter {
-            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-                if self.0 == 0 {
-                    return Err(std::io::ErrorKind::BrokenPipe.into());
-                }
-                let accepted = self.0.min(data.len());
-                self.0 -= accepted;
-                Ok(accepted)
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                panic!("a failed write should not flush")
-            }
-        }
-
-        let dir = crate::core::test_isolation::tempdir();
-        let cfg = temp_cfg(dir.path());
-        let stored = store_inner(&cfg, b"first\nsecond\n", "test", Some(0), 1).unwrap();
-        let conn = open(&cfg).unwrap();
-        let args = RecallArgs {
-            hash: Some(&stored.hash),
-            full: true,
-            from: None,
-            lines: None,
-            grep: None,
-            list: false,
-        };
-        user_env::with_path("RTK_DB_PATH", Some(dir.path().join("tracking.db")), || {
-            let error =
-                recall_from(&conn, &args, &mut PartialWriter(5)).expect_err("partial write");
-            assert_eq!(
-                error.downcast_ref::<std::io::Error>().unwrap().kind(),
-                std::io::ErrorKind::BrokenPipe
-            );
-            let tracker = tracking::Tracker::new().expect("tracking");
-            let events = tracker.recall_event_history(10, None).unwrap();
-            assert_eq!(events.len(), 1);
-            assert_eq!(events[0].emitted_bytes, 5);
-            assert_eq!(events[0].output_tokens, 2);
-            assert!(events[0].invoking_id.is_some());
-            assert!(events[0].source_capture_id.is_none());
-        });
     }
 
     #[test]
