@@ -1,0 +1,19 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________________ test_doc ___________________________________
+
+    def test_doc():
+        E = {"context": 42}
+>       assert "= Title =\nbody a\n" == "= Title =\nbody b\n"
+E       AssertionError: assert '= Title =\nbody a\n' == '= Title =\nbody b\n'
+E
+E           = Title =
+E         - body b
+E         ?      ^
+E         + body a
+E         ?      ^
+
+E          = {'context': 42}
+
+test_locals.py:3: AssertionError
+1 failed in 0.01s
