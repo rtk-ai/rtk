@@ -1,0 +1,5 @@
+PHP 8.5.12 (cli) (built: Oct 22 2026 10:11:20) (NTS)
+Copyright (c) The PHP Group
+Zend Engine v4.5.12, Copyright (c) Zend Technologies
+    with Xdebug v3.5.3, Copyright (c) 2002-2026, by Derick Rethans
+    with Zend OPcache v8.5.12, Copyright (c), by Zend Technologies
