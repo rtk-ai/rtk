@@ -218,6 +218,12 @@ fn test_init_and_uninstall_cycle_for_all_global_agents() {
 #[test]
 fn test_init_and_uninstall_cycle_for_all_project_scope_agents() {
     let cases: &[(&str, &[&str], &[&str])] = &[
+        ("codex-project", &["--codex"], &["--codex", "--uninstall"]),
+        (
+            "droid-project",
+            &["--agent", "droid"],
+            &["--agent", "droid", "--uninstall"],
+        ),
         (
             "antigravity-project",
             &["--agent", "antigravity"],
@@ -377,9 +383,18 @@ fn test_cursor_unregistered_legacy_script_warns() {
 
 #[test]
 fn test_outdated_claude_hook_still_warns_even_with_other_agent() {
+    for args in [
+        &["--agent", "antigravity"][..],
+        &["--codex"][..],
+        &["--agent", "droid"][..],
+    ] {
+        assert_outdated_claude_hook_still_warns(args);
+    }
+}
+
+fn assert_outdated_claude_hook_still_warns(install_args: &[&str]) {
     let (ws, home) = fresh_env();
-    // Configure Antigravity in workspace
-    run_rtk_init(ws.path(), home.path(), &["--agent", "antigravity"]);
+    run_rtk_init(ws.path(), home.path(), install_args);
 
     // Configure outdated Claude script hook (version 2 < 4)
     let hooks_dir = home.path().join(".claude/hooks");
