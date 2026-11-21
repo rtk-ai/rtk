@@ -86,6 +86,7 @@ listing into `head`, `tail`, or `cat`.
 |---------|--------------|
 | `go test` | Failures only |
 | `golangci-lint run` | Violations grouped by file |
+| `gotestsum` | Failures only (same filter as `go test`) |
 | `go build` | Errors only |
 
 ## Ruby
