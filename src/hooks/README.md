@@ -77,6 +77,10 @@ Deny > Defer > Ask > Allow (explicit) > Default (ask)
 
 Rules are loaded from all Claude Code `settings.json` files (project + global, including `.local` variants). Only `Bash(...)` rules are extracted; other scopes (Read, Write) are ignored.
 
+A trailing wildcard without a preceding space matches within a word (`curl -d @*`
+matches `curl -d @file.txt`). The ` *` and `:*` suffixes retain a word boundary
+(`ls *` matches `ls -l`, not `lsof`), as in Claude Code's [permission rules](https://code.claude.com/docs/en/permissions#wildcard-patterns).
+
 Quoted `sh -c`, `bash -c`, `zsh -c` and `fish -c` scripts add a
 second command-parsing boundary. RTK checks deny rules against both the outer
 wrapper and the parsed inner segments, including a wrapper behind a prefix the
