@@ -1,5 +1,6 @@
 //! Filters Go command output — test results, build errors, vet warnings.
 
+use crate::core::arg_tokenizer::{self, TokenKind};
 use crate::core::guard::never_worse;
 use crate::core::runner;
 use crate::core::shell::{display_args, quote_word};
@@ -11,7 +12,7 @@ use crate::golangci_cmd;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -53,6 +54,13 @@ fn forwarded_help(subcommand: &str, args: &[String], verbose: u8) -> Result<i32>
     crate::core::runner::run_passthrough("go", &forwarded, verbose)
 }
 
+fn should_skip_go_test_json(args: &[String]) -> bool {
+    let boundary = arg_tokenizer::injection_point(&arg_tokenizer::tokenize(args), args.len());
+    args[..boundary]
+        .iter()
+        .any(|a| a == "-json" || a.starts_with("-bench"))
+}
+
 pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     if crate::core::runner::requests_help_args("go", args) {
         return forwarded_help("test", args, verbose);
@@ -60,7 +68,7 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("go");
     cmd.arg("test");
 
-    let skip_json = args.iter().any(|a| a == "-json" || a.starts_with("-bench"));
+    let skip_json = should_skip_go_test_json(args);
 
     if !skip_json {
         cmd.arg("-json");
@@ -141,6 +149,21 @@ pub fn run_vet(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
+fn strip_leading_double_dash(args: &[OsString]) -> &[OsString] {
+    if args.first().is_some_and(|a| a == "--") {
+        &args[1..]
+    } else {
+        args
+    }
+}
+
+fn go_other_subcommand(args: &[OsString]) -> &OsStr {
+    strip_leading_double_dash(args)
+        .first()
+        .unwrap_or(&args[0])
+        .as_os_str()
+}
+
 pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         anyhow::bail!("go: no subcommand specified");
@@ -155,11 +178,9 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
 
     let timer = tracking::TimedExecution::start();
 
-    let subcommand = args[0].to_string_lossy();
+    let subcommand = go_other_subcommand(args).to_string_lossy();
     let mut cmd = resolved_command("go");
-    cmd.arg(&*subcommand);
-
-    for arg in &args[1..] {
+    for arg in args {
         cmd.arg(arg);
     }
 
@@ -205,12 +226,11 @@ fn detect_go_tool_golangci_version() -> u32 {
 }
 
 fn has_golangci_format_flag(args: &[OsString]) -> bool {
-    args.iter().any(|a| {
-        let s = a.to_string_lossy();
-        s == "--out-format"
-            || s.starts_with("--out-format=")
-            || s == "--output.json.path"
-            || s.starts_with("--output.json.path=")
+    let strings: Vec<std::borrow::Cow<'_, str>> =
+        args.iter().map(|a| a.to_string_lossy()).collect();
+    let tokens = arg_tokenizer::tokenize(&strings);
+    arg_tokenizer::before_dashdash(&tokens).iter().any(|t| {
+        t.kind == TokenKind::Long && matches!(t.text, "out-format" | "output.json.path")
     })
 }
 
@@ -231,6 +251,7 @@ impl GoTool {
 
 /// If the first arg is `tool` identify if it is a tool we already handle.
 fn match_go_tool(args: &[OsString]) -> Option<(GoTool, &[OsString])> {
+    let args = strip_leading_double_dash(args);
     if args.first().map(|a| a == "tool").unwrap_or(false)
         && let Some(tool_arg) = args.get(1)
         && let Some(tool) = GoTool::from_name(&tool_arg.to_string_lossy())
@@ -1315,6 +1336,24 @@ utils.go:15:5: unreachable code"#;
     }
 
     #[test]
+    fn test_match_go_tool_with_leading_double_dash() {
+        let args = os(&["--", "tool", "golangci-lint", "run", "./..."]);
+        let (tool, rest) = match_go_tool(&args).expect("should match after leading --");
+        assert_eq!(tool, GoTool::GolangciLint);
+        assert_eq!(rest, &os(&["run", "./..."])[..]);
+    }
+
+    #[test]
+    fn test_go_other_subcommand_skips_leading_double_dash() {
+        assert_eq!(go_other_subcommand(&os(&["version"])), OsStr::new("version"));
+        assert_eq!(
+            go_other_subcommand(&os(&["--", "version"])),
+            OsStr::new("version")
+        );
+        assert_eq!(go_other_subcommand(&os(&["--"])), OsStr::new("--"));
+    }
+
+    #[test]
     fn test_match_go_tool_bare() {
         let args = os(&["tool", "golangci-lint"]);
         let (tool, rest) = match_go_tool(&args).expect("should match");
@@ -1356,6 +1395,25 @@ utils.go:15:5: unreachable code"#;
         assert!(!has_golangci_format_flag(&os(&["run", "./..."])));
         assert!(!has_golangci_format_flag(&os(&[])));
         assert!(!has_golangci_format_flag(&os(&["--fix"])));
+        assert!(!has_golangci_format_flag(&os(&[
+            "run",
+            "--",
+            "--out-format=json"
+        ])));
+        assert!(!has_golangci_format_flag(&os(&[
+            "run",
+            "--",
+            "--output.json.path=stdout"
+        ])));
+    }
+
+    #[test]
+    fn test_should_skip_go_test_json_stops_at_double_dash() {
+        let s = |items: &[&str]| -> Vec<String> { items.iter().map(|x| x.to_string()).collect() };
+        assert!(should_skip_go_test_json(&s(&["-json"])));
+        assert!(should_skip_go_test_json(&s(&["-bench=."])));
+        assert!(!should_skip_go_test_json(&s(&["--", "-json"])));
+        assert!(!should_skip_go_test_json(&s(&["./...", "--", "-bench=."])));
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! (e.g., user specified `--format documentation`) or when injected JSON output
 //! fails to parse.
 
+use crate::core::arg_tokenizer;
 use crate::core::runner;
 use crate::core::shell::display_args;
 use crate::core::truncate::{CAP_WARNINGS, reduced};
@@ -69,15 +70,20 @@ struct RspecSummary {
 
 // ── Public entry point ───────────────────────────────────────────────────────
 
-pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = ruby_exec("rspec");
-
-    let has_format = args.iter().any(|a| {
+fn has_format_flag(args: &[String]) -> bool {
+    let boundary = arg_tokenizer::injection_point(&arg_tokenizer::tokenize(args), args.len());
+    args[..boundary].iter().any(|a| {
         a == "--format"
             || a == "-f"
             || a.starts_with("--format=")
             || (a.starts_with("-f") && a.len() > 2 && !a.starts_with("--"))
-    });
+    })
+}
+
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    let mut cmd = ruby_exec("rspec");
+
+    let has_format = has_format_flag(args);
 
     if !has_format {
         cmd.arg("--format").arg("json");
@@ -989,18 +995,13 @@ rspec ./spec/models/user_spec.rb:5 # User is valid
     #[test]
     fn test_has_format_flag_none() {
         let args: &[String] = &[];
-        assert!(!args.iter().any(|a| {
-            a == "--format"
-                || a == "-f"
-                || a.starts_with("--format=")
-                || (a.starts_with("-f") && a.len() > 2 && !a.starts_with("--"))
-        }));
+        assert!(!has_format_flag(args));
     }
 
     #[test]
     fn test_has_format_flag_long() {
         let args = ["--format".to_string(), "documentation".to_string()];
-        assert!(args.iter().any(|a| a == "--format"));
+        assert!(has_format_flag(&args));
     }
 
     #[test]
@@ -1008,18 +1009,22 @@ rspec ./spec/models/user_spec.rb:5 # User is valid
         // -fjson, -fj, -fdocumentation
         for flag in &["-fjson", "-fj", "-fdocumentation"] {
             let args = [flag.to_string()];
-            assert!(
-                args.iter()
-                    .any(|a| a.starts_with("-f") && a.len() > 2 && !a.starts_with("--")),
-                "should detect {}",
-                flag
-            );
+            assert!(has_format_flag(&args), "should detect {}", flag);
         }
     }
 
     #[test]
     fn test_has_format_flag_equals() {
         let args = ["--format=json".to_string()];
-        assert!(args.iter().any(|a| a.starts_with("--format=")));
+        assert!(has_format_flag(&args));
+    }
+
+    #[test]
+    fn test_has_format_flag_stops_at_double_dash() {
+        let args = |items: &[&str]| -> Vec<String> { items.iter().map(|s| s.to_string()).collect() };
+        assert!(!has_format_flag(&args(&["--", "-f.rb"])));
+        assert!(!has_format_flag(&args(&["--", "--format", "documentation"])));
+        assert!(!has_format_flag(&args(&["--", "--format=documentation"])));
+        assert!(has_format_flag(&args(&["-fdocumentation", "--", "-f.rb"])));
     }
 }
