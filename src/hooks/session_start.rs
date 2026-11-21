@@ -1,13 +1,16 @@
 //! SessionStart processor: keep the proxy alive for sessions routed through it.
 //!
 //! Registered by the `rtk init -g` proxy on-ramp. When the session's
-//! `ANTHROPIC_BASE_URL` points at a loopback address and nothing listens
-//! there, launch `rtk llm-proxy start` (a no-op when the daemon is already
-//! running) and report through `systemMessage` — user-visible, never model
-//! context, so RTK spends no tokens configuring itself. A listener that does
-//! not answer as the RTK proxy is never replaced: the hook warns if RTK was set
-//! up for its address and otherwise leaves it to whoever runs it. A problem is
-//! at most a warning; nothing here disrupts the session.
+//! `ANTHROPIC_BASE_URL` points at a loopback address RTK was set up for and
+//! nothing listens there, launch `rtk llm-proxy start` (a no-op when the
+//! daemon is already running) and report through `systemMessage` —
+//! user-visible, never model context, so RTK spends no tokens configuring
+//! itself. A listener that does not answer as the RTK proxy is never replaced:
+//! the hook warns if RTK was set up for its address. An address RTK was not set
+//! up for belongs to whoever runs it, listening or not, so the hook leaves it
+//! alone: starting RTK on a stopped gateway's port would take the gateway's
+//! traffic and keep the gateway from binding. A problem is at most a warning;
+//! nothing here disrupts the session.
 
 use std::io::Write;
 use std::net::TcpStream;
@@ -49,12 +52,14 @@ fn ensure_proxy_impl(
     if addrs.iter().any(|addr| probe(addr)) {
         return None;
     }
-    if addrs.iter().any(|addr| is_listening(addr)) {
-        return set_up_for(&addrs).then(|| {
-            format!(
-                "rtk: settings.json or RTK_PROXY_BIND expects the RTK proxy at {url}, but whatever holds that port is not answering as the RTK proxy — requests may fail or reach another service; free the port and run `rtk llm-proxy start --bind {addr}`, or remove that setting"
-            )
-        });
+    let listening = addrs.iter().any(|addr| is_listening(addr));
+    if !set_up_for(&addrs) {
+        return None;
+    }
+    if listening {
+        return Some(format!(
+            "rtk: settings.json or RTK_PROXY_BIND expects the RTK proxy at {url}, but whatever holds that port is not answering as the RTK proxy — requests may fail or reach another service; free the port and run `rtk llm-proxy start --bind {addr}`, or remove that setting"
+        ));
     }
     match spawn(addr) {
         Ok(()) => {
@@ -387,6 +392,68 @@ mod tests {
     }
 
     #[test]
+    fn free_port_is_left_alone_when_rtk_was_not_set_up() {
+        let out = ensure_proxy_impl(
+            "http://127.0.0.1:4000",
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| panic!("must not start a proxy on a stopped gateway's port"),
+            Duration::ZERO,
+        );
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn stopped_gateway_is_not_replaced_when_settings_name_another_port() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            write_base_url(claude_dir, "http://127.0.0.1:8080");
+            let free = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
+            let addr = free.local_addr().expect("free address");
+            drop(free);
+            let out = user_env::with_vars(&[("RTK_PROXY_BIND", None)], || {
+                ensure_proxy_impl(
+                    &format!("http://{addr}"),
+                    |addr| probe(addr, Duration::from_millis(150)),
+                    |addr| is_listening(addr, Duration::from_millis(150)),
+                    rtk_set_up_for,
+                    |_| panic!("must not start a proxy on a stopped gateway's port"),
+                    Duration::ZERO,
+                )
+            });
+            assert_eq!(out, None);
+        });
+    }
+
+    #[test]
+    fn dead_daemon_is_started_where_settings_point() {
+        let tmp = test_isolation::tempdir();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            write_base_url(claude_dir, "http://127.0.0.1:8080");
+            let spawned = Cell::new(false);
+            let out = user_env::with_vars(&[("RTK_PROXY_BIND", None)], || {
+                ensure_proxy_impl(
+                    "http://127.0.0.1:8080",
+                    |_| false,
+                    |_| false,
+                    rtk_set_up_for,
+                    |_| {
+                        spawned.set(true);
+                        Ok(())
+                    },
+                    Duration::ZERO,
+                )
+            });
+            assert!(spawned.get(), "a dead daemon RTK was set up for is started");
+            assert!(
+                out.expect("a start is reported")
+                    .contains("not answering yet")
+            );
+        });
+    }
+
+    #[test]
     fn dead_daemon_is_started_and_reported() {
         let calls = Cell::new(0usize);
         let out = ensure_proxy_impl(
@@ -396,7 +463,7 @@ mod tests {
                 calls.get() > 1
             },
             |_| false,
-            |_| panic!("a free port needs no setup check"),
+            |_| true,
             |_| Ok(()),
             Duration::from_millis(200),
         );
@@ -412,7 +479,7 @@ mod tests {
             "http://localhost:8580/v1",
             |_| false,
             |_| false,
-            |_| panic!("a free port needs no setup check"),
+            |_| true,
             |addr| {
                 *spawned_on.borrow_mut() = addr.to_string();
                 Ok(())
@@ -428,7 +495,7 @@ mod tests {
             "http://127.0.0.1:8080",
             |_| false,
             |_| false,
-            |_| panic!("a free port needs no setup check"),
+            |_| true,
             |_| Ok(()),
             Duration::ZERO,
         );
@@ -442,7 +509,7 @@ mod tests {
             "http://127.0.0.1:8080",
             |_| false,
             |_| false,
-            |_| panic!("a free port needs no setup check"),
+            |_| true,
             |_| anyhow::bail!("binary missing"),
             Duration::ZERO,
         );
