@@ -213,6 +213,8 @@ const OPENCODE_TOOLS: &[(&str, Subject)] = &[
     ("edit", Subject::Edit),
     ("apply_patch", Subject::Edit),
     ("bash", Subject::Shell),
+    // OpenCode 2.x names the bash tool `shell` in its execute hooks.
+    ("shell", Subject::Shell),
     ("execute", Subject::Shell),
     ("grep", Subject::Search),
     ("glob", Subject::Search),
@@ -220,6 +222,8 @@ const OPENCODE_TOOLS: &[(&str, Subject)] = &[
     ("webfetch", Subject::Web),
     ("websearch", Subject::Web),
     ("task", Subject::Subagent),
+    // `patch` is OpenCode's apply-diff tool; same role as `apply_patch`.
+    ("patch", Subject::Edit),
     ("list_mcp_resources", Subject::Mcp),
     ("read_mcp_resource", Subject::Mcp),
 ];

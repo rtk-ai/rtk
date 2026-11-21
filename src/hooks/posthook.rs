@@ -75,6 +75,14 @@ pub fn run(event: &Value) {
 
 /// Full pipeline behind the fail-open envelope. `None` = emit nothing.
 fn process(event: &Value) -> Option<(String, LoadedPipeline)> {
+    let (config, loaded) = load_context()?;
+    let output = process_with_config(event, &config, &loaded.resolved)?;
+    Some((output, loaded))
+}
+
+/// One config load and one pipeline load per invocation, behind the two
+/// session-wide off switches.
+fn load_context() -> Option<(Config, LoadedPipeline)> {
     if crate::core::user_env::var("RTK_DISABLED").as_deref() == Some("1") {
         return None;
     }
@@ -82,10 +90,120 @@ fn process(event: &Value) -> Option<(String, LoadedPipeline)> {
         return None;
     }
 
-    let config = Config::load().unwrap_or_default();
-    let loaded = pipeline_config::load();
-    let output = process_with_config(event, &config, &loaded.resolved)?;
+    Some((Config::load().unwrap_or_default(), pipeline_config::load()))
+}
+
+/// Entry point for a host that hands RTK plain tool text instead of Claude
+/// Code's event shape — OpenCode's `tool.execute.after`.
+///
+/// Same fail-open envelope as [`run`], with the payload reduced to the tool
+/// name, its arguments, and the text the tool produced. The only stdout write
+/// is the replacement text, and only when it is strictly smaller in bytes than
+/// the input; every early return leaves the host's original output in place.
+pub fn run_agent_text(agent: &str, tool_name: &str, args: &Value, raw: &str) {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        process_agent_text(agent, tool_name, args, raw)
+    }));
+    match outcome {
+        Ok(Some((output, loaded))) => {
+            let _ = io::stdout().write_all(output.as_bytes());
+            pipeline_config::write_status(&loaded);
+            pipeline_log::flush();
+        }
+        Ok(None) | Err(_) => pipeline_log::flush(),
+    }
+}
+
+/// Full pipeline behind the plain-text envelope. `None` = emit nothing.
+fn process_agent_text(
+    agent: &str,
+    tool_name: &str,
+    args: &Value,
+    raw: &str,
+) -> Option<(String, LoadedPipeline)> {
+    if raw.is_empty() {
+        return None;
+    }
+    let (config, loaded) = load_context()?;
+    let output = agent_text_with_config(agent, tool_name, args, raw, &config, &loaded.resolved)?;
     Some((output, loaded))
+}
+
+/// Testable core: map tool → subject/format/source, then run the same
+/// `hook.after_tool.<subject>` evaluation and guards as the Claude adapter.
+fn agent_text_with_config(
+    agent: &str,
+    tool_name: &str,
+    args: &Value,
+    raw: &str,
+    config: &Config,
+    pipeline: &Resolved,
+) -> Option<String> {
+    let subject = subject_of_for(agent, tool_name);
+    let source = source_of_args(subject, args);
+    let format = text_format(tool_name, subject, &source, raw)?;
+    if raw.len() < pipeline.guards.min_size {
+        return None;
+    }
+    let composed = filter_and_compose(
+        config, pipeline, subject, tool_name, &source, raw, format, 0,
+    )?;
+    // `filter_and_compose` refuses a token-larger result; the host contract is
+    // bytes, so refuse anything that is not strictly smaller.
+    accept_smaller(raw, composed)
+}
+
+fn accept_smaller(raw: &str, composed: String) -> Option<String> {
+    (composed.len() < raw.len()).then_some(composed)
+}
+
+/// Path, URL or command the facts and tracking rows key on, taken from the
+/// host's per-tool arguments. OpenCode spells the read path `filePath`; the
+/// snake_case variants keep this usable for other plugin hosts.
+fn source_of_args(subject: Subject, args: &Value) -> String {
+    let keys: &[&str] = match subject {
+        Subject::Shell => &["command"],
+        Subject::Read => &["filePath", "file_path", "path"],
+        Subject::Search => &["path", "filePath", "file_path"],
+        Subject::Web => &["url"],
+        _ => return String::new(),
+    };
+    keys.iter()
+        .find_map(|key| args.get(*key).and_then(Value::as_str))
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Content format for a host that provides plain text. Mirrors the Claude
+/// adapter's mapping where the shapes correspond; `None` means the host's
+/// output cannot be put back confidently and the text passes through.
+fn text_format(
+    tool_name: &str,
+    subject: Subject,
+    source: &str,
+    raw: &str,
+) -> Option<ContentFormat> {
+    match subject {
+        Subject::Read => Some(if is_lockfile_name(&basename_of(source)) {
+            ContentFormat::Lockfile
+        } else if extension_of(source) == "json" {
+            ContentFormat::Json
+        } else {
+            ContentFormat::Term
+        }),
+        Subject::Shell | Subject::Subagent => Some(ContentFormat::Term),
+        // Search covers both grep and file listings; only grep is `matches`.
+        Subject::Search if tool_name.eq_ignore_ascii_case("grep") => Some(ContentFormat::Matches),
+        Subject::Search => None,
+        Subject::Web => Some(ContentFormat::Web),
+        Subject::Mcp => Some(if serde_json::from_str::<Value>(raw.trim()).is_ok() {
+            ContentFormat::Json
+        } else {
+            ContentFormat::Term
+        }),
+        Subject::Write | Subject::Edit => None,
+        _ => Some(ContentFormat::Term),
+    }
 }
 
 /// The agent whose PostToolUse payload this process is handling.
@@ -487,6 +605,26 @@ fn filter_and_compose(
     format: ContentFormat,
     duration_ms: u64,
 ) -> Option<String> {
+    // `is_rtk_command` is only meaningful for shell output. The Claude shell
+    // path computes it in `process_shell`; the plain-text path (OpenCode
+    // `tool.execute.after`) has to compute it here, or the shipped
+    // `term-default` rule (`when = { is_rtk_command = false }`) can never
+    // match and every shell result falls through uncompressed.
+    let is_rtk_command = (subject == Subject::Shell).then(|| RTK_IN_COMMAND.is_match(source));
+
+    // Recall-recovery gate: a command that reads the recall store must see the
+    // raw bytes, else content elided by `cap` could never be read back.
+    // Mirrors the gate in `process_shell`.
+    if subject == Subject::Shell
+        && (source.contains("tee/posthook")
+            || RTK_RECALL_COMMAND.is_match(source)
+            || tee::posthook_recall_dir(config)
+                .is_some_and(|d| source.contains(&d.display().to_string())))
+    {
+        record_recovery(source);
+        return None;
+    }
+
     let applied = run_selected(
         pipeline,
         subject,
@@ -495,7 +633,7 @@ fn filter_and_compose(
         source,
         raw,
         duration_ms,
-        None,
+        is_rtk_command,
     )?;
     let filtered = applied.text.clone();
 
@@ -1160,6 +1298,206 @@ mod tests {
                 "{name} must pass through on rtk:default: upgrading is a no-op"
             );
         }
+    }
+
+    fn repeated_output() -> String {
+        std::iter::repeat_n("repeated build line", 400)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn test_agent_text_passes_through_when_no_after_tool_rule_matches() {
+        let raw = repeated_output();
+        assert!(
+            agent_text_with_config(
+                "opencode",
+                "bash",
+                &serde_json::json!({"command": "make build"}),
+                &raw,
+                &test_config(),
+                &default_pipeline(),
+            )
+            .is_none(),
+            "rtk:default has no after_tool rules"
+        );
+    }
+
+    #[test]
+    fn test_agent_text_applies_a_matching_after_tool_rule() {
+        let pipeline =
+            pipeline_from("[[hook.after_tool.shell]]\nname = \"squeeze\"\nuse = [\"dedup\"]\n");
+        let raw = repeated_output();
+        let out = agent_text_with_config(
+            "opencode",
+            "bash",
+            &serde_json::json!({"command": "make build"}),
+            &raw,
+            &test_config(),
+            &pipeline,
+        )
+        .expect("shell rule must run for an OpenCode bash result");
+        assert!(out.contains("[x400]"), "{out}");
+        assert!(out.len() < raw.len());
+    }
+
+    #[test]
+    fn test_agent_text_maps_the_opencode_tool_vocabulary() {
+        let pipeline =
+            pipeline_from("[[hook.after_tool.read]]\nname = \"squeeze\"\nuse = [\"dedup\"]\n");
+        let raw = repeated_output();
+        assert!(
+            agent_text_with_config(
+                "opencode",
+                "read",
+                &serde_json::json!({"filePath": "/tmp/build.log"}),
+                &raw,
+                &test_config(),
+                &pipeline,
+            )
+            .is_some(),
+            "read maps to the read subject"
+        );
+        assert!(
+            agent_text_with_config(
+                "opencode",
+                "bash",
+                &serde_json::json!({"command": "make build"}),
+                &raw,
+                &test_config(),
+                &pipeline,
+            )
+            .is_none(),
+            "bash is not a read"
+        );
+    }
+
+    #[test]
+    fn test_agent_text_emits_nothing_when_the_result_is_unchanged() {
+        let pipeline =
+            pipeline_from("[[hook.after_tool.shell]]\nname = \"squeeze\"\nuse = [\"dedup\"]\n");
+        let raw = (0..400)
+            .map(|i| format!("unique line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            agent_text_with_config(
+                "opencode",
+                "bash",
+                &serde_json::json!({"command": "make build"}),
+                &raw,
+                &test_config(),
+                &pipeline,
+            )
+            .is_none(),
+            "a no-op chain must not replace the output"
+        );
+    }
+
+    /// Reviewer's repro: 600 uniform lines must hit the shipped `term-default`
+    /// rule on the OpenCode after-tool path and come back capped, not verbatim.
+    fn numbered_output(n: usize) -> String {
+        (1..=n)
+            .map(|i| format!("q{i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn test_agent_text_term_default_matches_a_shell_result() {
+        let raw = numbered_output(600);
+        let out = agent_text_with_config(
+            "opencode",
+            "shell",
+            &serde_json::json!({"command": "seq"}),
+            &raw,
+            &test_config(),
+            &posthook_pipeline(),
+        )
+        .expect("the shipped term-default rule must match a non-rtk shell result");
+
+        let lines = out.lines().count();
+        assert!(lines < 300, "expected a head+tail cap, got {lines} lines");
+        assert!(out.contains("q1"), "the head must survive");
+        assert!(out.contains("q600"), "the tail must survive");
+        assert!(!out.contains("q350"), "the middle must be elided");
+    }
+
+    #[test]
+    fn test_agent_text_sets_is_rtk_command_for_shell_subjects() {
+        let raw = numbered_output(600);
+        // `term-default` is `when = { is_rtk_command = false }`: a command that
+        // already went through rtk must be skipped, not compressed again.
+        for command in ["rtk seq", "cd x && rtk ls -la"] {
+            assert!(
+                agent_text_with_config(
+                    "opencode",
+                    "shell",
+                    &serde_json::json!({ "command": command }),
+                    &raw,
+                    &test_config(),
+                    &posthook_pipeline(),
+                )
+                .is_none(),
+                "{command} runs rtk already and must pass through"
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_text_skips_compression_for_recall_recovery_commands() {
+        let raw = numbered_output(600);
+        // Reading the recall store back must see the raw bytes, else content
+        // elided by `cap` could never be recovered.
+        for command in [
+            "rtk recall ab12cd34",
+            "cd x && rtk recall ab12cd34 --tail 50",
+            "cat tee/posthook/12_3-4_read",
+        ] {
+            assert!(
+                agent_text_with_config(
+                    "opencode",
+                    "shell",
+                    &serde_json::json!({ "command": command }),
+                    &raw,
+                    &test_config(),
+                    &posthook_pipeline(),
+                )
+                .is_none(),
+                "{command} reads the recall store and must pass through"
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_text_maps_the_opencode_2x_tool_ids() {
+        for (tool, want) in [
+            ("shell", Subject::Shell),
+            ("bash", Subject::Shell),
+            ("patch", Subject::Edit),
+            ("read", Subject::Read),
+            ("write", Subject::Write),
+            ("edit", Subject::Edit),
+            ("grep", Subject::Search),
+            ("glob", Subject::Search),
+            ("webfetch", Subject::Web),
+            ("websearch", Subject::Web),
+            ("task", Subject::Subagent),
+        ] {
+            assert_eq!(subject_of_for("opencode", tool), want, "{tool}");
+        }
+        // No subject is a todo list; OpenCode's own confirmation is passed on.
+        assert_eq!(subject_of_for("opencode", "todowrite"), Subject::Any);
+    }
+
+    #[test]
+    fn test_accept_smaller_refuses_equal_and_larger_output() {
+        assert_eq!(accept_smaller("abc", "abc".to_string()), None);
+        assert_eq!(accept_smaller("abc", "abcd".to_string()), None);
+        assert_eq!(
+            accept_smaller("abcd", "abc".to_string()).as_deref(),
+            Some("abc")
+        );
     }
 
     #[test]
