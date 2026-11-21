@@ -49,7 +49,7 @@ uuid = { version = "1", features = ["v4"] }
 utoipa = { version = "5", features = ["chrono"] }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["macros"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "json", "stream"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors", "catch-panic"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
