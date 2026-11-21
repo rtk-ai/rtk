@@ -85,3 +85,95 @@ and tracking failures are not measured here. `rtk gain --recalls` remains a
 separate unique-content metric. `retention_days` reports the configured tracking
 retention, and `rtk gain --reset` clears both histories. IDs are not sent in
 telemetry.
+
+## Privacy
+
+- The tracking database is **local only** and never leaves your machine.
+- It is separate from telemetry. Telemetry is off by default and sends only anonymous aggregates if you opt in — see [Telemetry & Privacy](../guide/resources/telemetry.md).
+
+## Retention
+
+Records older than **90 days** are deleted automatically when new records are written.
+
+## Viewing your data
+
+```bash
+rtk gain                  # summary
+rtk gain --project        # current project only
+rtk gain --daily          # day by day
+rtk gain --weekly         # week by week
+rtk gain --monthly        # month by month
+rtk gain --history        # last 10 commands
+```
+
+See [Token Savings Analytics](../guide/analytics/gain.md) for the full `rtk gain` surface.
+
+## Exporting
+
+```bash
+rtk gain --all --format json > savings.json
+rtk gain --all --format csv  > savings.csv
+```
+
+Example JSON entry for one day (illustrative values):
+
+```json
+{
+  "date": "2026-01-01",
+  "commands": 100,
+  "input_tokens": 500000,
+  "output_tokens": 100000,
+  "saved_tokens": 400000,
+  "savings_pct": 80.0,
+  "total_time_ms": 20000,
+  "avg_time_ms": 200
+}
+```
+
+Weekly entries carry `week_start` and `week_end` instead of `date`; monthly entries carry `month` (`YYYY-MM`).
+
+You can also query the database directly:
+
+```bash
+sqlite3 ~/.local/share/rtk/history.db \
+  "SELECT timestamp, rtk_cmd, saved_tokens FROM commands
+   ORDER BY timestamp DESC LIMIT 10"
+```
+
+## Backup
+
+```bash
+cp ~/.local/share/rtk/history.db ~/backups/rtk-history-$(date +%Y%m%d).db
+```
+
+## Reset
+
+```bash
+rtk gain --reset          # asks for confirmation
+rtk gain --reset --yes    # skip the prompt (scripts)
+```
+
+Alternatively, delete the database file; it is recreated on the next command:
+
+```bash
+rm ~/.local/share/rtk/history.db
+```
+
+## Troubleshooting
+
+### Database locked error
+
+If you see "database is locked" errors:
+- Make sure no other tool holds the database open for writing
+- Check file permissions on `history.db`
+- As a last resort, delete it: `rm ~/.local/share/rtk/history.db && rtk gain`
+
+### Token counts don't match my provider
+
+Token estimation uses `~4 bytes = 1 token`. The percentage is reliable because the same estimator is applied to raw and filtered output, but absolute counts are approximate. For exact counts, run the raw and filtered output through your model's own tokenizer.
+
+## See Also
+
+- [Token Savings Analytics](../guide/analytics/gain.md)
+- [Audit Guide](AUDIT_GUIDE.md)
+- [README.md](../../README.md)
