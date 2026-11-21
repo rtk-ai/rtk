@@ -24,11 +24,23 @@ fn print_instructions_agents_awareness_note(agent: &str, ctx: InitContext) {
 // Cline / Roo Code support
 
 pub(super) fn run_cline_mode(ctx: InitContext) -> Result<()> {
+    run_cline_mode_at(std::path::Path::new("."), ctx)
+}
+
+fn run_cline_mode_at(root: &std::path::Path, ctx: InitContext) -> Result<()> {
     let InitContext {
         verbose, dry_run, ..
     } = ctx;
-    // Cline reads .clinerules from the project root (workspace-scoped)
-    let rules_path = PathBuf::from(".clinerules");
+    // Cline reads .clinerules from the project root (workspace-scoped). It
+    // accepts either a single file or a directory of rules; when the
+    // directory form is already in use, add our own file inside it instead of
+    // failing to overwrite the directory.
+    let clinerules = root.join(".clinerules");
+    let rules_path = if clinerules.is_dir() {
+        clinerules.join("rtk.md")
+    } else {
+        clinerules
+    };
 
     let existing = fs::read_to_string(&rules_path).unwrap_or_default();
     if existing.contains("RTK") || existing.contains("rtk") {
@@ -218,6 +230,19 @@ mod tests {
     use super::codex::{codex_rtk_md_content, run_codex_mode_with_paths};
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_cline_mode_writes_inside_existing_rules_directory() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join(".clinerules")).unwrap();
+
+        run_cline_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let rules_path = temp.path().join(".clinerules/rtk.md");
+        assert!(rules_path.exists(), "Rules file should be created");
+        let content = fs::read_to_string(&rules_path).unwrap();
+        assert_eq!(content, RTK_AWARENESS_FULL);
+    }
 
     #[test]
     fn test_kilocode_mode_creates_rules_file() {
