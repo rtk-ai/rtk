@@ -485,6 +485,19 @@ fn malformed_retry_json_errors_without_a_third_call() {
     assert_fetch_error(&out);
 }
 
+#[test]
+fn schema_drift_initial_json_degrades_without_retry() {
+    let sandbox = Sandbox::new();
+    sandbox.seed(&[("2026-09-28", 1)]);
+    sandbox.stub(&[(r#"{"weekly":[{"unknown_field":"2026-09-27"}]}"#, 0)]);
+    let out = sandbox.run("json");
+    sandbox.assert_calls(1);
+    assert_rtk_only(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("[warn] ccusage weekly output not understood:"));
+    assert!(stderr.contains("[warn] cost data skipped."));
+}
+
 fn duplicated_monday_fixture(key: &str) -> String {
     // Legacy groupByProject output can repeat a date without retaining any
     // project identity. totalTokens is deliberately independent of the four
