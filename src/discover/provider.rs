@@ -59,13 +59,32 @@ fn dir_matches_filter(dir_name: &str, filter: &str) -> bool {
 }
 
 fn dir_matches_filter_impl(dir_name: &str, filter: &str, case_insensitive: bool) -> bool {
-    if case_insensitive {
-        dir_name
-            .to_ascii_lowercase()
-            .contains(&filter.to_ascii_lowercase())
-    } else {
-        dir_name.contains(filter)
+    let matches = |needle: &str| {
+        if case_insensitive {
+            dir_name
+                .to_ascii_lowercase()
+                .contains(&needle.to_ascii_lowercase())
+        } else {
+            dir_name.contains(needle)
+        }
+    };
+
+    if matches(filter) {
+        return true;
     }
+
+    // `-p` is documented as a project path, but Claude Code stores transcripts
+    // under a sanitized directory name (`/home/user/app` -> `-home-user-app`).
+    // A path can never substring-match that name, so encode the filter the same
+    // way and try again (#2834). A trailing separator is not part of the cwd
+    // Claude encoded, so drop it before encoding.
+    if filter.contains(['/', '\\', ':']) {
+        let trimmed = filter.trim_end_matches(['/', '\\']);
+        let encoded = ClaudeProvider::encode_project_path(trimmed);
+        return encoded != filter && matches(&encoded);
+    }
+
+    false
 }
 
 impl ClaudeProvider {
@@ -477,6 +496,36 @@ mod tests {
         let encoded = ClaudeProvider::encode_project_path("/Users/foo/Sites/rtk");
         assert!(encoded.contains("rtk"));
         assert!(encoded.contains("Sites"));
+    }
+
+    #[test]
+    fn test_dir_matches_filter_accepts_an_absolute_path() {
+        // #2834: `-p` takes a project path, but the transcript directory name is
+        // sanitized. A raw path never substring-matches it; the encoded form does.
+        let dir = "-home-user-projects-my-app";
+        assert!(dir_matches_filter_impl(
+            dir,
+            "/home/user/projects/my-app",
+            false
+        ));
+        assert!(dir_matches_filter_impl(
+            dir,
+            "/home/user/projects/my-app/",
+            false
+        ));
+        assert!(dir_matches_filter_impl(dir, "my-app", false));
+        assert!(!dir_matches_filter_impl(
+            dir,
+            "/home/user/projects/other",
+            false
+        ));
+
+        // Windows drive-letter paths encode the colon and backslashes too.
+        assert!(dir_matches_filter_impl(
+            "C--Users-foo-bar",
+            r"C:\Users\foo\bar",
+            true
+        ));
     }
 
     #[test]
