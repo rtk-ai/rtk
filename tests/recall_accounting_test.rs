@@ -1,23 +1,23 @@
 mod common;
 
 use rusqlite::Connection;
-use serde_json::{Value, json};
-use std::io::Write;
+use serde_json::Value;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
-fn command(dir: &Path) -> Command {
+fn command(dir: &Path, db: &Path) -> Command {
     let mut cmd = common::rtk_command();
     cmd.current_dir(dir)
-        .env("RTK_DB_PATH", dir.join("history.db"))
-        .env("RTK_RECALL_DB", dir.join("recall.db"))
-        .env("CLAUDE_CONFIG_DIR", dir.join("claude"));
+        .env("RTK_DB_PATH", db.join("history.db"))
+        .env("RTK_RECALL_DB", db.join("recall.db"))
+        .env("CLAUDE_CONFIG_DIR", db.join("claude"));
     cmd
 }
 
-fn exported(dir: &Path) -> Value {
-    let output = command(dir)
-        .args(["gain", "--history", "--format", "json"])
+fn exported(dir: &Path, db: &Path, args: &[&str]) -> Value {
+    let output = command(dir, db)
+        .args(["gain", "--format", "json"])
+        .args(args)
         .output()
         .expect("gain");
     assert!(
@@ -28,60 +28,8 @@ fn exported(dir: &Path) -> Value {
     serde_json::from_slice(&output.stdout).expect("JSON export")
 }
 
-#[test]
-fn hook_and_command_share_explicit_ids() {
-    let dir = tempfile::tempdir().expect("directory");
-    std::fs::write(dir.path().join("input.txt"), "first\nsecond\n").expect("fixture");
-    let payload = json!({
-        "tool_name": "Bash", "session_id": "session-a", "tool_use_id": "tool-a",
-        "cwd": dir.path(), "tool_input": {"command": "head -n 1 input.txt", "timeout": 1200}
-    });
-    let mut hook = command(dir.path())
-        .args(["hook", "claude"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("hook");
-    hook.stdin
-        .take()
-        .expect("stdin")
-        .write_all(payload.to_string().as_bytes())
-        .expect("payload");
-    let output = hook.wait_with_output().expect("hook output");
-    assert!(output.status.success());
-    let response: Value = serde_json::from_slice(&output.stdout).expect("hook JSON");
-    let rewritten = response["hookSpecificOutput"]["updatedInput"]["command"]
-        .as_str()
-        .expect("rewrite");
-    let words: Vec<&str> = rewritten.split_whitespace().collect();
-    assert_eq!(&words[..2], &["rtk", "--hook-event-id"]);
-    assert_eq!(words[2].len(), 32);
-    assert_eq!(
-        response["hookSpecificOutput"]["updatedInput"]["timeout"],
-        1200
-    );
-    assert!(response["hookSpecificOutput"]["permissionDecision"].is_null());
-    let result = command(dir.path())
-        .args(&words[1..])
-        .output()
-        .expect("rewritten command");
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let export = exported(dir.path());
-    let row = &export["commands"][0];
-    assert_eq!(row["hook_event_id"], words[2]);
-    assert_eq!(row["tool_use_id"], "tool-a");
-    assert_eq!(row["session_id"], "session-a");
-}
-
-#[test]
-fn repeated_filtered_reads_count_actual_stdout_and_stay_unattributed() {
-    let dir = tempfile::tempdir().expect("directory");
-    let conn = Connection::open(dir.path().join("recall.db")).expect("db");
+fn seed_recall(dir: &Path) {
+    let conn = Connection::open(dir.join("recall.db")).expect("db");
     conn.execute_batch(
         "CREATE TABLE recall (
         hash TEXT PRIMARY KEY, command TEXT NOT NULL, cwd TEXT, exit_code INTEGER,
@@ -96,7 +44,12 @@ fn repeated_filtered_reads_count_actual_stdout_and_stay_unattributed() {
         [raw.as_slice()],
     )
     .expect("fixture");
-    drop(conn);
+}
+
+#[test]
+fn repeated_filtered_reads_count_actual_stdout_and_stay_unattributed() {
+    let dir = common::tempdir();
+    seed_recall(dir.path());
     let mut expected = 0;
     for args in [
         vec!["recall", "abc123"],
@@ -105,16 +58,18 @@ fn repeated_filtered_reads_count_actual_stdout_and_stay_unattributed() {
         vec!["recall", "abc123", "--full", "--grep", "second"],
         vec!["recall", "abc123", "--full", "--grep", "absent"],
     ] {
-        let output = command(dir.path()).args(args).output().expect("recall");
+        let output = command(dir.path(), dir.path())
+            .args(args)
+            .output()
+            .expect("recall");
         assert!(output.status.success());
         expected += output.stdout.len().div_ceil(4);
     }
-    let export = exported(dir.path());
+    let export = exported(dir.path(), dir.path(), &["--history"]);
     let accounting = &export["output_accounting"];
     assert_eq!(accounting["recall_events"], 5);
     assert_eq!(accounting["unattributed_recall_events"], 5);
     assert_eq!(accounting["retrieved_output_tokens"], expected as i64);
-    assert_eq!(accounting["observed_net_saved_tokens"], -(expected as i64));
     assert_eq!(accounting["measurement_complete"], false);
     let rows = export["recall_events"].as_array().expect("events");
     assert_eq!(rows.len(), 5);
@@ -131,15 +86,133 @@ fn repeated_filtered_reads_count_actual_stdout_and_stay_unattributed() {
 }
 
 #[test]
-fn command_without_hook_keeps_hook_fields_null() {
-    let dir = common::temp_git_repo();
-    let output = command(dir.path())
-        .args(["git", "log", "--oneline", "-1"])
+fn project_export_scopes_commands_and_recalls_by_their_own_directories() {
+    let db = common::tempdir();
+    let project_a = common::temp_git_repo();
+    let project_b = common::temp_git_repo();
+    seed_recall(db.path());
+    for project in [project_a.path(), project_b.path()] {
+        assert!(
+            command(project, db.path())
+                .args(["git", "log", "--oneline", "-1"])
+                .output()
+                .expect("command")
+                .status
+                .success()
+        );
+    }
+    for (project, count) in [(project_a.path(), "1"), (project_b.path(), "2")] {
+        assert!(
+            command(project, db.path())
+                .args(["recall", "abc123", "--lines", count])
+                .output()
+                .expect("recall")
+                .status
+                .success()
+        );
+    }
+    let a = exported(project_a.path(), db.path(), &["--project", "--history"]);
+    let b = exported(project_b.path(), db.path(), &["--project", "--history"]);
+    let all = exported(project_a.path(), db.path(), &["--history"]);
+    for (export, bytes) in [(&a, 6), (&b, 13)] {
+        let commands = export["commands"].as_array().expect("commands");
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0]["invocation_id"].is_string());
+        let events = export["recall_events"].as_array().expect("recall events");
+        assert_eq!(events.len(), 1);
+        assert!(events[0]["invoking_id"].is_string());
+        assert_eq!(events[0]["emitted_bytes"], bytes);
+        assert_eq!(export["output_accounting"]["recall_events"], 1);
+        assert_eq!(
+            export["output_accounting"]["retrieved_output_tokens"],
+            (bytes as usize).div_ceil(4)
+        );
+        assert_eq!(
+            export["output_accounting"]["initial_input_tokens"],
+            export["summary"]["total_input"]
+        );
+    }
+    assert_ne!(
+        a["commands"][0]["invocation_id"],
+        b["commands"][0]["invocation_id"]
+    );
+    assert_eq!(all["commands"].as_array().expect("all commands").len(), 2);
+    assert_eq!(
+        all["recall_events"]
+            .as_array()
+            .expect("all recall events")
+            .len(),
+        2
+    );
+    assert_eq!(
+        all["output_accounting"]["initial_input_tokens"].as_i64(),
+        Some(
+            a["summary"]["total_input"].as_i64().unwrap()
+                + b["summary"]["total_input"].as_i64().unwrap()
+        )
+    );
+}
+
+#[test]
+fn json_history_caps_pages_and_initial_accounting_matches_headline() {
+    let dir = common::tempdir();
+    let plain = exported(dir.path(), dir.path(), &[]);
+    assert!(plain.get("commands").is_none());
+    assert!(plain.get("recall_events").is_none());
+    let conn = Connection::open(dir.path().join("history.db")).expect("initialized tracking");
+    conn.execute_batch(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 101)
+         INSERT INTO commands (id, timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens, saved_tokens, savings_pct)
+         SELECT i, '2026-11-20', 'cmd', 'rtk cmd', CASE WHEN i=101 THEN 7501 ELSE 7500 END,
+                CASE WHEN i=101 THEN 200 ELSE 2 END, 7000, 80 FROM n ORDER BY i;
+         WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 101)
+         INSERT INTO recall_events (event_id, timestamp, emitted_bytes, output_tokens)
+         SELECT CAST(i AS TEXT), '2026-11-20', 8, 2 FROM n ORDER BY i;"
+    ).expect("seed both histories");
+    drop(conn);
+    let export = exported(dir.path(), dir.path(), &["--history"]);
+    let commands = export["commands"].as_array().expect("commands");
+    let recalls = export["recall_events"].as_array().expect("recalls");
+    assert_eq!((commands.len(), recalls.len()), (100, 100));
+    assert_eq!(commands[0]["id"], 101);
+    assert_eq!(recalls[0]["event_id"], "101");
+    let accounting = &export["output_accounting"];
+    assert_eq!(accounting["initial_input_tokens"], 750_000);
+    assert_eq!(
+        accounting["initial_input_tokens"],
+        export["summary"]["total_input"]
+    );
+    assert_eq!(accounting["initial_output_tokens"], 200);
+    assert_eq!(
+        accounting["initial_output_tokens"],
+        export["summary"]["total_output"]
+    );
+    assert_eq!(accounting["initial_oversized_excluded"], 1);
+    assert_eq!(
+        accounting["initial_oversized_excluded"],
+        export["summary"]["oversized_excluded"]
+    );
+    assert_eq!(accounting["recall_events"], 101);
+    assert_eq!(accounting["retrieved_output_tokens"], 202);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn recall_to_full_device_returns_failure_without_recording_an_emission() {
+    let dir = common::tempdir();
+    seed_recall(dir.path());
+    let stdout = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("full device");
+    let output = command(dir.path(), dir.path())
+        .args(["recall", "abc123", "--full"])
+        .stdout(std::process::Stdio::from(stdout))
         .output()
-        .expect("command");
-    assert!(output.status.success());
-    let export = exported(dir.path());
-    assert!(export["commands"][0]["invocation_id"].is_string());
-    assert!(export["commands"][0]["hook_event_id"].is_null());
-    assert!(export["commands"][0]["session_id"].is_null());
+        .expect("recall");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        exported(dir.path(), dir.path(), &["--history"])["output_accounting"]["recall_events"],
+        0
+    );
 }

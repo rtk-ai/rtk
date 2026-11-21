@@ -21,8 +21,6 @@ const DEFAULT_RETENTION_DAYS: u32 = 30;
 pub const MIN_FAILURE_BYTES: usize = 500;
 const HASH_HEX_LEN: usize = 16;
 const DEFAULT_TEE_MAX_FILES: usize = 20;
-// Capture metadata is independent of deduplicated payloads and always bounded.
-const MAX_CAPTURE_RECORDS: i64 = 1000;
 const DEFAULT_TEE_MAX_FILE_SIZE: usize = 1_048_576;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -350,10 +348,6 @@ enum RecallSchema {
     Initial = 1,
     /// `recall.recalled`, for databases created before the column existed.
     Recalled = 2,
-    /// Immutable identities for individual capture events.
-    CaptureIds = 3,
-    /// Other preview features also used stamp 3; establish our additive table.
-    CaptureIdsRecheck = 4,
     // New schema changes go directly above this line.
     Next,
 }
@@ -373,8 +367,6 @@ impl Version for RecallSchema {
 const MIGRATIONS: &[(RecallSchema, Migration)] = &[
     (RecallSchema::Initial, migrate_initial),
     (RecallSchema::Recalled, migrate_recalled),
-    (RecallSchema::CaptureIds, migrate_capture_ids),
-    (RecallSchema::CaptureIdsRecheck, migrate_capture_ids),
 ];
 
 const _: () = {
@@ -432,19 +424,6 @@ fn migrate_initial(conn: &Connection) -> Result<()> {
 
 fn migrate_recalled(conn: &Connection) -> Result<()> {
     db::add_column_if_missing(conn, "recall", "recalled", "INTEGER NOT NULL DEFAULT 0")
-}
-
-fn migrate_capture_ids(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS recall_captures (
-            capture_id TEXT PRIMARY KEY,
-            invocation_id TEXT,
-            hash TEXT NOT NULL,
-            created_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_recall_captures_hash ON recall_captures(hash);",
-    )
-    .context("Failed to create capture identities")
 }
 
 fn stat_family(slug: &str) -> &str {
@@ -675,17 +654,14 @@ fn evict(conn: &Connection, cfg: &RetrieverConfig, keep_hash: &str) {
 #[cfg(feature = "engine")]
 pub fn trim_family(cfg: &RetrieverConfig, prefix: &str, keep: usize) {
     let _ = with_open(cfg, |conn| {
-        let tx =
-            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-        tx.execute(
+        conn.execute(
             "DELETE FROM recall WHERE rowid IN (
                 SELECT rowid FROM recall WHERE command LIKE ?1 || '%'
                 ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?2
             )",
             params![prefix, keep as i64],
         )?;
-        prune_captures(&tx)?;
-        tx.commit().context("trim recall family")
+        Ok(())
     });
 }
 
@@ -783,48 +759,14 @@ fn store_inner(
         ],
     )
     .context("insert recall row")?;
-        // Unlike a content hash, a capture ID names exactly one store event.
-        // Legacy hashes never inherit ownership from the latest matching capture.
-        record_capture(conn, &hash)?;
         bump_stat(conn, command, "sqlite", "elisions");
         evict(conn, cfg, &hash);
-        prune_captures(conn)?;
 
         Ok(StoredRef {
             hash: hash.clone(),
             hidden_lines: total_lines.saturating_sub(shown_upto.saturating_sub(1)),
         })
     })
-}
-
-fn record_capture(conn: &Connection, hash: &str) -> Result<()> {
-    if let Some(capture_id) = super::invocation::new_id() {
-        conn.execute(
-            "INSERT INTO recall_captures (capture_id, invocation_id, hash, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                capture_id,
-                super::invocation::current().id,
-                hash,
-                now_secs()
-            ],
-        )
-        .context("record recall capture")?;
-    }
-    Ok(())
-}
-
-fn prune_captures(conn: &Connection) -> Result<()> {
-    conn.execute(
-        "DELETE FROM recall_captures WHERE hash NOT IN (SELECT hash FROM recall)",
-        [],
-    )?;
-    conn.execute(
-        "DELETE FROM recall_captures WHERE rowid NOT IN
-         (SELECT rowid FROM recall_captures ORDER BY rowid DESC LIMIT ?1)",
-        [MAX_CAPTURE_RECORDS],
-    )?;
-    Ok(())
 }
 
 /// Count bytes actually accepted by stdout, including a partial write before an
@@ -937,7 +879,7 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
         with_cached(
             path,
             |path| open_existing_path(path).context(UNAVAILABLE),
-            |conn| recall_from(conn, &args),
+            |conn| recall_from(conn, &args, &mut std::io::stdout().lock()),
         )
     });
     match recalled {
@@ -958,7 +900,7 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
     }
 }
 
-fn recall_from(conn: &Connection, args: &RecallArgs) -> Result<i32> {
+fn recall_from(conn: &Connection, args: &RecallArgs, writer: &mut impl Write) -> Result<i32> {
     if args.list {
         return list_entries(conn);
     }
@@ -1001,13 +943,10 @@ fn recall_from(conn: &Connection, args: &RecallArgs) -> Result<i32> {
         );
         return Ok(1);
     }
-    let stdout = std::io::stdout();
-    let (emitted, result) = emit_recall(&mut stdout.lock(), &out);
+    let (emitted, result) = emit_recall(writer, &out);
     if (result.is_ok() || emitted > 0)
         && let Ok(tracker) = super::tracking::Tracker::new()
     {
-        // A content hash can name multiple captures, including ones already
-        // pruned. Never guess a source invocation from retained hash matches.
         let _ = tracker.record_recall_event(emitted, None, None);
     }
     result.context("write recalled output")?;
@@ -1084,124 +1023,102 @@ mod tests {
     }
 
     #[test]
-    fn version_three_preview_without_captures_gains_capture_schema() {
-        // Exact additive schemas from the stats-cap and storage-budget previews.
-        let previews = [
-            r#"CREATE TRIGGER IF NOT EXISTS recall_stats_cap
-         AFTER INSERT ON recall_stats
-         WHEN (SELECT COUNT(*) FROM recall_stats) > 500
-         BEGIN
-             DELETE FROM recall_stats WHERE rowid IN (
-                 SELECT rowid FROM recall_stats WHERE rowid != NEW.rowid
-                 ORDER BY elisions + recalls ASC, rowid ASC
-                 LIMIT (SELECT COUNT(*) FROM recall_stats) - 500
-             );
-         END;
-         DELETE FROM recall_stats WHERE rowid IN (
-             SELECT rowid FROM recall_stats
-             ORDER BY elisions + recalls ASC, rowid ASC
-             LIMIT MAX((SELECT COUNT(*) FROM recall_stats) - 500, 0)
-         );"#,
-            r#"CREATE TABLE IF NOT EXISTS recall_storage (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            entries INTEGER NOT NULL,
-            blob_bytes INTEGER NOT NULL
-        );
-        INSERT INTO recall_storage (id, entries, blob_bytes)
-        SELECT 1, (SELECT COUNT(*) FROM recall),
-                  (SELECT COALESCE(SUM(length(blob)), 0) FROM recall)
-        WHERE NOT EXISTS (SELECT 1 FROM recall_storage WHERE id = 1);
-        CREATE TRIGGER IF NOT EXISTS recall_storage_insert AFTER INSERT ON recall BEGIN
-            UPDATE recall_storage SET entries = entries + 1,
-                blob_bytes = blob_bytes + length(NEW.blob) WHERE id = 1;
-        END;
-        CREATE TRIGGER IF NOT EXISTS recall_storage_update AFTER UPDATE OF blob ON recall BEGIN
-            UPDATE recall_storage SET blob_bytes = blob_bytes + length(NEW.blob) - length(OLD.blob)
-            WHERE id = 1;
-        END;
-        CREATE TRIGGER IF NOT EXISTS recall_storage_delete AFTER DELETE ON recall BEGIN
-            UPDATE recall_storage SET entries = entries - 1,
-                blob_bytes = blob_bytes - length(OLD.blob) WHERE id = 1;
-        END;"#,
-        ];
-        for (kind, sql) in previews.iter().enumerate() {
-            let conn = Connection::open_in_memory().expect("db");
-            migrate_initial(&conn).expect("initial");
-            migrate_recalled(&conn).expect("recalled");
-            conn.execute_batch(sql).expect("preview schema");
-            conn.execute_batch(
-                "INSERT INTO recall VALUES
-                ('payload','cmd','',0,0,1,1,3,0,'raw',X'616263',0);
-                INSERT INTO recall_stats VALUES ('cmd','sqlite',8,2);",
-            )
-            .expect("preview data");
-            conn.pragma_update(None, "application_id", DbKind::Recall.application_id())
-                .expect("tag");
-            conn.pragma_update(None, "user_version", 3)
-                .expect("preview stamp");
-            for _ in 0..2 {
-                db::apply_migrations(&conn, &SCHEMA, MigrationMode::GatedByVersion)
-                    .expect("upgrade");
-                assert_eq!(user_version(&conn), SCHEMA_VERSION);
-                assert_eq!(
-                    conn.query_row("SELECT COUNT(*) FROM recall_captures", [], |row| row
-                        .get::<_, i64>(0))
-                        .expect("capture table"),
-                    0
-                );
-                assert_eq!(
-                    conn.query_row("SELECT blob FROM recall WHERE hash='payload'", [], |row| {
-                        row.get::<_, Vec<u8>>(0)
-                    })
-                    .expect("payload"),
-                    b"abc"
-                );
-                assert_eq!(
-                    conn.query_row(
-                        "SELECT elisions+recalls FROM recall_stats WHERE slug='cmd'",
-                        [],
-                        |row| row.get::<_, i64>(0)
-                    )
-                    .expect("stats"),
-                    10
-                );
-                if kind == 0 {
-                    assert_eq!(conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='recall_stats_cap'", [],
-                        |row| row.get::<_, i64>(0)).expect("stats trigger"), 1);
+    fn recall_writer_retries_interrupted_and_reports_write_zero_and_flush_errors() {
+        struct Writer {
+            written: Vec<u8>,
+            interrupt: bool,
+            zero: bool,
+            fail_flush: bool,
+        }
+        impl Write for Writer {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                if std::mem::take(&mut self.interrupt) {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                if self.zero {
+                    return Ok(0);
+                }
+                self.written.extend_from_slice(data);
+                Ok(data.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                if self.fail_flush {
+                    Err(std::io::ErrorKind::BrokenPipe.into())
                 } else {
-                    assert_eq!(
-                        conn.query_row(
-                            "SELECT entries, blob_bytes FROM recall_storage WHERE id=1",
-                            [],
-                            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-                        )
-                        .expect("storage totals"),
-                        (1, 3)
-                    );
+                    Ok(())
                 }
             }
         }
+        let mut writer = Writer {
+            written: Vec::new(),
+            interrupt: true,
+            zero: false,
+            fail_flush: false,
+        };
+        let output = b"a\xff\n";
+        let (emitted, outcome) = emit_recall(&mut writer, output);
+        outcome.expect("retry interrupted write");
+        assert_eq!(emitted, output.len());
+        assert_eq!(writer.written, output);
+
+        writer.zero = true;
+        let (emitted, outcome) = emit_recall(&mut writer, b"not written");
+        assert_eq!(emitted, 0);
+        assert_eq!(outcome.unwrap_err().kind(), std::io::ErrorKind::WriteZero);
+
+        writer.zero = false;
+        writer.fail_flush = true;
+        let (emitted, outcome) = emit_recall(&mut writer, b"flush fails");
+        assert_eq!(emitted, 11);
+        assert_eq!(outcome.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
     }
 
     #[test]
-    fn version_two_recall_upgrades_capture_ids_without_replaying_initial() {
-        let conn = Connection::open_in_memory().expect("db");
-        migrate_initial(&conn).expect("initial");
-        migrate_recalled(&conn).expect("recalled");
-        conn.pragma_update(None, "application_id", DbKind::Recall.application_id())
-            .expect("tag");
-        conn.pragma_update(None, "user_version", RecallSchema::Recalled.number())
-            .expect("stamp");
-        for _ in 0..2 {
-            db::apply_migrations(&conn, &SCHEMA, MigrationMode::GatedByVersion).expect("upgrade");
-            assert_eq!(user_version(&conn), SCHEMA_VERSION);
-            assert_eq!(
-                conn.query_row("SELECT COUNT(*) FROM recall_captures", [], |row| row
-                    .get::<_, i64>(0))
-                    .expect("capture table"),
-                0
-            );
+    fn recall_records_only_the_partial_output_and_propagates_the_write_error() {
+        struct PartialWriter(usize);
+
+        impl Write for PartialWriter {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                let accepted = self.0.min(data.len());
+                self.0 -= accepted;
+                Ok(accepted)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                panic!("a failed write should not flush")
+            }
         }
+
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let stored = store_inner(&cfg, b"first\nsecond\n", "test", Some(0), 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        let args = RecallArgs {
+            hash: Some(&stored.hash),
+            full: true,
+            from: None,
+            lines: None,
+            grep: None,
+            list: false,
+        };
+        user_env::with_path("RTK_DB_PATH", Some(dir.path().join("tracking.db")), || {
+            let error =
+                recall_from(&conn, &args, &mut PartialWriter(5)).expect_err("partial write");
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::BrokenPipe
+            );
+            let tracker = tracking::Tracker::new().expect("tracking");
+            let events = tracker.recall_event_history(10, None).unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].emitted_bytes, 5);
+            assert_eq!(events[0].output_tokens, 2);
+            assert!(events[0].invoking_id.is_some());
+            assert!(events[0].source_capture_id.is_none());
+        });
     }
 
     #[test]
@@ -1250,126 +1167,6 @@ mod tests {
         let cfg = temp_cfg(dir.path());
         reset_stats_with(&cfg).unwrap();
         assert!(!cfg.database_path.as_ref().unwrap().exists());
-    }
-
-    #[cfg(feature = "engine")]
-    #[test]
-    fn family_rotation_prunes_capture_metadata_without_resurrection() {
-        let dir = tempfile::tempdir().expect("directory");
-        let cfg = temp_cfg(dir.path());
-        store_inner(&cfg, b"first\noutput\n", "posthook:read", None, 1).expect("first");
-        let conn = open(&cfg).expect("db");
-        let first_capture: String = conn
-            .query_row("SELECT capture_id FROM recall_captures LIMIT 1", [], |r| {
-                r.get(0)
-            })
-            .expect("capture");
-        drop(conn);
-        store_inner(&cfg, b"second\noutput\n", "posthook:read", None, 1).expect("second");
-        store_inner(&cfg, b"failure\n", "cargo", Some(1), 1).expect("unrelated");
-        trim_family(&cfg, "posthook:", 1);
-        let conn = open(&cfg).expect("rotated db");
-        let captures: i64 = conn
-            .query_row("SELECT COUNT(*) FROM recall_captures", [], |r| r.get(0))
-            .expect("remaining captures");
-        assert_eq!(captures, 2, "rotation prunes only evicted captures");
-        let present = |conn: &Connection| -> i64 {
-            conn.query_row(
-                "SELECT COUNT(*) FROM recall_captures WHERE capture_id = ?1",
-                [&first_capture],
-                |r| r.get(0),
-            )
-            .expect("old capture count")
-        };
-        assert_eq!(present(&conn), 0);
-        drop(conn);
-        store_inner(&cfg, b"first\noutput\n", "posthook:read", None, 1).expect("recapture");
-        let conn = open(&cfg).expect("db after recapture");
-        assert_eq!(present(&conn), 0, "an expired capture must not return");
-    }
-
-    #[test]
-    fn equal_payloads_have_distinct_immutable_capture_ids() {
-        let dir = tempfile::tempdir().expect("directory");
-        let cfg = temp_cfg(dir.path());
-        let first = store_inner(&cfg, b"same\noutput\n", "cmd", None, 1).expect("store");
-        let second = store_inner(&cfg, b"same\noutput\n", "cmd", None, 2).expect("store");
-        assert_eq!(first.hash, second.hash);
-        let conn = open(&cfg).expect("db");
-        let distinct: i64 = conn
-            .query_row(
-                "SELECT COUNT(DISTINCT capture_id) FROM recall_captures",
-                [],
-                |r| r.get(0),
-            )
-            .expect("count");
-        assert_eq!(distinct, 2);
-        let source: Option<String> = conn
-            .query_row(
-                "SELECT invocation_id FROM recall_captures LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
-            .expect("capture source");
-        assert_eq!(source, super::super::invocation::current().id);
-    }
-
-    #[test]
-    fn capture_metadata_is_bounded_and_prunes_payload_orphans() {
-        let conn = Connection::open_in_memory().expect("db");
-        db::apply_migrations(&conn, &SCHEMA, MigrationMode::Always).expect("schema");
-        conn.execute(
-            "INSERT INTO recall VALUES ('hash','cmd','',0,0,1,1,1,0,'raw',X'61',0)",
-            [],
-        )
-        .expect("payload");
-        for i in 0..MAX_CAPTURE_RECORDS + 5 {
-            conn.execute(
-                "INSERT INTO recall_captures VALUES (?1,NULL,'hash',0)",
-                [i.to_string()],
-            )
-            .expect("capture");
-        }
-        prune_captures(&conn).expect("prune");
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM recall_captures", [], |r| r.get(0))
-            .expect("count");
-        assert_eq!(count, MAX_CAPTURE_RECORDS);
-        conn.execute("DELETE FROM recall", [])
-            .expect("delete payload");
-        prune_captures(&conn).expect("orphans");
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM recall_captures", [], |r| r.get(0))
-            .expect("count");
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn emission_counts_partial_and_non_utf8_bytes() {
-        struct FailsAfterThree {
-            written: usize,
-        }
-        impl Write for FailsAfterThree {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                if self.written == 3 {
-                    return Err(std::io::ErrorKind::BrokenPipe.into());
-                }
-                let n = bytes.len().min(3 - self.written);
-                self.written += n;
-                Ok(n)
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let (bytes, result) = emit_recall(&mut FailsAfterThree { written: 0 }, b"abcdef");
-        assert_eq!(bytes, 3);
-        assert!(result.is_err());
-        let mut out = Vec::new();
-        let (bytes, result) = emit_recall(&mut out, b"a\xff\n");
-        assert_eq!(bytes, 3);
-        assert!(result.is_ok());
-        assert_eq!(out, b"a\xff\n");
     }
 
     #[test]
