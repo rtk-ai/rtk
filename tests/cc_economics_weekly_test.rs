@@ -689,11 +689,11 @@ fn ignored_monday_retry_preserves_all_report_sections() {
                     assert_eq!(report["daily"].as_array().expect("daily rows").len(), 1);
                     assert_eq!(report["monthly"].as_array().expect("monthly rows").len(), 1);
                     assert_joined(&report["daily"][0], "2026-09-30", 1, 1, 1);
-                    // Preserve the existing monthly formula (saved divided by
-                    // saved + input + output), independent of weekly fallback.
+                    // Signed monthly accounting uses saved / input, just like daily
+                    // accounting; weekly fallback must not alter either section.
                     let mut expected_month = report["daily"][0].clone();
                     expected_month["label"] = json!("2026-09");
-                    expected_month["rtk_savings_pct"] = json!(40.0);
+                    expected_month["rtk_savings_pct"] = json!(80.0);
                     assert_eq!(report["monthly"][0], expected_month);
                     let weekly = report["weekly"].as_array().expect("weekly rows");
                     assert_eq!(weekly.len(), 1);
