@@ -1093,14 +1093,8 @@ impl CardData {
                 return Some(format!("{pct:.0}% of tool output removed"));
             }
         }
-        if let Some(p) = self.proxy.as_ref() {
-            let prefix = p.cache_read + p.cache_created;
-            if prefix > 0 {
-                return Some(format!(
-                    "{:.0}% prompt-cache hit",
-                    p.cache_read as f64 / prefix as f64 * 100.0
-                ));
-            }
+        if let Some(hit) = self.proxy.as_ref().and_then(|p| p.cache_hit_ratio) {
+            return Some(format!("{:.0}% prompt-cache hit", hit * 100.0));
         }
         None
     }
@@ -1452,9 +1446,8 @@ fn print_terminal_card(
                 any = true;
             }
         }
-        let prefix = proxy_row.cache_read + proxy_row.cache_created;
-        if prefix > 0 {
-            let hit = proxy_row.cache_read as f64 / prefix as f64 * 100.0;
+        if let Some(ratio) = proxy_row.cache_hit_ratio {
+            let hit = ratio * 100.0;
             bar_row(
                 "prompt-cache hit",
                 format!("{} requests", proxy_row.requests),
@@ -1628,9 +1621,8 @@ fn share_card(
                     ));
                 }
             }
-            let prefix = row.cache_read + row.cache_created;
-            if prefix > 0 {
-                let hit = row.cache_read as f64 / prefix as f64 * 100.0;
+            if let Some(ratio) = row.cache_hit_ratio {
+                let hit = ratio * 100.0;
                 out.push_str(&format!(
                     "| prompt-cache hit rate | {} requests | `{}` **{hit:.0}%** cached |\n",
                     row.requests,
@@ -2197,6 +2189,7 @@ mod tests {
             saved_rules: 0,
             cache_read: 4000,
             cache_created: 1000,
+            cache_hit_ratio: Some(0.8),
         };
         let sources = vec![(
             "user pipeline.toml".to_string(),

@@ -216,7 +216,10 @@ async fn run_openai(
     let mut retrieve_calls: i64 = 0;
     let mut last_status = 0u16;
     let mut last_bytes: Vec<u8> = Vec::new();
-    let mut prior_usage = crate::extract::Usage::default();
+    let mut prior_usage = crate::extract::Usage {
+        chat_prompt_tokens: Some(0),
+        ..Default::default()
+    };
 
     for round in 0..ccr::MAX_ROUNDS {
         if !last_bytes.is_empty() {
@@ -226,6 +229,10 @@ async fn run_openai(
                 prior_usage.output += ru.output;
                 prior_usage.cache_creation += ru.cache_creation;
                 prior_usage.cache_read += ru.cache_read;
+                prior_usage.chat_prompt_tokens = prior_usage
+                    .chat_prompt_tokens
+                    .zip(ru.chat_prompt_tokens)
+                    .map(|(prior, next)| prior + next);
             }
         }
         let Some((status, bytes)) = post_once(state, &url, headers, &body).await else {
@@ -367,6 +374,10 @@ fn finalize(
         tokens_output: usage.output + prior.output,
         cache_creation_tokens: usage.cache_creation + prior.cache_creation,
         cache_read_tokens: usage.cache_read + prior.cache_read,
+        chat_prompt_tokens: prior
+            .chat_prompt_tokens
+            .zip(usage.chat_prompt_tokens)
+            .map(|(prior, last)| prior + last),
         ccr_retrieve_calls: retrieve_calls,
         latency_ms,
         error_body,

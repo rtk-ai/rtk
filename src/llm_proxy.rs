@@ -161,6 +161,8 @@ pub struct ProxyGainSummary {
     /// predating these columns, not a cold cache.
     pub cache_read: i64,
     pub cache_created: i64,
+    /// Cache hit share across requests with a known denominator.
+    pub cache_hit_ratio: Option<f64>,
     /// Mid-session prefix invalidations over the most recent requests: the
     /// previous request in the session read a large cached prefix, this one
     /// read nothing and rewrote one, close enough in time to rule out the
@@ -196,14 +198,6 @@ pub struct ProxyGainSummary {
 }
 
 impl ProxyGainSummary {
-    /// Cached share of prefix tokens, `None` when nothing has been recorded.
-    /// A healthy cache stays high; sustained decline means the prefix is
-    /// churning.
-    pub fn cache_hit_ratio(&self) -> Option<f64> {
-        let denom = self.cache_read + self.cache_created;
-        (denom > 0).then(|| self.cache_read as f64 / denom as f64)
-    }
-
     /// How much the prompt cache cut effective input cost, as a fraction of
     /// what the same input would bill uncached: raw input is `tokens_in +
     /// reads + writes`, billed-equivalent weighs reads at 0.1x and writes at
@@ -282,6 +276,23 @@ fn count_cache_fractures(conn: &rusqlite::Connection) -> Option<i64> {
     .ok()
 }
 
+/// SQL aggregate for both the overview and per-pipeline reports. Chat
+/// Completions counts hits within the whole prompt. Older rows have only the
+/// hits, so omit those rows from both sides while retaining their raw totals.
+fn cache_hit_ratio_sql(conn: &rusqlite::Connection) -> String {
+    let prompt = if crate::core::db::column_exists(conn, "usage_records", "chat_prompt_tokens")
+        .unwrap_or(false)
+    {
+        "chat_prompt_tokens"
+    } else {
+        "NULL"
+    };
+    format!(
+        "1.0 * SUM(cache_read_tokens) FILTER (WHERE provider <> 'openai' OR {prompt} IS NOT NULL)
+         / SUM(CASE WHEN provider = 'openai' THEN {prompt} ELSE cache_read_tokens + cache_creation_tokens END)"
+    )
+}
+
 /// [`read_gain_summary`] against an explicit path, so the query is testable
 /// without depending on the caller's config directory.
 fn read_gain_summary_at(db: &std::path::Path) -> Option<ProxyGainSummary> {
@@ -293,7 +304,9 @@ fn read_gain_summary_at(db: &std::path::Path) -> Option<ProxyGainSummary> {
     // older proxy lacks them and this connection is read-only, so it cannot be
     // migrated here -- fall back to the older column list rather than losing
     // the whole summary over a few missing sums.
+    let cache_ratio = cache_hit_ratio_sql(&conn);
     let totals = |cache: bool| {
+        let ratio = if cache { cache_ratio.as_str() } else { "NULL" };
         let cache_cols = if cache {
             ", COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_creation_tokens),0), \
                COALESCE(SUM(ccr_retrieve_calls),0), COALESCE(SUM(saved_normalize),0)"
@@ -308,7 +321,7 @@ fn read_gain_summary_at(db: &std::path::Path) -> Option<ProxyGainSummary> {
                  COALESCE(SUM(ctx_duplicate),0), COALESCE(SUM(ctx_image),0), \
                  COALESCE(SUM(saved_ingest_filter),0), COALESCE(SUM(saved_pixel_compress),0), \
                  COALESCE(SUM(saved_ccr),0), \
-                 COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),0){cache_cols} \
+                 COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),0){cache_cols}, {ratio} \
                  FROM usage_records"
             ),
             [],
@@ -329,6 +342,7 @@ fn read_gain_summary_at(db: &std::path::Path) -> Option<ProxyGainSummary> {
                     failed_requests: r.get(12)?,
                     cache_read: r.get(13)?,
                     cache_created: r.get(14)?,
+                    cache_hit_ratio: r.get(17)?,
                     cache_fractures: 0,
                     retrieve_calls: r.get(15)?,
                     saved_normalize: r.get(16)?,
@@ -420,6 +434,7 @@ pub struct ProxyPipelineRow {
     pub saved_rules: i64,
     pub cache_read: i64,
     pub cache_created: i64,
+    pub cache_hit_ratio: Option<f64>,
 }
 
 #[cfg(feature = "engine")]
@@ -444,6 +459,7 @@ pub fn read_gain_summary_as_pipeline() -> Option<ProxyPipelineRow> {
         saved_rules: s.saved_rules,
         cache_read: s.cache_read,
         cache_created: s.cache_created,
+        cache_hit_ratio: s.cache_hit_ratio,
     })
 }
 
@@ -480,6 +496,7 @@ fn savings_by_pipeline_at(db: &std::path::Path) -> Option<Vec<ProxyPipelineRow>>
         rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .ok()?;
     conn.busy_timeout(Duration::from_millis(500)).ok()?;
+    let cache_ratio = cache_hit_ratio_sql(&conn);
     let rows = |rules: bool| -> Option<Vec<ProxyPipelineRow>> {
         let rules_col = if rules {
             "COALESCE(SUM(saved_engine_methods),0)"
@@ -492,7 +509,7 @@ fn savings_by_pipeline_at(db: &std::path::Path) -> Option<Vec<ProxyPipelineRow>>
                  COALESCE(SUM(tokens_saved),0), COALESCE(SUM(saved_ccr),0), \
                  COALESCE(SUM(saved_normalize),0), COALESCE(SUM(saved_ingest_filter),0), \
                  COALESCE(SUM(saved_pixel_compress),0), COALESCE(SUM(cache_read_tokens),0), \
-                 COALESCE(SUM(cache_creation_tokens),0), {rules_col} FROM usage_records \
+                 COALESCE(SUM(cache_creation_tokens),0), {rules_col}, {cache_ratio} FROM usage_records \
                  GROUP BY 1 ORDER BY 4 DESC"
             ))
             .ok()?;
@@ -510,6 +527,7 @@ fn savings_by_pipeline_at(db: &std::path::Path) -> Option<Vec<ProxyPipelineRow>>
                     cache_read: r.get(8)?,
                     cache_created: r.get(9)?,
                     saved_rules: r.get(10)?,
+                    cache_hit_ratio: r.get(11)?,
                 })
             })
             .ok()?
@@ -1174,6 +1192,7 @@ mod tests {
                 saved_pixel_compress INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                provider TEXT DEFAULT 'anthropic',
                 pipeline TEXT
             );
             INSERT INTO usage_records
@@ -1246,11 +1265,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cache_health_reads_from_a_current_schema() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("p.db");
-        let conn = rusqlite::Connection::open(&db_path).expect("open");
+    fn create_cache_schema(conn: &rusqlite::Connection) {
         conn.execute_batch(
             "CREATE TABLE usage_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1261,6 +1276,8 @@ mod tests {
                 cost_usd REAL NOT NULL DEFAULT 0,
                 status INTEGER NOT NULL DEFAULT 0,
                 session TEXT,
+                provider TEXT NOT NULL DEFAULT 'anthropic',
+                pipeline TEXT,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
                 ccr_retrieve_calls INTEGER NOT NULL DEFAULT 0,
@@ -1273,8 +1290,54 @@ mod tests {
                 saved_pixel_compress INTEGER NOT NULL DEFAULT 0,
                 saved_ccr INTEGER NOT NULL DEFAULT 0,
                 saved_normalize INTEGER NOT NULL DEFAULT 0
-            );
-            INSERT INTO usage_records
+            );",
+        )
+        .expect("create schema");
+    }
+
+    #[test]
+    fn chat_cache_hit_ratio_uses_reported_tokens_and_excludes_unknown_history() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("proxy.db");
+        let conn = rusqlite::Connection::open(&db).expect("open");
+        create_cache_schema(&conn);
+        let report = || read_gain_summary_at(&db).expect("summary");
+        assert_eq!(report().cache_hit_ratio, None);
+        conn.execute_batch(
+            "INSERT INTO usage_records (ts, provider, cache_read_tokens)
+             VALUES ('old', 'openai', 2000);",
+        )
+        .unwrap();
+        assert_eq!(report().cache_hit_ratio, None);
+        let by_pipeline = || savings_by_pipeline_at(&db).unwrap().remove(0);
+        assert_eq!(by_pipeline().cache_hit_ratio, None);
+        conn.execute_batch(
+            "ALTER TABLE usage_records ADD COLUMN chat_prompt_tokens INTEGER;
+             INSERT INTO usage_records (ts, provider, tokens_in, cache_read_tokens, chat_prompt_tokens)
+             VALUES ('now', 'openai', 9999, 800, 900);",
+        ).unwrap();
+        assert_eq!(report().cache_hit_ratio, Some(800.0 / 900.0));
+        conn.execute_batch(
+            "INSERT INTO usage_records (ts, provider, cache_read_tokens, cache_creation_tokens)
+             VALUES ('other', 'anthropic', 60, 40);
+             INSERT INTO usage_records (ts, provider, chat_prompt_tokens)
+             VALUES ('cold', 'openai', 1000);",
+        )
+        .unwrap();
+        let summary = report();
+        assert_eq!(summary.cache_read, 2860);
+        assert_eq!(summary.cache_hit_ratio, Some(860.0 / 2000.0));
+        assert_eq!(by_pipeline().cache_hit_ratio, summary.cache_hit_ratio);
+    }
+
+    #[test]
+    fn cache_health_reads_from_a_current_schema() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("p.db");
+        let conn = rusqlite::Connection::open(&db_path).expect("open");
+        create_cache_schema(&conn);
+        conn.execute_batch(
+            "INSERT INTO usage_records
                 (ts, status, session, cache_read_tokens, cache_creation_tokens, ccr_retrieve_calls, saved_normalize)
             VALUES ('2026-01-01T00:00:00Z', 200, 's1', 0, 20000, 2, 40),
                    ('2026-01-01T00:00:30Z', 200, 's1', 18232, 627, 0, 0),
@@ -1289,27 +1352,7 @@ mod tests {
         assert_eq!(s.cache_fractures, 1);
         assert_eq!(s.retrieve_calls, 5);
         assert_eq!(s.saved_normalize, 111);
-        assert!(s.cache_hit_ratio().is_some());
-    }
-
-    #[test]
-    fn cache_hit_ratio_is_none_before_any_cache_data() {
-        let s = ProxyGainSummary {
-            cache_read: 0,
-            cache_created: 0,
-            ..Default::default()
-        };
-        assert!(s.cache_hit_ratio().is_none());
-    }
-
-    #[test]
-    fn cache_hit_ratio_reports_the_cached_share() {
-        let s = ProxyGainSummary {
-            cache_read: 97,
-            cache_created: 3,
-            ..Default::default()
-        };
-        assert!((s.cache_hit_ratio().unwrap() - 0.97).abs() < 1e-9);
+        assert_eq!(s.cache_hit_ratio, Some(18232.0 / (18232.0 + 41410.0)));
     }
 
     #[test]
@@ -1340,6 +1383,7 @@ mod tests {
                 saved_ccr INTEGER NOT NULL DEFAULT 0,
                 saved_normalize INTEGER NOT NULL DEFAULT 0,
                 pipeline TEXT,
+                provider TEXT NOT NULL DEFAULT 'anthropic',
                 saved_engine_methods INTEGER NOT NULL DEFAULT 0,
                 saved_rules TEXT
             );
