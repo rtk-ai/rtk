@@ -1,0 +1,10 @@
+!
+! Can't write to /opt/perl5/perl5.44.0/lib/site_perl/5.44.0 and /opt/perl5/perl5.44.0/bin: Installing modules to /home/user/perl5
+! To turn off this warning, you have to do one of the following:
+!   - run me as a root or with --sudo option (to install to /opt/perl5/perl5.44.0/lib/site_perl/5.44.0 and /opt/perl5/perl5.44.0/bin)
+!   - Configure local::lib in your existing shell to set PERL_MM_OPT etc.
+!   - Install local::lib by running the following commands
+!
+!         cpanm --local-lib=~/perl5 local::lib && eval $(perl -I ~/perl5/lib/perl5/ -Mlocal::lib)
+!
+ETHER/Try-Tiny-0.32.tar.gz

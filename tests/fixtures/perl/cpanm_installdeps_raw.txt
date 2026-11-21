@@ -1,0 +1,35 @@
+! Finding Acme::Does::Not::Exist::RtkSample on cpanmetadb failed.
+! Finding Acme::Does::Not::Exist::RtkSample (1.0) on mirror http://www.cpan.org failed.
+! Couldn't find module or a distribution Acme::Does::Not::Exist::RtkSample (1.0)
+--> Working on .
+Configuring /home/user/Acme-RtkSample ... OK
+==> Found dependencies: Acme::Does::Not::Exist::RtkSample, Try::Tiny, List::MoreUtils
+--> Working on Try::Tiny
+Fetching http://www.cpan.org/authors/id/E/ET/ETHER/Try-Tiny-0.32.tar.gz ... OK
+Configuring Try-Tiny-0.32 ... OK
+Building and testing Try-Tiny-0.32 ... OK
+Successfully installed Try-Tiny-0.32
+--> Working on List::MoreUtils
+Fetching http://www.cpan.org/authors/id/R/RE/REHSACK/List-MoreUtils-0.430.tar.gz ... OK
+Configuring List-MoreUtils-0.430 ... OK
+==> Found dependencies: Exporter::Tiny, Test::LeakTrace, List::MoreUtils::XS
+--> Working on Exporter::Tiny
+Fetching http://www.cpan.org/authors/id/T/TO/TOBYINK/Exporter-Tiny-1.006003.tar.gz ... OK
+Configuring Exporter-Tiny-1.006003 ... OK
+Building and testing Exporter-Tiny-1.006003 ... OK
+Successfully installed Exporter-Tiny-1.006003
+--> Working on Test::LeakTrace
+Fetching http://www.cpan.org/authors/id/L/LE/LEEJO/Test-LeakTrace-0.17.tar.gz ... OK
+Configuring Test-LeakTrace-0.17 ... OK
+Building and testing Test-LeakTrace-0.17 ... OK
+Successfully installed Test-LeakTrace-0.17
+--> Working on List::MoreUtils::XS
+Fetching http://www.cpan.org/authors/id/R/RE/REHSACK/List-MoreUtils-XS-0.430.tar.gz ... OK
+Configuring List-MoreUtils-XS-0.430 ... OK
+Building and testing List-MoreUtils-XS-0.430 ... OK
+Successfully installed List-MoreUtils-XS-0.430
+Building and testing List-MoreUtils-0.430 ... OK
+Successfully installed List-MoreUtils-0.430
+! Installing the dependencies failed: Module 'Acme::Does::Not::Exist::RtkSample' is not installed
+! Bailing out the installation for ..
+5 distributions installed

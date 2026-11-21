@@ -1,0 +1,259 @@
+Reading database from /home/user/Acme-RtkSample/cover_db
+
+
+---------------------------- ------ ------ ------ ------ ------ ------ ------
+File                           stmt   bran   cond    sub    pod   time  total
+---------------------------- ------ ------ ------ ------ ------ ------ ------
+blib/lib/Acme/RtkSample.pm     73.5   75.0    n/a   77.7    0.0   99.2   66.1
+...ib/Acme/RtkSample/Util.pm   64.2    n/a    n/a   75.0    0.0    0.7   60.0
+Total                          70.8   75.0    n/a   76.9    0.0  100.0   64.6
+---------------------------- ------ ------ ------ ------ ------ ------ ------
+
+
+Run:          -e
+Perl version: 5.44.0
+OS:           linux
+Start:        Mon Sep 21 14:32:33 2026
+Finish:       Mon Sep 21 14:32:33 2026
+
+Run:          -e
+Perl version: 5.44.0
+OS:           linux
+Start:        Mon Sep 21 14:32:33 2026
+Finish:       Mon Sep 21 14:32:33 2026
+
+Run:          -e
+Perl version: 5.44.0
+OS:           linux
+Start:        Mon Sep 21 14:32:33 2026
+Finish:       Mon Sep 21 14:32:33 2026
+
+Run:          -e
+Perl version: 5.44.0
+OS:           linux
+Start:        Mon Sep 21 14:32:33 2026
+Finish:       Mon Sep 21 14:32:33 2026
+
+Run:          -e
+Perl version: 5.44.0
+OS:           linux
+Start:        Mon Sep 21 14:32:34 2026
+Finish:       Mon Sep 21 14:32:34 2026
+
+Run:          -e
+Perl version: 5.44.0
+OS:           linux
+Start:        Mon Sep 21 14:32:34 2026
+Finish:       Mon Sep 21 14:32:34 2026
+
+Run:          -e
+Perl version: 5.44.0
+OS:           linux
+Start:        Mon Sep 21 14:32:34 2026
+Finish:       Mon Sep 21 14:32:34 2026
+
+Run:          -e
+Perl version: 5.44.0
+OS:           linux
+Start:        Mon Sep 21 14:32:34 2026
+Finish:       Mon Sep 21 14:32:34 2026
+
+Run:          -e
+Perl version: 5.44.0
+OS:           linux
+Start:        Mon Sep 21 14:32:34 2026
+Finish:       Mon Sep 21 14:32:34 2026
+
+Run:          -e
+Perl version: 5.44.0
+OS:           linux
+Start:        Mon Sep 21 14:32:34 2026
+Finish:       Mon Sep 21 14:32:35 2026
+
+Run:          -e
+Perl version: 5.44.0
+OS:           linux
+Start:        Mon Sep 21 14:32:34 2026
+Finish:       Mon Sep 21 14:32:34 2026
+
+Run:          t-pass/00-load.t
+Perl version: 5.44.0
+OS:           linux
+Start:        Mon Sep 21 14:32:34 2026
+Finish:       Mon Sep 21 14:32:34 2026
+
+Run:          t-pass/01-basic.t
+Perl version: 5.44.0
+OS:           linux
+Start:        Mon Sep 21 14:32:35 2026
+Finish:       Mon Sep 21 14:32:35 2026
+
+Run:          t-pass/06-todo-skip.t
+Perl version: 5.44.0
+OS:           linux
+Start:        Mon Sep 21 14:32:35 2026
+Finish:       Mon Sep 21 14:32:35 2026
+
+Run:          t/02-fail-more.t
+Perl version: 5.44.0
+OS:           linux
+Start:        Mon Sep 21 14:32:35 2026
+Finish:       Mon Sep 21 14:32:35 2026
+
+blib/lib/Acme/RtkSample.pm
+
+line  err   stmt   bran   cond    sub    pod   time   code
+1                                                     package Acme::RtkSample;
+2                                                     # ABSTRACT: sample dist for rtk filter fixtures
+3                                                     
+4              4                    4        128209   use strict;
+               4                                  3   
+               4                                 21   
+5              4                    4             5   use warnings;
+               4                                  1   
+               4                                391   
+6                                                     
+7                                                     our $VERSION = '0.01';
+8                                                     
+9                                                     sub new {
+10    ***      3                    3     *0 139907       my $class = shift;
+11             3                                  4       my %args = @_;
+12             3                                  4       return bless { %args }, $class;
+13                                                    }
+14                                                    
+15                                                    # Deliberately sloppy code so perlcritic has something to say.
+16                                                    sub add {
+17    ***      5                    5     *0   2074       my ($self, $a, $b) = @_;
+18             5                                  6       return $a + $b;
+19                                                    }
+20                                                    
+21                                                    sub sorted_names {
+22    ***      1                    1     *0      0       my $self = shift;
+23    ***      1   * 50                           1       return sort @{ $self->{names} || [] };
+               1                                  4   
+24                                                    }
+25                                                    
+26                                                    sub read_first_line {
+27    ***     *0                   *0     *0      0       my ($self, $path) = @_;
+28    ***     *0   *  0                           0       open FH, $path or die "cannot open $path";
+29    ***     *0                                  0       my $line = <FH>;
+30    ***     *0                                  0       close FH;
+31    ***     *0                                  0       chomp $line;
+32    ***     *0                                  0       return $line;
+33                                                    }
+34                                                    
+35                                                    sub classify {
+36    ***      6                    6     *0   1812       my ($self, $n) = @_;
+37             6    100                          11       if ($n =~ /^\d+$/) {
+38             5    100                           7           if ($n > 100) {
+                    100                               
+39             2    100                           2               if ($n > 1000) {
+40             1                                  1                   return 'huge';
+41                                                                } else {
+42             1                                  2                   return 'big';
+43                                                                }
+44                                                            } elsif ($n > 10) {
+45             2                                  6               return 'medium';
+46                                                            } else {
+47             1                                  1               return 'small';
+48                                                            }
+49                                                        }
+50             1                                  1       return 'nan';
+51                                                    }
+52                                                    
+53                                                    sub mask {
+54    ***      1                    1     *0      1       my ($self, $n) = @_;
+55             1                                  2       return $n & 0xff;
+56                                                    }
+57                                                    
+58                                                    sub stringy {
+59    ***     *0                   *0     *0              my $self = shift;
+60    ***     *0                                          my $s = eval "1 + 1";
+61    ***     *0                                          return "$s";
+62                                                    }
+63                                                    
+64                                                    1;
+
+
+Branches
+--------
+
+line  err      %   true  false   branch
+----- --- ------ ------ ------   ------
+23    ***     50      0      1   unless $self->{'names'}
+28    ***      0      0      0   unless open FH, $path
+37           100      5      1   if ($n =~ /^\d+$/)
+38           100      2      3   if ($n > 100) { }
+             100      2      1   elsif ($n > 10) { }
+39           100      1      1   if ($n > 1000) { }
+
+
+Covered Subroutines
+-------------------
+
+Subroutine      Count Pod Location                     
+--------------- ----- --- -----------------------------
+BEGIN               4     blib/lib/Acme/RtkSample.pm:4 
+BEGIN               4     blib/lib/Acme/RtkSample.pm:5 
+add                 5   0 blib/lib/Acme/RtkSample.pm:17
+classify            6   0 blib/lib/Acme/RtkSample.pm:36
+mask                1   0 blib/lib/Acme/RtkSample.pm:54
+new                 3   0 blib/lib/Acme/RtkSample.pm:10
+sorted_names        1   0 blib/lib/Acme/RtkSample.pm:22
+
+Uncovered Subroutines
+---------------------
+
+Subroutine      Count Pod Location                     
+--------------- ----- --- -----------------------------
+read_first_line     0   0 blib/lib/Acme/RtkSample.pm:27
+stringy             0   0 blib/lib/Acme/RtkSample.pm:59
+
+
+blib/lib/Acme/RtkSample/Util.pm
+
+line  err   stmt   bran   cond    sub    pod   time   code
+1                                                     package Acme::RtkSample::Util;
+2                                                     
+3              2                    2           628   use strict;
+               2                                  2   
+               2                                  7   
+4              2                    2             2   use warnings;
+               2                                  2   
+               2                                 96   
+5                                                     
+6                                                     sub trim {
+7     ***      1                    1     *0   1276       my $s = shift;
+8              1                                  2       $s =~ s/^\s+|\s+$//g;
+9              1                                  2       return $s;
+10                                                    }
+11                                                    
+12                                                    sub pairs {
+13    ***     *0                   *0     *0              my %h = @_;
+14    ***     *0                                          my @out;
+15    ***     *0                                          foreach my $k (keys %h) {
+16    ***     *0                                              push @out, "$k=$h{$k}";
+17                                                        }
+18    ***     *0                                          return @out;
+19                                                    }
+20                                                    
+21                                                    1;
+
+
+Covered Subroutines
+-------------------
+
+Subroutine Count Pod Location                          
+---------- ----- --- ----------------------------------
+BEGIN          2     blib/lib/Acme/RtkSample/Util.pm:3 
+BEGIN          2     blib/lib/Acme/RtkSample/Util.pm:4 
+trim           1   0 blib/lib/Acme/RtkSample/Util.pm:7 
+
+Uncovered Subroutines
+---------------------
+
+Subroutine Count Pod Location                          
+---------- ----- --- ----------------------------------
+pairs          0   0 blib/lib/Acme/RtkSample/Util.pm:13
+
+

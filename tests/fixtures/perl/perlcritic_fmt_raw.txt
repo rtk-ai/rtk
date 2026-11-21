@@ -1,0 +1,21 @@
+lib/Acme/RtkSample.pm:9:1:4:Subroutines::RequireArgUnpacking:Always unpack @_ first
+lib/Acme/RtkSample.pm:23:5:5:Subroutines::ProhibitReturnSort:"return" statement followed by "sort"
+lib/Acme/RtkSample.pm:28:5:5:InputOutput::ProhibitBarewordFileHandles:Bareword file handle opened
+lib/Acme/RtkSample.pm:28:5:5:InputOutput::ProhibitTwoArgOpen:Two-argument "open" used
+lib/Acme/RtkSample.pm:28:5:4:InputOutput::RequireBriefOpen:Close filehandles as soon as possible after opening them
+lib/Acme/RtkSample.pm:28:23:3:ErrorHandling::RequireCarping:"die" used instead of "croak"
+lib/Acme/RtkSample.pm:30:5:2:InputOutput::RequireCheckedClose:Return value of "close" ignored
+lib/Acme/RtkSample.pm:30:5:1:InputOutput::RequireCheckedSyscalls:Return value of flagged function ignored - close
+lib/Acme/RtkSample.pm:37:15:2:RegularExpressions::RequireDotMatchAnything:Regular expression without "/s" flag
+lib/Acme/RtkSample.pm:37:15:3:RegularExpressions::RequireExtendedFormatting:Regular expression without "/x" flag
+lib/Acme/RtkSample.pm:37:15:2:RegularExpressions::RequireLineBoundaryMatching:Regular expression without "/m" flag
+lib/Acme/RtkSample.pm:38:18:2:ValuesAndExpressions::ProhibitMagicNumbers:100 is not one of the allowed literal values (0, 1, 2). Use the Readonly or Const::Fast module or the "constant" pragma instead
+lib/Acme/RtkSample.pm:39:22:2:ValuesAndExpressions::ProhibitMagicNumbers:1000 is not one of the allowed literal values (0, 1, 2). Use the Readonly or Const::Fast module or the "constant" pragma instead
+lib/Acme/RtkSample.pm:44:23:2:ValuesAndExpressions::ProhibitMagicNumbers:10 is not one of the allowed literal values (0, 1, 2). Use the Readonly or Const::Fast module or the "constant" pragma instead
+lib/Acme/RtkSample.pm:55:17:2:ValuesAndExpressions::ProhibitMagicNumbers:0xff is not one of the allowed literal values (0, 1, 2). Use the Readonly or Const::Fast module or the "constant" pragma instead
+lib/Acme/RtkSample.pm:60:13:5:BuiltinFunctions::ProhibitStringyEval:Expression form of "eval"
+lib/Acme/RtkSample.pm:60:18:1:ValuesAndExpressions::ProhibitInterpolationOfLiterals:Useless interpolation of literal string
+lib/Acme/RtkSample/Util.pm:1:1:2:Modules::RequireVersionVar:No package-scoped "$VERSION" variable found
+lib/Acme/RtkSample/Util.pm:8:11:2:RegularExpressions::RequireDotMatchAnything:Regular expression without "/s" flag
+lib/Acme/RtkSample/Util.pm:8:11:3:RegularExpressions::RequireExtendedFormatting:Regular expression without "/x" flag
+lib/Acme/RtkSample/Util.pm:8:11:2:RegularExpressions::RequireLineBoundaryMatching:Regular expression without "/m" flag

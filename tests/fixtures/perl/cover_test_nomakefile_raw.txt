@@ -1,0 +1,17 @@
+Deleting database /home/user/Acme-RtkSample/cover_db
+cover: running make test "OPTIMIZE=-O0 -fprofile-arcs -ftest-coverage" "OTHERLDFLAGS=-fprofile-arcs -ftest-coverage"
+make: *** No rule to make target 'test'.  Stop.
+Reading database from /home/user/Acme-RtkSample/cover_db
+Can't stat /home/user/Acme-RtkSample/cover_db: No such file or directory
+ at /opt/perl5/perl5.44.0/lib/site_perl/5.44.0/x86_64-linux/Devel/Cover/DB.pm line 146.
+
+
+-----
+File 
+-----
+Total
+-----
+
+
+Unable to open file '/home/user/Acme-RtkSample/cover_db/coverage.html' [No such file or directory]
+done.

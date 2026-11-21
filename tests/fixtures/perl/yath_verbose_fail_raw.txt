@@ -1,0 +1,65 @@
+( LAUNCH )  job  1    t/02-fail-more.t
+[  PASS  ]  job  1  + object builds
+[  FAIL  ]  job  1  + two plus two is five
+(  DIAG  )  job  1      Failed test 'two plus two is five'
+(  DIAG  )  job  1      at t/02-fail-more.t line 10.
+(  DIAG  )  job  1             got: '4'
+(  DIAG  )  job  1        expected: '5'
+[  FAIL  ]  job  1  + sorted names structure
+(  DIAG  )  job  1      Failed test 'sorted names structure'
+(  DIAG  )  job  1      at t/02-fail-more.t line 11.
+(  DIAG  )  job  1        Structures begin differing at:
+(  DIAG  )  job  1             $got->{list}[2] = 'c'
+(  DIAG  )  job  1        $expected->{list}[2] = 'd'
+[  FAIL  ]  job  1  + twenty is big
+(  DIAG  )  job  1      Failed test 'twenty is big'
+(  DIAG  )  job  1      at t/02-fail-more.t line 16.
+(  DIAG  )  job  1                      'medium'
+(  DIAG  )  job  1        doesn't match '(?^:^big$)'
+[  PASS  ]  job  1  + still running
+[  PLAN  ]  job  1    Expected assertions: 5
+( MEMORY )  job  1    rss:  24972kB
+( MEMORY )  job  1    size: 32104kB
+( MEMORY )  job  1    peak: 32104kB
+(  DIAG  )  job  1    Looks like you failed 3 tests of 5.
+( FAILED )  job  1    t/02-fail-more.t
+(  TIME  )  job  1    Startup: 0.03453s | Events: 0.00073s | Cleanup: 0.00361s | Total: 0.03887s
+< REASON >  job  1    Test script returned error (Err: 3)
+< REASON >  job  1    Assertion failures were encountered (Count: 3)
+( LAUNCH )  job  2    t/03-fail-t2.t
+(  NOTE  )  job  2    Seeded srand with seed '20260921' from local date.
+[  FAIL  ]  job  2  + pairs round-trips
+[  DEBUG ]  job  2    t/03-fail-t2.t line 7
+(  DIAG  )  job  2    +------+-----+----+-------+
+(  DIAG  )  job  2    | PATH | GOT | OP | CHECK |
+(  DIAG  )  job  2    +------+-----+----+-------+
+(  DIAG  )  job  2    | {b}  | 2   | eq | 3     |
+(  DIAG  )  job  2    +------+-----+----+-------+
+[  PASS  ]  job  2  + trim tabs and newlines
+[  PLAN  ]  job  2    Expected assertions: 2
+( MEMORY )  job  2    rss:  27056kB
+( MEMORY )  job  2    size: 33624kB
+( MEMORY )  job  2    peak: 33632kB
+( FAILED )  job  2    t/03-fail-t2.t
+(  TIME  )  job  2    Startup: 0.03952s | Events: 0.00085s | Cleanup: 0.00350s | Total: 0.04387s
+< REASON >  job  2    Test script returned error (Err: 1)
+< REASON >  job  2    Assertion failures were encountered (Count: 1)
+
+The following jobs failed:
++--------------------------------------+------------------+
+| Job ID                               | Test File        |
++--------------------------------------+------------------+
+| 42143246-B5C9-11F1-BF39-84D6875683ED | t/02-fail-more.t |
+| 42143570-B5C9-11F1-BF39-84D6875683ED | t/03-fail-t2.t   |
++--------------------------------------+------------------+
+
+                                Yath Result Summary
+-----------------------------------------------------------------------------------
+     Fail Count: 2
+     File Count: 2
+Assertion Count: 7
+      Wall Time: 0.45 seconds
+       CPU Time: 0.33 seconds (usr: 0.09s | sys: 0.01s | cusr: 0.18s | csys: 0.05s)
+      CPU Usage: 72%
+    -->  Result: FAILED  <--
+[0m
