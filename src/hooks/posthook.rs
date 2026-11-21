@@ -767,6 +767,18 @@ fn process_shell(
     };
 
     let raw_combined = combine_streams(stdout, stderr);
+    let track_passthrough = || {
+        if !is_rtk_command {
+            track(
+                "Bash",
+                "term",
+                first_word,
+                &raw_combined,
+                &raw_combined,
+                duration_ms,
+            );
+        }
+    };
 
     if (filtered_stdout == stdout && filtered_stderr == stderr) || shadow {
         if shadow && let Some(applied) = &applied_stdout {
@@ -780,14 +792,7 @@ fn process_shell(
                 estimate_tokens(&filtered_stdout),
             );
         }
-        track(
-            "Bash",
-            "term",
-            first_word,
-            &raw_combined,
-            &raw_combined,
-            duration_ms,
-        );
+        track_passthrough();
         return None;
     }
 
@@ -800,14 +805,7 @@ fn process_shell(
 
     let emitted_combined = combine_streams(&composed_stdout, &filtered_stderr);
     if estimate_tokens(&emitted_combined) > estimate_tokens(&raw_combined) {
-        track(
-            "Bash",
-            "term",
-            first_word,
-            &raw_combined,
-            &raw_combined,
-            duration_ms,
-        );
+        track_passthrough();
         return None;
     }
 
@@ -1029,7 +1027,9 @@ fn basename_of(source: &str) -> String {
 
 /// Record a tracking row without ever crashing (mirrors
 /// `record_parse_failure_silent`). Every posthook code path tracks, including
-/// passthroughs — otherwise gains silently fail (pipe_cmd precedent).
+/// passthroughs — otherwise gains silently fail (pipe_cmd precedent). The one
+/// exception is the passthrough of a command line that runs rtk: that rtk
+/// command's own row already counts the output.
 fn track(
     tool_name: &str,
     format_token: &str,
