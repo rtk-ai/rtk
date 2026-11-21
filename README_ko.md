@@ -105,7 +105,7 @@ cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
 ### 확인
 
 ```bash
-rtk --version   # "rtk 0.27.x" 표시되어야 함
+rtk --version   # 현재 배포된 버전이면 됨
 rtk gain        # 토큰 절약 통계 표시되어야 함
 ```
 
