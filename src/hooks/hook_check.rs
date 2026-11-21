@@ -30,6 +30,7 @@ const AGENT_PROBES: &[fn() -> bool] = &[
     super::init::hermes::is_configured,
     super::init::pi::is_configured,
     super::init::vibe::is_configured,
+    super::init::workbuddy::is_configured,
 ];
 
 /// Returns true if at least one supported non-Claude agent has an active hook/plugin configured.
