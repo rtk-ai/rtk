@@ -1,6 +1,6 @@
 [filters.just]
 description = "Compact just task runner output — strip recipe headers, keep command output"
-match_command = "^just\\b"
+match_command = "^just(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

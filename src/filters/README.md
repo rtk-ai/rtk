@@ -29,7 +29,7 @@ For the full contribution checklist (including `discover/rules.rs` registration)
 ```toml
 [filters.my-tool]
 description = "Short description of what this filter does"
-match_command = "^my-tool\\b"          # regex matched against the full command string
+match_command = "^my-tool(?:[ \\t\\n]|$)"  # regex matched against the full command string
 strip_ansi = true                       # optional: strip ANSI escape codes first
 strip_lines_matching = [               # optional: drop lines matching any of these regexes
   "^\\s*$",
@@ -44,12 +44,16 @@ input = "raw command output here"
 expected = "expected filtered output"
 ```
 
+## Writing `match_command`
+
+`match_command` is matched against the whole command: at run time the words `rtk` received, joined by single spaces, and in the hook's rewrite the command as the agent wrote it. A command word ends where bash ends it: at a space, a tab, a newline or the end of the line. Spell a separator `[ \t\n]+` and end the last word with `(?:[ \t\n]|$)`, so that `^helm(?:[ \t\n]|$)` matches `helm list` and not `helm-docs`. `\b` and `\s` read words differently: `\b` ends a word at `-` and `.`, and both treat a carriage return, a vertical tab, a form feed or a non-breaking space as a separator where bash keeps it in the word. These are regex spellings; inside a TOML string each backslash is doubled, as in the example above. The built-in filters use the `[ \t\n]` form, and `test_builtin_match_command_words_end_at_ifs` rejects `\b`, `\s` and `\S` in them. A project or user-global filter is matched with the regex as written, while `exclude_commands` names command words as the lexer ends them, at a space, a tab or a newline: excluding `mytool` leaves `mytool-x`, `mytool.x` and `mytool` glued to a vertical tab alone, although a `^mytool\b` filter matches all three.
+
 ## Available filter fields
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `description` | string | Human-readable description |
-| `match_command` | regex | Matches the command string (e.g. `"^docker\\s+inspect"`) |
+| `match_command` | regex | Matches the command string (e.g. `"^docker[ \\t\\n]+inspect"`) |
 | `strip_ansi` | bool | Strip ANSI escape codes before processing |
 | `filter_stderr` | bool | Capture and merge stderr into stdout before filtering (use for tools like liquibase that emit banners to stderr) |
 | `strip_lines_matching` | regex[] | Drop lines matching any regex |

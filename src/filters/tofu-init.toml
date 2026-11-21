@@ -1,6 +1,6 @@
 [filters.tofu-init]
 description = "Compact OpenTofu init output"
-match_command = "^tofu\\s+init(\\s|$)"
+match_command = "^tofu[ \\t\\n]+init([ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^- Downloading",

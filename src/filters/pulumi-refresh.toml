@@ -1,6 +1,6 @@
 [filters.pulumi-refresh]
 description = "Compact Pulumi refresh (state reconciliation) output"
-match_command = "^pulumi\\s+refresh(\\s|$)"
+match_command = "^pulumi[ \\t\\n]+refresh([ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",
