@@ -1,0 +1,114 @@
+PHPUnit 13.4.3 by Sebastian Bergmann and contributors.
+
+Runtime:       PHP 8.5.4
+
+EFFR                                                                4 / 4 (100%)
+
+Time: 00:00.008, Memory: 8.00 MB
+
+There was 1 error:
+
+1) BazTest::testDeepError
+RuntimeException: Outer failure.
+
+/app/tests/BazTest.php:16
+/app/tests/BazTest.php:8
+/app/tests/BazTest.php:25
+
+Caused by
+InvalidArgumentException: Inner cause.
+
+/app/tests/BazTest.php:14
+/app/tests/BazTest.php:8
+/app/tests/BazTest.php:25
+
+--
+
+There were 2 failures:
+
+1) BazTest::testHelperAssertion
+Failed asserting that -1 is greater than 0.
+
+/app/tests/BazTest.php:50
+/app/tests/BazTest.php:30
+
+2) BazTest::testLongDiff
+Failed asserting that two arrays are identical.
+--- Expected
++++ Actual
+@@ @@
+ Array &0 [
+     'k0' => 0,
+-    'k1' => 1,
+-    'k2' => 2,
+-    'k3' => 3,
+-    'k4' => 4,
+-    'k5' => 5,
+-    'k6' => 6,
+-    'k7' => 7,
+-    'k8' => 8,
+-    'k9' => 9,
+-    'k10' => 10,
+-    'k11' => 11,
+-    'k12' => 12,
+-    'k13' => 13,
+-    'k14' => 14,
+-    'k15' => 15,
+-    'k16' => 16,
+-    'k17' => 17,
+-    'k18' => 18,
+-    'k19' => 19,
+-    'k20' => 20,
+-    'k21' => 21,
+-    'k22' => 22,
+-    'k23' => 23,
+-    'k24' => 24,
+-    'k25' => 25,
+-    'k26' => 26,
+-    'k27' => 27,
+-    'k28' => 28,
+-    'k29' => 29,
++    'k1' => 2,
++    'k2' => 4,
++    'k3' => 6,
++    'k4' => 8,
++    'k5' => 10,
++    'k6' => 12,
++    'k7' => 14,
++    'k8' => 16,
++    'k9' => 18,
++    'k10' => 20,
++    'k11' => 22,
++    'k12' => 24,
++    'k13' => 26,
++    'k14' => 28,
++    'k15' => 30,
++    'k16' => 32,
++    'k17' => 34,
++    'k18' => 36,
++    'k19' => 38,
++    'k20' => 40,
++    'k21' => 42,
++    'k22' => 44,
++    'k23' => 46,
++    'k24' => 48,
++    'k25' => 50,
++    'k26' => 52,
++    'k27' => 54,
++    'k28' => 56,
++    'k29' => 58,
+ ]
+
+/app/tests/BazTest.php:41
+
+--
+
+There was 1 risky test:
+
+1) BazTest::testRisky
+This test did not perform any assertions
+
+/app/tests/BazTest.php:44
+
+ERRORS!
+Tests: 4, Assertions: 2, Errors: 1, Failures: 2, Risky: 1.
