@@ -9,10 +9,15 @@ use anyhow::{Context, Result};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+
+mod retention;
+use retention::{evict, init_storage_accounting, maintain_store};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_MAX_ENTRY_BYTES: usize = 10 * 1024 * 1024;
@@ -38,6 +43,8 @@ pub struct RetrieverConfig {
     pub mode: RecoveryMode,
     pub max_entry_bytes: usize,
     pub max_entries: usize,
+    /// Combined encoded blob bytes; zero preserves the legacy unbounded budget.
+    pub max_total_bytes: usize,
     pub retention_days: u32,
     pub compression: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -56,6 +63,7 @@ impl Default for RetrieverConfig {
             mode: RecoveryMode::Sqlite,
             max_entry_bytes: DEFAULT_MAX_ENTRY_BYTES,
             max_entries: DEFAULT_MAX_ENTRIES,
+            max_total_bytes: 0,
             retention_days: DEFAULT_RETENTION_DAYS,
             compression: true,
             database_path: None,
@@ -186,6 +194,40 @@ fn db_path(cfg: &RetrieverConfig) -> Result<PathBuf> {
     Ok(base.join(RECALL_DB))
 }
 
+// Resolve an existing ancestor without creating or chmodding the database.
+// db::open_and_migrate must validate ownership before changing any file.
+fn writer_gate(path: &Path) -> Result<Arc<Mutex<()>>> {
+    static WRITERS: LazyLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    let absolute = std::path::absolute(path).context("resolve recall writer path")?;
+    let key = absolute.canonicalize().unwrap_or_else(|_| {
+        let mut resolved = PathBuf::new();
+        for part in absolute.components() {
+            match part {
+                std::path::Component::ParentDir => {
+                    resolved.pop();
+                }
+                std::path::Component::CurDir => {}
+                _ => {
+                    resolved.push(part.as_os_str());
+                    if let Ok(canonical) = resolved.canonicalize() {
+                        resolved = canonical;
+                    }
+                }
+            }
+        }
+        resolved
+    });
+    let mut writers = WRITERS.lock().unwrap_or_else(|e| e.into_inner());
+    writers.retain(|_, writer| writer.strong_count() > 0);
+    if let Some(writer) = writers.get(&key).and_then(Weak::upgrade) {
+        return Ok(writer);
+    }
+    let writer = Arc::new(Mutex::new(()));
+    writers.insert(key, Arc::downgrade(&writer));
+    Ok(writer)
+}
+
 fn open_path(path: &Path) -> Result<Opened> {
     db::open_and_migrate(path, &SCHEMA, MigrationMode::GatedByVersion)
 }
@@ -263,6 +305,10 @@ fn with_cached<T>(
     open: impl FnOnce(&Path) -> Result<Option<Opened>>,
     f: impl FnOnce(&Connection) -> Result<T>,
 ) -> Result<Option<T>> {
+    // Queue same-process writers before either migration or a cached write.
+    // SQLite still coordinates processes; the gate never touches the file.
+    let writer = writer_gate(&path)?;
+    let _guard = writer.lock().unwrap_or_else(|e| e.into_inner());
     CONN_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let before = file_id(&path);
@@ -348,6 +394,8 @@ enum RecallSchema {
     Initial = 1,
     /// `recall.recalled`, for databases created before the column existed.
     Recalled = 2,
+    /// Retained payload totals and their accounting triggers.
+    StorageAccounting = 3,
     // New schema changes go directly above this line.
     Next,
 }
@@ -367,6 +415,7 @@ impl Version for RecallSchema {
 const MIGRATIONS: &[(RecallSchema, Migration)] = &[
     (RecallSchema::Initial, migrate_initial),
     (RecallSchema::Recalled, migrate_recalled),
+    (RecallSchema::StorageAccounting, init_storage_accounting),
 ];
 
 const _: () = {
@@ -626,31 +675,6 @@ pub fn record_tee_recall(slug: &str, path: &str) {
     record_tee_recall_with(&cfg, slug, path);
 }
 
-fn evict(conn: &Connection, cfg: &RetrieverConfig, keep_hash: &str) {
-    if cfg.retention_days > 0 {
-        let cutoff = now_secs() - (cfg.retention_days as i64) * 86_400;
-        let _ = conn.execute(
-            "DELETE FROM recall WHERE created_at < ?1 AND hash != ?2",
-            params![cutoff, keep_hash],
-        );
-    }
-    if cfg.max_entries > 0 {
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM recall", [], |r| r.get(0))
-            .unwrap_or(0);
-        let excess = count - cfg.max_entries as i64;
-        if excess > 0 {
-            let _ = conn.execute(
-                "DELETE FROM recall WHERE rowid IN (
-                    SELECT rowid FROM recall WHERE hash != ?2
-                    ORDER BY created_at ASC, rowid ASC LIMIT ?1
-                )",
-                params![excess, keep_hash],
-            );
-        }
-    }
-}
-
 #[cfg(feature = "engine")]
 pub fn trim_family(cfg: &RetrieverConfig, prefix: &str, keep: usize) {
     let _ = with_open(cfg, |conn| {
@@ -724,12 +748,18 @@ fn store_inner(
     } else {
         (payload.to_vec(), "raw")
     };
+    anyhow::ensure!(
+        cfg.max_total_bytes == 0 || blob.len() <= cfg.max_total_bytes,
+        "encoded recall entry exceeds the total storage budget"
+    );
     let cwd = user_dirs::current_dir()
         .ok()
         .map(|p| p.to_string_lossy().into_owned());
 
     with_open(cfg, |conn| {
-        conn.execute(
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+            .context("begin recall storage transaction")?;
+        tx.execute(
         "INSERT INTO recall
          (hash, command, cwd, exit_code, created_at, total_lines, shown_upto, byte_size, truncated, codec, blob)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
@@ -759,8 +789,9 @@ fn store_inner(
         ],
     )
     .context("insert recall row")?;
-        bump_stat(conn, command, "sqlite", "elisions");
-        evict(conn, cfg, &hash);
+        bump_stat(&tx, command, "sqlite", "elisions");
+        evict(&tx, cfg, &[&hash]).context("evict recall storage entries")?;
+        tx.commit().context("commit recall output and retention")?;
 
         Ok(StoredRef {
             hash: hash.clone(),
@@ -848,6 +879,13 @@ pub struct RecallArgs<'a> {
     pub lines: Option<usize>,
     pub grep: Option<&'a str>,
     pub list: bool,
+}
+
+pub fn run_maintenance(purge: bool) -> Result<i32> {
+    let cfg = Config::load()?.retriever;
+    let removed = maintain_store(&cfg, purge)?;
+    println!("rtk recall: removed {removed} stored output(s); recall statistics preserved");
+    Ok(0)
 }
 
 /// What a failure to reach the store is reported as, unlike a failure on an entry
@@ -1000,6 +1038,714 @@ mod tests {
             database_path: Some(dir.join("recall_test.db")),
             ..RetrieverConfig::default()
         }
+    }
+
+    fn storage_totals(conn: &Connection) -> (i64, i64) {
+        conn.query_row(
+            "SELECT entries, blob_bytes FROM recall_storage WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_writer_gate_reuses_canonical_paths_and_releases_unused_gates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recall.db");
+        open_path(&path).unwrap();
+        let writer = writer_gate(&path).unwrap();
+        let canonical = writer_gate(&path.canonicalize().unwrap()).unwrap();
+        let dotted = writer_gate(&dir.path().join(".").join("recall.db")).unwrap();
+        assert!(Arc::ptr_eq(&writer, &canonical));
+        assert!(Arc::ptr_eq(&writer, &dotted));
+        let weak = Arc::downgrade(&writer);
+        drop((writer, canonical, dotted));
+        assert!(weak.upgrade().is_none());
+        assert!(writer_gate(&path).unwrap().try_lock().is_ok());
+    }
+
+    #[test]
+    fn test_writer_gate_for_first_open_does_not_create_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("recall.db");
+        let before = writer_gate(&path).unwrap();
+        assert!(!path.parent().unwrap().exists());
+        open_path(&path).unwrap();
+        let after = writer_gate(&path).unwrap();
+        assert!(Arc::ptr_eq(&before, &after));
+    }
+
+    #[test]
+    fn test_writer_gate_keeps_missing_parent_dotdot_alias_stable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new/sub/../recall.db");
+        let direct = dir.path().join("new/recall.db");
+        let before = writer_gate(&path).unwrap();
+        assert!(Arc::ptr_eq(&before, &writer_gate(&direct).unwrap()));
+        assert!(!dir.path().join("new").exists());
+        open_path(&path).unwrap();
+        assert!(Arc::ptr_eq(&before, &writer_gate(&path).unwrap()));
+        assert!(Arc::ptr_eq(&before, &writer_gate(&direct).unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_writer_gate_reuses_symlink_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recall.db");
+        let alias = dir.path().join("alias.db");
+        open_path(&path).unwrap();
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert!(Arc::ptr_eq(
+            &writer_gate(&path).unwrap(),
+            &writer_gate(&alias).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_writer_gate_does_not_block_a_different_database() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.db");
+        open_path(&first).unwrap();
+        let writer = writer_gate(&first).unwrap();
+        let guard = writer.lock().unwrap();
+        let cfg = RetrieverConfig {
+            database_path: Some(dir.path().join("nested").join("second.db")),
+            ..RetrieverConfig::default()
+        };
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            done_tx
+                .send(store_inner(&cfg, b"stored\n", "cmd", None, 1).is_ok())
+                .unwrap();
+        });
+        let result = done_rx.recv_timeout(Duration::from_secs(10));
+        drop(guard);
+        worker.join().unwrap();
+        assert!(result.expect("an unrelated database must not wait for this writer"));
+    }
+
+    #[test]
+    fn test_writer_gate_recovers_after_transaction_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            max_total_bytes: 4,
+            compression: false,
+            ..temp_cfg(dir.path())
+        };
+        let old = store_inner(&cfg, b"old\n", "cmd", None, 1).unwrap();
+        let panic = std::panic::catch_unwind(|| {
+            let _ = with_open(&cfg, |conn| -> Result<()> {
+                let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+                tx.execute("DELETE FROM recall", [])?;
+                panic!("fixture panic inside a recall transaction");
+            });
+        });
+        assert!(panic.is_err());
+        let conn = open(&cfg).unwrap();
+        assert!(load_by_hash(&conn, &old.hash).unwrap().is_some());
+        assert_eq!(storage_totals(&conn), (1, 4));
+
+        let new = store_inner(&cfg, b"new\n", "cmd", None, 1).unwrap();
+        assert!(load_by_hash(&conn, &old.hash).unwrap().is_none());
+        assert!(load_by_hash(&conn, &new.hash).unwrap().is_some());
+        assert_eq!(storage_totals(&conn), (1, 4));
+        assert_eq!(stats_snapshot_with(&cfg).unwrap()[0].elisions, 2);
+    }
+
+    #[test]
+    fn test_total_budget_defaults_to_legacy_unlimited() {
+        let cfg: RetrieverConfig = toml::from_str("max_entries = 12").unwrap();
+        assert_eq!(cfg.max_total_bytes, 0);
+        assert_eq!(cfg.max_entries, 12);
+    }
+
+    #[test]
+    fn test_total_budget_evicts_oldest_and_keeps_returned_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            max_total_bytes: 8,
+            compression: false,
+            ..temp_cfg(dir.path())
+        };
+        let first = store_inner(&cfg, b"aaa\n", "cmd", None, 1).unwrap();
+        let second = store_inner(&cfg, b"bbb\n", "cmd", None, 1).unwrap();
+        let newest = store_inner(&cfg, b"ccc\n", "cmd", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        assert!(load_by_hash(&conn, &first.hash).unwrap().is_none());
+        assert!(load_by_hash(&conn, &second.hash).unwrap().is_some());
+        assert_eq!(
+            decode(&load_by_hash(&conn, &newest.hash).unwrap().unwrap()).unwrap(),
+            b"ccc\n"
+        );
+        assert_eq!(storage_totals(&conn), (2, 8));
+    }
+
+    #[test]
+    fn test_total_budget_measures_encoded_blob_and_rejects_oversize() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = vec![b'x'; 4096];
+        let bytes = gzip(&content).unwrap().len();
+        let cfg = RetrieverConfig {
+            max_total_bytes: bytes,
+            ..temp_cfg(dir.path())
+        };
+        let saved = store_inner(&cfg, &content, "cmd", None, 1).unwrap();
+        let too_small = RetrieverConfig {
+            max_total_bytes: bytes - 1,
+            ..cfg.clone()
+        };
+        assert!(matches!(
+            store(&too_small, &content, "new", None, 1),
+            Stored::Unavailable
+        ));
+        let conn = open(&cfg).unwrap();
+        assert_eq!(storage_totals(&conn), (1, bytes as i64));
+        assert!(load_by_hash(&conn, &saved.hash).unwrap().is_some());
+        assert_eq!(stats_snapshot_with(&cfg).unwrap()[0].elisions, 1);
+    }
+
+    #[test]
+    fn test_storage_totals_follow_upsert_delete_and_legacy_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let content = vec![b'a'; 100];
+        let stored = store_inner(&cfg, &content, "cmd", None, 1).unwrap();
+        let raw = RetrieverConfig {
+            compression: false,
+            ..cfg.clone()
+        };
+        store_inner(&raw, &content, "cmd", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        assert_eq!(storage_totals(&conn), (1, 100));
+        conn.execute_batch("DROP TRIGGER recall_storage_insert; DROP TRIGGER recall_storage_update; DROP TRIGGER recall_storage_delete; DROP TABLE recall_storage;").unwrap();
+        db::apply_migrations(&conn, &SCHEMA, MigrationMode::Always).unwrap();
+        db::apply_migrations(&conn, &SCHEMA, MigrationMode::Always).unwrap();
+        assert_eq!(storage_totals(&conn), (1, 100));
+        conn.execute("DELETE FROM recall WHERE hash = ?1", [&stored.hash])
+            .unwrap();
+        assert_eq!(storage_totals(&conn), (0, 0));
+    }
+
+    #[test]
+    fn test_version_two_store_migrates_payload_accounting_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            compression: false,
+            ..temp_cfg(dir.path())
+        };
+        store_inner(&cfg, b"old bytes", "cmd", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        conn.execute_batch("DROP TRIGGER recall_storage_insert; DROP TRIGGER recall_storage_update; DROP TRIGGER recall_storage_delete; DROP TABLE recall_storage; PRAGMA user_version=2;").unwrap();
+        drop(conn);
+        CONN_CACHE.set(None);
+        let conn = open(&cfg).unwrap();
+        assert_eq!(user_version(&conn), RecallSchema::StorageAccounting as i64);
+        assert_eq!(storage_totals(&conn), (1, 9));
+        conn.execute_batch(
+            "DROP TRIGGER recall_storage_insert;
+            INSERT INTO recall SELECT 'second', command, cwd, exit_code, created_at,
+                total_lines, shown_upto, byte_size, truncated, codec, blob, recalled
+            FROM recall LIMIT 1;",
+        )
+        .unwrap();
+        drop(conn);
+        // A current version is not implicitly repaired on every open.
+        let conn = open(&cfg).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE name='recall_storage_insert'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        drop(conn);
+        ensure_schema_fresh_with(&cfg).unwrap();
+        let conn = open(&cfg).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE name='recall_storage_insert'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(storage_totals(&conn), (2, 18));
+        conn.execute("DELETE FROM recall WHERE hash = 'second'", [])
+            .unwrap();
+        assert_eq!(storage_totals(&conn), (1, 9));
+    }
+
+    #[test]
+    fn test_failed_accounting_upgrade_preserves_stamp_and_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            compression: false,
+            ..temp_cfg(dir.path())
+        };
+        let entry = store_inner(&cfg, b"keep", "cmd", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        conn.execute_batch("DROP TRIGGER recall_storage_insert; DROP TRIGGER recall_storage_update; DROP TRIGGER recall_storage_delete; DROP TABLE recall_storage; CREATE TABLE recall_storage (wrong INTEGER); PRAGMA user_version=2;").unwrap();
+        drop(conn);
+        CONN_CACHE.set(None);
+        let opened = open_path(&db_path(&cfg).unwrap()).unwrap();
+        assert!(opened.behind.is_some());
+        assert_eq!(user_version(&opened.conn), 2);
+        assert!(load_by_hash(&opened.conn, &entry.hash).unwrap().is_some());
+        opened
+            .conn
+            .execute_batch("DROP TABLE recall_storage")
+            .unwrap();
+        drop(opened);
+        let conn = open(&cfg).unwrap();
+        assert_eq!(user_version(&conn), SCHEMA_VERSION);
+        assert_eq!(storage_totals(&conn), (1, 4));
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_posthook_family_trim_updates_payload_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            compression: false,
+            max_total_bytes: 16,
+            ..temp_cfg(dir.path())
+        };
+        let failure = store_inner(&cfg, b"err\n", "cargo test", Some(1), 1).unwrap();
+        store_inner(&cfg, b"old\n", "posthook:bash_ls", None, 1).unwrap();
+        let newest = store_inner(&cfg, b"new\n", "posthook:bash_ls", None, 1).unwrap();
+        trim_family(&cfg, "posthook:", 1);
+        let conn = open(&cfg).unwrap();
+        assert_eq!(storage_totals(&conn), (2, 8));
+        assert!(load_by_hash(&conn, &failure.hash).unwrap().is_some());
+        assert!(load_by_hash(&conn, &newest.hash).unwrap().is_some());
+        store_inner(&cfg, b"next log", "cargo build", Some(1), 1).unwrap();
+        assert_eq!(storage_totals(&conn), (3, 16));
+        assert!(load_by_hash(&conn, &failure.hash).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_eviction_failure_rolls_back_store_and_stats() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            max_total_bytes: 4,
+            compression: false,
+            ..temp_cfg(dir.path())
+        };
+        let old = store_inner(&cfg, b"old\n", "cmd", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        conn.execute_batch("CREATE TRIGGER block_eviction BEFORE DELETE ON recall BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;").unwrap();
+        assert!(matches!(
+            store(&cfg, b"new\n", "cmd", None, 1),
+            Stored::Unavailable
+        ));
+        assert!(load_by_hash(&conn, &old.hash).unwrap().is_some());
+        assert_eq!(storage_totals(&conn), (1, 4));
+        assert_eq!(stats_snapshot_with(&cfg).unwrap()[0].elisions, 1);
+    }
+
+    #[test]
+    fn test_gc_applies_retention_and_budget_without_new_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            compression: false,
+            ..temp_cfg(dir.path())
+        };
+        let old = store_inner(&cfg, b"old\n", "cmd", None, 1).unwrap();
+        let keep = store_inner(&cfg, b"new\n", "cmd", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        conn.execute(
+            "UPDATE recall SET created_at = 0 WHERE hash = ?1",
+            [&old.hash],
+        )
+        .unwrap();
+        let bounded = RetrieverConfig {
+            max_total_bytes: 4,
+            ..cfg.clone()
+        };
+        assert_eq!(maintain_store(&bounded, false).unwrap(), 1);
+        assert!(load_by_hash(&conn, &keep.hash).unwrap().is_some());
+        assert_eq!(storage_totals(&conn), (1, 4));
+    }
+
+    #[test]
+    fn test_purge_preserves_stats_and_unrelated_files_even_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        store_inner(&cfg, b"stored\n", "cmd", None, 1).unwrap();
+        let unrelated = dir.path().join("tracking.db");
+        std::fs::write(&unrelated, b"unrelated fixture").unwrap();
+        let disabled = RetrieverConfig {
+            mode: RecoveryMode::Disabled,
+            ..cfg.clone()
+        };
+        assert_eq!(maintain_store(&disabled, true).unwrap(), 1);
+        let conn = open(&cfg).unwrap();
+        assert_eq!(storage_totals(&conn), (0, 0));
+        assert_eq!(stats_snapshot_with(&cfg).unwrap()[0].elisions, 1);
+        assert_eq!(std::fs::read(unrelated).unwrap(), b"unrelated fixture");
+        assert_eq!(maintain_store(&cfg, true).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_maintenance_never_creates_store_or_initializes_unrelated_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        assert_eq!(maintain_store(&cfg, false).unwrap(), 0);
+        assert_eq!(maintain_store(&cfg, true).unwrap(), 0);
+        let path = cfg.database_path.as_ref().unwrap();
+        assert!(!path.exists());
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE unrelated (value TEXT); INSERT INTO unrelated VALUES ('fixture');",
+        )
+        .unwrap();
+        assert!(maintain_store(&cfg, true).is_err());
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_store_waits_for_an_observed_writer_then_commits_atomically() {
+        use std::cell::RefCell;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        thread_local! {
+            static BUSY: RefCell<Option<mpsc::Sender<()>>> = const { RefCell::new(None) };
+        }
+        fn observe_busy(attempt: i32) -> bool {
+            BUSY.with(|sender| {
+                if let Some(sender) = sender.borrow_mut().take() {
+                    let _ = sender.send(());
+                }
+            });
+            std::thread::sleep(Duration::from_millis(1));
+            attempt < 5000
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            max_total_bytes: 4,
+            compression: false,
+            ..temp_cfg(dir.path())
+        };
+        store_inner(&cfg, b"old\n", "cmd", None, 1).unwrap();
+        let holder = open(&cfg).unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (start_tx, start_rx) = mpsc::channel();
+        let (busy_tx, busy_rx) = mpsc::channel();
+        let worker_cfg = cfg.clone();
+        let worker = std::thread::spawn(move || {
+            with_open(&worker_cfg, |conn| {
+                conn.busy_handler(Some(observe_busy))?;
+                Ok(())
+            })
+            .unwrap();
+            BUSY.with(|sender| *sender.borrow_mut() = Some(busy_tx));
+            ready_tx.send(()).unwrap();
+            start_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            store_inner(&worker_cfg, b"new\n", "cmd", None, 1)
+        });
+        ready_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let tx = Transaction::new_unchecked(&holder, TransactionBehavior::Immediate).unwrap();
+        start_tx.send(()).unwrap();
+
+        // Release only after SQLite has actually encountered the writer lock.
+        // Sleeping before release would let an unscheduled worker miss the lock.
+        let observed = busy_rx.recv_timeout(Duration::from_secs(10));
+        tx.commit().unwrap();
+        let stored = worker.join().unwrap().unwrap();
+        observed.expect("worker must exercise SQLite's busy path");
+        assert_eq!(
+            load_by_hash(&holder, &stored.hash).unwrap().unwrap().blob,
+            b"new\n"
+        );
+        assert_eq!(storage_totals(&holder), (1, 4));
+        let actual: (i64, i64) = holder
+            .query_row(
+                "SELECT COUNT(*), SUM(length(blob)) FROM recall",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(actual, (1, 4));
+        assert_eq!(stats_snapshot_with(&cfg).unwrap()[0].elisions, 2);
+    }
+
+    #[test]
+    fn test_busy_store_is_unavailable_without_partial_writes_and_can_retry() {
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            max_total_bytes: 4,
+            compression: false,
+            ..temp_cfg(dir.path())
+        };
+        let old = store_inner(&cfg, b"old\n", "cmd", None, 1).unwrap();
+        with_open(&cfg, |conn| {
+            // Fail immediately under the deliberately retained fixture lock.
+            // The production timeout and the concurrent-writer test are unchanged.
+            conn.busy_timeout(Duration::ZERO)?;
+            Ok(())
+        })
+        .unwrap();
+        let holder = open(&cfg).unwrap();
+        let tx = Transaction::new_unchecked(&holder, TransactionBehavior::Immediate).unwrap();
+        let error = store_inner(&cfg, b"new\n", "cmd", None, 1)
+            .err()
+            .expect("held writer must reject a no-wait store");
+        assert!(matches!(
+            error.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(code, _))
+                if code.code == rusqlite::ErrorCode::DatabaseBusy
+        ));
+        assert!(matches!(
+            store(&cfg, b"new\n", "cmd", None, 1),
+            Stored::Unavailable
+        ));
+        assert_eq!(storage_totals(&holder), (1, 4));
+        let actual: (i64, i64) = holder
+            .query_row(
+                "SELECT COUNT(*), SUM(length(blob)) FROM recall",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(actual, (1, 4));
+        assert!(load_by_hash(&holder, &old.hash).unwrap().is_some());
+        assert_eq!(stats_snapshot_with(&cfg).unwrap()[0].elisions, 1);
+        with_open(&cfg, |conn| {
+            assert!(
+                conn.is_autocommit(),
+                "failed store must not retain a transaction"
+            );
+            conn.busy_timeout(Duration::from_secs(5))?;
+            Ok(())
+        })
+        .unwrap();
+        tx.commit().unwrap();
+
+        let new = store_inner(&cfg, b"new\n", "cmd", None, 1).unwrap();
+        assert!(load_by_hash(&holder, &old.hash).unwrap().is_none());
+        assert!(load_by_hash(&holder, &new.hash).unwrap().is_some());
+        assert_eq!(storage_totals(&holder), (1, 4));
+        let actual: (i64, i64) = holder
+            .query_row(
+                "SELECT COUNT(*), SUM(length(blob)) FROM recall",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(actual, (1, 4));
+        assert_eq!(stats_snapshot_with(&cfg).unwrap()[0].elisions, 2);
+    }
+
+    #[test]
+    fn test_concurrent_stores_obey_total_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            max_total_bytes: 40,
+            compression: false,
+            ..temp_cfg(dir.path())
+        };
+        drop(open(&cfg).unwrap());
+        let workers: Vec<_> = (0..8)
+            .map(|i| {
+                let cfg = cfg.clone();
+                std::thread::spawn(move || {
+                    for j in 0..10 {
+                        store_inner(&cfg, format!("{i}:{j}\n").as_bytes(), "cmd", None, 1).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let conn = open(&cfg).unwrap();
+        let (entries, bytes) = storage_totals(&conn);
+        assert!(entries <= 10);
+        assert!(bytes <= 40);
+        let actual: i64 = conn
+            .query_row("SELECT SUM(length(blob)) FROM recall", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(bytes, actual);
+        assert_eq!(stats_snapshot_with(&cfg).unwrap()[0].elisions, 80);
+    }
+
+    #[test]
+    fn test_concurrent_stores_do_not_spend_sqlite_timeout_on_local_writers() {
+        use std::sync::{Arc, Barrier};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            max_total_bytes: 40,
+            compression: false,
+            ..temp_cfg(dir.path())
+        };
+        drop(open(&cfg).unwrap());
+        let ready = Arc::new(Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|i| {
+                let cfg = cfg.clone();
+                let ready = Arc::clone(&ready);
+                std::thread::spawn(move || {
+                    let initialized = with_open(&cfg, |conn| {
+                        conn.busy_timeout(Duration::ZERO)?;
+                        Ok(())
+                    });
+                    ready.wait();
+                    initialized.unwrap();
+                    for j in 0..10 {
+                        store_inner(&cfg, format!("{i}:{j}\n").as_bytes(), "cmd", None, 1).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let conn = open(&cfg).unwrap();
+        let (entries, bytes) = storage_totals(&conn);
+        assert!(entries <= 10);
+        assert!(bytes <= 40);
+        let actual: (i64, i64) = conn
+            .query_row("SELECT COUNT(*), SUM(length(blob)) FROM recall", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((entries, bytes), actual);
+        assert_eq!(stats_snapshot_with(&cfg).unwrap()[0].elisions, 80);
+    }
+
+    #[test]
+    fn test_concurrent_first_stores_initialize_one_database() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            database_path: Some(dir.path().join("nested").join("recall.db")),
+            max_total_bytes: 40,
+            compression: false,
+            ..RetrieverConfig::default()
+        };
+        let ready = Arc::new(Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|i| {
+                let cfg = cfg.clone();
+                let ready = Arc::clone(&ready);
+                std::thread::spawn(move || {
+                    ready.wait();
+                    store_inner(&cfg, format!("{i}:0\n").as_bytes(), "cmd", None, 1).unwrap();
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(storage_totals(&open(&cfg).unwrap()), (8, 32));
+        assert_eq!(stats_snapshot_with(&cfg).unwrap()[0].elisions, 8);
+    }
+
+    #[test]
+    fn test_gc_enforces_lowered_budget_and_compacts_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            compression: false,
+            retention_days: 0,
+            ..temp_cfg(dir.path())
+        };
+        store_inner(&cfg, &vec![b'x'; 256 * 1024], "large", None, 1).unwrap();
+        store_inner(&cfg, b"new\n", "small", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        let path = cfg.database_path.as_ref().unwrap();
+        let before = std::fs::metadata(path).unwrap().len();
+        let bounded = RetrieverConfig {
+            max_total_bytes: 4,
+            ..cfg.clone()
+        };
+        assert_eq!(maintain_store(&bounded, false).unwrap(), 1);
+        assert_eq!(storage_totals(&conn), (1, 4));
+        assert!(std::fs::metadata(path).unwrap().len() < before);
+        // The blob budget is deliberately not a physical SQLite-file budget.
+        assert!(std::fs::metadata(path).unwrap().len() > 4);
+    }
+
+    #[test]
+    fn test_purge_uses_environment_override_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        store_inner(&cfg, b"config\n", "cmd", None, 1).unwrap();
+        let other = dir.path().join("override.db");
+        user_env::with_path("RTK_RECALL_DB", Some(&other), || {
+            store_inner(&cfg, b"override\n", "cmd", None, 1).unwrap();
+            assert_eq!(maintain_store(&cfg, true).unwrap(), 1);
+            assert_eq!(storage_totals(&open(&cfg).unwrap()), (0, 0));
+        });
+        assert_eq!(storage_totals(&open(&cfg).unwrap()).0, 1);
+    }
+
+    #[test]
+    fn test_budget_evict_protects_all_promised_hashes_or_rolls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            compression: false,
+            ..temp_cfg(dir.path())
+        };
+        let first = store_inner(&cfg, b"one\n", "cmd", None, 1).unwrap();
+        let second = store_inner(&cfg, b"two\n", "cmd", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        let bounded = RetrieverConfig {
+            max_total_bytes: 4,
+            ..cfg
+        };
+        let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).unwrap();
+        assert!(evict(&tx, &bounded, &[&first.hash, &second.hash]).is_err());
+        drop(tx);
+        assert_eq!(storage_totals(&conn), (2, 8));
+    }
+
+    #[test]
+    fn test_maintenance_accepts_legacy_store_before_recalled_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        store_inner(&cfg, b"legacy\n", "cmd", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        conn.execute_batch("ALTER TABLE recall DROP COLUMN recalled;")
+            .unwrap();
+        assert_eq!(maintain_store(&cfg, true).unwrap(), 1);
+        assert_eq!(storage_totals(&conn), (0, 0));
+    }
+
+    #[test]
+    fn test_eviction_handles_large_protected_hash_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let saved = store_inner(&cfg, b"keep\n", "cmd", None, 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        conn.execute("UPDATE recall SET created_at = 0", [])
+            .unwrap();
+        let protected = vec![saved.hash.as_str(); 40_000];
+        evict(&conn, &cfg, &protected).unwrap();
+        assert!(load_by_hash(&conn, &saved.hash).unwrap().is_some());
     }
 
     #[test]
@@ -1427,7 +2173,7 @@ mod tests {
         insert_row(&conn, "zzz999999999", "old1");
         insert_row(&conn, "yyy888888888", "old2");
         insert_row(&conn, "aaa111111111", "newest");
-        evict(&conn, &cfg, "aaa111111111");
+        evict(&conn, &cfg, &["aaa111111111"]).unwrap();
         let newest: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM recall WHERE hash = 'aaa111111111'",
@@ -1736,7 +2482,7 @@ mod tests {
 
         assert_eq!(user_version(&conn), SCHEMA_VERSION);
         assert_eq!(application_id(&conn), DbKind::Recall.application_id());
-        for table in ["recall", "tee_reads", "recall_stats"] {
+        for table in ["recall", "tee_reads", "recall_stats", "recall_storage"] {
             assert!(db::table_exists(&conn, table), "{table} should exist");
         }
         assert!(db::column_exists(&conn, "recall", "recalled").expect("columns are readable"));
@@ -1764,6 +2510,7 @@ mod tests {
             })
             .expect("the stored row should survive with the new column");
         assert_eq!((command.as_str(), recalled), ("vitest", 0));
+        assert_eq!(storage_totals(&conn), (1, 4));
     }
 
     #[test]
@@ -1814,8 +2561,12 @@ mod tests {
         assert!(opened.behind.is_some());
         assert_eq!(user_version(&conn), RecallSchema::Initial as i64);
 
-        conn.execute_batch("DROP VIEW recall; CREATE TABLE recall (hash TEXT PRIMARY KEY);")
-            .expect("table should replace the view");
+        // Include blob for the following StorageAccounting migration, while
+        // deliberately omitting recalled so this still exercises its retry.
+        conn.execute_batch(
+            "DROP VIEW recall; CREATE TABLE recall (hash TEXT PRIMARY KEY, blob BLOB NOT NULL);",
+        )
+        .expect("table should replace the view");
         let reopened = open_existing(&cfg)
             .expect("the retry should succeed")
             .expect("database exists");
