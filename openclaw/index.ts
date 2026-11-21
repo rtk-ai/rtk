@@ -40,6 +40,13 @@
  */
 
 import { execFileSync } from "node:child_process";
+import {
+  accessSync,
+  constants as fsConstants,
+  realpathSync,
+  statSync,
+} from "node:fs";
+import { delimiter, isAbsolute, join } from "node:path";
 
 /**
  * Tells RTK that OpenClaw applies its own exec policy to the rewritten
@@ -49,17 +56,47 @@ import { execFileSync } from "node:child_process";
  */
 const RTK_REWRITE_HOST = "openclaw";
 
-let rtkAvailable: boolean | null = null;
+function executableNames(): string[] {
+  if (process.platform !== "win32") return ["rtk"];
 
-function checkRtk(): boolean {
-  if (rtkAvailable !== null) return rtkAvailable;
+  const extensions = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .filter(Boolean);
+  return ["rtk", ...extensions.map((extension) => `rtk${extension.toLowerCase()}`)];
+}
+
+function validateExecutable(candidate: string): string | null {
   try {
-    execFileSync("which", ["rtk"], { stdio: "ignore" });
-    rtkAvailable = true;
+    const resolved = realpathSync(candidate);
+    if (!statSync(resolved).isFile()) return null;
+    accessSync(
+      resolved,
+      process.platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK
+    );
+    return resolved;
   } catch {
-    rtkAvailable = false;
+    return null;
   }
-  return rtkAvailable;
+}
+
+/** Resolve RTK once so later PATH changes cannot select a different binary. */
+function resolveRtk(configuredPath?: unknown): string | null {
+  if (configuredPath !== undefined) {
+    if (typeof configuredPath !== "string" || !isAbsolute(configuredPath)) {
+      console.warn("[rtk] config.rtkPath must be an absolute path");
+      return null;
+    }
+    return validateExecutable(configuredPath);
+  }
+
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    if (!directory) continue;
+    for (const name of executableNames()) {
+      const resolved = validateExecutable(join(directory, name));
+      if (resolved) return resolved;
+    }
+  }
+  return null;
 }
 
 /**
@@ -74,6 +111,7 @@ function checkRtk(): boolean {
 type RewriteVerdict = "ask" | "deny";
 
 function tryRewrite(
+  rtkPath: string,
   command: string
 ): [string | null, RewriteVerdict?] {
   const options = {
@@ -82,7 +120,7 @@ function tryRewrite(
     env: { ...process.env, RTK_REWRITE_HOST },
   };
   try {
-    const result = execFileSync("rtk", ["rewrite", command], options)
+    const result = execFileSync(rtkPath, ["rewrite", command], options)
       .toString()
       .trim();
     // Exit 0 — no rule matched (or an explicit allow): rewrite and apply.
@@ -114,7 +152,8 @@ export default function register(api: any) {
 
   if (!enabled) return;
 
-  if (!checkRtk()) {
+  const rtkPath = resolveRtk(pluginConfig.rtkPath);
+  if (!rtkPath) {
     console.warn("[rtk] rtk binary not found in PATH — plugin disabled");
     return;
   }
@@ -127,7 +166,7 @@ export default function register(api: any) {
       const command = event.params?.command;
       if (typeof command !== "string") return;
 
-      const [rewritten, verdict] = tryRewrite(command);
+      const [rewritten, verdict] = tryRewrite(rtkPath, command);
 
       // Deny rule matched — block the call entirely
       if (verdict === "deny") {
