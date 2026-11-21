@@ -51,7 +51,7 @@ esac
 # rely on it.
 # Use "|| EXIT_CODE=$?" to capture non-zero exit codes without triggering set -e.
 EXIT_CODE=0
-REWRITTEN=$(env -u RTK_REWRITE_HOST rtk rewrite "$CMD" 2>/dev/null) || EXIT_CODE=$?
+REWRITTEN=$(env -u RTK_REWRITE_HOST rtk rewrite -- "$CMD" 2>/dev/null) || EXIT_CODE=$?
 
 case $EXIT_CODE in
   0)

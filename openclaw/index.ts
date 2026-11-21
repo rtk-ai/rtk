@@ -82,7 +82,7 @@ function tryRewrite(
     env: { ...process.env, RTK_REWRITE_HOST },
   };
   try {
-    const result = execFileSync("rtk", ["rewrite", command], options)
+    const result = execFileSync("rtk", ["rewrite", "--", command], options)
       .toString()
       .trim();
     // Exit 0 — no rule matched (or an explicit allow): rewrite and apply.

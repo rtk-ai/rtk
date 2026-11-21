@@ -60,7 +60,7 @@ def _pre_tool_call(tool_name=None, args=None, **_kwargs):
 
         try:
             result = subprocess.run(
-                ["rtk", "rewrite", command],
+                ["rtk", "rewrite", "--", command],
                 shell=False,
                 stdin=subprocess.DEVNULL,
                 timeout=_rewrite_timeout(),

@@ -56,7 +56,7 @@ fi
 # hook turns exit 0 into an explicit allow, so an inherited value (a shell rc,
 # .envrc, or CI env) must not reach it. Only the delegate that sets it may
 # rely on it.
-REWRITTEN=$(env -u RTK_REWRITE_HOST rtk rewrite "$CMD" 2>/dev/null)
+REWRITTEN=$(env -u RTK_REWRITE_HOST rtk rewrite -- "$CMD" 2>/dev/null)
 EXIT_CODE=$?
 
 case $EXIT_CODE in
