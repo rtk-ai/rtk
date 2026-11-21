@@ -186,6 +186,120 @@ fn db_path(cfg: &RetrieverConfig) -> Result<PathBuf> {
     Ok(base.join(RECALL_DB))
 }
 
+/// Erase the configured recall store without creating a missing database.
+pub(crate) fn forget(cfg: &RetrieverConfig) -> Result<()> {
+    let path = db_path(cfg)?;
+    anyhow::ensure!(
+        !path.as_os_str().is_empty(),
+        "Refusing an empty recall database path"
+    );
+    CONN_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if matches!(&*cache, Some((cached, _, _)) if *cached == path) {
+            // Release our WAL handle before unlinking, including on Windows.
+            cache.take();
+        }
+    });
+    let paths: Vec<_> = ["", "-wal", "-shm", "-journal"]
+        .iter()
+        .map(|suffix| {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(suffix);
+            PathBuf::from(name)
+        })
+        .collect();
+    // A configured path may be shared or accidentally name a directory. Never
+    // recurse, and do not claim erasure after merely unlinking a symlink.
+    for path in &paths {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => anyhow::bail!(
+                "Refusing to delete non-regular recall file: {}",
+                path.display()
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("Inspect {}", path.display())),
+        }
+    }
+    if path.try_exists()? {
+        // Untagged SQLite files are not necessarily legacy RTK stores. Probe
+        // read-only before the shared opener can change permissions or WAL mode.
+        let probe = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        verify_legacy_store_for_erasure(&probe)?;
+        drop(probe);
+        // Apply the shared ownership/open checks, but no schema steps: erasure
+        // must work for old or incomplete stores without trying to repair them.
+        let conn = db::open_existing_and_migrate(
+            &path,
+            &Schema {
+                steps: &[],
+                ..SCHEMA
+            },
+            MigrationMode::GatedByVersion,
+        )
+        .with_context(|| format!("Open recall store for erasure: {}", path.display()))?
+        .context("Recall store disappeared before erasure; retry")?
+        .conn;
+        conn.busy_timeout(std::time::Duration::from_millis(250))?;
+        conn.execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; ROLLBACK;")
+            .with_context(|| {
+                format!(
+                    "Cannot erase recall store {}; stop other RTK commands and retry",
+                    path.display()
+                )
+            })?;
+        // Windows needs this handle closed before unlink. This is a quiescence
+        // check, not an interprocess erasure barrier: callers must stop writers.
+        drop(conn);
+    }
+    for path in paths {
+        // nosemgrep: filesystem-deletion
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("Delete {}", path.display())),
+        }
+    }
+    Ok(())
+}
+
+/// An untagged store is erasable only when its stable legacy recall shape is
+/// recognizable. Do not require `recalled`, which was added by a later migration.
+fn verify_legacy_store_for_erasure(conn: &Connection) -> Result<()> {
+    let tag: i32 = conn.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    let stamp: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if tag == 0 && stamp == 0 {
+        let has_recall_table: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recall')",
+            [],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            has_recall_table,
+            "Refusing to erase an unrecognized untagged database"
+        );
+        for column in [
+            "hash",
+            "command",
+            "cwd",
+            "exit_code",
+            "created_at",
+            "total_lines",
+            "shown_upto",
+            "byte_size",
+            "truncated",
+            "codec",
+            "blob",
+        ] {
+            anyhow::ensure!(
+                db::column_exists(conn, "recall", column)?,
+                "Refusing to erase an unrecognized untagged database: missing recall.{column}"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn open_path(path: &Path) -> Result<Opened> {
     db::open_and_migrate(path, &SCHEMA, MigrationMode::GatedByVersion)
 }
@@ -994,6 +1108,195 @@ mod tests {
     use super::*;
     use crate::core::db::testing::{application_id, user_version};
     use crate::core::tracking;
+
+    #[test]
+    fn test_forget_rejects_an_empty_database_path() {
+        let cfg = RetrieverConfig::default();
+        let error =
+            user_env::with_vars(&[("RTK_RECALL_DB", Some(""))], || forget(&cfg)).unwrap_err();
+        assert!(error.to_string().contains("empty recall database path"));
+    }
+
+    #[test]
+    fn test_forget_preserves_a_database_owned_by_another_application() {
+        for (tag, stamp) in [
+            (DbKind::Tracking.application_id(), 1),
+            (0x12345678, 0),
+            (0, 1),
+            (0, 0),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = temp_cfg(dir.path());
+            let path = db_path(&cfg).unwrap();
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE keep_me (value TEXT); INSERT INTO keep_me VALUES ('private');",
+            )
+            .unwrap();
+            conn.pragma_update(None, "application_id", tag).unwrap();
+            conn.pragma_update(None, "user_version", stamp).unwrap();
+            drop(conn);
+            let before = std::fs::read(&path).unwrap();
+            assert!(forget(&cfg).is_err(), "foreign tag {tag}, stamp {stamp}");
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn test_forget_erases_legacy_and_newer_owned_stores_without_migrating() {
+        for (tag, stamp) in [
+            (0, 0),
+            (DbKind::Recall.application_id(), SCHEMA_VERSION + 1),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = temp_cfg(dir.path());
+            let path = db_path(&cfg).unwrap();
+            if tag == 0 {
+                seed_unversioned_db(&path);
+            }
+            let conn = Connection::open(&path).unwrap();
+            // Tagged stores need no complete schema or successful migration.
+            conn.execute_batch("CREATE TABLE private_output (value TEXT);")
+                .unwrap();
+            conn.pragma_update(None, "application_id", tag).unwrap();
+            conn.pragma_update(None, "user_version", stamp).unwrap();
+            drop(conn);
+            forget(&cfg).unwrap();
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn test_forget_rejects_an_untagged_partial_recall_lookalike() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let path = db_path(&cfg).unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE recall (hash TEXT PRIMARY KEY, command TEXT);")
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(forget(&cfg).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!path.with_extension("db-wal").exists());
+    }
+
+    #[test]
+    fn test_forget_then_recreate_uses_new_cached_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        store_inner(&cfg, b"first", "before", Some(0), 1).unwrap();
+        forget(&cfg).unwrap();
+        store_inner(&cfg, b"second", "after", Some(0), 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        assert_eq!(application_id(&conn), DbKind::Recall.application_id());
+        assert_eq!(user_version(&conn), SCHEMA_VERSION);
+        let commands: Vec<String> = conn
+            .prepare("SELECT command FROM recall")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(commands, ["after"]);
+    }
+
+    #[test]
+    fn test_forget_closes_cached_store_without_recreating_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        store_inner(&cfg, b"private output\n", "cmd", Some(1), 1).unwrap();
+        forget(&cfg).unwrap();
+        assert!(!db_path(&cfg).unwrap().exists());
+        assert!(stats_snapshot_with(&cfg).unwrap().is_empty());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        forget(&cfg).unwrap();
+    }
+
+    #[test]
+    fn test_forget_removes_orphan_sidecars_and_preserves_neighbors() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let path = db_path(&cfg).unwrap();
+        for suffix in ["-wal", "-shm", "-journal", ".backup"] {
+            std::fs::write(
+                path.with_file_name(format!("recall_test.db{suffix}")),
+                "secret",
+            )
+            .unwrap();
+        }
+        forget(&cfg).unwrap();
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["recall_test.db.backup"]);
+    }
+
+    #[test]
+    fn test_forget_respects_environment_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let configured = db_path(&cfg).unwrap();
+        let overridden = dir.path().join("override.sqlite");
+        drop(open(&cfg).unwrap());
+        user_env::with_path("RTK_RECALL_DB", Some(&overridden), || {
+            drop(open(&cfg).unwrap());
+            forget(&cfg)
+        })
+        .unwrap();
+        assert!(!overridden.exists());
+        assert!(configured.exists());
+    }
+
+    #[test]
+    fn test_forget_refuses_busy_wal_store_without_unlinking_it() {
+        for transaction in ["BEGIN IMMEDIATE", "BEGIN; SELECT * FROM recall"] {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = temp_cfg(dir.path());
+            store_inner(&cfg, b"private output", "cmd", Some(1), 1).unwrap();
+            let other = open(&cfg).unwrap();
+            other.execute_batch(transaction).unwrap();
+            let error = forget(&cfg).unwrap_err();
+            assert!(error.to_string().contains("stop other RTK commands"));
+            assert!(db_path(&cfg).unwrap().exists());
+            assert!(dir.path().join("recall_test.db-wal").exists());
+            drop(other);
+            forget(&cfg).unwrap();
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn test_forget_never_removes_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = temp_cfg(dir.path());
+        let path = db_path(&cfg).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("keep"), "unrelated").unwrap();
+        assert!(forget(&cfg).is_err());
+        assert!(path.join("keep").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_forget_rejects_symlinks_without_touching_the_target() {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = temp_cfg(dir.path());
+            if !suffix.is_empty() {
+                drop(open(&cfg).unwrap());
+            }
+            let target = dir.path().join("unrelated");
+            std::fs::write(&target, "keep").unwrap();
+            let link = dir.path().join(format!("recall_test.db{suffix}"));
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(forget(&cfg).is_err());
+            assert!(db_path(&cfg).unwrap().exists());
+            assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+            assert_eq!(std::fs::read_to_string(target).unwrap(), "keep");
+        }
+    }
 
     fn temp_cfg(dir: &std::path::Path) -> RetrieverConfig {
         RetrieverConfig {
