@@ -72,7 +72,13 @@ fn try_wrap_with_probes(
     }
 
     let script = cmd.trim();
-    if script.split_whitespace().next() == Some("rtk") || is_shell_wrapper_candidate(script) {
+    // Read the first word as bash does: a leading `\` and newline is dropped
+    // before the command runs, so `\<NL>rtk run ...` already starts with `rtk`.
+    let first_word_is_rtk = super::registry::collapse_line_continuations(script)
+        .split_whitespace()
+        .next()
+        == Some("rtk");
+    if first_word_is_rtk || is_shell_wrapper_candidate(script) {
         return None;
     }
     if !is_unambiguous_fish(script) {
@@ -566,6 +572,15 @@ mod tests {
             try_wrap_gated("echo 'a b'; and echo done", true).as_deref(),
             Some("rtk run --shell fish -c 'echo '\\''a b'\\''; and echo done'")
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_already_wrapped_script_behind_leading_continuation_is_not_wrapped_again() {
+        let typed = "rtk run --shell fish -c 'echo ok'; and git status";
+        assert_eq!(try_wrap_gated(typed, true), None);
+        assert_eq!(try_wrap_gated(&format!("\\\n{typed}"), true), None);
+        assert_eq!(try_wrap_gated(&format!("\\\n\\\n  {typed}"), true), None);
     }
 
     #[cfg(not(windows))]
