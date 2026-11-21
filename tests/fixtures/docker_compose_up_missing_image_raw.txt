@@ -1,0 +1,3 @@
+ gone Pulling 
+ gone Error failed to resolve reference "rtk1305-does-not-exist.invalid/nothing:1": failed to do request: Head "https://rtk1305-does-not-exist.invalid/v2/nothing/manifests/1": dial tcp: lookup rtk1305-does-not-exist.invalid on 127.0.0.53:53: no such host
+Error response from daemon: failed to resolve reference "rtk1305-does-not-exist.invalid/nothing:1": failed to do request: Head "https://rtk1305-does-not-exist.invalid/v2/nothing/manifests/1": dial tcp: lookup rtk1305-does-not-exist.invalid on 127.0.0.53:53: no such host

@@ -1,0 +1,10 @@
+ Network rtk1305fail2_default  Creating
+ Network rtk1305fail2_default  Created
+ Container rtk1305fail2-web2-1  Creating
+ Container rtk1305fail2-web-1  Creating
+ Container rtk1305fail2-web-1  Created
+ Container rtk1305fail2-web2-1  Created
+ Container rtk1305fail2-web2-1  Starting
+ Container rtk1305fail2-web-1  Starting
+ Container rtk1305fail2-web-1  Started
+Error response from daemon: failed to set up container networking: driver failed programming external connectivity on endpoint rtk1305fail2-web2-1 (87ecc520da14b60fc32452ac194b1d6c24ebf5db1287e5f4baad8bf155b66d30): Bind for 0.0.0.0:8099 failed: port is already allocated

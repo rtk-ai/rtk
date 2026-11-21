@@ -951,6 +951,7 @@ Auto-detects `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `Gemfile`
 | `rtk docker compose ps` | Compact Compose services |
 | `rtk docker compose logs [service]` | Deduplicated Compose logs |
 | `rtk docker compose build [service]` | Build summary |
+| `rtk docker compose up -d`, `down`, `stop`, `start`, `restart`, `create` | Progress lines: a `Creating`/`Starting`/`Stopping`/`Removing` line is dropped once the same resource reports `Created`/`Started`/`Stopped`/`Removed`; failures and errors are kept |
 
 Unrecognized subcommands are passed through directly (passthrough).
 
