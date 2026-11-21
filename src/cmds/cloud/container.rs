@@ -836,9 +836,10 @@ fn k8s_get_requests_raw_output(args: &[String]) -> bool {
     args.iter().any(|arg| {
         matches!(
             arg.as_str(),
-            "-o" | "--output" | "-w" | "--watch" | "--show-labels" | "--show-kind"
+            "-o" | "--output" | "-w" | "--watch" | "--show-labels" | "--show-kind" | "--no-headers"
         ) || arg.starts_with("-o")
             || arg.starts_with("--output=")
+            || arg.starts_with("--no-headers=")
     })
 }
 
@@ -1043,6 +1044,19 @@ api-1  | Connected to database";
                 k8s_get_target(&args),
                 None,
                 "should pass through {output_flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_k8s_get_target_respects_no_headers_flag() {
+        for no_headers_flag in ["--no-headers", "--no-headers=true"] {
+            let args = vec!["pods".to_string(), no_headers_flag.to_string()];
+
+            assert_eq!(
+                k8s_get_target(&args),
+                None,
+                "should pass through {no_headers_flag}"
             );
         }
     }
