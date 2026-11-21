@@ -3,7 +3,6 @@
 // A tool's flag grammar lives with its filter, next to the `run` grammar defined as its superset,
 // so discover borrows golangci-lint's table from `cmds` rather than moving it into `core`.
 use crate::cmds::go::golangci_cmd;
-use crate::cmds::system::search::{Engine, is_bare_file_list};
 use crate::core::arg_tokenizer::{self, Dialect, Grammar, TokenKind as ArgTokenKind};
 use crate::core::utils::composer_bin_dirs;
 use regex::{Regex, RegexSet};
@@ -12,8 +11,8 @@ use std::sync::LazyLock;
 
 use super::lexer::{
     ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer,
-    contains_unattestable_construct_in, is_crlf_at, redirect_has_file_target, resolve_word_text,
-    shell_split, split_on_operators, tokenize, tokenize_with_newlines, words_and_spans,
+    contains_unattestable_construct_in, is_crlf_at, resolve_word_text, shell_split,
+    split_on_operators, tokenize, tokenize_with_newlines, words_and_spans,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 use super::shell_wrapper::parse_shell_wrapper;
@@ -1088,7 +1087,6 @@ struct PipelineAnalysis {
     end_offset: usize,
     next_clause_offset: Option<usize>,
     final_stage_start: Option<usize>,
-    all_consumers_safe: bool,
 }
 
 fn analyze_pipeline(
@@ -1110,44 +1108,25 @@ fn analyze_pipeline(
     let mut stage_start = segment_start;
     let mut final_stage_start = None;
     let mut has_supported_structure = true;
-    let mut consumers_all_safe = true;
-
-    for (i, token) in tokens.iter().enumerate() {
+    for token in tokens {
         if token.offset >= end_offset {
             break;
         }
         if token.offset < first_pipe_offset {
             continue;
         }
-        if token.kind == TokenKind::Redirect {
-            if redirect_has_file_target(tokens, i) {
-                consumers_all_safe = false;
-            }
-            continue;
-        }
         let TokenKind::Pipe(kind) = token.kind else {
             continue;
         };
-
         if cmd[stage_start..token.offset].trim().is_empty() || kind == PipeKind::StdoutAndStderr {
             has_supported_structure = false;
         }
-        if token.offset > first_pipe_offset
-            && !is_safe_pipe_consumer(cmd[stage_start..token.offset].trim())
-        {
-            consumers_all_safe = false;
-        }
-
         stage_start = token.offset + token.value.len();
         final_stage_start = Some(stage_start);
     }
-
     if cmd[stage_start..end_offset].trim().is_empty() {
         has_supported_structure = false;
-    } else if !is_safe_pipe_consumer(cmd[stage_start..end_offset].trim()) {
-        consumers_all_safe = false;
     }
-
     PipelineAnalysis {
         end_offset,
         next_clause_offset,
@@ -1156,7 +1135,6 @@ fn analyze_pipeline(
         } else {
             None
         },
-        all_consumers_safe: has_supported_structure && consumers_all_safe,
     }
 }
 
@@ -1209,39 +1187,6 @@ fn rewrite_pipeline_final_stage(
         let stage = &cmd[final_stage_start..analysis.end_offset];
         let lead = &stage[..stage.len() - stage.trim_start().len()];
         format!("{}{}{}", head.trim_start(), lead, rewritten)
-    })
-}
-
-// #3171
-fn rewrite_pipeline_producer(
-    cmd: &str,
-    segment_start: usize,
-    first_pipe_offset: usize,
-    analysis: PipelineAnalysis,
-    excluded: &[ExcludePattern],
-    transparent_prefixes: &[String],
-    shell_wrapper_depth: usize,
-) -> Option<String> {
-    if !analysis.all_consumers_safe {
-        return None;
-    }
-
-    rewrite_pipeline_stage(
-        cmd,
-        segment_start,
-        first_pipe_offset,
-        RewriteContext::PipelineProducer,
-        excluded,
-        transparent_prefixes,
-        shell_wrapper_depth,
-    )
-    .map(|rewritten| {
-        // The gap between the producer and the `|` sits in neither piece:
-        // the rewrite is trimmed and the tail starts at the pipe itself.
-        let producer = &cmd[segment_start..first_pipe_offset];
-        let gap = &producer[producer.trim_end().len()..];
-        let tail = &cmd[first_pipe_offset..analysis.end_offset];
-        format!("{}{}{}", rewritten, gap, tail.trim_end())
     })
 }
 
@@ -1331,18 +1276,7 @@ fn rewrite_compound(
                     excluded,
                     transparent_prefixes,
                     shell_wrapper_depth,
-                )
-                .or_else(|| {
-                    rewrite_pipeline_producer(
-                        cmd,
-                        seg_start,
-                        tok.offset,
-                        analysis,
-                        excluded,
-                        transparent_prefixes,
-                        shell_wrapper_depth,
-                    )
-                });
+                );
 
                 if let Some(rewritten) = rewritten_pipeline {
                     any_changed = true;
@@ -1517,58 +1451,6 @@ const MATCH_ONLY_WRAPPERS: &[ProcessWrapper] = &[
     },
 ];
 
-struct SafePipeConsumer {
-    name: &'static str,
-    unsafe_flags: &'static [&'static str],
-    unsafe_flag_chars: &'static [char],
-}
-
-const SAFE_PIPE_CONSUMERS: &[SafePipeConsumer] = &[
-    SafePipeConsumer {
-        name: "cat",
-        unsafe_flags: &[],
-        unsafe_flag_chars: &[],
-    },
-    SafePipeConsumer {
-        name: "head",
-        unsafe_flags: &[],
-        unsafe_flag_chars: &[],
-    },
-    // #3171: only non-following tail is display-only
-    SafePipeConsumer {
-        name: "tail",
-        unsafe_flags: &["--follow"],
-        unsafe_flag_chars: &['f', 'F'],
-    },
-];
-
-fn arg_matches_unsafe_flag(consumer: &SafePipeConsumer, arg: &str) -> bool {
-    if let Some(rest) = arg.strip_prefix("--") {
-        let name = rest.split_once('=').map_or(rest, |(name, _)| name);
-        return !name.is_empty()
-            && consumer.unsafe_flags.iter().any(|flag| {
-                flag.strip_prefix("--")
-                    .is_some_and(|full| full.starts_with(name))
-            });
-    }
-    arg.strip_prefix('-').is_some_and(|rest| {
-        rest.chars()
-            .any(|c| consumer.unsafe_flag_chars.contains(&c))
-    })
-}
-
-fn is_safe_pipe_consumer(stage: &str) -> bool {
-    let words = shell_split(stage);
-    let mut words = words.iter();
-    let Some(head) = words.next() else {
-        return false;
-    };
-    let Some(consumer) = SAFE_PIPE_CONSUMERS.iter().find(|c| c.name == head.as_str()) else {
-        return false;
-    };
-    !words.any(|arg| arg_matches_unsafe_flag(consumer, arg))
-}
-
 /// Every built-in transparent wrapper, paired with whether it may fall through.
 /// Derived from the two lists above so they cannot drift apart.
 fn builtin_transparent_prefixes() -> impl Iterator<Item = (&'static str, bool)> {
@@ -1587,7 +1469,6 @@ const MAX_SHELL_WRAPPER_DEPTH: usize = 1;
 enum RewriteContext {
     Normal,
     PipelineFinal,
-    PipelineProducer,
 }
 
 /// Checks whether grep or rg reads patterns from a file.
@@ -1608,35 +1489,6 @@ fn search_uses_pattern_file(cmd: &str) -> bool {
 
 fn pipeline_command_is_safe(rtk_cmd: &str, cmd: &str) -> bool {
     !matches!(rtk_cmd, "rtk grep" | "rtk rg") || !search_uses_pattern_file(cmd)
-}
-
-/// A folded file list (`-l`/`-L`/`--files`) carries its shared prefix in a header line, so a
-/// display consumer that keeps only some lines (`tail`) would return tails with no prefix.
-/// A folded `git ls-tree` path list puts many paths on one line, so `head -5` or `cat` would
-/// no longer see git's lines either.
-fn producer_output_is_line_faithful(rtk_cmd: &str, cmd: &str) -> bool {
-    let engine = match rtk_cmd {
-        "rtk grep" => Engine::Grep,
-        "rtk rg" => Engine::Rg,
-        "rtk git" => return !git_ls_tree_folds(cmd),
-        _ => return true,
-    };
-    let args: Vec<String> = shell_split(cmd).into_iter().skip(1).collect();
-    !is_bare_file_list(engine, &args)
-}
-
-/// True when `cmd` is a `git ls-tree` whose arguments rtk folds, using the classifier's
-/// git global-option pattern.
-fn git_ls_tree_folds(cmd: &str) -> bool {
-    let Some((_, args)) = cmd.split_once(char::is_whitespace) else {
-        return false;
-    };
-    let normalized = GIT_GLOBAL_OPT.replace(args.trim_start(), "");
-    let words = shell_split(&normalized);
-    if words.first().map(String::as_str) != Some("ls-tree") {
-        return false;
-    }
-    crate::cmds::git::git_cmd::ls_tree_folds(&words[1..])
 }
 
 pub(crate) enum ExcludePattern {
@@ -2071,15 +1923,6 @@ fn rewrite_segment_inner(
     {
         return None;
     }
-    // #3171
-    if context == RewriteContext::PipelineProducer
-        && (!rule.pipeline_safety.producer_safe()
-            || !pipeline_command_is_safe(rule.rtk_cmd, cmd_part)
-            || !producer_output_is_line_faithful(rule.rtk_cmd, cmd_part))
-    {
-        return None;
-    }
-
     // The trailing redirect is the shell's, not the tool's: every rewrite of a
     // supported command re-attaches it here, once, exactly as typed.
     rewrite_command_part(rule, cmd_part)
@@ -3030,92 +2873,6 @@ mod tests {
         assert_eq!(
             cmd[analysis.final_stage_start.unwrap()..analysis.end_offset].trim(),
             "grep FAILED"
-        );
-    }
-
-    #[test]
-    fn test_analyze_pipeline_all_consumers_safe() {
-        for cmd in ["git log | tail -5", "git log | head | cat"] {
-            assert!(analyze_test_pipeline(cmd).all_consumers_safe, "{cmd}");
-        }
-        for cmd in [
-            "git log | wc -l",
-            "git log | tail > f",
-            "cargo test |& tail",
-            "git log | FOO=1 tail",
-        ] {
-            assert!(!analyze_test_pipeline(cmd).all_consumers_safe, "{cmd}");
-        }
-    }
-
-    #[test]
-    fn test_pipeline_producer_safe_rule_set() {
-        let mut safe_rules: Vec<_> = RULES
-            .iter()
-            .filter(|rule| rule.pipeline_safety.producer_safe())
-            .map(|rule| rule.rtk_cmd)
-            .collect();
-        safe_rules.sort_unstable();
-        safe_rules.dedup();
-
-        assert_eq!(
-            safe_rules,
-            vec![
-                "rtk ast-grep",
-                "rtk brew",
-                "rtk bundle",
-                "rtk cargo",
-                "rtk composer",
-                "rtk df",
-                "rtk diff",
-                "rtk dotnet",
-                "rtk du",
-                "rtk ecs",
-                "rtk find",
-                "rtk git",
-                "rtk go",
-                "rtk golangci-lint run",
-                "rtk grep",
-                "rtk hadolint",
-                "rtk helm",
-                "rtk iptables",
-                "rtk lint",
-                "rtk liquibase",
-                "rtk ls",
-                "rtk markdownlint",
-                "rtk mix",
-                "rtk mvn",
-                "rtk mypy",
-                "rtk next",
-                "rtk paratest",
-                "rtk pest",
-                "rtk phpstan",
-                "rtk phpunit",
-                "rtk pint",
-                "rtk pio",
-                "rtk pip",
-                "rtk poetry",
-                "rtk pre-commit",
-                "rtk prettier",
-                "rtk ps",
-                "rtk pytest",
-                "rtk quarto",
-                "rtk rake",
-                "rtk rg",
-                "rtk rspec",
-                "rtk rubocop",
-                "rtk ruff",
-                "rtk shellcheck",
-                "rtk shopify",
-                "rtk swift",
-                "rtk systemctl",
-                "rtk terraform",
-                "rtk tofu",
-                "rtk tree",
-                "rtk trunk",
-                "rtk wc",
-                "rtk yamllint",
-            ]
         );
     }
 
@@ -4329,307 +4086,23 @@ mod tests {
         );
     }
 
-    // --- Safe pipe consumers: producer rewrite ---
-
+    // Pipeline producers must keep their native output because downstream commands
+    // consume it as data, while rewriting the final consumer remains safe.
     #[test]
-    fn test_rewrite_pipe_safe_consumers_producer_rewritten() {
-        assert_eq!(
-            rewrite_command_no_prefixes("git log | tail -5", &[]),
-            Some("rtk git log | tail -5".into())
-        );
-        assert_eq!(
-            rewrite_command_no_prefixes("cargo test | tail -50", &[]),
-            Some("rtk cargo test | tail -50".into())
-        );
-        assert_eq!(
-            rewrite_command_no_prefixes("git diff | cat", &[]),
-            Some("rtk git diff | cat".into())
-        );
-        assert_eq!(
-            rewrite_command_no_prefixes("RUST_BACKTRACE=1 cargo test 2>&1 | tail -50", &[]),
-            Some("RUST_BACKTRACE=1 rtk cargo test 2>&1 | tail -50".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_git_ls_tree_folds_only_where_nothing_reads_its_lines() {
-        for (cmd, expected) in [
-            (
-                "git ls-tree -r --name-only HEAD",
-                Some("rtk git ls-tree -r --name-only HEAD"),
-            ),
-            (
-                "git ls-tree HEAD | head -3",
-                Some("rtk git ls-tree HEAD | head -3"),
-            ),
-            (
-                "git ls-tree -r -z --name-only HEAD | cat",
-                Some("rtk git ls-tree -r -z --name-only HEAD | cat"),
-            ),
-            ("git ls-tree -r --name-only HEAD | head -5", None),
-            ("git ls-tree -r --name-only HEAD | cat", None),
-            ("git ls-tree --name-status HEAD | tail -2", None),
-            ("git -C src ls-tree -r --name-only HEAD | head -5", None),
-            ("yadm -C src ls-tree -r --name-only HEAD | head -5", None),
-            (
-                "yadm -c core.quotePath=false ls-tree -r --name-only HEAD | cat",
-                None,
-            ),
-            (
-                "git  -C src ls-tree -r -z --name-only HEAD | head -5",
-                Some("rtk git -C src ls-tree -r -z --name-only HEAD | head -5"),
-            ),
-            ("git  -C src ls-tree -r --name-only HEAD | head -5", None),
-            (
-                "git  -c core.quotePath=false ls-tree -r --name-only HEAD | cat",
-                None,
-            ),
-            (
-                "git show --name-only HEAD | head -5",
-                Some("rtk git show --name-only HEAD | head -5"),
-            ),
-            (
-                "git diff --name-status HEAD~3 | cat",
-                Some("rtk git diff --name-status HEAD~3 | cat"),
-            ),
-            ("git\tls-tree -r --name-only HEAD | cat", None),
-            (
-                "git ls-tree -r --name-only HEAD | while read f; do echo \"$f\"; done",
-                None,
-            ),
-        ] {
-            assert_eq!(
-                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
-                expected,
-                "{cmd}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_rewrite_git_ls_tree_globals_preserve_pipeline_lines() {
-        for globals in [
-            "-c core.quotePath=false",
-            "-C src",
-            "--git-dir=.git",
-            "--git-dir .git",
-            "--work-tree=.",
-            "--work-tree .",
-            "--no-pager",
-            "--no-optional-locks",
-            "--bare",
-            "--literal-pathspecs",
-            "--no-pager -c core.quotePath=false",
-        ] {
-            for format in ["--name-only", "--name-status"] {
-                let cmd = format!("git {globals} ls-tree -r {format} HEAD");
-                assert_eq!(
-                    rewrite_command_no_prefixes(&cmd, &[]),
-                    Some(format!("rtk {cmd}")),
-                    "{cmd}"
-                );
-                for consumer in ["head -5", "tail -2", "cat"] {
-                    let piped = format!("{cmd} | {consumer}");
-                    assert_eq!(rewrite_command_no_prefixes(&piped, &[]), None, "{piped}");
-                    let raw = format!("git {globals} ls-tree -r -z {format} HEAD | {consumer}");
-                    assert_eq!(
-                        rewrite_command_no_prefixes(&raw, &[]),
-                        Some(format!("rtk {raw}")),
-                        "{raw}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_git_ls_tree_declares_measured_savings() {
-        let (status, savings) = status_and_savings("git ls-tree -r --name-only HEAD");
-        assert_eq!(status, RtkStatus::Existing);
-        assert_eq!(savings, 37.0);
-    }
-
-    #[test]
-    fn test_rewrite_multi_pipe_all_safe_consumers() {
-        assert_eq!(
-            rewrite_command_no_prefixes("git log | head -20 | tail -5", &[]),
-            Some("rtk git log | head -20 | tail -5".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_pipe_safe_consumer_with_next_clause() {
-        assert_eq!(
-            rewrite_command_no_prefixes("git log | tail -5 && git status", &[]),
-            Some("rtk git log | tail -5 && rtk git status".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_pipe_mixed_consumers_stay_raw() {
-        assert_eq!(
-            rewrite_command_no_prefixes("git log | head | wc -l", &[]),
-            None
-        );
-        assert_eq!(
-            rewrite_command_no_prefixes("git log | tail | xargs echo", &[]),
-            None
-        );
-        assert_eq!(
-            rewrite_command_no_prefixes("git log | grep feat | wc -l", &[]),
-            None
-        );
-    }
-
-    #[test]
-    fn test_rewrite_pipe_producer_no_rule_or_excluded_stays_raw() {
-        assert_eq!(
-            rewrite_command_no_prefixes("unknowncmd | tail -5", &[]),
-            None
-        );
-        assert_eq!(
-            rewrite_command_no_prefixes("git log | tail -5", &["git log".into()]),
-            None
-        );
-        assert_eq!(
-            rewrite_command_no_prefixes("rtk git log | tail -5", &[]),
-            None
-        );
-    }
-
-    #[test]
-    fn test_rewrite_pipe_consumer_decorations_stay_raw() {
-        assert_eq!(
-            rewrite_command_no_prefixes("git log | FOO=1 tail -5", &[]),
-            None
-        );
-        assert_eq!(
-            rewrite_command_no_prefixes("git log | /usr/bin/tail -5", &[]),
-            None
-        );
-        assert_eq!(rewrite_command_no_prefixes("git log |& tail -5", &[]), None);
-    }
-
-    #[test]
-    fn test_rewrite_pipe_consumer_fd_dup_redirect_rewritten() {
-        assert_eq!(
-            rewrite_command_no_prefixes("git log | tail -5 2>&1", &[]),
-            Some("rtk git log | tail -5 2>&1".into())
-        );
-        assert_eq!(
-            rewrite_command_no_prefixes("git log | tail -5 2>/dev/null", &[]),
-            Some("rtk git log | tail -5 2>/dev/null".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_pipe_consumer_redirect_stays_raw() {
-        assert_eq!(
-            rewrite_command_no_prefixes("git log | tail -5 > out.txt", &[]),
-            None
-        );
-        assert_eq!(
-            rewrite_command_no_prefixes("git log | cat > file.txt", &[]),
-            None
-        );
-    }
-
-    #[test]
-    fn test_rewrite_pipe_read_producer_stays_raw() {
-        assert_eq!(
-            rewrite_command_no_prefixes("head -20 file.txt | tail -5", &[]),
-            None
-        );
-        assert_eq!(
-            rewrite_command_no_prefixes("cat file.txt | tail -5", &[]),
-            None
-        );
-        assert_eq!(
-            rewrite_command_no_prefixes("tail -20 file.txt | head -5", &[]),
-            None
-        );
-    }
-
-    fn assert_consumer_flag_blocks_rewrite(consumer: &str, spelling: &str) {
-        let cmd = format!("git log | {consumer} {spelling}");
-        assert_eq!(rewrite_command_no_prefixes(&cmd, &[]), None, "{cmd}");
-    }
-
-    /// Every shell spelling of a consumer's unsafe flag must keep the producer raw.
-    /// Driven off `SAFE_PIPE_CONSUMERS` so a consumer added later is covered on arrival:
-    /// `getopt_long` accepts any unambiguous prefix of a long option, and the shell strips
-    /// quotes and backslashes before the flag ever reaches the consumer.
-    #[test]
-    fn test_unsafe_consumer_flag_spellings_stay_raw() {
-        for consumer in SAFE_PIPE_CONSUMERS {
-            for flag in consumer.unsafe_flags {
-                let name = flag
-                    .strip_prefix("--")
-                    .expect("unsafe_flags entries are long options");
-                for len in 1..=name.len() {
-                    let abbrev = &name[..len];
-                    for spelling in [
-                        format!("--{abbrev}"),
-                        format!("\"--{abbrev}\""),
-                        format!("'--{abbrev}'"),
-                        format!("\\-\\-{abbrev}"),
-                        format!("--{abbrev}=x"),
-                    ] {
-                        assert_consumer_flag_blocks_rewrite(consumer.name, &spelling);
-                    }
-                }
-            }
-
-            for ch in consumer.unsafe_flag_chars {
-                for spelling in [
-                    format!("-{ch}"),
-                    format!("\"-{ch}\""),
-                    format!("'-{ch}'"),
-                    format!("\\-{ch}"),
-                    format!("-{ch}q"),
-                    format!("-q{ch}"),
-                    format!("-{ch}n20"),
-                ] {
-                    assert_consumer_flag_blocks_rewrite(consumer.name, &spelling);
-                }
-            }
-        }
-    }
-
-    /// Guards the test above against passing vacuously if the consumer table empties.
-    #[test]
-    fn test_safe_consumer_spellings_still_rewrite() {
+    fn test_rewrite_pipeline_producers_stay_raw() {
         for cmd in [
-            "git log | cat",
-            "git log | head -20",
-            "git log | tail -20",
-            "git log | tail -n 20",
-        ] {
-            assert!(
-                rewrite_command_no_prefixes(cmd, &[]).is_some(),
-                "{cmd} should rewrite"
-            );
-        }
-    }
-
-    #[test]
-    fn test_rewrite_pipe_following_tail_stays_raw() {
-        for cmd in [
-            "git log | tail -f",
-            "git log | tail -F",
-            "git log | tail --follow",
-            "git log | tail --follow=name",
-            "git log | tail --foll",
-            "git log | tail --f",
-            "git log | tail -fn20",
-            "git log | tail \"-f\"",
-            "git log | tail \\-f",
+            "git log | head -5",
+            "git log --oneline | head -3",
+            "git diff 2>&1 | head",
+            "git diff 2>&1 | head -3",
+            "git log | tail -5",
+            "git diff | cat",
         ] {
             assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
         }
         assert_eq!(
-            rewrite_command_no_prefixes("git log | tail -n 20", &[]),
-            Some("rtk git log | tail -n 20".into())
+            rewrite_command_no_prefixes("git log | grep feat", &[]),
+            Some("git log | rtk grep feat".into())
         );
     }
 
@@ -4662,7 +4135,7 @@ mod tests {
         );
         assert_eq!(
             rewrite_command_no_prefixes("grep foo src/main.rs | head -5", &[]),
-            Some("rtk grep foo src/main.rs | head -5".into())
+            None
         );
     }
 
@@ -4677,27 +4150,36 @@ mod tests {
         ] {
             assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
         }
-        // `-c` with `-l` is not folded, and `-e -l` makes `-l` the pattern.
+        // Even line-faithful grep output stays native when another process consumes it.
         assert_eq!(
             rewrite_command_no_prefixes("grep -rlc foo src | tail -3", &[]),
-            Some("rtk grep -rlc foo src | tail -3".into())
+            None
         );
         assert_eq!(
             rewrite_command_no_prefixes("grep -e -l src | tail -3", &[]),
-            Some("rtk grep -e -l src | tail -3".into())
+            None
         );
     }
 
     #[test]
-    fn test_rewrite_pipe_producer_batch_rules_rewritten() {
-        assert_eq!(
-            rewrite_command_no_prefixes("pytest | tail -20", &[]),
-            Some("rtk pytest | tail -20".into())
-        );
+    fn test_rewrite_pipe_producer_batch_rules_stay_raw() {
+        assert_eq!(rewrite_command_no_prefixes("pytest | tail -20", &[]), None);
         assert_eq!(
             rewrite_command_no_prefixes("terraform plan | head -40", &[]),
-            Some("rtk terraform plan | head -40".into())
+            None
         );
+    }
+
+    #[test]
+    fn test_git_ls_tree_standalone_still_rewrites() {
+        let cmd = "git ls-tree -r --name-only HEAD";
+        assert_eq!(
+            rewrite_command_no_prefixes(cmd, &[]),
+            Some("rtk git ls-tree -r --name-only HEAD".into())
+        );
+        let (status, savings) = status_and_savings(cmd);
+        assert_eq!(status, RtkStatus::Existing);
+        assert_eq!(savings, 37.0);
     }
 
     #[test]
@@ -5204,15 +4686,17 @@ mod tests {
         }
         groups.push(("wrapper prefixes", wrapped));
 
+        // Final-stage search rewrites exercise the emitter without changing
+        // the native bytes produced by an earlier pipeline stage.
         let mut piped = Vec::new();
-        for consumer in SAFE_PIPE_CONSUMERS {
+        for producer in ["git log", "cargo test"] {
             for gap in GAPS {
                 for pipe_gap in GAPS {
-                    piped.push(format!("ls -la{gap}|{pipe_gap}{} -3", consumer.name));
+                    piped.push(format!("{producer}{gap}|{pipe_gap}grep FAILED"));
                 }
             }
         }
-        groups.push(("safe pipe consumers", piped));
+        groups.push(("final-stage pipeline search", piped));
 
         // A `case` arm's terminator may sit flush against `esac`. The
         // terminator is one operator and `esac` the word after it, so the gap
@@ -6459,10 +5943,6 @@ mod tests {
                 "golangci-lint --color never run ./... 2>&1",
                 "rtk golangci-lint --color never run ./... 2>&1",
             ),
-            (
-                "golangci-lint run ./... 2>&1 | tail -5",
-                "rtk golangci-lint run ./... 2>&1 | tail -5",
-            ),
             // No space before the redirect: the boundary is kept exactly as
             // typed, so a word ending in digits is not turned into a
             // descriptor number and vice versa.
@@ -6481,6 +5961,12 @@ mod tests {
                 "{input}"
             );
         }
+        // A pipeline producer must pass its original data to the consumer.
+        // Redirects on standalone commands still preserve their spelling.
+        assert_eq!(
+            rewrite_command_no_prefixes("golangci-lint run ./... 2>&1 | tail -5", &[]),
+            None
+        );
     }
 
     #[test]
@@ -8439,7 +7925,7 @@ mod tests {
     fn test_process_wrapper_keeps_pipeline_context() {
         assert_eq!(
             rewrite_command_no_prefixes("timeout 300 git log | head -5", &[]),
-            Some("timeout 300 rtk git log | head -5".into())
+            None
         );
         assert_eq!(
             rewrite_command_no_prefixes("cargo test | timeout 5 grep error", &[]),
@@ -8595,7 +8081,7 @@ mod tests {
     fn test_rewrite_pipe_then_and() {
         assert_eq!(
             rewrite_command_no_prefixes("git log | head -5 && git stash", &[]),
-            Some("rtk git log | head -5 && rtk git stash".into())
+            Some("git log | head -5 && rtk git stash".into())
         );
     }
 
@@ -8603,7 +8089,7 @@ mod tests {
     fn test_rewrite_pipe_then_semicolon() {
         assert_eq!(
             rewrite_command_no_prefixes("cargo test | head; git status", &[]),
-            Some("rtk cargo test | head; rtk git status".into())
+            Some("cargo test | head; rtk git status".into())
         );
     }
 
@@ -8638,7 +8124,7 @@ mod tests {
     fn test_rewrite_multi_pipe_then_and() {
         assert_eq!(
             rewrite_command_no_prefixes("git log | head | tail && git status", &[]),
-            Some("rtk git log | head | tail && rtk git status".into())
+            Some("git log | head | tail && rtk git status".into())
         );
     }
 
