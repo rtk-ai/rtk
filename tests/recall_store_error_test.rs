@@ -11,6 +11,12 @@ fn rtk_on(store: &Path, args: &[&str]) -> Output {
     common::rtk_command()
         .args(args)
         .env("RTK_RECALL_DB", store)
+        // Windows resolves its known home folder independently of HOME. Each
+        // concurrent fixture must initialize its own Claude directory.
+        .env(
+            "CLAUDE_CONFIG_DIR",
+            store.parent().unwrap().join("claude-config"),
+        )
         .output()
         .expect("rtk should run")
 }
@@ -56,7 +62,11 @@ fn recall_says_the_store_is_unavailable_only_when_it_is() {
 
     // A failure on the entries of a store that is there is not that: a store stamped
     // at its last version, with no step left to add the columns `--list` needs.
-    common::recall_store(&store, 2, "CREATE TABLE recall (hash TEXT PRIMARY KEY);");
+    current_store(&store);
+    Connection::open(&store)
+        .expect("open")
+        .execute_batch("DROP TABLE recall; CREATE TABLE recall (hash TEXT PRIMARY KEY);")
+        .expect("break current schema");
     let output = list();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
@@ -70,7 +80,28 @@ fn recall_says_the_store_is_unavailable_only_when_it_is() {
 
 /// A store at its last version with a table gone, as a partial restore leaves it.
 fn store_without_its_table(store: &Path) {
-    common::recall_store(store, 2, "CREATE TABLE tee_reads (path TEXT PRIMARY KEY);");
+    current_store(store);
+    Connection::open(store)
+        .expect("open")
+        .execute_batch("DROP TABLE recall; DROP TABLE recall_stats;")
+        .expect("drop recall");
+}
+
+fn current_store(store: &Path) {
+    Connection::open(store).expect("create existing empty store");
+    let initialized = rtk_on(store, &["init", "-g", "--no-patch"]);
+    assert!(
+        initialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    assert!(
+        store
+            .parent()
+            .unwrap()
+            .join("claude-config/RTK.md")
+            .is_file()
+    );
 }
 
 const REPAIR_HINT: &str = "Run `rtk init` to recreate it.";
