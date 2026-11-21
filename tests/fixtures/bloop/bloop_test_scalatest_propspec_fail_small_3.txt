@@ -1,0 +1,32 @@
+Compiling root (1 Scala source)
+Compiled root (1460ms)
+Compiling root-test (1 Scala source)
+Compiled root-test (1083ms)
+CalculatorSuite:
+- Calculator.add matches the table *** FAILED ***
+  TestFailedException was thrown during property evaluation. (CalculatorSuite.scala:17)
+    Message: 17 did not equal 99
+    Location: (CalculatorSuite.scala:16)
+    Occurred at table row 1 (zero based, not counting headings), which had values (
+      a = 10,
+      b = 7,
+      sum = 99
+    )
+Execution took 34ms
+1 tests, 1 failed
+
+===========================================================================================================================================================================
+Total duration: 34ms
+1 failed
+
+Failed:
+- example.CalculatorSuite:
+  * Calculator.add matches the table - org.scalatest.exceptions.TableDrivenPropertyCheckFailedException: TestFailedException was thrown during property evaluation. (CalculatorSuite.scala:17)
+  Message: 17 did not equal 99
+  Location: (CalculatorSuite.scala:16)
+  Occurred at table row 1 (zero based, not counting headings), which had values (
+    a = 10,
+    b = 7,
+    sum = 99
+  )
+===========================================================================================================================================================================
