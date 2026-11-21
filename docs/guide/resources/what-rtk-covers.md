@@ -165,6 +165,7 @@ If a command isn't intercepted by the hook rules, RTK runs it through passthroug
 
 ```bash
 rtk bypass cargo run      # runs cargo run, tracks usage, no filtering
+rtk bypass RUST_LOG=debug cargo run    # leading NAME=value words go to the command's environment
 ```
 
 To check whether any command will be rewritten before running it:
