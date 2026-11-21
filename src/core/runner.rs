@@ -2320,6 +2320,9 @@ mod err_test_runner_tests {
             .lines()
             .find(|l| l.contains("rtk recall ") || l.contains("tail -n +1 "))
             .unwrap_or_else(|| panic!("no recovery hint for the hidden rows:\n{out}"));
+        let hint = hint
+            .strip_suffix(" (unfiltered; may contain sensitive data)")
+            .expect("recovery hint warns about unfiltered sensitive output");
 
         if let Some(rest) = hint.split("rtk recall ").nth(1) {
             let hash = rest.trim_end_matches(']').trim();

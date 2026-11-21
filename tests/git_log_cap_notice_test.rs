@@ -1415,7 +1415,7 @@ fn rtk_recall(repo: &Repo, args: &[&str]) -> Output {
 fn parse_recall_hint(line: &str) -> (usize, String) {
     let inner = line
         .strip_prefix("[+")
-        .and_then(|rest| rest.strip_suffix(']'))
+        .and_then(|rest| rest.strip_suffix("] (unfiltered; may contain sensitive data)"))
         .unwrap_or_else(|| panic!("not a recall hint: {line:?}"));
     let (hidden, id) = inner
         .split_once(" hidden: rtk recall ")
@@ -1961,7 +1961,7 @@ fn in_tee_mode_the_hint_names_the_file_and_the_line_after_the_fiftieth() {
 
         let (first, path) = lines[50]
             .strip_prefix("[see remaining: tail -n +")
-            .and_then(|rest| rest.strip_suffix(']'))
+            .and_then(|rest| rest.strip_suffix("] (unfiltered; may contain sensitive data)"))
             .and_then(|rest| rest.split_once(' '))
             .unwrap_or_else(|| panic!("{shape}: not a tee hint: {:?}", lines[50]));
         let first: usize = first.parse().expect("the line `tail` starts from");
