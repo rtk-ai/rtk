@@ -1,0 +1,13 @@
+[1m[34mUse --update-env to update environment variables[39m[22m
+[32m[PM2] [39mApplying action restartProcessId on app [api](ids: [ 0, 1 ])
+[32m[PM2] [39m[api](0) ✓
+[32m[PM2] [39m[api](1) ✓
+┌────┬────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id │ name       │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ [1m[36m0[39m[22m  │ api        │ default     │ 1.0.0   │ [34m[1mcluster[22m[39m │ 780902   │ 0s     │ 1    │ [32m[1monline[22m[39m    │ 0%       │ 57.6mb   │ [1mdevop[22m    │ [90mdisabled[39m │
+│ [1m[36m1[39m[22m  │ api        │ default     │ 1.0.0   │ [34m[1mcluster[22m[39m │ 780926   │ 0s     │ 1    │ [32m[1monline[22m[39m    │ 0%       │ 46.0mb   │ [1mdevop[22m    │ [90mdisabled[39m │
+│ [1m[36m3[39m[22m  │ billing    │ default     │ 1.0.0   │ [7m[1mfork[22m[27m    │ 0        │ 0      │ 2    │ [31m[1merrored[22m[39m   │ 0%       │ 0b       │ [1mdevop[22m    │ [90mdisabled[39m │
+│ [1m[36m2[39m[22m  │ worker     │ default     │ 1.0.0   │ [7m[1mfork[22m[27m    │ 780333   │ 11s    │ 0    │ [32m[1monline[22m[39m    │ 0%       │ 53.9mb   │ [1mdevop[22m    │ [90mdisabled[39m │
+└────┴────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘
+[1m[36mhost metrics[39m[22m | [1mcpu[22m: 0% | [1mram usage[22m: [32m49.9%[39m | [1mdisk[22m: ⇓ 0mb/s ⇑ 0mb/s [90m/[39m [1m[31m98.74%[39m[22m [90m/media/devop/OS[39m [1m[33m81.43%[39m[22m

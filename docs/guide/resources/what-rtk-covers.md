@@ -145,6 +145,14 @@ listing into `head`, `tail`, or `cat`.
 | `curl` | Response body only, headers stripped |
 | `helm list` | Release name, namespace, status, and chart columns |
 | `terraform plan` | Planned changes summary, resource diffs condensed |
+| `pm2 list` | ANSI, outer table borders, host metrics line removed; every process row kept |
+| `pm2 restart api` | ANSI and update-env hint removed; action lines and errors kept |
+| `pm2 reload api` | Same as `pm2 restart` |
+| `pm2 env 0` | ANSI removed; values unchanged |
+| `pm2 logs --nostream` | ANSI, blank lines, and prefix padding removed; log lines kept (plain `pm2 logs` streams and is not rewritten) |
+| `redis-cli info` | Blank lines and zero-valued internal counters removed (`info <section>` unchanged) |
+| `redis-cli keys *` | Capped at 50 lines with a recovery hint; values unchanged. `get`, `del`, `monitor` are not rewritten |
+| `redis-cli hgetall cfg` | Same cap as `keys`; also `scan`, `lrange`, `smembers`, `zrange` |
 
 ## Global flags
 

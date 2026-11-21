@@ -983,6 +983,15 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^pm2(?:\s+--?\S+)*\s+(?:(?:list|ls|l|ps|status|restart|reload|env)(?:\s|$|[;|&()<>])|logs\b[^;|&]*--nostream)",
+        rtk_cmd: "rtk pm2",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["pm2"],
+        category: "Infra",
+        savings_pct: 45.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^ps(\s|$)",
         rtk_cmd: "rtk ps",
         pipeline_safety: PipelineSafety::ProducerOnly,
@@ -1012,6 +1021,14 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["quarto"],
         category: "Build",
         savings_pct: 65.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"(?i)^redis-cli(?:\s+-\S+(?:\s+[^-\s]\S*)?)*\s+(?:info\s*$|(?:keys|scan|hscan|sscan|zscan|hgetall|hkeys|hvals|smembers|lrange|zrange|zrevrange|xrange|xrevrange|--scan)(?:\s|$|[;|&()<>]))",
+        rtk_cmd: "rtk redis-cli",
+        rewrite_prefixes: &["redis-cli"],
+        category: "Infra",
+        savings_pct: 40.0,
         ..RtkRule::DEFAULT
     },
     RtkRule {

@@ -1,0 +1,2 @@
+[1m[34mUse --update-env to update environment variables[39m[22m
+[31m[PM2][ERROR] [39mProcess or Namespace nosuch not found

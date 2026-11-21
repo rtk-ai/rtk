@@ -1,0 +1,11 @@
+node_version: [32m18.19.1[39m
+unique_id: [32m4a47d6a7-78cb-4999-9cac-cfecc8f2bed3[39m
+PM2_USAGE: [32mCLI[39m
+PM2_HOME: [32m/tmp/pm2work/home[39m
+PATH: [32m/usr/local/bin:/usr/bin:/bin:/home/devop/.nvm/versions/node/v20.20.2/bin[39m
+NODE_ENV: [32mproduction[39m
+SHELL: [32m/bin/bash[39m
+LANG: [32men_US.UTF-8[39m
+USER: [32mdev[39m
+HOME: [32m/home/dev[39m
+NODE_APP_INSTANCE: [32m0[39m

@@ -2151,6 +2151,7 @@ match_command = "^make\\b"
             "mix-format",
             "ping",
             "pio-run",
+            "pm2",
             "poetry-install",
             "pre-commit",
             "ps",
@@ -2160,6 +2161,8 @@ match_command = "^make\\b"
             "pulumi-stack",
             "pulumi-up",
             "quarto-render",
+            "redis-cli",
+            "redis-cli-info",
             "rsync",
             "shellcheck",
             "shopify-theme",
@@ -2192,8 +2195,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            62,
-            "Expected exactly 62 built-in filters, got {}. \
+            65,
+            "Expected exactly 65 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -2301,11 +2304,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 62 existing filters still present + 1 new = 63
+        // All 65 existing filters still present + 1 new = 66
         assert_eq!(
             filters.len(),
-            63,
-            "Expected 63 filters after concat (62 built-in + 1 new)"
+            66,
+            "Expected 66 filters after concat (65 built-in + 1 new)"
         );
 
         // New filter is discoverable
@@ -2315,5 +2318,195 @@ expected = "output line 1\noutput line 2"
             "Newly added filter must be discoverable via find_filter_in"
         );
         assert_eq!(found.unwrap().name, "my-new-tool");
+    }
+
+    fn builtin_for(cmd: &str) -> &'static CompiledFilter {
+        find_matching_filter(cmd).unwrap_or_else(|| panic!("no built-in filter matches `{cmd}`"))
+    }
+
+    fn savings_pct(raw: &str, filtered: &str) -> f64 {
+        100.0 - (filtered.len() as f64 / raw.len() as f64 * 100.0)
+    }
+
+    #[test]
+    fn test_pm2_matches_bounded_subcommands_only() {
+        for cmd in [
+            "pm2 list",
+            "pm2 ls",
+            "pm2 status",
+            "pm2 restart api --update-env",
+            "pm2 reload all",
+            "pm2 env 0",
+            "pm2 logs --nostream --lines 50",
+            "pm2 --no-color list",
+        ] {
+            assert!(find_matching_filter(cmd).is_some(), "{cmd} should match");
+        }
+        // `pm2 logs` tails forever, `monit` is a TUI, `jlist` is JSON: none may be buffered.
+        for cmd in [
+            "pm2 logs",
+            "pm2 logs api --lines 5",
+            "pm2 monit",
+            "pm2 jlist",
+            "pm2 start app.js",
+        ] {
+            assert!(find_matching_filter(cmd).is_none(), "{cmd} must not match");
+        }
+    }
+
+    #[test]
+    fn test_pm2_fixture_savings_and_content() {
+        let f = builtin_for("pm2 list");
+        for (cmd, raw) in [
+            (
+                "pm2 list",
+                include_str!("../../tests/fixtures/pm2_list_raw.txt"),
+            ),
+            (
+                "pm2 restart api",
+                include_str!("../../tests/fixtures/pm2_restart_raw.txt"),
+            ),
+            (
+                "pm2 reload api",
+                include_str!("../../tests/fixtures/pm2_reload_raw.txt"),
+            ),
+            (
+                "pm2 logs --nostream",
+                include_str!("../../tests/fixtures/pm2_logs_raw.txt"),
+            ),
+            (
+                "pm2 env 2",
+                include_str!("../../tests/fixtures/pm2_env_raw.txt"),
+            ),
+        ] {
+            let (out, loss) = apply_filter_with_info(builtin_for(cmd), raw);
+            assert_eq!(loss, Lossiness::None, "{cmd}");
+            assert!(!out.contains('\u{1b}'), "{cmd}: ANSI left in output");
+            // Log lines are the payload and are kept verbatim, so only ANSI, blank
+            // lines and prefix padding are removable: ~19% on this fixture.
+            let floor = if cmd.starts_with("pm2 logs") {
+                15.0
+            } else {
+                20.0
+            };
+            let pct = savings_pct(raw, &out);
+            assert!(
+                pct >= floor,
+                "{cmd}: expected >={floor}% savings, got {pct:.1}%"
+            );
+        }
+        let list = apply_filter(f, include_str!("../../tests/fixtures/pm2_list_raw.txt"));
+        for needle in ["billing", "errored", "worker", "online"] {
+            assert!(list.contains(needle), "list lost `{needle}`");
+        }
+        assert_eq!(list.lines().filter(|l| l.contains("api")).count(), 2);
+    }
+
+    #[test]
+    fn test_pm2_error_and_stack_trace_preserved() {
+        let err = apply_filter(
+            builtin_for("pm2 restart nosuch"),
+            include_str!("../../tests/fixtures/pm2_restart_err_raw.txt"),
+        );
+        assert_eq!(err, "[PM2][ERROR] Process or Namespace nosuch not found");
+        let logs = apply_filter(
+            builtin_for("pm2 logs --nostream"),
+            include_str!("../../tests/fixtures/pm2_logs_raw.txt"),
+        );
+        assert!(logs.contains("Error: Cannot find module ./config"));
+        assert!(logs.contains("ECONNREFUSED"));
+    }
+
+    #[test]
+    fn test_redis_cli_matching() {
+        let info = "redis-cli-info";
+        let list = "redis-cli";
+        for (cmd, name) in [
+            ("redis-cli info", info),
+            ("redis-cli -h cache -p 6380 -n 2 info", info),
+            ("redis-cli --raw INFO", info),
+            ("redis-cli keys '*'", list),
+            ("redis-cli -p 6399 scan 0 count 100", list),
+            ("redis-cli --scan --pattern 'user:*'", list),
+            ("redis-cli hgetall cfg:app", list),
+            ("redis-cli lrange queue:jobs 0 -1", list),
+        ] {
+            let f = find_matching_filter(cmd).unwrap_or_else(|| panic!("{cmd} should match"));
+            assert_eq!(f.name, name, "{cmd}");
+        }
+        // Single-key reads/writes, explicit info sections and streaming modes are untouched.
+        for cmd in [
+            "redis-cli get session:42",
+            "redis-cli del session:42",
+            "redis-cli -n 1 get keys",
+            "redis-cli info keyspace",
+            "redis-cli info all",
+            "redis-cli monitor",
+            "redis-cli subscribe news",
+            "redis-cli --bigkeys",
+            "redis-cli --latency",
+        ] {
+            assert!(find_matching_filter(cmd).is_none(), "{cmd} must not match");
+        }
+    }
+
+    #[test]
+    fn test_redis_cli_info_fixture() {
+        let raw = include_str!("../../tests/fixtures/redis_info_raw.txt");
+        let (out, loss) = apply_filter_with_info(builtin_for("redis-cli info"), raw);
+        assert_eq!(loss, Lossiness::None);
+        let pct = savings_pct(raw, &out);
+        assert!(pct >= 20.0, "expected >=20% savings, got {pct:.1}%");
+        for keep in [
+            "# Server",
+            "redis_version:7.0.15",
+            "used_memory_human:1.00M",
+            "connected_clients:1",
+            "role:master",
+            "keyspace_hits:0",
+            "evicted_keys:0",
+            "connected_slaves:0",
+            "# Keyspace",
+            "db0:keys=122,expires=0,avg_ttl=0",
+        ] {
+            assert!(out.lines().any(|l| l == keep), "lost `{keep}`");
+        }
+    }
+
+    #[test]
+    fn test_redis_cli_keys_cap_is_recoverable() {
+        let raw = include_str!("../../tests/fixtures/redis_keys_raw.txt");
+        let (out, loss) = apply_filter_with_info(builtin_for("redis-cli keys '*'"), raw);
+        assert!(out.ends_with("... (72 lines truncated)"));
+        assert_eq!(out.lines().count(), 51);
+        assert!(out.starts_with(raw.lines().next().unwrap()));
+        match loss {
+            Lossiness::Tail {
+                tail_offset,
+                tee_payload,
+            } => {
+                assert_eq!(tail_offset, 51);
+                assert_eq!(tee_payload.lines().count(), 122);
+            }
+            other => panic!("expected recoverable tail loss, got {other:?}"),
+        }
+        let pct = savings_pct(raw, &out);
+        assert!(pct >= 20.0, "expected >=20% savings, got {pct:.1}%");
+    }
+
+    #[test]
+    fn test_redis_cli_short_results_unchanged() {
+        let raw = "cfg:app
+queue:jobs
+";
+        let (out, loss) = apply_filter_with_info(builtin_for("redis-cli keys 'c*'"), raw);
+        assert_eq!(out, raw.trim_end());
+        assert_eq!(loss, Lossiness::None);
+        let hash = include_str!("../../tests/fixtures/redis_hgetall_raw.txt");
+        let out = apply_filter(builtin_for("redis-cli hgetall cfg:app"), hash);
+        assert_eq!(
+            out.lines().take(50).collect::<Vec<_>>(),
+            hash.lines().take(50).collect::<Vec<_>>()
+        );
     }
 }

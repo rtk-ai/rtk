@@ -1,0 +1,19 @@
+[filters.redis-cli]
+description = "Cap long redis-cli keys/scan/hash/list/set/zset/stream listings; values are never altered, hidden lines are recoverable via the tee hint"
+match_command = "(?i)^redis-cli(?:\\s+-\\S+(?:\\s+[^-\\s]\\S*)?)*\\s+(?:keys|scan|hscan|sscan|zscan|hgetall|hkeys|hvals|smembers|lrange|zrange|zrevrange|xrange|xrevrange|--scan)(?:\\s|$)"
+max_lines = 50
+
+[[tests.redis-cli]]
+name = "short result passes through unchanged"
+input = "user:1:session\nuser:2:session\nuser:3:session"
+expected = "user:1:session\nuser:2:session\nuser:3:session"
+
+[[tests.redis-cli]]
+name = "multi-line values are not altered"
+input = "payload\n  indented value\n\ntrailing blank above"
+expected = "payload\n  indented value\n\ntrailing blank above"
+
+[[tests.redis-cli]]
+name = "empty input passes through"
+input = ""
+expected = ""
