@@ -4,6 +4,8 @@
 
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 mod common;
 
@@ -11,16 +13,28 @@ mod common;
 /// `rtk init` never reads the developer's own OpenCode. With `version` the stub
 /// prints it; without, it fails, which reads as no OpenCode at all.
 fn path_with_opencode(home: &Path, version: Option<&str>) -> std::ffi::OsString {
+    let (label, body) = match version {
+        Some(v) => (format!("opencode-{v}"), format!("#!/bin/sh\necho {v}\n")),
+        None => (
+            "opencode-none".to_string(),
+            "#!/bin/sh\nexit 1\n".to_string(),
+        ),
+    };
+    opencode_on_path(home, &label, &body)
+}
+
+/// `opencode` that never exits. `exec` so the sleep is the process init kills.
+fn path_with_sleeping_opencode(home: &Path) -> std::ffi::OsString {
+    opencode_on_path(home, "opencode-hang", "#!/bin/sh\nexec sleep 60\n")
+}
+
+fn opencode_on_path(home: &Path, label: &str, body: &str) -> std::ffi::OsString {
     use std::os::unix::fs::PermissionsExt;
 
     // One directory per answer, so a test's own stub survives `rtk(home)`.
-    let bin = home.join(format!("opencode-{}", version.unwrap_or("none")));
+    let bin = home.join(label);
     std::fs::create_dir_all(&bin).expect("create stub bin");
     let opencode = bin.join("opencode");
-    let body = match version {
-        Some(v) => format!("#!/bin/sh\necho {v}\n"),
-        None => "#!/bin/sh\nexit 1\n".to_string(),
-    };
     std::fs::write(&opencode, body).expect("write opencode stub");
     std::fs::set_permissions(&opencode, std::fs::Permissions::from_mode(0o755))
         .expect("make opencode stub executable");
@@ -28,6 +42,65 @@ fn path_with_opencode(home: &Path, version: Option<&str>) -> std::ffi::OsString 
     path.push(":");
     path.push(std::env::var_os("PATH").unwrap_or_default());
     path
+}
+
+/// Run `cmd` to completion, or kill its process group and panic once `limit` passes.
+fn output_within(cmd: &mut Command, limit: Duration) -> std::process::Output {
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+
+    cmd.process_group(0)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn rtk");
+    let mut stdout = child.stdout.take().expect("stdout");
+    let mut stderr = child.stderr.take().expect("stderr");
+    let stdout_handle = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_handle = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        buf
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait().expect("wait rtk") {
+            Some(status) => break status,
+            None if started.elapsed() > limit => {
+                let pid = child.id() as libc::pid_t;
+                if pid > 0 {
+                    #[allow(unsafe_code)]
+                    // nosemgrep: unsafe-block
+                    unsafe {
+                        libc::kill(-pid, libc::SIGKILL);
+                    }
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                panic!("rtk init did not finish within {limit:?}");
+            }
+            None => thread::sleep(Duration::from_millis(50)),
+        }
+    };
+    std::process::Output {
+        status,
+        stdout: stdout_handle.join().expect("stdout thread"),
+        stderr: stderr_handle.join().expect("stderr thread"),
+    }
+}
+
+fn refusal_lines(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .filter(|line| {
+            line.contains("OpenCode 1.1.4 is older than") || line.contains("Upgrade OpenCode")
+        })
+        .collect()
 }
 
 /// Runs rtk with `home` as its home, and its configuration, data and history
@@ -176,6 +249,74 @@ fn opencode_claude_md_rerun_restores_missing_plugin() {
     assert!(
         plugin(home.path()).exists(),
         "re-running init must restore the OpenCode plugin"
+    );
+}
+
+#[test]
+fn an_old_opencode_dry_run_says_the_same_thing_as_the_real_run() {
+    let args = ["-g", "--opencode"];
+    let mut refusals = Vec::new();
+    for dry in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let path = path_with_opencode(home.path(), Some("1.1.4"));
+        let mut cmd = rtk(home.path());
+        cmd.env("PATH", &path).arg("init").args(args);
+        if dry {
+            cmd.arg("--dry-run");
+        }
+        let out = cmd.output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            out.status.success(),
+            "dry={dry}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !plugin(home.path()).exists(),
+            "dry={dry}: old OpenCode must not get a plugin"
+        );
+        assert!(
+            !stdout.contains("plugins/rtk.ts"),
+            "dry={dry} names a plugin it did not write:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("would create OpenCode plugin"),
+            "dry={dry} previews an install the real run refuses:\n{stdout}"
+        );
+        let lines = refusal_lines(&stdout);
+        assert_eq!(
+            lines.len(),
+            2,
+            "dry={dry} must report the floor and the upgrade hint:\n{stdout}"
+        );
+        refusals.push(lines.into_iter().map(str::to_string).collect::<Vec<_>>());
+    }
+    assert_eq!(
+        refusals[0], refusals[1],
+        "dry-run and the real run must say the same thing"
+    );
+}
+
+#[test]
+fn a_hanging_opencode_is_installed_as_if_no_version_was_read() {
+    let home = tempfile::tempdir().unwrap();
+    let path = path_with_sleeping_opencode(home.path());
+    let mut cmd = rtk(home.path());
+    cmd.env("PATH", &path).args(["init", "-g", "--opencode"]);
+    let out = output_within(&mut cmd, Duration::from_secs(15));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "rtk init failed: {}\n{stdout}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !stdout.contains("older than"),
+        "a hung probe must not be reported as an old OpenCode:\n{stdout}"
+    );
+    assert!(
+        plugin(home.path()).exists(),
+        "a hung probe reads as no version, so the plugin is installed:\n{stdout}"
     );
 }
 
