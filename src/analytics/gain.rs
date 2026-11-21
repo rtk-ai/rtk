@@ -813,7 +813,7 @@ pub fn run(
         for gap in crate::hooks::init::claude_hook_gaps() {
             print_kpi(
                 "Hook needed",
-                format!("{gap} — run `rtk init -g` so those pipeline rules fire"),
+                format!("{gap} — run `rtk init -g --auto-patch` so those pipeline rules fire"),
             );
         }
         // The CTA sits with the numbers it is about, not in a footer nobody
