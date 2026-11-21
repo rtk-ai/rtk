@@ -71,6 +71,14 @@ fn printed_capture_hint_keeps_its_output_and_attribution_after_recapture() {
             |r| r.get(0),
         )
         .expect("source invocation");
+    let second_invocation: String = source
+        .query_row(
+            "SELECT invocation_id FROM recall_captures WHERE capture_id = ?1",
+            [&second[2..]],
+            |r| r.get(0),
+        )
+        .expect("second capture belongs to another invocation");
+    assert_ne!(invocation, second_invocation);
     let history = Connection::open(dir.path().join("history.db")).expect("history");
     let source_commands: i64 = history
         .query_row(

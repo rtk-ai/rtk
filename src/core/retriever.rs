@@ -1381,7 +1381,7 @@ mod tests {
                 |r| r.get(0),
             )
             .expect("capture source");
-        assert_eq!(source, super::super::invocation::current().id);
+        assert_eq!(source.as_deref(), super::super::invocation::current());
     }
 
     #[test]
@@ -1456,13 +1456,11 @@ mod tests {
         let cwd_b = super::super::test_isolation::tempdir();
         let first = {
             let _cwd = super::super::test_isolation::enter(cwd_a.path());
-            super::super::invocation::initialize(None);
             store_inner(&cfg, b"a\nb\nc\n", "same", Some(1), 2).expect("first")
         };
-        let first_invocation = super::super::invocation::current().id;
+        let first_invocation = super::super::invocation::current();
         let second = {
             let _cwd = super::super::test_isolation::enter(cwd_b.path());
-            super::super::invocation::initialize(None);
             store_inner(&cfg, b"a\nb\nc\n", "same", Some(2), 3).expect("second")
         };
         assert_eq!(first.hash, second.hash);
@@ -1471,7 +1469,7 @@ mod tests {
         let row = load_reference(&conn, &first.reference)
             .expect("lookup")
             .expect("first");
-        assert_eq!(row.invocation_id, first_invocation);
+        assert_eq!(row.invocation_id.as_deref(), first_invocation);
         assert_eq!(row.shown_upto, 2);
         let metadata: (String, i32, i64, i64, bool) = conn
             .query_row(
