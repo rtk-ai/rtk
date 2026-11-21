@@ -504,6 +504,10 @@ fn run_install(args: &[String], verbose: u8) -> Result<i32> {
 
     if !result.success() {
         eprint!("{}", result.stderr);
+        let filtered_stdout = filter_pnpm_install_failure_stdout(&result.stdout);
+        if !filtered_stdout.trim().is_empty() {
+            println!("{}", filtered_stdout);
+        }
         return Ok(result.exit_code);
     }
 
@@ -516,6 +520,29 @@ fn run_install(args: &[String], verbose: u8) -> Result<i32> {
     timer.track("pnpm install", "rtk pnpm install", &combined, shown);
 
     Ok(0)
+}
+
+/// Filter pnpm install stdout on failure - remove progress bars while keeping
+/// lifecycle script stdout and pnpm's ELIFECYCLE summary lines.
+fn filter_pnpm_install_failure_stdout(output: &str) -> String {
+    let mut result = Vec::new();
+    let mut saw_progress = false;
+
+    for line in output.lines() {
+        if line.contains("Progress") || line.contains('│') || line.contains('%') {
+            saw_progress = true;
+            continue;
+        }
+
+        if saw_progress && line.trim().is_empty() {
+            continue;
+        }
+
+        saw_progress = false;
+        result.push(line);
+    }
+
+    result.join("\n")
 }
 
 /// Filter pnpm install output - remove progress bars, keep summary
@@ -703,5 +730,31 @@ mod tests {
             .unwrap();
         assert!(!react.dev_dependency, "react should be prod");
         assert!(eslint.dev_dependency, "eslint should be dev");
+    }
+
+    #[test]
+    fn test_filter_pnpm_install_failure_stdout_keeps_elifecycle_and_script_stdout() {
+        let stdout = "\
+Progress: resolved 10, reused 10, downloaded 0, added 0
+Progress: resolved 10, reused 10, downloaded 0, added 10, done
+
+> my-app@1.0.0 postinstall /tmp/my-app
+> node scripts/postinstall.js
+
+checking native bindings...
+\u{2009}ELIFECYCLE\u{2009} Command failed with exit code 1.
+";
+        let filtered = filter_pnpm_install_failure_stdout(stdout);
+        assert!(!filtered.contains("Progress:"));
+        assert!(filtered.contains("checking native bindings..."));
+        assert!(filtered.contains("ELIFECYCLE"));
+        assert!(filtered.contains("Command failed with exit code 1."));
+    }
+
+    #[test]
+    fn test_filter_pnpm_install_failure_stdout_empty_when_only_progress() {
+        let stdout = "Progress: resolved 1, reused 0, downloaded 0, added 0\n\n";
+        let filtered = filter_pnpm_install_failure_stdout(stdout);
+        assert!(filtered.trim().is_empty());
     }
 }
