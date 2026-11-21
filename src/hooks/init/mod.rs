@@ -2161,7 +2161,7 @@ fn show_claude_config() -> Result<()> {
     // Check global CLAUDE.md
     if global_claude_md.exists() {
         let content = fs::read_to_string(&global_claude_md)?;
-        if content.contains(RTK_MD_REF) {
+        if has_rtk_reference(&content, &[RTK_MD_REF]) {
             println!("[ok] Global (~/.claude/CLAUDE.md): @RTK.md reference");
         } else if content.contains(RTK_BLOCK_START) {
             println!(

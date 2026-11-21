@@ -1,6 +1,7 @@
 //! Claude Code: the default `rtk init` flow -- settings.json hook registration, RTK.md and
 //! CLAUDE.md patching, legacy-hook migration -- plus the `--claude-md` injection mode.
 
+use super::agents_md::has_rtk_reference;
 use super::*;
 use crate::core::user_dirs;
 use crate::hooks::constants::{
@@ -83,7 +84,7 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
     }
 
     // Check if @RTK.md already present
-    if content.contains(RTK_MD_REF) {
+    if has_rtk_reference(&content, &[RTK_MD_REF]) {
         if verbose > 0 {
             eprintln!("@RTK.md reference already present in CLAUDE.md");
         }
