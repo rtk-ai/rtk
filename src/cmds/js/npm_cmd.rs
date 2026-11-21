@@ -48,7 +48,6 @@ const NPM_SUBCOMMANDS: &[&str] = &[
     "version",
     "prefix",
     "root",
-    "bin",
     "bugs",
     "docs",
     "home",
@@ -90,6 +89,8 @@ const NPM_SUBCOMMANDS: &[&str] = &[
     "run-script",
     "sbom",
     "shrinkwrap",
+    "trust",
+    "undeprecate",
     "unstar",
 ];
 
@@ -291,6 +292,20 @@ npm notice
         ];
 
         for subcommand in subcommands {
+            assert!(
+                NPM_SUBCOMMANDS.contains(&subcommand),
+                "npm {subcommand} must be routed as a native subcommand"
+            );
+        }
+    }
+
+    #[test]
+    fn test_npm_subcommands_track_current_npm() {
+        // `npm bin` was removed in npm 9, so `rtk npm bin` must run a `bin` script.
+        assert!(!NPM_SUBCOMMANDS.contains(&"bin"));
+
+        // Added in npm 11; without them `rtk npm trust` becomes `npm run trust`.
+        for subcommand in ["trust", "undeprecate"] {
             assert!(
                 NPM_SUBCOMMANDS.contains(&subcommand),
                 "npm {subcommand} must be routed as a native subcommand"
