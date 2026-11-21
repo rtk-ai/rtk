@@ -1950,7 +1950,7 @@ dependencies = [
 
 [[package]]
 name = "rtk"
-version = "0.49.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "base16ct",
@@ -1989,7 +1989,7 @@ dependencies = [
 
 [[package]]
 name = "rtk-engine"
-version = "0.49.0"
+version = "1.2.0"
 dependencies = [
  "htmd",
  "regex",
@@ -2003,14 +2003,14 @@ dependencies = [
 
 [[package]]
 name = "rtk-plugin"
-version = "0.49.0"
+version = "1.2.0"
 dependencies = [
  "rtk-engine",
 ]
 
 [[package]]
 name = "rtk-text"
-version = "0.49.0"
+version = "1.2.0"
 dependencies = [
  "regex",
 ]
