@@ -18,14 +18,6 @@ pub(super) fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
     } = ctx;
     let cursor_dir = resolve_cursor_dir()?;
 
-    // Ensure ~/.cursor exists before any write: atomic_write creates its temp
-    // file in the target's parent, which fails on a fresh machine where the
-    // directory does not yet exist (part of #2097).
-    if !dry_run {
-        fs::create_dir_all(&cursor_dir)
-            .with_context(|| format!("Failed to create {}", cursor_dir.display()))?;
-    }
-
     // Migrate old hook script if present
     let old_hook = cursor_dir.join("hooks").join(REWRITE_HOOK_FILE);
     if old_hook.exists() {
@@ -96,12 +88,11 @@ fn patch_cursor_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
         &root,
         ctx,
         "hooks.json",
-        &format!(
+        Report::new(format!(
             "[dry-run] would patch Cursor hooks.json: {}",
             path.display()
-        ),
-        true,
-        Written::Backup,
+        ))
+        .with_content(),
     )?;
 
     Ok(true)
@@ -159,12 +150,11 @@ fn remove_legacy_cursor_hooks_json_entries(path: &Path, ctx: InitContext) -> Res
         &root,
         ctx,
         "hooks.json",
-        &format!(
+        Report::new(format!(
             "[dry-run] would remove legacy rtk-rewrite.sh entry from Cursor hooks.json: {}",
             path.display()
-        ),
-        false,
-        Written::Line(
+        ))
+        .done_verbose(
             "  [ok] Removed legacy rtk-rewrite.sh entry from Cursor hooks.json".to_string(),
         ),
     )
@@ -233,12 +223,11 @@ fn remove_cursor_hooks_at(cursor_dir: &Path, ctx: InitContext) -> Result<Vec<Str
             &root,
             ctx,
             "hooks.json",
-            &format!(
+            Report::new(format!(
                 "[dry-run] would remove RTK entry from Cursor hooks.json: {}",
                 hooks_json_path.display()
-            ),
-            false,
-            Written::Line("Removed RTK hook from Cursor hooks.json".to_string()),
+            ))
+            .done_verbose("Removed RTK hook from Cursor hooks.json".to_string()),
         )?;
         removed.push("Cursor hooks.json: removed RTK entry".to_string());
     }

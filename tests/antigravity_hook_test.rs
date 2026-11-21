@@ -786,6 +786,8 @@ fn antigravity_readonly_appended_rules_warns_and_succeeds() {
     let full_content = format!("{user_content}\n\n{LEGACY_V036}");
     fs::write(&legacy_file, &full_content).unwrap();
 
+    // The file is edited in place, so the file itself is what must refuse the write.
+    fs::set_permissions(&legacy_file, fs::Permissions::from_mode(0o444)).expect("chmod file");
     let mut perms = fs::metadata(rules_dir).expect("meta").permissions();
     perms.set_mode(0o555);
     fs::set_permissions(rules_dir, perms.clone()).expect("chmod");

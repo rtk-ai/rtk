@@ -370,7 +370,10 @@ fn both_failures_are_reported() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("OpenCode install failed"), "{stderr}");
     assert!(
-        stderr.contains("Failed to create OpenCode plugin directory"),
+        stderr.contains(&format!(
+            "{} is not a directory",
+            config_dir.join("opencode").display()
+        )),
         "the OpenCode cause must be reported:\n{stderr}"
     );
     assert!(stderr.contains("Agent install failed"), "{stderr}");
