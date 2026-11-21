@@ -12,8 +12,8 @@ use crate::core::tracking::{GainSummary as TrackerSummary, Tracker};
 use crate::core::utils::format_tokens;
 use crate::llm_proxy::{self, ProxyGainSummary};
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -41,20 +41,18 @@ impl State {
 }
 
 pub fn run(project_scope: Option<&str>) -> Result<()> {
-    let mut terminal = ratatui::init();
-    let mut state = State {
-        tracker_summary: None,
-        proxy_summary: None,
-        // Forces the very first draw to fetch data instead of showing "no
-        // data yet" for one frame.
-        last_refresh: Instant::now() - REFRESH_INTERVAL,
-        project_scope: project_scope.map(str::to_string),
-    };
-    state.refresh();
-
-    let result = event_loop(&mut terminal, &mut state);
-    ratatui::restore();
-    result
+    ratatui::run(|terminal| {
+        let mut state = State {
+            tracker_summary: None,
+            proxy_summary: None,
+            // Forces the very first draw to fetch data instead of showing "no
+            // data yet" for one frame.
+            last_refresh: Instant::now() - REFRESH_INTERVAL,
+            project_scope: project_scope.map(str::to_string),
+        };
+        state.refresh();
+        event_loop(terminal, &mut state)
+    })
 }
 
 fn event_loop(terminal: &mut ratatui::DefaultTerminal, state: &mut State) -> Result<()> {
