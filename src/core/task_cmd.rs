@@ -9,7 +9,7 @@ use crate::core::arg_tokenizer::{Dialect, Flag, Grammar, TokenKind, ValueSpec, t
 use crate::core::http;
 use crate::core::pipeline_config;
 use crate::core::shell::{Launch, shell_command};
-use crate::core::tracking::{Tracker, estimate_tokens};
+use crate::core::tracking::{estimate_tokens, recording_tracker};
 use crate::core::utils::{ChildArgExt, resolved_command};
 use anyhow::{Context, Result, bail};
 use rtk_engine::pipeline::{TaskDef, UpstreamDef};
@@ -279,7 +279,7 @@ pub fn run_task(name: &str, args: &[String]) -> Result<i32> {
     let corpus_tokens: usize = corpus.iter().map(|f| estimate_tokens(&f.content)).sum();
     let summary_tokens = estimate_tokens(&output);
     let _ = (worker_in, worker_out);
-    if let Ok(tracker) = Tracker::new() {
+    if let Some(tracker) = recording_tracker() {
         let _ = tracker.record_attribution("task", "task", name, corpus_tokens, summary_tokens);
     }
 
@@ -976,7 +976,7 @@ fn answer_with(
     }
     let corpus_tokens: usize = corpus.iter().map(|f| estimate_tokens(&f.content)).sum();
     let _ = (worker_in, worker_out);
-    if let Ok(tracker) = Tracker::new() {
+    if let Some(tracker) = recording_tracker() {
         let _ = tracker.record_attribution(
             "task",
             "task",
