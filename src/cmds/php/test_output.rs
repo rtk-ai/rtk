@@ -8,6 +8,12 @@ fn is_progress_line(line: &str) -> bool {
         return false;
     }
 
+    // A progress row never starts with '-'; such a line is the removed side of a diff
+    // (`-1.5` under `--- Expected`) and must reach the reader.
+    if trimmed.starts_with('-') {
+        return false;
+    }
+
     let has_dot = trimmed.contains('.');
     let progress_charset = trimmed.chars().all(|c| {
         matches!(
@@ -80,5 +86,35 @@ mod tests {
         let filtered = filter_test_runner_output(output);
         assert!(filtered.contains("There was 1 failure"));
         assert!(filtered.contains("Failed asserting true is false"));
+    }
+
+    #[test]
+    fn test_keeps_minus_side_of_numeric_assertion_diff() {
+        let output = "..F\nFailed asserting that two values are equal.\n--- Expected\n+++ Actual\n@@ @@\n-1.5\n+2.5\n";
+        let filtered = filter_test_runner_output(output);
+        assert!(
+            filtered.lines().any(|l| l == "-1.5"),
+            "expected side dropped: {filtered}"
+        );
+        assert!(filtered.lines().any(|l| l == "+2.5"));
+    }
+
+    #[test]
+    fn test_keeps_dotted_negative_and_zero_expected_values() {
+        for expected in ["-42.0", "-0.0", "-3.14", "-10.5"] {
+            let output = format!("--- Expected\n+++ Actual\n@@ @@\n{expected}\n+1.0\n");
+            let filtered = filter_test_runner_output(&output);
+            assert!(
+                filtered.lines().any(|l| l == expected),
+                "{expected} dropped: {filtered}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_still_drops_progress_counter_line() {
+        let filtered =
+            filter_test_runner_output("..........  10 / 10 (100%)\nOK (10 tests, 10 assertions)\n");
+        assert!(!filtered.contains("(100%)"));
     }
 }
