@@ -84,7 +84,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         cmd,
         "ruff",
         &display_args(args),
-        move |stdout| filter_ruff_output(&owned_args, stdout),
+        move |stdout| filter_output(&owned_args, stdout),
         runner::RunOptions::stdout_only().clean_outputs(clean_outputs),
     )
 }
@@ -96,7 +96,7 @@ fn is_analyze_graph_invocation(args: &[String]) -> bool {
 /// Choose the output treatment for a routed invocation: check runs get the
 /// JSON summary, format runs the format summary, help and version requests
 /// stay complete, and everything else is a bounded passthrough.
-fn filter_ruff_output(args: &[String], stdout: &str) -> String {
+fn filter_output(args: &[String], stdout: &str) -> String {
     let route = route_ruff_args(args);
     let is_check = matches!(route, RuffRoute::Check { .. });
     let is_format = matches!(route, RuffRoute::Subcommand { at } if args[at] == "format");
@@ -112,9 +112,9 @@ fn filter_ruff_output(args: &[String], stdout: &str) -> String {
     let use_json_filter = !user_set_output_format || user_json_format;
 
     if is_check && use_json_filter && !trimmed.is_empty() {
-        filter_ruff_check_json(stdout)
+        filter_check_json(stdout)
     } else if is_format {
-        filter_ruff_format(stdout)
+        filter_format(stdout)
     } else if ruff_output_is_complete(route, args) {
         // Help and version output are complete documentation: raw Ruff
         // returns every byte, and so does rtk.
@@ -248,7 +248,7 @@ fn plan_ruff_command(args: &[String]) -> Vec<String> {
 }
 
 /// Filter ruff check JSON output - group by rule and file
-pub fn filter_ruff_check_json(output: &str) -> String {
+pub fn filter_check_json(output: &str) -> String {
     let diagnostics: Result<Vec<RuffDiagnostic>, _> = serde_json::from_str(output);
 
     let diagnostics = match diagnostics {
@@ -416,7 +416,7 @@ pub fn filter_ruff_check_json(output: &str) -> String {
 }
 
 /// Filter ruff format output - show files that need formatting
-pub fn filter_ruff_format(output: &str) -> String {
+pub fn filter_format(output: &str) -> String {
     let mut files_to_format: Vec<String> = Vec::new();
     let mut files_checked = 0;
 
@@ -631,7 +631,7 @@ mod tests {
         assert!(raw.len() > config::limits().passthrough_max_chars);
 
         let args = ["analyze".to_string(), "graph".to_string()];
-        let result = filter_ruff_output(&args, raw);
+        let result = filter_output(&args, raw);
 
         assert_eq!(result, raw.trim());
         serde_json::from_str::<serde_json::Value>(&result)
@@ -658,7 +658,7 @@ mod tests {
 
         let raw = include_str!("../../../tests/fixtures/ruff_rule_e501_raw.txt");
         assert!(raw.len() > config::limits().passthrough_max_chars);
-        let result = filter_ruff_output(&args(&["rule", "E501"]), raw);
+        let result = filter_output(&args(&["rule", "E501"]), raw);
         assert!(
             result.ends_with("...") && raw.starts_with(result.trim_end_matches("...")),
             "rule output must be a capped prefix of ruff's, got {} of {} bytes",
@@ -670,7 +670,7 @@ mod tests {
     #[test]
     fn test_filter_ruff_check_no_issues() {
         let output = "[]";
-        let result = filter_ruff_check_json(output);
+        let result = filter_check_json(output);
         assert!(result.contains("Ruff"));
         assert!(result.contains("No issues found"));
     }
@@ -681,7 +681,7 @@ mod tests {
             {"code":"F401","message":"`os` imported but unused","location":{"row":1,"column":8},"filename":"/project/src/a.py","fix":null},
             {"code":"F401","message":"`os` imported but unused","location":{"row":2,"column":8},"filename":"/project/src/b.py","fix":null}
         ]"#;
-        let out = filter_ruff_check_json(input);
+        let out = filter_check_json(input);
         let (summary, detail) = out.split_once("Violations:\n").expect("detail section");
         assert!(
             summary.contains("F401 (2x): `os` imported but unused"),
@@ -698,7 +698,7 @@ mod tests {
             {"code":"F401","message":"`os` imported but unused","location":{"row":1,"column":8},"filename":"/project/src/a.py","fix":null},
             {"code":"F401","message":"`sys` imported but unused","location":{"row":2,"column":8},"filename":"/project/src/a.py","fix":null}
         ]"#;
-        let out = filter_ruff_check_json(input);
+        let out = filter_check_json(input);
         assert!(out.contains("src/a.py:1:8 F401 `os` imported but unused"));
         assert!(out.contains("src/a.py:2:8 F401 `sys` imported but unused"));
     }
@@ -713,8 +713,7 @@ mod tests {
                 })
             })
             .collect();
-        let out =
-            filter_ruff_check_json(&serde_json::to_string(&diagnostics).expect("fixture JSON"));
+        let out = filter_check_json(&serde_json::to_string(&diagnostics).expect("fixture JSON"));
         let detail = out.split_once("Violations:\n").expect("detail section").1;
         assert!(detail.contains("RULE10 Distinct diagnostic 10"), "{out}");
     }
@@ -726,7 +725,7 @@ mod tests {
         // where four.py imports os and has two one-line if statements. Only
         // the machine-specific filename prefix was normalized to /fixture.
         let input = include_str!("../../../tests/fixtures/ruff_check_repeated_raw.json");
-        let out = filter_ruff_check_json(input);
+        let out = filter_check_json(input);
         assert_eq!(
             out.matches("Multiple statements on one line (colon)")
                 .count(),
@@ -746,7 +745,7 @@ mod tests {
             "must save at least 20%"
         );
         for _ in 0..10 {
-            assert_eq!(filter_ruff_check_json(input), out);
+            assert_eq!(filter_check_json(input), out);
         }
     }
 
@@ -766,7 +765,7 @@ mod tests {
         // Each run hashes its maps differently; a count-only sort would pass
         // one run by luck but not ten.
         for _ in 0..10 {
-            let out = filter_ruff_check_json(input);
+            let out = filter_check_json(input);
             assert!(out.contains(expected_rules), "{out}");
             assert!(out.contains(expected_files), "{out}");
         }
@@ -779,7 +778,7 @@ mod tests {
         // modules importing the same long module name. Only the machine-specific
         // filename prefix was normalized to /fixture.
         let input = include_str!("../../../tests/fixtures/ruff_check_long_message_raw.json");
-        let out = filter_ruff_check_json(input);
+        let out = filter_check_json(input);
         assert!(
             out.contains("  F401 (2x): `a_really_long_package_name_for_testing.with_a_long_submodule_name.and_yet_another_module` import...\n"),
             "{out}"
@@ -817,7 +816,7 @@ mod tests {
     "fix": null
   }
 ]"#;
-        let result = filter_ruff_check_json(output);
+        let result = filter_check_json(output);
         assert!(result.contains("3 issues"));
         assert!(result.contains("2 files"));
         assert!(result.contains("1 fixable"));
@@ -832,7 +831,7 @@ mod tests {
     #[test]
     fn test_filter_ruff_format_all_formatted() {
         let output = "5 files left unchanged";
-        let result = filter_ruff_format(output);
+        let result = filter_format(output);
         assert!(result.contains("Ruff format"));
         assert!(result.contains("All files formatted correctly"));
     }
@@ -842,7 +841,7 @@ mod tests {
         let output = r#"Would reformat: src/main.py
 Would reformat: tests/test_utils.py
 2 files would be reformatted, 3 files left unchanged"#;
-        let result = filter_ruff_format(output);
+        let result = filter_format(output);
         assert!(result.contains("2 files need formatting"));
         assert!(result.contains("main.py"));
         assert!(result.contains("test_utils.py"));
@@ -860,7 +859,7 @@ Would reformat: tests/test_utils.py
             ));
         }
         let json = format!("[\n{}\n]", diags.join(",\n"));
-        let result = filter_ruff_check_json(&json);
+        let result = filter_check_json(&json);
 
         let in_section = result.split("Violations:").nth(1).unwrap_or("");
         let listed = in_section
@@ -1160,16 +1159,13 @@ Would reformat: tests/test_utils.py
         let max_chars = config::limits().passthrough_max_chars;
         let help = "usage: ruff help\n".repeat(max_chars);
         assert_eq!(
-            filter_ruff_output(&owned(&["help", "format"]), &help),
+            filter_output(&owned(&["help", "format"]), &help),
             help.trim()
         );
-        assert_eq!(filter_ruff_output(&owned(&["version"]), &help), help.trim());
+        assert_eq!(filter_output(&owned(&["version"]), &help), help.trim());
+        assert_eq!(filter_output(&owned(&["--version"]), &help), help.trim());
         assert_eq!(
-            filter_ruff_output(&owned(&["--version"]), &help),
-            help.trim()
-        );
-        assert_eq!(
-            filter_ruff_output(&owned(&["--config", "ruff.toml", "--help"]), &help),
+            filter_output(&owned(&["--config", "ruff.toml", "--help"]), &help),
             help.trim()
         );
     }
@@ -1178,7 +1174,7 @@ Would reformat: tests/test_utils.py
     fn ruff_other_subcommands_keep_the_bounded_passthrough() {
         let max_chars = config::limits().passthrough_max_chars;
         let long = "rule F401: ".repeat(max_chars);
-        let out = filter_ruff_output(&owned(&["rule", "F401"]), &long);
+        let out = filter_output(&owned(&["rule", "F401"]), &long);
         assert!(out.len() < long.len());
         assert!(out.ends_with("..."));
     }
@@ -1187,13 +1183,13 @@ Would reformat: tests/test_utils.py
     fn ruff_output_filter_selects_by_route() {
         // Check runs keep the JSON summary.
         let json = r#"[{"code":"F401","message":"`os` imported but unused","location":{"row":1,"column":1},"end_location":{"row":1,"column":9},"filename":"dirty.py","fix":null}]"#;
-        assert!(filter_ruff_output(&owned(&["check", "dirty.py"]), json).contains("F401"));
+        assert!(filter_output(&owned(&["check", "dirty.py"]), json).contains("F401"));
         // The format filter still serves effective format subcommands
         // (pre-0.16 wording; the ruff >= 0.16 shapes are #3965's scope).
         let mixed =
             "Would reformat: dirty.py\n2 files would be reformatted, 3 files left unchanged";
         assert!(
-            filter_ruff_output(&owned(&["format", "--check", "dirty.py"]), mixed)
+            filter_output(&owned(&["format", "--check", "dirty.py"]), mixed)
                 .contains("1 files need formatting")
         );
     }
