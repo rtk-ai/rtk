@@ -488,7 +488,22 @@ fn load_permission_rules_tracking(
         append_bash_rules(permissions.get("allow"), &mut allow_rules);
     }
 
+    allow_rules.retain(|pattern| !is_colon_spelled_catch_all(pattern));
+
     (deny_rules, ask_rules, allow_rules)
+}
+
+/// Whether a rule names no command and spells its wildcard with a colon: `:*`, `*:*`,
+/// `::*`, `*:**`. [`command_matches_pattern`] reads these as broad wildcards, which errs
+/// on the safe side for deny and ask. Claude Code does not read them as every command,
+/// so as an allow rule they would approve what it prompts for: they are not loaded, and
+/// it keeps that decision. `: *` names the `:` builtin, and is read as that.
+fn is_colon_spelled_catch_all(pattern: &str) -> bool {
+    let pattern = normalize_command_text(pattern);
+    pattern.contains(':')
+        && pattern.contains('*')
+        && !pattern.starts_with(": ")
+        && pattern.chars().all(|c| matches!(c, ':' | '*' | ' '))
 }
 
 /// Extract Bash-scoped patterns from a JSON array and append them to `target`.
@@ -1283,7 +1298,8 @@ mod tests {
         assert!(!command_matches_pattern("sudoedit /etc/hosts", "sudo:*"));
     }
 
-    // Bug 2: *:* catch-all must match everything
+    // Bug 2: *:* catch-all must match everything. As an allow rule from Claude
+    // settings it is not loaded, see is_colon_spelled_catch_all.
     #[test]
     fn test_star_colon_star_matches_everything() {
         assert!(command_matches_pattern("rm -rf /", "*:*"));
@@ -1349,6 +1365,56 @@ mod tests {
             "git pull origin main",
             "git * --force *"
         ));
+    }
+
+    fn allow_rules_loaded_from(allow: &[&str]) -> Vec<String> {
+        let allow: Vec<String> = allow.iter().map(|rule| format!("Bash({rule})")).collect();
+        let settings = serde_json::json!({ "permissions": { "allow": allow } }).to_string();
+        rules_from_files(&[("settings.json", Some(&settings))]).2
+    }
+
+    #[test]
+    fn test_colon_spelled_catch_alls_are_not_loaded_as_allow_rules() {
+        for rule in [":*", "*:*", "::*", "*:**", "* :*", " *:* ", ":\\\n*"] {
+            assert!(allow_rules_loaded_from(&[rule]).is_empty(), "{rule:?}");
+        }
+    }
+
+    #[test]
+    fn test_allow_rules_naming_a_command_or_a_plain_wildcard_are_loaded() {
+        for rule in [
+            "*",
+            "**",
+            ":",
+            ": *",
+            "git:*",
+            "a:b:*",
+            "git:status",
+            "git -C * status:*",
+            "curl *:8080*",
+        ] {
+            assert_eq!(allow_rules_loaded_from(&[rule]), [rule], "{rule:?}");
+        }
+    }
+
+    #[test]
+    fn test_a_dropped_allow_rule_leaves_the_others() {
+        assert_eq!(allow_rules_loaded_from(&["*:*", "git:*"]), ["git:*"]);
+    }
+
+    #[test]
+    fn test_colon_spelled_catch_alls_are_still_read_for_deny_and_ask() {
+        let settings = serde_json::json!({
+            "permissions": { "deny": ["Bash(*:*)"], "ask": ["Bash(:*)"] }
+        })
+        .to_string();
+        let (deny, ask, _) = rules_from_files(&[("settings.json", Some(&settings))]);
+        assert_eq!(deny, ["*:*"]);
+        assert_eq!(ask, [":*"]);
+        assert_eq!(
+            check_command_with_rules("git status", &[], &ask, &[]),
+            PermissionVerdict::Ask
+        );
     }
 
     // Integration: deny with leading wildcard
