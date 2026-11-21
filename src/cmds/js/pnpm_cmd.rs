@@ -365,7 +365,7 @@ fn format_dependency_listing(state: &DependencyState, cap: bool) -> String {
 
 #[derive(Debug, Clone)]
 pub enum PnpmCommand {
-    List { depth: usize },
+    List { depth: Option<i64> },
     Outdated,
     Install,
 }
@@ -378,7 +378,29 @@ pub fn run(cmd: PnpmCommand, args: &[String], verbose: u8) -> Result<i32> {
     }
 }
 
-fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
+fn list_needs_passthrough(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(arg.as_str(), "--json" | "--depth" | "-d" | "--")
+            || arg.starts_with("--json=")
+            || arg.starts_with("--depth=")
+            || arg.starts_with("-d")
+    })
+}
+
+fn run_list(depth: Option<i64>, args: &[String], verbose: u8) -> Result<i32> {
+    // Explicit output/depth requests belong to pnpm: do not inject conflicting
+    // defaults or condense machine-readable JSON. A separator also makes the
+    // remaining tokens package selectors rather than options.
+    if depth.is_some() || list_needs_passthrough(args) {
+        let mut forwarded = vec![OsString::from("list")];
+        if let Some(depth) = depth {
+            forwarded.push(format!("--depth={depth}").into());
+        }
+        forwarded.extend(args.iter().map(OsString::from));
+        return run_passthrough(&forwarded, verbose);
+    }
+
+    let depth = 0;
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = resolved_command("pnpm");
@@ -564,6 +586,24 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_list_explicit_options_bypass_defaults() {
+        for flag in [
+            "--json",
+            "--json=true",
+            "--depth",
+            "--depth=-1",
+            "-d",
+            "-d2",
+            "--",
+        ] {
+            assert!(list_needs_passthrough(&[flag.to_string()]));
+        }
+        for flag in ["--prod", "--dev", "--filter=@demo/a", "some-package"] {
+            assert!(!list_needs_passthrough(&[flag.to_string()]));
+        }
+    }
 
     #[test]
     fn test_pnpm_list_parser_json() {
