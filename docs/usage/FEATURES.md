@@ -155,7 +155,7 @@ fn main() -> Result<()> {                   fn main() -> Result<()> { ... }
 ...
 ```
 
-**Languages supported for filtering:** Rust, Python, JavaScript, TypeScript, Go, C, C++, Java, Ruby, Shell.
+**Languages supported for filtering:** Rust, Python, JavaScript, TypeScript, Go, C, C++, Java, Ruby, Shell, CSS, and other `//`/`/* */` languages (Kotlin, Swift, Scala, C#, Dart, Groovy/Gradle, Protobuf, SCSS, Less, Objective-C, WIT, WGSL, HLSL, Metal).
 
 ---
 
