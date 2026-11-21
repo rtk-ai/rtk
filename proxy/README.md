@@ -17,8 +17,8 @@ between your AI coding tool and the real provider endpoint, runs the pipeline
 on the traffic — compression, and the relay of calls your pipeline routes to
 cheaper models — then relays the response back. It is agent-agnostic by
 design: it speaks the provider's dialect, not the agent's. Claude Code
-(`rtk claude`), Codex (`rtk codex`) and Mistral Vibe (`rtk vibe`) are wired
-end to end; Cursor and Antigravity offer no base-URL override, so they keep
+(`rtk claude`), OpenCode (`rtk opencode`, Anthropic provider), Codex
+(`rtk codex`) and Mistral Vibe (`rtk vibe`) are wired end to end; Cursor and Antigravity offer no base-URL override, so they keep
 RTK's hooks and never reach the daemon.
 
 It is a **local daemon**: one background process on your machine, driven by the
@@ -45,6 +45,7 @@ Setup, what the daemon compresses, its settings and endpoints live in the user g
 
 ```bash
 rtk claude              # start the daemon if needed, then launch Claude Code through it
+rtk opencode            # same for OpenCode (its Anthropic provider)
 rtk codex               # same for Codex (API-key or ChatGPT login)
 rtk vibe                # same for Mistral Vibe, once `rtk init -g --agent vibe` pointed it here
 rtk llm-proxy status    # is it up

@@ -12,7 +12,7 @@ moving.
 
 ## Adding an agent to `rtk <agent>`
 
-`rtk claude`, `rtk codex` and `rtk vibe` start the daemon if it is not running,
+`rtk claude`, `rtk opencode`, `rtk codex` and `rtk vibe` start the daemon if it is not running,
 point the agent at it through the one channel that agent reads, and hand over
 the process — on Unix by `exec`, so signals, stdio and the exit code behave
 exactly as if the agent had been launched directly.
@@ -23,7 +23,7 @@ a `Redirect`, which is how the agent is pointed elsewhere:
 
 | `Redirect` | The agent reads | Launcher | Guided setup |
 |---|---|---|---|
-| `Env { var }` | an environment variable (Claude Code: `ANTHROPIC_BASE_URL`) | sets it for the process | writes it into the agent's settings |
+| `Env { var, path, exported }` | an environment variable, with the route `path` after the daemon's address (Claude Code: `ANTHROPIC_BASE_URL`, no path; OpenCode: the same variable, `/v1`) | sets it for the process | writes it into the agent's settings when `exported`; a variable shared with another agent at a different path stays launcher-only |
 | `CliOverride { file, key, read, path }` | a config key that a CLI flag can override per run (Codex: `openai_base_url`, `-c`) | passes the override | writes the key |
 | `ConfigFile { file, path, read }` | a config file only (Vibe: the `mistral` provider's `api_base`) | verifies the file and refuses to launch at a dead daemon; never writes | writes the entry |
 

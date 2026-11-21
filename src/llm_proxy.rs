@@ -639,8 +639,15 @@ pub struct ProxyAgent {
 
 #[derive(Debug, Clone, Copy)]
 pub enum Redirect {
+    /// A base-URL variable set on the launched process. `path` follows the
+    /// daemon's address (see `ConfigChannel::Env`). `exported` says whether
+    /// `rtk llm-proxy start --env` and `rtk init` also set it shell- or
+    /// settings-wide: false when the variable is shared with another agent that
+    /// expects a different path, so only `rtk <agent>` can set it safely.
     Env {
         var: &'static str,
+        path: &'static str,
+        exported: bool,
     },
     ConfigFile {
         file: &'static str,
@@ -664,6 +671,19 @@ pub const PROXY_AGENTS: &[ProxyAgent] = &[
         label: "Claude Code",
         redirect: Redirect::Env {
             var: "ANTHROPIC_BASE_URL",
+            path: "",
+            exported: true,
+        },
+    },
+    // Claude Code reads the same variable without `/v1`, so a shell-wide value
+    // would send OpenCode to `/messages`. Only `rtk opencode` sets it.
+    ProxyAgent {
+        name: "opencode",
+        label: "OpenCode",
+        redirect: Redirect::Env {
+            var: "ANTHROPIC_BASE_URL",
+            path: "/v1",
+            exported: false,
         },
     },
     ProxyAgent {
@@ -756,6 +776,7 @@ enum LaunchPlan {
     UnproxiedClear,
 }
 
+#[cfg(test)]
 fn launch_plan(existing: Option<&str>, proxy_url: &str, daemon_up: bool) -> LaunchPlan {
     launch_plan_with(existing, |url| url == proxy_url, daemon_up)
 }
@@ -833,11 +854,15 @@ fn plan_launch(
         agent.name
     );
     match agent.redirect {
-        Redirect::Env { var } => {
-            let base_url = format!("http://{bind}");
+        Redirect::Env { var, path, .. } => {
+            let base_url = format!("http://{bind}{path}");
             let existing = env(var);
             let up = daemon_up(&mut plan);
-            match launch_plan(existing.as_deref(), &base_url, up) {
+            // Any value RTK writes for this variable is ours, including the
+            // one exported for another agent at a different path: it points at
+            // the same daemon, and this agent needs its own path.
+            let ours = |url: &str| is_rtk_url(url, bind, &[path, ""]);
+            match launch_plan_with(existing.as_deref(), ours, up) {
                 LaunchPlan::Proxied => plan.set_env = Some((var.to_string(), base_url)),
                 LaunchPlan::KeepExisting => plan.notices.push(format!(
                     "rtk: {var} is already set — leaving it; unset it to route through the rtk proxy"
@@ -997,9 +1022,15 @@ fn run_setup() -> Result<()> {
     }
     for agent in &detected {
         match agent.redirect {
-            Redirect::Env { .. } => println!(
+            Redirect::Env { exported: true, .. } => println!(
                 "detected: {} ({}) -- run `rtk init` to route it through the proxy, or `eval \"$(rtk llm-proxy start --env)\"` for one shell",
                 agent.name, agent.label
+            ),
+            Redirect::Env {
+                exported: false, ..
+            } => println!(
+                "detected: {} ({}) -- `rtk {}` routes each session through the proxy",
+                agent.name, agent.label, agent.name
             ),
             Redirect::ConfigFile { setup, .. } => println!(
                 "detected: {} ({}) -- run `{setup}` to route it through the proxy",
@@ -1043,7 +1074,15 @@ fn run_start(bind: Option<&str>, env_only: bool) -> Result<()> {
             println!();
             println!("point {} at it:", agent.label);
             match agent.redirect {
-                Redirect::Env { .. } => {
+                Redirect::Env {
+                    exported: false, ..
+                } => {
+                    if let Some(export) = bind_export_hint(&bind) {
+                        println!("  {export}");
+                    }
+                    println!("  rtk {} [{} args...]", agent.name, agent.name);
+                }
+                Redirect::Env { exported: true, .. } => {
                     if let Some(export) = bind_export_hint(&bind) {
                         println!("  {export}");
                     }
@@ -1128,8 +1167,16 @@ fn env_lines(bind: &str) -> Vec<String> {
     PROXY_AGENTS
         .iter()
         .filter_map(|agent| match agent.redirect {
-            Redirect::Env { var } => Some(format!("export {var}=http://{bind}")),
-            Redirect::ConfigFile { .. } | Redirect::CliOverride { .. } => None,
+            Redirect::Env {
+                var,
+                path,
+                exported: true,
+            } => Some(format!("export {var}=http://{bind}{path}")),
+            Redirect::Env {
+                exported: false, ..
+            }
+            | Redirect::ConfigFile { .. }
+            | Redirect::CliOverride { .. } => None,
         })
         .collect()
 }
@@ -1224,6 +1271,7 @@ mod tests {
         assert!(resolve_agent("claude").is_some());
         assert!(resolve_agent("codex").is_some());
         assert!(resolve_agent("vibe").is_some());
+        assert!(resolve_agent("opencode").is_some());
         // No base-URL override exists for these, so `rtk cursor` must stay
         // plain passthrough rather than pretending to route.
         for absent in [
@@ -1231,7 +1279,6 @@ mod tests {
             "cursor-agent",
             "windsurf",
             "cline",
-            "opencode",
             "antigravity",
             "agy",
         ] {
@@ -1243,11 +1290,18 @@ mod tests {
         for agent in PROXY_AGENTS {
             assert!(!agent.name.is_empty());
             match agent.redirect {
-                Redirect::Env { var } => assert!(
-                    var.ends_with("_BASE_URL"),
-                    "{} must name a base-URL variable",
-                    agent.name
-                ),
+                Redirect::Env { var, path, .. } => {
+                    assert!(
+                        var.ends_with("_BASE_URL"),
+                        "{} must name a base-URL variable",
+                        agent.name
+                    );
+                    assert!(
+                        path.is_empty() || (path.starts_with('/') && !path.ends_with('/')),
+                        "{}",
+                        agent.name
+                    );
+                }
                 Redirect::ConfigFile {
                     file, path, setup, ..
                 } => {
@@ -1414,6 +1468,20 @@ mod tests {
             label: "Claude Code",
             redirect: Redirect::Env {
                 var: "ANTHROPIC_BASE_URL",
+                path: "",
+                exported: true,
+            },
+        }
+    }
+
+    fn opencode_agent() -> ProxyAgent {
+        ProxyAgent {
+            name: "opencode",
+            label: "OpenCode",
+            redirect: Redirect::Env {
+                var: "ANTHROPIC_BASE_URL",
+                path: "/v1",
+                exported: false,
             },
         }
     }
@@ -1572,6 +1640,74 @@ mod tests {
         assert_eq!(absent.remove_env, None);
     }
 
+    /// OpenCode's AI SDK appends `/messages` to the base URL, so it needs
+    /// `/v1` where Claude Code does not (checked on opencode 1.19.6).
+    #[test]
+    fn opencode_is_pointed_at_the_v1_route() {
+        let up = plan_launch(&opencode_agent(), BIND, no_env, || Ok(()));
+        assert_eq!(
+            up.set_env,
+            Some((
+                "ANTHROPIC_BASE_URL".to_string(),
+                "http://127.0.0.1:8080/v1".to_string()
+            ))
+        );
+        assert!(up.notices.is_empty(), "{:?}", up.notices);
+    }
+
+    #[test]
+    fn opencode_replaces_the_value_exported_for_claude_code() {
+        // `eval "$(rtk llm-proxy start --env)"` exports the daemon's bare
+        // address for Claude Code; left alone, OpenCode would call `/messages`.
+        let plan = plan_launch(
+            &opencode_agent(),
+            BIND,
+            |_| Some("http://127.0.0.1:8080".to_string()),
+            || Ok(()),
+        );
+        assert_eq!(
+            plan.set_env,
+            Some((
+                "ANTHROPIC_BASE_URL".to_string(),
+                "http://127.0.0.1:8080/v1".to_string()
+            ))
+        );
+        let dead = plan_launch(
+            &opencode_agent(),
+            BIND,
+            |_| Some("http://127.0.0.1:8080/v1".to_string()),
+            || anyhow::bail!("no binary"),
+        );
+        assert_eq!(dead.remove_env, Some("ANTHROPIC_BASE_URL".to_string()));
+    }
+
+    #[test]
+    fn opencode_keeps_a_gateway_the_user_set() {
+        let plan = plan_launch(
+            &opencode_agent(),
+            BIND,
+            |_| Some("http://127.0.0.1:4000/v1".to_string()),
+            || Ok(()),
+        );
+        assert_eq!(plan.set_env, None);
+        assert_eq!(plan.remove_env, None);
+        assert!(
+            plan.notices[0].contains("already set"),
+            "{:?}",
+            plan.notices
+        );
+    }
+
+    #[test]
+    fn the_shell_export_never_carries_a_launch_only_agent() {
+        // Claude Code and OpenCode share ANTHROPIC_BASE_URL at different paths,
+        // so the export stays Claude Code's and OpenCode goes through `rtk opencode`.
+        assert_eq!(
+            env_lines("127.0.0.1:8080"),
+            vec!["export ANTHROPIC_BASE_URL=http://127.0.0.1:8080".to_string()]
+        );
+    }
+
     #[test]
     fn the_shipped_routes_are_the_ones_the_daemon_serves() {
         let Redirect::ConfigFile { path, .. } = resolve_agent("vibe").unwrap().redirect else {
@@ -1597,8 +1733,15 @@ mod tests {
                 .unwrap_or_else(|| panic!("{} names no harness profile", agent.name));
             assert_eq!(profile.name, agent.label);
             match (agent.redirect, profile.base_url_config) {
-                (Redirect::Env { var }, Some(ConfigChannel::Env { var: documented })) => {
-                    assert_eq!(var, documented, "{}", agent.name)
+                (
+                    Redirect::Env { var, path, .. },
+                    Some(ConfigChannel::Env {
+                        var: documented,
+                        path: documented_path,
+                    }),
+                ) => {
+                    assert_eq!(var, documented, "{}", agent.name);
+                    assert_eq!(path, documented_path, "{}", agent.name);
                 }
                 (
                     Redirect::ConfigFile { file, .. },
