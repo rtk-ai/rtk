@@ -234,10 +234,7 @@ fn patch_gemini_settings(
         return Ok(false);
     }
 
-    // Write atomically
-    let tmp = NamedTempFile::new_in(gemini_dir)?;
-    fs::write(tmp.path(), &content)?;
-    tmp.persist(&settings_path)
+    atomic_write(&settings_path, &content)
         .with_context(|| format!("Failed to write {}", settings_path.display()))?;
 
     if verbose > 0 {
@@ -356,6 +353,67 @@ pub fn is_configured() -> bool {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_patch_gemini_settings_keeps_file_mode() {
+        let tmp = TempDir::new().expect("create temp dir");
+        let gemini_dir = tmp.path().join(".gemini");
+        fs::create_dir_all(&gemini_dir).expect("create .gemini");
+        let settings_path = gemini_dir.join(SETTINGS_JSON);
+        if !seed_with_mode(&settings_path, b"{\"model\": \"foo\"}", 0o640) {
+            return;
+        }
+
+        // Under umask 077 a new file would come out 0600.
+        test_isolation::with_umask(0o077, || {
+            patch_gemini_settings(
+                &gemini_dir,
+                Path::new("/fake/hook/path"),
+                PatchMode::Auto,
+                InitContext::default(),
+            )
+        })
+        .expect("patch settings.json");
+
+        let content = fs::read_to_string(&settings_path).expect("read settings.json");
+        assert!(content.contains("/fake/hook/path"), "hook must be added");
+        assert_eq!(
+            mode_of(&settings_path),
+            0o640,
+            "patch must keep settings.json's mode"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_patch_gemini_settings_writes_through_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().expect("create temp dir");
+        let gemini_dir = tmp.path().join(".gemini");
+        fs::create_dir_all(&gemini_dir).expect("create .gemini");
+        let dotfiles = tmp.path().join("dotfiles-settings.json");
+        fs::write(&dotfiles, "{\"model\": \"foo\"}").expect("seed the link's target");
+        let settings_path = gemini_dir.join(SETTINGS_JSON);
+        symlink(&dotfiles, &settings_path).expect("link settings.json");
+
+        patch_gemini_settings(
+            &gemini_dir,
+            Path::new("/fake/hook/path"),
+            PatchMode::Auto,
+            InitContext::default(),
+        )
+        .expect("patch settings.json");
+
+        let link = fs::symlink_metadata(&settings_path).expect("lstat settings.json");
+        assert!(link.file_type().is_symlink(), "the link must stay");
+        let content = fs::read_to_string(&dotfiles).expect("read the link's target");
+        assert!(
+            content.contains("/fake/hook/path"),
+            "the target gets the hook"
+        );
+    }
 
     #[test]
     fn test_patch_gemini_settings_malformed_json_warns_without_overwriting() {

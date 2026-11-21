@@ -119,6 +119,18 @@ pub fn with_agent_dir<R>(tmp: &Path, var: &str, dir: &Path, f: impl FnOnce() -> 
     with_root(&home, || user_env::with_path(var, Some(dir), f))
 }
 
+/// What `id` prints with `flag` (such as `-u` or `-G`), or `None` when it
+/// cannot run or fails.
+#[cfg(unix)]
+pub fn id(flag: &str) -> Option<String> {
+    Command::new("id")
+        .arg(flag)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Whether `path` lies inside the scratch directory, as spelt or with links
 /// resolved: the working directory comes back resolved (`/private/var/…` on
 /// macOS), while the scratch path is spelt as the temporary directory was.
