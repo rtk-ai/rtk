@@ -198,21 +198,17 @@ pub fn ok_confirmation(action: &str, detail: &str) -> String {
 /// `128 + signal` per Unix convention when terminated by a signal (no exit code
 /// available). Falls back to 1 on non-Unix platforms.
 pub fn exit_code_from_output(output: &std::process::Output, label: &str) -> i32 {
-    match output.status.code() {
-        Some(code) => code,
-        None => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::ExitStatusExt;
-                if let Some(sig) = output.status.signal() {
-                    eprintln!("[rtk] {}: process terminated by signal {}", label, sig);
-                    return 128 + sig;
-                }
-            }
-            eprintln!("[rtk] {}: process terminated by signal", label);
-            1
-        }
-    }
+    exit_code_from_status(&output.status, label)
+}
+
+/// The signal behind an exit `code` that an MSYS/Cygwin program reports to a native
+/// Windows parent when a signal killed it: `signal << 8`, e.g. 1536 for SIGABRT from
+/// Git for Windows' grep (#5073). A POSIX shell keeps only the low byte of an exit
+/// code, so passed through as is it reads as 0, success. `None` off Windows, where
+/// a signal never arrives as an exit code.
+pub(crate) fn msys_signal(code: i32) -> Option<i32> {
+    let sig = code >> 8;
+    (cfg!(windows) && code & 0xFF == 0 && (1..=64).contains(&sig)).then_some(sig)
 }
 
 /// Extract exit code from an ExitStatus (for `.status()` calls, not `.output()`).
@@ -220,7 +216,13 @@ pub fn exit_code_from_output(output: &std::process::Output, label: &str) -> i32 
 /// terminated by a signal. Falls back to 1 on non-Unix platforms.
 pub fn exit_code_from_status(status: &std::process::ExitStatus, label: &str) -> i32 {
     match status.code() {
-        Some(code) => code,
+        Some(code) => match msys_signal(code) {
+            Some(sig) => {
+                eprintln!("[rtk] {}: process terminated by signal {}", label, sig);
+                128 + sig
+            }
+            None => code,
+        },
         None => {
             #[cfg(unix)]
             {
