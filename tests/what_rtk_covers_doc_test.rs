@@ -189,6 +189,8 @@ const UNDOCUMENTED: &[&str] = &[
     "paratest",
     "pest",
     "php",
+    "phpcbf",
+    "phpcs",
     "phpstan",
     "phpt",
     "phpunit",

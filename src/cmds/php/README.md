@@ -11,5 +11,6 @@
 - `ecs_cmd.rs` condenses EasyCodingStandard output while preserving file paths and error lines
 - `pest_cmd.rs` runs Pest with compact progress suppression and test-focused output
 - `paratest_cmd.rs` runs ParaTest with compact progress suppression and test-focused output
+- `phpcs_cmd.rs` runs PHP_CodeSniffer (`phpcs`) and its fixer (`phpcbf`); drops report frames (dash rows, blank lines, `-p` progress, `Time:` footer) and keeps every finding. `--report=json|xml|...`, `-v`, `-i`, `-e` and stdin runs pass through
 - `test_output.rs` provides shared PHPUnit/Pest/ParaTest output filtering logic
 - `utils.rs` resolves local `vendor/bin/*` tools first, then falls back to global binaries
