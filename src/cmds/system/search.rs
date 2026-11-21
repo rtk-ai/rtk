@@ -462,6 +462,24 @@ fn unparsed_signal(stdout: &str) -> usize {
         .count()
 }
 
+/// BusyBox/non-GNU grep rejects RTK's `-I`/`--null` parse aids with an
+/// "unrecognized option" (or equivalent) error. Only that case may trigger the
+/// verbatim re-run — a genuine error after matches (e.g. unreadable path in
+/// `grep -r`) must surface as-is, not cause a second run that replaces filtered
+/// output with raw (#5199).
+fn is_unsupported_parse_flag_stderr(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("unrecognized option")
+        || lower.contains("invalid option")
+        || lower.contains("illegal option")
+}
+
+/// `#5192` fallback: engine rejected our parse aids, so re-run the agent's argv
+/// verbatim instead of surfacing an error the raw command never had.
+fn engine_failed(exit_code: i32, stderr: &str, stdout_empty: bool) -> bool {
+    exit_code == 2 && stdout_empty && is_unsupported_parse_flag_stderr(stderr)
+}
+
 /// Run real grep so matches and the savings baseline match the agent's command;
 /// rg is the fallback when grep is absent, rejects a flag, or `--type` is used.
 /// The search engine the agent actually invoked. RTK runs this binary verbatim
@@ -653,7 +671,7 @@ fn run_streaming_search(
     max_results: usize,
     real_cmd: &str,
     detected_flags: DetectedFlags,
-) -> Result<i32> {
+) -> Result<stream::StreamResult> {
     let filter = SearchStreamFilter {
         show_file: detected_flags
             .show_file
@@ -677,7 +695,18 @@ fn run_streaming_search(
         &result.raw_stdout,
         &result.filtered,
     );
-    Ok(result.exit_code)
+    Ok(result)
+}
+
+/// Passthrough argv: the agent's flags verbatim, plus `--line-buffered` only
+/// when the caller wants live output through a pipe.
+fn passthrough_args<T: AsRef<str>>(args: &[T], line_buffered: bool) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len() + usize::from(line_buffered));
+    if line_buffered {
+        out.push("--line-buffered".to_string());
+    }
+    out.extend(args.iter().map(|arg| arg.as_ref().to_string()));
+    out
 }
 
 /// Runs the agent's command verbatim for forms RTK does not group: format/shape
@@ -694,20 +723,26 @@ fn passthrough<T: AsRef<str>>(
     stream_stdin: bool,
     fold_file_list: bool,
 ) -> Result<i32> {
+    let line_buffered = stream_stdin && !std::io::stdout().is_terminal();
     let mut cmd = resolved_command(engine.bin());
-    if stream_stdin && !std::io::stdout().is_terminal() {
-        // Keep passthrough output live when stdout is piped.
-        cmd.child_arg("--line-buffered");
-    }
-    for a in args {
-        cmd.child_arg(a.as_ref());
-    }
+    cmd.child_args(passthrough_args(args, line_buffered));
 
     if stream_stdin {
-        let exit_code =
+        let mut exit_code =
             stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
                 .context("search failed")?
                 .exit_code;
+        if line_buffered && exit_code >= 2 {
+            // BusyBox grep has no --line-buffered. Passthrough inherits stdio,
+            // so stderr cannot be classified here; an engine error with the
+            // live-output flag means rerun the agent's argv verbatim (#5199).
+            let mut plain = resolved_command(engine.bin());
+            plain.child_args(passthrough_args(args, false));
+            exit_code =
+                stream::run_streaming(&mut plain, StdinMode::Inherit, FilterMode::Passthrough)
+                    .context("search failed")?
+                    .exit_code;
+        }
         timer.track_passthrough(real_cmd, &tracking::passthrough_label(real_cmd));
         return Ok(exit_code);
     }
@@ -874,7 +909,7 @@ pub fn run(
     }
 
     if reads_piped_stdin {
-        return run_streaming_search(
+        let result = run_streaming_search(
             &timer,
             engine,
             &extra_args,
@@ -883,7 +918,17 @@ pub fn run(
             max_results,
             &real_cmd,
             detected_flags,
-        );
+        )?;
+        let exit_code = result.exit_code;
+        return if engine_failed(
+            exit_code,
+            &result.raw_stderr,
+            result.raw_stdout.trim().is_empty(),
+        ) {
+            passthrough(&timer, engine, args, &real_cmd, true, false)
+        } else {
+            Ok(exit_code)
+        };
     }
 
     let result = engine_capture(engine, &extra_args, &patterns, &paths)?;
@@ -894,6 +939,14 @@ pub fn run(
     // Unparseable shape re-runs verbatim below (with its own stderr), so handle it
     // before surfacing this run's stderr (#2333).
     if unparsed_signal(&raw_output) > 0 {
+        return passthrough(&timer, engine, args, &real_cmd, false, false);
+    }
+
+    // BusyBox grep rejects RTK's `-I`/`--null` parse aids with exit 2 and no
+    // output. Re-run the agent's exact argv instead of surfacing an error the
+    // raw command never had. A genuine late error (e.g. unreadable dir) keeps
+    // its own exit code and filtered output (#5199).
+    if engine_failed(exit_code, &result.stderr, raw_output.trim().is_empty()) {
         return passthrough(&timer, engine, args, &real_cmd, false, false);
     }
 
@@ -2504,6 +2557,31 @@ mod tests {
         let stdout =
             "file.txt\x003-context_before\nfile.txt\x004:match\nfile.txt\x005-context_after\n";
         assert_eq!(unparsed_signal(stdout), 0);
+    }
+
+    #[test]
+    fn test_passthrough_retry_omits_line_buffered_flag() {
+        let args = ["-o", "needle", "-"];
+        assert_eq!(
+            passthrough_args(&args, true),
+            ["--line-buffered", "-o", "needle", "-"]
+        );
+        // BusyBox rejects --line-buffered; the retry runs the agent's argv verbatim.
+        assert_eq!(passthrough_args(&args, false), ["-o", "needle", "-"]);
+    }
+
+    #[test]
+    fn test_engine_error_falls_back_but_no_match_does_not() {
+        // Only a BusyBox-style parse-aid rejection may trigger the re-run.
+        let busybox = "/bin/grep: unrecognized option: null\nBusyBox v1.36.1";
+        assert!(engine_failed(2, busybox, true));
+        assert!(!engine_failed(0, busybox, true));
+        assert!(!engine_failed(1, busybox, true));
+        // A genuine error after matches, or without the parse-aid signature,
+        // must surface as-is instead of re-running the whole search (#5199).
+        assert!(!engine_failed(2, busybox, false));
+        assert!(!engine_failed(2, "grep: dir/x: Permission denied", true));
+        assert!(!engine_failed(127, busybox, true));
     }
 
     // --- has_context_flag ---
