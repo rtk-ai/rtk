@@ -17,6 +17,7 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "go-build" => Some(crate::cmds::go::go_cmd::filter_go_build),
         "ctest" => Some(crate::cmds::system::ctest_cmd::filter_ctest_output),
         "tsc" => Some(crate::cmds::js::tsc_cmd::filter_tsc_output),
+        "npm" => Some(crate::cmds::js::npm_cmd::filter_npm_output),
         "vitest" => Some(vitest_wrapper),
         "grep" | "rg" => Some(grep_wrapper),
         "find" | "fd" => Some(find_wrapper),
@@ -275,7 +276,7 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
         Some(name) => resolve_filter(name).ok_or_else(|| {
             anyhow::anyhow!(
                 "Unknown filter '{}'. Available: cargo-test, pytest, go-test, go-build, \
-                 ctest, tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
+                 ctest, tsc, npm, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
                  log, mypy, ruff-check, ruff-format, sqlfluff-lint, prettier, phpunit, pest, \
                  paratest, php-test, ecs, phpstan, pint",
                 name
@@ -408,6 +409,16 @@ mod tests {
     #[test]
     fn test_resolve_filter_tsc() {
         assert!(resolve_filter("tsc").is_some());
+    }
+
+    #[test]
+    fn test_resolve_filter_npm() {
+        let f = resolve_filter("npm").expect("npm filter must exist");
+        let input = "\n> app@1.0.0 build\n> next build\n\nnpm WARN deprecated inflight@1.0.6: not supported\nnpm notice\n   Creating an optimized production build...\n   ✓ Build completed\n";
+        let out = f(input);
+        assert!(!out.contains("npm WARN"), "out={}", out);
+        assert!(!out.contains("> app@1.0.0"), "out={}", out);
+        assert!(out.contains("Build completed"), "out={}", out);
     }
 
     #[test]
