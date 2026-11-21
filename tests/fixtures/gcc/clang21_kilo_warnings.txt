@@ -1,0 +1,109 @@
+kilo.c:193:9: warning: initializer-string for character array is too long, array size is 2 but initializer has size 3 (including the null terminating character); did you mean to use the 'nonstring' attribute? [-Wunterminated-string-initialization]
+  193 |         "//","/*","*/",
+      |         ^~~~
+kilo.c:229:20: warning: implicit conversion changes signedness: 'int' to 'tcflag_t' (aka 'unsigned long') [-Wsign-conversion]
+  229 |     raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+      |                 ~~ ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kilo.c:231:20: warning: implicit conversion changes signedness: 'int' to 'tcflag_t' (aka 'unsigned long') [-Wsign-conversion]
+  231 |     raw.c_oflag &= ~(OPOST);
+      |                 ~~ ^~~~~~~~
+kilo.c:236:20: warning: implicit conversion changes signedness: 'int' to 'tcflag_t' (aka 'unsigned long') [-Wsign-conversion]
+  236 |     raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+      |                 ~~ ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+kilo.c:256:21: warning: implicit conversion loses integer precision: 'ssize_t' (aka 'long') to 'int' [-Wshorten-64-to-32]
+  256 |     while ((nread = read(fd,&c,1)) == 0);
+      |                   ~ ^~~~~~~~~~~~~
+kilo.c:383:36: warning: implicit conversion changes signedness: 'int' to 'unsigned long' [-Wsign-conversion]
+  383 |     row->hl = realloc(row->hl,row->rsize);
+      |               ~~~~~~~         ~~~~~^~~~~
+kilo.c:489:43: warning: implicit conversion changes signedness: 'int' to 'unsigned long' [-Wsign-conversion]
+  489 |                 if (!memcmp(p,keywords[j],klen) &&
+      |                      ~~~~~~               ^~~~
+kilo.c:485:28: warning: implicit conversion loses integer precision: 'unsigned long' to 'int' [-Wshorten-64-to-32]
+  485 |                 int klen = strlen(keywords[j]);
+      |                     ~~~~   ^~~~~~~~~~~~~~~~~~~
+kilo.c:541:26: warning: implicit conversion loses integer precision: 'unsigned long' to 'int' [-Wshorten-64-to-32]
+  541 |             int patlen = strlen(s->filematch[i]);
+      |                 ~~~~~~   ^~~~~~~~~~~~~~~~~~~~~~~
+kilo.c:573:31: warning: implicit conversion changes signedness: 'int' to 'unsigned int' [-Wsign-conversion]
+  573 |     row->render = malloc(row->size + tabs*8 + nonprint*9 + 1);
+      |                          ~~~~~^~~~ ~
+kilo.c:594:50: warning: implicit conversion changes signedness: 'int' to 'unsigned long' [-Wsign-conversion]
+  594 |     E.row = realloc(E.row,sizeof(erow)*(E.numrows+1));
+      |                                       ~ ~~~~~~~~~^~
+kilo.c:596:64: warning: implicit conversion changes signedness: 'int' to 'unsigned long' [-Wsign-conversion]
+  596 |         memmove(E.row+at+1,E.row+at,sizeof(E.row[0])*(E.numrows-at));
+      |                                                     ~ ~~~~~~~~~^~~
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/secure/_string.h:239:42: note: expanded from macro 'memmove'
+  239 | #define memmove(...) __memmove_chk_func (__VA_ARGS__)
+      |                                          ^~~~~~~~~~~
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/secure/_string.h:132:34: note: expanded from macro '__memmove_chk_func'
+  132 |                 __builtin___memmove_chk (dest, __VA_ARGS__, __darwin_obsz0 (dest))
+      |                                                ^~~~~~~~~~~
+kilo.c:599:22: warning: implicit conversion loses integer precision: 'size_t' (aka 'unsigned long') to 'int' [-Wshorten-64-to-32]
+  599 |     E.row[at].size = len;
+      |                    ~ ^~~
+kilo.c:627:63: warning: implicit conversion changes signedness: 'int' to 'unsigned long' [-Wsign-conversion]
+  627 |     memmove(E.row+at,E.row+at+1,sizeof(E.row[0])*(E.numrows-at-1));
+      |                                                 ~ ~~~~~~~~~~~~^~
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/secure/_string.h:239:42: note: expanded from macro 'memmove'
+  239 | #define memmove(...) __memmove_chk_func (__VA_ARGS__)
+      |                                          ^~~~~~~~~~~
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/secure/_string.h:132:34: note: expanded from macro '__memmove_chk_func'
+  132 |                 __builtin___memmove_chk (dest, __VA_ARGS__, __darwin_obsz0 (dest))
+      |                                                ^~~~~~~~~~~
+kilo.c:648:22: warning: implicit conversion changes signedness: 'int' to 'unsigned long' [-Wsign-conversion]
+  648 |     p = buf = malloc(totlen);
+      |               ~~~~~~ ^~~~~~
+kilo.c:667:57: warning: implicit conversion changes signedness: 'int' to 'unsigned long' [-Wsign-conversion]
+  667 |         row->chars = realloc(row->chars,row->size+padlen+2);
+      |                      ~~~~~~~            ~~~~~~~~~~~~~~~~^~
+kilo.c:674:50: warning: implicit conversion changes signedness: 'int' to 'unsigned long' [-Wsign-conversion]
+  674 |         row->chars = realloc(row->chars,row->size+2);
+      |                      ~~~~~~~            ~~~~~~~~~^~
+kilo.c:678:22: warning: implicit conversion loses integer precision: 'int' to 'char' [-Wimplicit-int-conversion]
+  678 |     row->chars[at] = c;
+      |                    ~ ^
+kilo.c:685:42: warning: implicit conversion changes signedness: 'int' to 'size_t' (aka 'unsigned long') [-Wsign-conversion]
+  685 |     row->chars = realloc(row->chars,row->size+len+1);
+      |                                     ~~~~~^~~~~
+kilo.c:744:63: warning: implicit conversion changes signedness: 'int' to 'size_t' (aka 'unsigned long') [-Wsign-conversion]
+  744 |         editorInsertRow(filerow+1,row->chars+filecol,row->size-filecol);
+      |         ~~~~~~~~~~~~~~~                              ~~~~~~~~~^~~~~~~~
+kilo.c:771:65: warning: implicit conversion changes signedness: 'int' to 'size_t' (aka 'unsigned long') [-Wsign-conversion]
+  771 |         editorRowAppendString(&E.row[filerow-1],row->chars,row->size);
+      |         ~~~~~~~~~~~~~~~~~~~~~                              ~~~~~^~~~
+kilo.c:821:40: warning: implicit conversion changes signedness: 'ssize_t' (aka 'long') to 'size_t' (aka 'unsigned long') [-Wsign-conversion]
+  821 |         editorInsertRow(E.numrows,line,linelen);
+      |         ~~~~~~~~~~~~~~~                ^~~~~~~
+kilo.c:839:22: warning: implicit conversion changes signedness: 'int' to 'size_t' (aka 'unsigned long') [-Wsign-conversion]
+  839 |     if (write(fd,buf,len) != len) goto writeerr;
+      |         ~~~~~        ^~~
+kilo.c:868:38: warning: implicit conversion changes signedness: 'int' to 'unsigned long' [-Wsign-conversion]
+  868 |     char *new = realloc(ab->b,ab->len+len);
+      |                 ~~~~~~~       ~~~~~~~^~~~
+kilo.c:939:30: warning: declaration shadows a local variable [-Wshadow]
+  939 |                         char buf[16];
+      |                              ^
+kilo.c:885:10: note: previous declaration is here
+  885 |     char buf[32];
+      |          ^
+kilo.c:996:33: warning: implicit conversion changes signedness: 'int' to 'size_t' (aka 'unsigned long') [-Wsign-conversion]
+  996 |     write(STDOUT_FILENO,ab.b,ab.len);
+      |     ~~~~~                    ~~~^~~
+kilo.c:976:18: warning: implicit conversion loses integer precision: 'unsigned long' to 'int' [-Wshorten-64-to-32]
+  976 |     int msglen = strlen(E.statusmsg);
+      |         ~~~~~~   ^~~~~~~~~~~~~~~~~~~
+kilo.c:994:22: warning: implicit conversion loses integer precision: 'unsigned long' to 'int' [-Wshorten-64-to-32]
+  994 |     abAppend(&ab,buf,strlen(buf));
+      |     ~~~~~~~~         ^~~~~~~~~~~
+kilo.c:1057:33: warning: implicit conversion loses integer precision: 'int' to 'char' [-Wimplicit-int-conversion]
+ 1057 |                 query[qlen++] = c;
+      |                               ~ ^
+kilo.c:1090:44: warning: implicit conversion changes signedness: 'int' to 'unsigned long' [-Wsign-conversion]
+ 1090 |                     saved_hl = malloc(row->rsize);
+      |                                ~~~~~~ ~~~~~^~~~~
+kilo.c:1076:41: warning: implicit conversion loses integer precision: 'long' to 'int' [-Wshorten-64-to-32]
+ 1076 |                     match_offset = match-E.row[current].render;
+      |                                  ~ ~~~~~^~~~~~~~~~~~~~~~~~~~~~
+31 warnings generated.

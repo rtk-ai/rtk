@@ -1,0 +1,165 @@
+kilo.c:193:9: warning: initializer-string for array of 'char' truncates NUL terminator but destination lacks 'nonstring' attribute (3 chars into 2 available) [-Wunterminated-string-initialization]
+  193 |         "//","/*","*/",
+      |         ^~~~
+kilo.c: In function 'enableRawMode':
+kilo.c:229:17: warning: unsigned conversion from 'int' to 'tcflag_t' {aka 'long unsigned int'} changes value from '-819' to '18446744073709550797' [-Wsign-conversion]
+  229 |     raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+      |                 ^~
+kilo.c:231:17: warning: unsigned conversion from 'int' to 'tcflag_t' {aka 'long unsigned int'} changes value from '-2' to '18446744073709551614' [-Wsign-conversion]
+  231 |     raw.c_oflag &= ~(OPOST);
+      |                 ^~
+kilo.c:236:17: warning: unsigned conversion from 'int' to 'tcflag_t' {aka 'long unsigned int'} changes value from '-1417' to '18446744073709550199' [-Wsign-conversion]
+  236 |     raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+      |                 ^~
+kilo.c: In function 'editorReadKey':
+kilo.c:256:21: warning: conversion from 'ssize_t' {aka 'long int'} to 'int' may change value [-Wconversion]
+  256 |     while ((nread = read(fd,&c,1)) == 0);
+      |                     ^~~~
+kilo.c: In function 'editorUpdateSyntax':
+kilo.c:383:34: warning: conversion to 'size_t' {aka 'long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+  383 |     row->hl = realloc(row->hl,row->rsize);
+      |                               ~~~^~~~~~~
+In file included from /Library/Developer/CommandLineTools/SDKs/MacOSX27.sdk/usr/include/_string.h:228,
+                 from /Library/Developer/CommandLineTools/SDKs/MacOSX27.sdk/usr/include/string.h:58,
+                 from kilo.c:46:
+kilo.c:384:33: warning: conversion to 'long unsigned int' from 'int' may change the sign of the result [-Wsign-conversion]
+  384 |     memset(row->hl,HL_NORMAL,row->rsize);
+      |                              ~~~^~~~~~~
+kilo.c:415:50: warning: conversion to 'long unsigned int' from 'int' may change the sign of the result [-Wsign-conversion]
+  415 |             memset(row->hl+i,HL_COMMENT,row->size-i);
+      |                                         ~~~~~~~~~^~
+kilo.c:485:28: warning: conversion from 'size_t' {aka 'long unsigned int'} to 'int' may change value [-Wconversion]
+  485 |                 int klen = strlen(keywords[j]);
+      |                            ^~~~~~
+kilo.c:489:43: warning: conversion to 'size_t' {aka 'long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+  489 |                 if (!memcmp(p,keywords[j],klen) &&
+      |                                           ^~~~
+kilo.c:493:70: warning: conversion to 'long unsigned int' from 'int' may change the sign of the result [-Wsign-conversion]
+  493 |                     memset(row->hl+i,kw2 ? HL_KEYWORD2 : HL_KEYWORD1,klen);
+      |                                                                      ^~~~
+kilo.c: In function 'editorSelectSyntaxHighlight':
+kilo.c:541:26: warning: conversion from 'size_t' {aka 'long unsigned int'} to 'int' may change value [-Wconversion]
+  541 |             int patlen = strlen(s->filematch[i]);
+      |                          ^~~~~~
+kilo.c: In function 'editorUpdateRow':
+kilo.c:573:36: warning: conversion to 'unsigned int' from 'int' may change the sign of the result [-Wsign-conversion]
+  573 |     row->render = malloc(row->size + tabs*8 + nonprint*9 + 1);
+      |                                    ^
+kilo.c: In function 'editorInsertRow':
+kilo.c:594:39: warning: conversion to 'long unsigned int' from 'int' may change the sign of the result [-Wsign-conversion]
+  594 |     E.row = realloc(E.row,sizeof(erow)*(E.numrows+1));
+      |                                       ^
+kilo.c:596:53: warning: conversion to 'long unsigned int' from 'int' may change the sign of the result [-Wsign-conversion]
+  596 |         memmove(E.row+at+1,E.row+at,sizeof(E.row[0])*(E.numrows-at));
+      |                                                     ^
+kilo.c:599:22: warning: conversion from 'size_t' {aka 'long unsigned int'} to 'int' may change value [-Wconversion]
+  599 |     E.row[at].size = len;
+      |                      ^~~
+kilo.c: In function 'editorDelRow':
+kilo.c:627:49: warning: conversion to 'long unsigned int' from 'int' may change the sign of the result [-Wsign-conversion]
+  627 |     memmove(E.row+at,E.row+at+1,sizeof(E.row[0])*(E.numrows-at-1));
+      |                                                 ^
+kilo.c: In function 'editorRowsToString':
+kilo.c:648:22: warning: conversion to 'size_t' {aka 'long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+  648 |     p = buf = malloc(totlen);
+      |                      ^~~~~~
+kilo.c:650:41: warning: conversion to 'long unsigned int' from 'int' may change the sign of the result [-Wsign-conversion]
+  650 |         memcpy(p,E.row[j].chars,E.row[j].size);
+      |                                 ~~~~~~~~^~~~~
+kilo.c: In function 'editorRowInsertChar':
+kilo.c:667:57: warning: conversion to 'size_t' {aka 'long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+  667 |         row->chars = realloc(row->chars,row->size+padlen+2);
+      |                                         ~~~~~~~~~~~~~~~~^~
+kilo.c:668:41: warning: conversion to 'long unsigned int' from 'int' may change the sign of the result [-Wsign-conversion]
+  668 |         memset(row->chars+row->size,' ',padlen);
+      |                                         ^~~~~~
+kilo.c:674:50: warning: conversion to 'size_t' {aka 'long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+  674 |         row->chars = realloc(row->chars,row->size+2);
+      |                                         ~~~~~~~~~^~
+kilo.c:675:59: warning: conversion to 'long unsigned int' from 'int' may change the sign of the result [-Wsign-conversion]
+  675 |         memmove(row->chars+at+1,row->chars+at,row->size-at+1);
+      |                                               ~~~~~~~~~~~~^~
+kilo.c:678:22: warning: conversion from 'int' to 'char' may change value [-Wconversion]
+  678 |     row->chars[at] = c;
+      |                      ^
+kilo.c: In function 'editorRowAppendString':
+kilo.c:685:46: warning: conversion to 'size_t' {aka 'long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+  685 |     row->chars = realloc(row->chars,row->size+len+1);
+      |                                              ^
+kilo.c:687:15: warning: conversion to 'size_t' {aka 'long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+  687 |     row->size += len;
+      |               ^~
+kilo.c:687:18: warning: conversion from 'size_t' {aka 'long unsigned int'} to 'int' may change value [-Wconversion]
+  687 |     row->size += len;
+      |                  ^~~
+kilo.c: In function 'editorRowDelChar':
+kilo.c:696:52: warning: conversion to 'long unsigned int' from 'int' may change the sign of the result [-Wsign-conversion]
+  696 |     memmove(row->chars+at,row->chars+at+1,row->size-at);
+      |                                           ~~~~~~~~~^~~
+kilo.c: In function 'editorInsertNewline':
+kilo.c:744:63: warning: conversion to 'size_t' {aka 'long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+  744 |         editorInsertRow(filerow+1,row->chars+filecol,row->size-filecol);
+      |                                                      ~~~~~~~~~^~~~~~~~
+kilo.c: In function 'editorDelChar':
+kilo.c:771:63: warning: conversion to 'size_t' {aka 'long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+  771 |         editorRowAppendString(&E.row[filerow-1],row->chars,row->size);
+      |                                                            ~~~^~~~~~
+kilo.c: In function 'editorOpen':
+kilo.c:821:40: warning: conversion to 'size_t' {aka 'long unsigned int'} from 'ssize_t' {aka 'long int'} may change the sign of the result [-Wsign-conversion]
+  821 |         editorInsertRow(E.numrows,line,linelen);
+      |                                        ^~~~~~~
+kilo.c: In function 'editorSave':
+kilo.c:839:22: warning: conversion to 'size_t' {aka 'long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+  839 |     if (write(fd,buf,len) != len) goto writeerr;
+      |                      ^~~
+kilo.c: In function 'abAppend':
+kilo.c:868:38: warning: conversion to 'size_t' {aka 'long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+  868 |     char *new = realloc(ab->b,ab->len+len);
+      |                               ~~~~~~~^~~~
+kilo.c:871:26: warning: conversion to 'long unsigned int' from 'int' may change the sign of the result [-Wsign-conversion]
+  871 |     memcpy(new+ab->len,s,len);
+      |                          ^~~
+kilo.c: In function 'editorRefreshScreen':
+kilo.c:939:30: warning: declaration of 'buf' shadows a previous local [-Wshadow]
+  939 |                         char buf[16];
+      |                              ^~~
+kilo.c:885:10: note: shadowed declaration is here
+  885 |     char buf[32];
+      |          ^~~
+kilo.c:976:18: warning: conversion from 'size_t' {aka 'long unsigned int'} to 'int' may change value [-Wconversion]
+  976 |     int msglen = strlen(E.statusmsg);
+      |                  ^~~~~~
+kilo.c:994:22: warning: conversion from 'size_t' {aka 'long unsigned int'} to 'int' may change value [-Wconversion]
+  994 |     abAppend(&ab,buf,strlen(buf));
+      |                      ^~~~~~~~~~~
+kilo.c:996:32: warning: conversion to 'size_t' {aka 'long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+  996 |     write(STDOUT_FILENO,ab.b,ab.len);
+      |                              ~~^~~~
+kilo.c: In function 'editorFind':
+kilo.c:1024:70: warning: conversion to 'long unsigned int' from 'int' may change the sign of the result [-Wsign-conversion]
+ 1024 |         memcpy(E.row[saved_hl_line].hl,saved_hl, E.row[saved_hl_line].rsize); \
+      |                                                  ~~~~~~~~~~~~~~~~~~~~^~~~~~
+kilo.c:1048:13: note: in expansion of macro 'FIND_RESTORE_HL'
+ 1048 |             FIND_RESTORE_HL;
+      |             ^~~~~~~~~~~~~~~
+kilo.c:1057:33: warning: conversion from 'int' to 'char' may change value [-Wconversion]
+ 1057 |                 query[qlen++] = c;
+      |                                 ^
+kilo.c:1076:36: warning: conversion from 'long int' to 'int' may change value [-Wconversion]
+ 1076 |                     match_offset = match-E.row[current].render;
+      |                                    ^~~~~
+kilo.c:1024:70: warning: conversion to 'long unsigned int' from 'int' may change the sign of the result [-Wsign-conversion]
+ 1024 |         memcpy(E.row[saved_hl_line].hl,saved_hl, E.row[saved_hl_line].rsize); \
+      |                                                  ~~~~~~~~~~~~~~~~~~~~^~~~~~
+kilo.c:1083:13: note: in expansion of macro 'FIND_RESTORE_HL'
+ 1083 |             FIND_RESTORE_HL;
+      |             ^~~~~~~~~~~~~~~
+kilo.c:1090:42: warning: conversion to 'size_t' {aka 'long unsigned int'} from 'int' may change the sign of the result [-Wsign-conversion]
+ 1090 |                     saved_hl = malloc(row->rsize);
+      |                                       ~~~^~~~~~~
+kilo.c:1091:48: warning: conversion to 'long unsigned int' from 'int' may change the sign of the result [-Wsign-conversion]
+ 1091 |                     memcpy(saved_hl,row->hl,row->rsize);
+      |                                             ~~~^~~~~~~
+kilo.c:1092:58: warning: conversion to 'long unsigned int' from 'int' may change the sign of the result [-Wsign-conversion]
+ 1092 |                     memset(row->hl+match_offset,HL_MATCH,qlen);
+      |                                                          ^~~~

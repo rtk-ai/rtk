@@ -1,0 +1,817 @@
+use crate::core::runner;
+use crate::core::shell::display_args;
+use crate::core::utils::{resolved_command, strip_ansi};
+use anyhow::Result;
+use regex::Regex;
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::sync::LazyLock;
+
+// file:line:col: severity: message [-Wflag]; file may start with a Windows
+// drive letter (C:\src\a.c:12:3: error: ...)
+static DIAG: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^((?:[A-Za-z]:)?[^:\n]+):(\d+):\d+:\s*(fatal error|error|warning|note):\s+(.+?)(?:\s+\[(-\S+)\])?$",
+    )
+    .unwrap()
+});
+
+// "In file included from …" / "In function 'foo':" / "At top level:"
+static CONTEXT_HDR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:In file included from|In function|At top level|from)\b").unwrap()
+});
+
+// Macro backtrace notes: gcc "in expansion of macro 'X'" / "in definition of
+// macro 'X'", clang "expanded from macro 'X'". Like the include chain, they
+// locate rather than explain, and they repeat for every error in a macro.
+static MACRO_NOTE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:in (?:expansion|definition) of macro|expanded from macro) ").unwrap()
+});
+
+// Driver/tool errors without a source location:
+// "cc1: fatal error: x.c: No such file or directory", "gcc: error: …"
+static TOOL_ERR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[^\s:]+: (?:fatal error|error): ").unwrap());
+
+// make: *** [...] Error N
+static MAKE_ERR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^make(?:\[\d+\])?: \*\*\*").unwrap());
+
+/// Flags that make the compiler write its real output (preprocessed source,
+/// dependency rules, `-o -`) to stdout, which the diagnostic summary would replace.
+fn writes_to_stdout(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| matches!(a.as_str(), "-E" | "-M" | "-MM" | "-o-"))
+        || args.windows(2).any(|w| w[0] == "-o" && w[1] == "-")
+}
+
+pub fn run(compiler: &str, args: &[String], verbose: u8) -> Result<i32> {
+    if writes_to_stdout(args) {
+        let os_args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        return runner::run_passthrough(compiler, &os_args, verbose);
+    }
+
+    let mut cmd = resolved_command(compiler);
+    cmd.args(args);
+
+    if verbose > 0 {
+        eprintln!("Running: {} {}", compiler, args.join(" "));
+    }
+
+    // Diagnostics go to stderr, so filter the combined output. On failure the
+    // full output is teed and its path appended; the runner prints the raw
+    // output instead when the summary would be longer.
+    let tool = compiler.to_string();
+    runner::run_filtered(
+        cmd,
+        compiler,
+        &display_args(args),
+        move |raw| filter_compiler_output(&tool, &strip_ansi(raw)),
+        runner::RunOptions::with_tee(compiler),
+    )
+}
+
+/// Severity level of a gcc diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Severity {
+    Note,
+    Warning,
+    Error,
+}
+
+impl Severity {
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "error" | "fatal error" => Some(Severity::Error),
+            "warning" => Some(Severity::Warning),
+            "note" => Some(Severity::Note),
+            _ => None,
+        }
+    }
+}
+
+struct GccDiagnostic {
+    file: String,
+    line: usize,
+    severity: Severity,
+    message: String,
+    /// Flag that triggered this diagnostic, e.g. `-Wunused-variable`
+    flag: Option<String>,
+    /// Notes that follow this diagnostic (candidates, fix-it hints)
+    notes: Vec<String>,
+}
+
+/// Filter gcc/g++/clang compiler output, grouping diagnostics by file.
+///
+/// Suppresses verbose caret context lines (the `|` source snippets and `^`
+/// underlines) that duplicate information already present in the diagnostic
+/// message line itself.  Notes that annotate the preceding diagnostic are
+/// attached inline so no information is lost.
+///
+/// Returns a compact summary: header + grouped file sections.
+///
+/// `tool` (gcc, g++, clang, clang++) labels the header.
+pub fn filter_compiler_output(tool: &str, output: &str) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+    let mut diagnostics: Vec<GccDiagnostic> = Vec::new();
+    let mut make_errors: Vec<String> = Vec::new();
+    let mut tool_errors: Vec<String> = Vec::new();
+
+    for line in &lines {
+        if MAKE_ERR.is_match(line) {
+            make_errors.push(line.to_string());
+            continue;
+        }
+        if TOOL_ERR.is_match(line) {
+            tool_errors.push(line.to_string());
+            continue;
+        }
+        // Skip context headers ("In function …") and caret/pipe source lines
+        if CONTEXT_HDR.is_match(line) {
+            continue;
+        }
+        // Skip pure caret/source snippet lines (start with spaces and contain | or ^)
+        let trimmed = line.trim();
+        if trimmed.starts_with('|') || trimmed.starts_with('^') || trimmed.starts_with('~') {
+            continue;
+        }
+        // Skip line-number-only source echo lines (leading spaces + digits + " |")
+        if trimmed.contains(" | ") || trimmed.ends_with(" |") {
+            // Heuristic: lines like "   25 |     x = 42;"
+            if trimmed
+                .split_whitespace()
+                .next()
+                .is_some_and(|w| w.chars().all(|c| c.is_ascii_digit()))
+            {
+                continue;
+            }
+        }
+
+        if let Some(caps) = DIAG.captures(line) {
+            let severity_str = &caps[3];
+            let Some(severity) = Severity::from_str(severity_str) else {
+                continue;
+            };
+            let file = &caps[1];
+            let line_no: usize = caps[2].parse().unwrap_or(0);
+            if severity == Severity::Note {
+                if MACRO_NOTE.is_match(&caps[4]) {
+                    continue;
+                }
+                // Attach to the diagnostic it explains; drop orphan notes
+                if let Some(parent) = diagnostics.last_mut() {
+                    let note = if parent.file == file {
+                        format!("L{}: {}", line_no, &caps[4])
+                    } else {
+                        format!("{}:{}: {}", file, line_no, &caps[4])
+                    };
+                    parent.notes.push(note);
+                }
+                continue;
+            }
+            diagnostics.push(GccDiagnostic {
+                file: file.to_string(),
+                line: line_no,
+                severity,
+                message: caps[4].to_string(),
+                flag: caps.get(5).map(|m| m.as_str().to_string()),
+                notes: Vec::new(),
+            });
+        }
+    }
+
+    // No located diagnostic (linker, driver or make output): pass through raw,
+    // since the summary below would drop the lines that explain the failure
+    if diagnostics.is_empty() {
+        let trimmed = output.trim();
+        if trimmed.is_empty() {
+            return format!("{}: Build succeeded with no warnings", tool);
+        }
+        return trimmed.to_string();
+    }
+
+    let errors: Vec<&GccDiagnostic> = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    let warnings: Vec<&GccDiagnostic> = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Warning)
+        .collect();
+
+    // Only-warnings run (no errors) — build probably succeeded
+    if errors.is_empty() && tool_errors.is_empty() && make_errors.is_empty() {
+        if warnings.is_empty() {
+            return format!("{}: Build succeeded with no warnings", tool);
+        }
+        return format_warnings_only(tool, &warnings);
+    }
+
+    // Build failed — show errors + summary + warnings summary
+    format_build_failed(tool, &errors, &warnings, &tool_errors, &make_errors)
+}
+
+fn format_warnings_only(tool: &str, warnings: &[&GccDiagnostic]) -> String {
+    let mut by_file: HashMap<&str, Vec<&GccDiagnostic>> = HashMap::new();
+    for w in warnings {
+        by_file.entry(w.file.as_str()).or_default().push(w);
+    }
+
+    let mut result = format!(
+        "{}: {} warning{} in {} file{}\n",
+        tool,
+        warnings.len(),
+        if warnings.len() == 1 { "" } else { "s" },
+        by_file.len(),
+        if by_file.len() == 1 { "" } else { "s" }
+    );
+
+    let mut files: Vec<(&&str, &Vec<&GccDiagnostic>)> = by_file.iter().collect();
+    files.sort_by_key(|(f, _)| **f);
+
+    for (file, diags) in files {
+        result.push_str(&format!(
+            "{} ({} warning{})\n",
+            file,
+            diags.len(),
+            if diags.len() == 1 { "" } else { "s" }
+        ));
+        push_grouped(&mut result, diags, "");
+        result.push('\n');
+    }
+
+    result.trim().to_string()
+}
+
+/// One line per distinct message in a file, listing every line it occurs on
+/// (`L119,121,136: …`). The same error repeated through a header or macro
+/// would otherwise cost a full line per occurrence. A diagnostic with notes
+/// keeps its own line, since its notes belong to that occurrence.
+fn push_grouped(result: &mut String, diags: &[&GccDiagnostic], label: &str) {
+    let mut groups: Vec<(Vec<usize>, &GccDiagnostic)> = Vec::new();
+    for d in diags {
+        let same = groups.iter_mut().find(|(_, g)| {
+            d.notes.is_empty() && g.notes.is_empty() && g.message == d.message && g.flag == d.flag
+        });
+        match same {
+            Some((lines, _)) => lines.push(d.line),
+            None => groups.push((vec![d.line], d)),
+        }
+    }
+    for (lines, d) in groups {
+        let lines = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let flag = d
+            .flag
+            .as_deref()
+            .map(|f| format!(" [{}]", f))
+            .unwrap_or_default();
+        result.push_str(&format!("  L{}: {}{}{}\n", lines, label, d.message, flag));
+        for note in &d.notes {
+            result.push_str(&format!("    note {}\n", note));
+        }
+    }
+}
+
+fn format_build_failed(
+    tool: &str,
+    errors: &[&GccDiagnostic],
+    warnings: &[&GccDiagnostic],
+    tool_errors: &[String],
+    make_errors: &[String],
+) -> String {
+    let mut by_file: HashMap<&str, Vec<&GccDiagnostic>> = HashMap::new();
+    for e in errors {
+        by_file.entry(e.file.as_str()).or_default().push(e);
+    }
+
+    let error_count = errors.len() + tool_errors.len();
+    let mut result = format!(
+        "{}: BUILD FAILED — {} error{}, {} warning{}\n",
+        tool,
+        error_count,
+        if error_count == 1 { "" } else { "s" },
+        warnings.len(),
+        if warnings.len() == 1 { "" } else { "s" },
+    );
+
+    for line in tool_errors {
+        result.push_str(line);
+        result.push('\n');
+    }
+    if !tool_errors.is_empty() {
+        result.push('\n');
+    }
+
+    // Files sorted by error count descending
+    let mut files: Vec<(&&str, &Vec<&GccDiagnostic>)> = by_file.iter().collect();
+    files.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+
+    for (file, diags) in &files {
+        result.push_str(&format!(
+            "{} ({} error{})\n",
+            file,
+            diags.len(),
+            if diags.len() == 1 { "" } else { "s" }
+        ));
+        push_grouped(&mut result, diags, "[error] ");
+        result.push('\n');
+    }
+
+    // Warnings summary (counts only, to save tokens)
+    if !warnings.is_empty() {
+        let mut warn_by_file: HashMap<&str, usize> = HashMap::new();
+        for w in warnings {
+            *warn_by_file.entry(w.file.as_str()).or_insert(0) += 1;
+        }
+        let mut warn_files: Vec<_> = warn_by_file.iter().collect();
+        warn_files.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+
+        result.push_str("Warnings:\n");
+        for (file, count) in &warn_files {
+            result.push_str(&format!(
+                "  {} — {} warning{}\n",
+                file,
+                count,
+                if **count == 1 { "" } else { "s" }
+            ));
+        }
+        result.push('\n');
+    }
+
+    // make error lines (e.g. "make: *** [Makefile:10: build] Error 1")
+    for line in make_errors {
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    result.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn count_tokens(s: &str) -> usize {
+        s.split_whitespace().count()
+    }
+
+    fn filter_gcc_output(output: &str) -> String {
+        filter_compiler_output("gcc", output)
+    }
+
+    // ── Helpers ─────────────────────────────────────────────────────────────
+
+    fn fixture(name: &str) -> &'static str {
+        match name {
+            "errors" => include_str!("../../../tests/fixtures/gcc/build_errors.txt"),
+            "success" => include_str!("../../../tests/fixtures/gcc/build_success.txt"),
+            "clean" => include_str!("../../../tests/fixtures/gcc/build_clean.txt"),
+            // Real captures: lua with <string.h> removed and L->top renamed in ldo.c,
+            // kilo with -Wall -Wextra -Wconversion -Wshadow
+            "gcc16_lua" => include_str!("../../../tests/fixtures/gcc/gcc16_lua_errors.txt"),
+            "clang21_lua" => include_str!("../../../tests/fixtures/gcc/clang21_lua_errors.txt"),
+            "gcc16_kilo" => include_str!("../../../tests/fixtures/gcc/gcc16_kilo_warnings.txt"),
+            "clang21_kilo" => include_str!("../../../tests/fixtures/gcc/clang21_kilo_warnings.txt"),
+            _ => panic!("unknown fixture: {}", name),
+        }
+    }
+
+    // ── Filter logic tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_failed_header() {
+        let result = filter_gcc_output(fixture("errors"));
+        assert!(
+            result.contains("BUILD FAILED"),
+            "should have BUILD FAILED header"
+        );
+    }
+
+    #[test]
+    fn test_error_count_in_header() {
+        let result = filter_gcc_output(fixture("errors"));
+        // fixture has 5 errors
+        assert!(
+            result.contains("5 errors"),
+            "header should show error count; got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_errors_grouped_by_file() {
+        let result = filter_gcc_output(fixture("errors"));
+        assert!(result.contains("src/main.c"), "should show main.c");
+        assert!(result.contains("src/parser.c"), "should show parser.c");
+        assert!(result.contains("src/lexer.c"), "should show lexer.c");
+    }
+
+    #[test]
+    fn test_error_line_numbers_present() {
+        let result = filter_gcc_output(fixture("errors"));
+        assert!(result.contains("L25:"), "should show line 25 from main.c");
+        assert!(result.contains("L88:"), "should show line 88 from parser.c");
+    }
+
+    #[test]
+    fn test_caret_lines_stripped() {
+        let result = filter_gcc_output(fixture("errors"));
+        // Caret context lines should not appear in output
+        assert!(
+            !result.contains("^~~~~~~"),
+            "caret lines should be stripped"
+        );
+        assert!(
+            !result.contains("      |"),
+            "pipe context lines should be stripped"
+        );
+    }
+
+    #[test]
+    fn test_make_error_preserved() {
+        let result = filter_gcc_output(fixture("errors"));
+        assert!(
+            result.contains("make:") || result.contains("Error 1"),
+            "make error line should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_warnings_only_header() {
+        let result = filter_gcc_output(fixture("success"));
+        assert!(
+            result.contains("warning"),
+            "warnings-only run should mention warnings"
+        );
+        assert!(
+            !result.contains("BUILD FAILED"),
+            "warnings-only should not say BUILD FAILED"
+        );
+    }
+
+    #[test]
+    fn test_warnings_include_flag() {
+        let result = filter_gcc_output(fixture("success"));
+        // fixture has [-Wunused-result] and [-Wpointer-compare]
+        assert!(
+            result.contains("-Wunused-result") || result.contains("-Wpointer-compare"),
+            "warning flags should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_clean_build() {
+        let result = filter_gcc_output(fixture("clean"));
+        assert!(
+            result.contains("no warnings") || result.contains("succeeded"),
+            "clean build should report success"
+        );
+    }
+
+    #[test]
+    fn test_empty_input() {
+        let result = filter_gcc_output("");
+        assert!(
+            result.contains("no warnings") || result.contains("succeeded"),
+            "empty input treated as clean build"
+        );
+    }
+
+    #[test]
+    fn test_most_errors_file_first() {
+        let input = "\
+src/a.c:1:1: error: error one
+src/b.c:1:1: error: error B1
+src/b.c:2:1: error: error B2
+src/b.c:3:1: error: error B3
+";
+        let result = filter_gcc_output(input);
+        let pos_a = result.find("src/a.c").unwrap_or(usize::MAX);
+        let pos_b = result.find("src/b.c").unwrap_or(usize::MAX);
+        assert!(
+            pos_b < pos_a,
+            "b.c (3 errors) should appear before a.c (1 error)"
+        );
+    }
+
+    // ── Token savings test ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_token_savings_errors_fixture() {
+        let input = fixture("errors");
+        let output = filter_gcc_output(input);
+
+        let input_tokens = count_tokens(input);
+        let output_tokens = count_tokens(&output);
+
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 40.0,
+            "Expected ≥40% token savings on errors fixture, got {:.1}% (in={} out={})",
+            savings,
+            input_tokens,
+            output_tokens
+        );
+    }
+
+    #[test]
+    fn test_token_savings_warnings_fixture() {
+        let input = fixture("success");
+        let output = filter_gcc_output(input);
+
+        let input_tokens = count_tokens(input);
+        let output_tokens = count_tokens(&output);
+
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 25.0,
+            "Expected ≥25% token savings on warnings fixture, got {:.1}% (in={} out={})",
+            savings,
+            input_tokens,
+            output_tokens
+        );
+    }
+
+    // ── Regression tests (real clang output) ────────────────────────────────
+
+    #[test]
+    fn test_fatal_error_kept_next_to_warning() {
+        let input = "\
+b.c:2:18: warning: unused variable 'unused' [-Wunused-variable]
+    2 | int f(void){ int unused; return 1; }
+      |                  ^~~~~~
+1 warning generated.
+a.c:2:10: fatal error: 'missing.h' file not found
+    2 | #include \"missing.h\"
+      |          ^~~~~~~~~~~
+1 error generated.
+";
+        let result = filter_gcc_output(input);
+        assert!(result.contains("BUILD FAILED"), "got:\n{}", result);
+        assert!(
+            result.contains("'missing.h' file not found"),
+            "fatal error must be shown; got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_notes_attached_to_error() {
+        let input = "\
+c.cpp:3:13: error: no matching function for call to 'g'
+    3 | int main(){ g(\"x\"); }
+      |             ^
+c.cpp:1:6: note: candidate function not viable: no known conversion from 'const char[2]' to 'int' for 1st argument
+    1 | void g(int);
+      |      ^ ~~~
+c.cpp:2:6: note: candidate function not viable: no known conversion from 'const char[2]' to 'double' for 1st argument
+    2 | void g(double);
+      |      ^ ~~~~~~
+1 error generated.
+";
+        let result = filter_gcc_output(input);
+        assert!(
+            result.contains("1 error,"),
+            "notes are not errors; got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("note L1: candidate function not viable"),
+            "got:\n{}",
+            result
+        );
+        assert!(result.contains("to 'double'"), "got:\n{}", result);
+    }
+
+    #[test]
+    fn test_note_from_other_file_keeps_path() {
+        let input = "\
+src/main.c:9:5: error: conflicting types for 'parse'
+src/parser.h:3:5: note: previous declaration is here
+";
+        let result = filter_gcc_output(input);
+        assert!(
+            result.contains("note src/parser.h:3: previous declaration is here"),
+            "got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_stdout_modes_pass_through() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(writes_to_stdout(&args(&["-E", "w.c"])));
+        assert!(writes_to_stdout(&args(&["-M", "a.c"])));
+        assert!(writes_to_stdout(&args(&["-MM", "a.c"])));
+        assert!(!writes_to_stdout(&args(&["-MMD", "-c", "a.c"])));
+        assert!(!writes_to_stdout(&args(&["-Wall", "-c", "a.c"])));
+        assert!(writes_to_stdout(&args(&["-S", "-o", "-", "a.c"])));
+        assert!(writes_to_stdout(&args(&["-S", "-o-", "a.c"])));
+        assert!(!writes_to_stdout(&args(&["-o", "a.out", "a.c"])));
+    }
+
+    #[test]
+    fn test_driver_error_kept_next_to_warning() {
+        // GNU gcc 16: missing input file next to a file that only warns
+        let input = "\
+cc1: fatal error: nofile.c: No such file or directory
+compilation terminated.
+b.c: In function 'f':
+b.c:1:18: warning: unused variable 'unused' [-Wunused-variable]
+    1 | int f(void){ int unused; return 1; }
+      |                  ^~~~~~
+";
+        let result = filter_gcc_output(input);
+        assert!(
+            result.contains("BUILD FAILED — 1 error"),
+            "got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("cc1: fatal error: nofile.c: No such file or directory"),
+            "got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_header_names_the_compiler() {
+        let input = "c.cpp:3:13: error: no matching function for call to 'g'\n";
+        let result = filter_compiler_output("clang++", input);
+        assert!(
+            result.starts_with("clang++: BUILD FAILED"),
+            "got:\n{}",
+            result
+        );
+        assert_eq!(
+            filter_compiler_output("g++", ""),
+            "g++: Build succeeded with no warnings"
+        );
+    }
+
+    #[test]
+    fn test_error_keeps_its_flag() {
+        let input = "kilo.c:350:27: error: implicit declaration of function 'strlen' [-Wimplicit-function-declaration]\n";
+        let result = filter_gcc_output(input);
+        assert!(
+            result.contains("[error] implicit declaration of function 'strlen' [-Wimplicit-function-declaration]"),
+            "got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_macro_backtrace_notes_dropped() {
+        let input = "\
+ldo.c:119:21: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+lobject.h:129:9: note: in expansion of macro 'setobj'
+ldo.c:119:5: note: in expansion of macro 'setobjs2s'
+lobject.h:119:30: note: in definition of macro 'setobj'
+";
+        let result = filter_gcc_output(input);
+        assert!(result.contains("did you mean 'top'?"), "got:\n{}", result);
+        assert!(!result.contains("macro"), "got:\n{}", result);
+    }
+
+    #[test]
+    fn test_repeated_message_grouped_on_one_line() {
+        let input = "\
+ldo.c:119:21: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+ldo.c:121:7: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+ldo.c:136:3: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+ldo.c:200:3: error: 'CallInfo' has no member named 'x'
+";
+        let result = filter_gcc_output(input);
+        assert!(result.contains("4 errors"), "got:\n{}", result);
+        assert!(
+            result.contains("  L119,121,136: [error] 'lua_State' has no member named 'topp'"),
+            "got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("  L200: [error] 'CallInfo'"),
+            "got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_with_notes_not_grouped() {
+        let input = "\
+c.cpp:3:13: error: no matching function for call to 'g'
+c.cpp:1:6: note: candidate function not viable
+c.cpp:4:13: error: no matching function for call to 'g'
+c.cpp:1:6: note: candidate function not viable
+";
+        let result = filter_gcc_output(input);
+        assert!(result.contains("  L3: [error]"), "got:\n{}", result);
+        assert!(result.contains("  L4: [error]"), "got:\n{}", result);
+    }
+
+    #[test]
+    fn test_windows_drive_letter_path() {
+        let input = "C:\\src\\main.c:12:3: error: 'x' undeclared (first use in this function)\n";
+        let result = filter_gcc_output(input);
+        assert!(
+            result.contains("C:\\src\\main.c (1 error)"),
+            "got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("L12: [error] 'x' undeclared"),
+            "got:\n{}",
+            result
+        );
+    }
+
+    fn savings(input: &str, output: &str) -> f64 {
+        100.0 - (count_tokens(output) as f64 / count_tokens(input) as f64 * 100.0)
+    }
+
+    #[test]
+    fn test_real_gcc16_lua_errors() {
+        let input = fixture("gcc16_lua");
+        let result = filter_gcc_output(input);
+        assert!(
+            result.starts_with("gcc: BUILD FAILED — 55 errors, 21 warnings"),
+            "got:\n{}",
+            result
+        );
+        // 45 occurrences of the same error in ldo.c fold into one line
+        assert!(
+            result.contains("ldo.c (45 errors)\n  L119,121,136,"),
+            "got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("note L28: include '<string.h>'"),
+            "got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("in expansion of macro"),
+            "got:\n{}",
+            result
+        );
+        let s = savings(input, &result);
+        assert!(s >= 60.0, "expected >=60% savings, got {:.1}%", s);
+    }
+
+    #[test]
+    fn test_real_clang21_lua_errors() {
+        let input = fixture("clang21_lua");
+        let result = filter_gcc_output(input);
+        assert!(result.contains("BUILD FAILED"), "got:\n{}", result);
+        assert!(
+            result.contains("no member named 'topp'"),
+            "got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("include the header <string.h>"),
+            "got:\n{}",
+            result
+        );
+        let s = savings(input, &result);
+        assert!(s >= 40.0, "expected >=40% savings, got {:.1}%", s);
+    }
+
+    #[test]
+    fn test_real_kilo_warnings() {
+        for name in ["gcc16_kilo", "clang21_kilo"] {
+            let input = fixture(name);
+            let result = filter_gcc_output(input);
+            assert!(result.contains("warnings in 1 file"), "{name}:\n{}", result);
+            assert!(!result.contains("BUILD FAILED"), "{name}:\n{}", result);
+            assert!(
+                result.contains("[-Wsign-conversion]"),
+                "{name}:\n{}",
+                result
+            );
+            let s = savings(input, &result);
+            assert!(s >= 60.0, "{name}: expected >=60% savings, got {:.1}%", s);
+        }
+    }
+
+    #[test]
+    fn test_linker_failure_passes_through() {
+        let input = "\
+Undefined symbols for architecture arm64:
+  \"_nope\", referenced from:
+      _main in l-9a32a6.o
+ld: symbol(s) not found for architecture arm64
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+";
+        let result = filter_gcc_output(input);
+        assert!(
+            result.contains("\"_nope\", referenced from:"),
+            "got:\n{}",
+            result
+        );
+        assert!(result.contains("linker command failed"), "got:\n{}", result);
+    }
+}

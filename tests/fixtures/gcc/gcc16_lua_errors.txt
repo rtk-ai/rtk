@@ -1,0 +1,480 @@
+In file included from lstate.h:17,
+                 from lapi.h:12,
+                 from ldo.c:19:
+ldo.c: In function 'luaD_seterrorobj':
+ldo.c:119:29: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  119 |     setobjs2s(L, oldtop, L->topp.p - 1);  /* move it to 'oldtop' */
+      |                             ^~~~
+lobject.h:129:33: note: in expansion of macro 'setobj'
+  129 | #define setobjs2s(L,o1,o2)      setobj(L,s2v(o1),s2v(o2))
+      |                                 ^~~~~~
+lobject.h:129:50: note: in expansion of macro 's2v'
+  129 | #define setobjs2s(L,o1,o2)      setobj(L,s2v(o1),s2v(o2))
+      |                                                  ^~~
+ldo.c:119:5: note: in expansion of macro 'setobjs2s'
+  119 |     setobjs2s(L, oldtop, L->topp.p - 1);  /* move it to 'oldtop' */
+      |     ^~~~~~~~~
+ldo.c:121:6: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  121 |   L->topp.p = oldtop + 1;  /* top goes back to old top plus error object */
+      |      ^~~~
+      |      top
+ldo.c: In function 'luaD_throw':
+ldo.c:136:40: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  136 |       setobjs2s(L, mainth->top.p++, L->topp.p - 1);  /* copy error obj. */
+      |                                        ^~~~
+lobject.h:119:50: note: in definition of macro 'setobj'
+  119 |         { TValue *io1=(obj1); const TValue *io2=(obj2); \
+      |                                                  ^~~~
+lobject.h:129:50: note: in expansion of macro 's2v'
+  129 | #define setobjs2s(L,o1,o2)      setobj(L,s2v(o1),s2v(o2))
+      |                                                  ^~~
+ldo.c:136:7: note: in expansion of macro 'setobjs2s'
+  136 |       setobjs2s(L, mainth->top.p++, L->topp.p - 1);  /* copy error obj. */
+      |       ^~~~~~~~~
+ldo.c: In function 'luaD_errerr':
+ldo.c:217:21: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  217 |   setsvalue2s(L, L->topp.p, msg);
+      |                     ^~~~
+lobject.h:386:19: note: in definition of macro 'setsvalue'
+  386 |   { TValue *io = (obj); TString *x_ = (x); \
+      |                   ^~~
+lobject.h:391:45: note: in expansion of macro 's2v'
+  391 | #define setsvalue2s(L,o,s)      setsvalue(L,s2v(o),s)
+      |                                             ^~~
+ldo.c:217:3: note: in expansion of macro 'setsvalue2s'
+  217 |   setsvalue2s(L, L->topp.p, msg);
+      |   ^~~~~~~~~~~
+ldo.c:218:6: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  218 |   L->topp.p++;  /* assume EXTRA_STACK */
+      |      ^~~~
+      |      top
+ldo.c: In function 'luaD_checkminstack':
+ldo.c:235:28: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  235 |   if (L->stack_last.p - L->topp.p >= BASIC_STACK_SIZE)
+      |                            ^~~~
+      |                            top
+ldo.c: In function 'relstack':
+ldo.c:263:6: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  263 |   L->topp.offset = savestack(L, L->top.p);
+      |      ^~~~
+      |      top
+ldo.c: In function 'correctstack':
+ldo.c:281:6: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  281 |   L->topp.p = restorestack(L, L->top.offset);
+      |      ^~~~
+      |      top
+In file included from lapi.h:11:
+ldo.c: In function 'luaD_growstack':
+ldo.c:374:30: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  374 |     int needed = cast_int(L->topp.p - L->stack.p) + n;
+      |                              ^~~~
+llimits.h:127:30: note: in definition of macro 'cast'
+  127 | #define cast(t, exp)    ((t)(exp))
+      |                              ^~~
+ldo.c:374:18: note: in expansion of macro 'cast_int'
+  374 |     int needed = cast_int(L->topp.p - L->stack.p) + n;
+      |                  ^~~~~~~~
+ldo.c: In function 'stackinuse':
+ldo.c:398:18: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  398 |   StkId lim = L->topp.p;
+      |                  ^~~~
+      |                  top
+ldo.c: In function 'luaD_hook':
+ldo.c:446:37: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  446 |     ptrdiff_t top = savestack(L, L->topp.p);  /* preserve original 'top' */
+      |                                     ^~~~
+llimits.h:127:30: note: in definition of macro 'cast'
+  127 | #define cast(t, exp)    ((t)(exp))
+      |                              ^~~
+ldo.h:45:34: note: in expansion of macro 'cast_charp'
+   45 | #define savestack(L,pt)         (cast_charp(pt) - cast_charp(L->stack.p))
+      |                                  ^~~~~~~~~~
+ldo.c:446:21: note: in expansion of macro 'savestack'
+  446 |     ptrdiff_t top = savestack(L, L->topp.p);  /* preserve original 'top' */
+      |                     ^~~~~~~~~
+ldo.c:454:25: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  454 |     if (isLua(ci) && L->topp.p < ci->top.p)
+      |                         ^~~~
+      |                         top
+ldo.c:455:10: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  455 |       L->topp.p = ci->top.p;  /* protect entire activation register */
+      |          ^~~~
+      |          top
+ldo.c:457:24: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  457 |     if (ci->top.p < L->topp.p + LUA_MINSTACK)
+      |                        ^~~~
+      |                        top
+ldo.c:458:22: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  458 |       ci->top.p = L->topp.p + LUA_MINSTACK;
+      |                      ^~~~
+      |                      top
+ldo.c:467:8: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  467 |     L->topp.p = restorestack(L, top);
+      |        ^~~~
+      |        top
+ldo.c: In function 'rethook':
+ldo.c:498:25: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  498 |     StkId firstres = L->topp.p - nres;  /* index of first result */
+      |                         ^~~~
+      |                         top
+ldo.c: In function 'tryfuncTM':
+ldo.c:531:15: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  531 |   for (p = L->topp.p; p > func; p--)  /* open space for metamethod */
+      |               ^~~~
+      |               top
+ldo.c:533:6: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  533 |   L->topp.p++;  /* stack space pre-allocated by the caller */
+      |      ^~~~
+      |      top
+ldo.c: In function 'genmoveresults':
+ldo.c:544:26: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  544 |   StkId firstresult = L->topp.p - nres;  /* index of first result */
+      |                          ^~~~
+      |                          top
+ldo.c:552:6: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  552 |   L->topp.p = res + wanted;  /* top points after the last result */
+      |      ^~~~
+      |      top
+ldo.c: In function 'moveresults':
+ldo.c:567:10: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  567 |       L->topp.p = res;
+      |          ^~~~
+      |          top
+ldo.c:573:30: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  573 |         setobjs2s(L, res, L->topp.p - nres);  /* move it to proper place */
+      |                              ^~~~
+lobject.h:119:50: note: in definition of macro 'setobj'
+  119 |         { TValue *io1=(obj1); const TValue *io2=(obj2); \
+      |                                                  ^~~~
+lobject.h:129:50: note: in expansion of macro 's2v'
+  129 | #define setobjs2s(L,o1,o2)      setobj(L,s2v(o1),s2v(o2))
+      |                                                  ^~~
+ldo.c:573:9: note: in expansion of macro 'setobjs2s'
+  573 |         setobjs2s(L, res, L->topp.p - nres);  /* move it to proper place */
+      |         ^~~~~~~~~
+ldo.c:574:10: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  574 |       L->topp.p = res + 1;
+      |          ^~~~
+      |          top
+ldo.c: In function 'precallC':
+ldo.c:650:35: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  650 |                                L->topp.p + LUA_MINSTACK);
+      |                                   ^~~~
+      |                                   top
+ldo.c:653:28: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  653 |     int narg = cast_int(L->topp.p - func) - 1;
+      |                            ^~~~
+llimits.h:127:30: note: in definition of macro 'cast'
+  127 | #define cast(t, exp)    ((t)(exp))
+      |                              ^~~
+ldo.c:653:16: note: in expansion of macro 'cast_int'
+  653 |     int narg = cast_int(L->topp.p - func) - 1;
+      |                ^~~~~~~~
+ldo.c: In function 'luaD_pretailcall':
+ldo.c:696:10: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  696 |       L->topp.p = func + narg1;  /* set top */
+      |          ^~~~
+      |          top
+ldo.c: In function 'luaD_precall':
+ldo.c:731:30: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  731 |       int narg = cast_int(L->topp.p - func) - 1;  /* number of real arguments */
+      |                              ^~~~
+llimits.h:127:30: note: in definition of macro 'cast'
+  127 | #define cast(t, exp)    ((t)(exp))
+      |                              ^~~
+ldo.c:731:18: note: in expansion of macro 'cast_int'
+  731 |       int narg = cast_int(L->topp.p - func) - 1;  /* number of real arguments */
+      |                  ^~~~~~~~
+ldo.c:738:26: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  738 |         setnilvalue2s(L->topp.p++);  /* complete missing arguments */
+      |                          ^~~~
+lobject.h:114:27: note: in definition of macro 'settt_'
+  114 | #define settt_(o,t)     ((o)->tt_=(t))
+      |                           ^
+lobject.h:212:33: note: in expansion of macro 'setnilvalue'
+  212 | #define setnilvalue2s(stk)      setnilvalue(s2v(stk))
+      |                                 ^~~~~~~~~~~
+lobject.h:212:45: note: in expansion of macro 's2v'
+  212 | #define setnilvalue2s(stk)      setnilvalue(s2v(stk))
+      |                                             ^~~
+ldo.c:738:9: note: in expansion of macro 'setnilvalue2s'
+  738 |         setnilvalue2s(L->topp.p++);  /* complete missing arguments */
+      |         ^~~~~~~~~~~~~
+ldo.c: In function 'resume_error':
+ldo.c:903:6: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  903 |   L->topp.p -= narg;  /* remove args from the stack */
+      |      ^~~~
+      |      top
+ldo.c:904:21: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  904 |   setsvalue2s(L, L->topp.p, luaS_new(L, msg));  /* push error message */
+      |                     ^~~~
+lobject.h:386:19: note: in definition of macro 'setsvalue'
+  386 |   { TValue *io = (obj); TString *x_ = (x); \
+      |                   ^~~
+lobject.h:391:45: note: in expansion of macro 's2v'
+  391 | #define setsvalue2s(L,o,s)      setsvalue(L,s2v(o),s)
+      |                                             ^~~
+ldo.c:904:3: note: in expansion of macro 'setsvalue2s'
+  904 |   setsvalue2s(L, L->topp.p, luaS_new(L, msg));  /* push error message */
+      |   ^~~~~~~~~~~
+ldo.c: In function 'resume':
+ldo.c:920:23: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  920 |   StkId firstArg = L->topp.p - n;  /* first argument */
+      |                       ^~~~
+      |                       top
+ldo.c:932:10: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  932 |       L->topp.p = firstArg;  /* discard arguments */
+      |          ^~~~
+      |          top
+ldo.c: In function 'lua_resume':
+ldo.c:975:17: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  975 |     else if (L->topp.p - (L->ci->func.p + 1) == nargs)  /* no function? */
+      |                 ^~~~
+      |                 top
+ldo.c:993:36: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  993 |     luaD_seterrorobj(L, status, L->topp.p);  /* push error message */
+      |                                    ^~~~
+      |                                    top
+ldo.c:994:23: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  994 |     L->ci->top.p = L->topp.p;
+      |                       ^~~~
+      |                       top
+ldo.c:997:51: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+  997 |                                     : cast_int(L->topp.p - (L->ci->func.p + 1));
+      |                                                   ^~~~
+llimits.h:127:30: note: in definition of macro 'cast'
+  127 | #define cast(t, exp)    ((t)(exp))
+      |                              ^~~
+ldo.c:997:39: note: in expansion of macro 'cast_int'
+  997 |                                     : cast_int(L->topp.p - (L->ci->func.p + 1));
+      |                                       ^~~~~~~~
+ldo.c: In function 'f_parser':
+ldo.c:1135:36: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+ 1135 |   ptrdiff_t otop = savestack(L, L->topp.p);  /* original top */
+      |                                    ^~~~
+llimits.h:127:30: note: in definition of macro 'cast'
+  127 | #define cast(t, exp)    ((t)(exp))
+      |                              ^~~
+ldo.h:45:34: note: in expansion of macro 'cast_charp'
+   45 | #define savestack(L,pt)         (cast_charp(pt) - cast_charp(L->stack.p))
+      |                                  ^~~~~~~~~~
+ldo.c:1135:20: note: in expansion of macro 'savestack'
+ 1135 |   ptrdiff_t otop = savestack(L, L->topp.p);  /* original top */
+      |                    ^~~~~~~~~
+ldo.c:1138:21: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+ 1138 |   sethvalue2s(L, L->topp.p++, anchor);  /* anchor the anchor table */
+      |                     ^~~~
+lobject.h:738:19: note: in definition of macro 'sethvalue'
+  738 |   { TValue *io = (obj); Table *x_ = (x); \
+      |                   ^~~
+lobject.h:742:45: note: in expansion of macro 's2v'
+  742 | #define sethvalue2s(L,o,h)      sethvalue(L,s2v(o),h)
+      |                                             ^~~
+ldo.c:1138:3: note: in expansion of macro 'sethvalue2s'
+ 1138 |   sethvalue2s(L, L->topp.p++, anchor);  /* anchor the anchor table */
+      |   ^~~~~~~~~~~
+ldo.c:1152:6: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+ 1152 |   L->topp.p = restorestack(L, otop);  /* restore stack */
+      |      ^~~~
+      |      top
+ldo.c:1153:23: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+ 1153 |   setclLvalue2s(L, L->topp.p++, cl);  /* push closure */
+      |                       ^~~~
+lobject.h:662:19: note: in definition of macro 'setclLvalue'
+  662 |   { TValue *io = (obj); LClosure *x_ = (x); \
+      |                   ^~~
+lobject.h:666:47: note: in expansion of macro 's2v'
+  666 | #define setclLvalue2s(L,o,cl)   setclLvalue(L,s2v(o),cl)
+      |                                               ^~~
+ldo.c:1153:3: note: in expansion of macro 'setclLvalue2s'
+ 1153 |   setclLvalue2s(L, L->topp.p++, cl);  /* push closure */
+      |   ^~~~~~~~~~~~~
+ldo.c: In function 'luaD_anchorobj':
+ldo.c:1165:25: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+ 1165 |   setgcovalue(L, s2v(L->topp.p++), obj);  /* temporary anchor in the stack */
+      |                         ^~~~
+lobject.h:324:19: note: in definition of macro 'setgcovalue'
+  324 |   { TValue *io = (obj); GCObject *i_g=(x); \
+      |                   ^~~
+ldo.c:1165:18: note: in expansion of macro 's2v'
+ 1165 |   setgcovalue(L, s2v(L->topp.p++), obj);  /* temporary anchor in the stack */
+      |                  ^~~
+ldo.c:1166:30: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+ 1166 |   luaH_set(L, anchor, s2v(L->topp.p - 1), s2v(L->top.p - 1));
+      |                              ^~~~
+lobject.h:172:20: note: in definition of macro 's2v'
+  172 | #define s2v(o)  (&(o)->val)
+      |                    ^
+ldo.c:1169:6: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+ 1169 |   L->topp.p--;
+      |      ^~~~
+      |      top
+ldo.c: In function 'luaD_protectedparser':
+ldo.c:1183:56: error: 'lua_State' has no member named 'topp'; did you mean 'top'?
+ 1183 |   status = luaD_pcall(L, f_parser, &p, savestack(L, L->topp.p), L->errfunc);
+      |                                                        ^~~~
+llimits.h:127:30: note: in definition of macro 'cast'
+  127 | #define cast(t, exp)    ((t)(exp))
+      |                              ^~~
+ldo.h:45:34: note: in expansion of macro 'cast_charp'
+   45 | #define savestack(L,pt)         (cast_charp(pt) - cast_charp(L->stack.p))
+      |                                  ^~~~~~~~~~
+ldo.c:1183:40: note: in expansion of macro 'savestack'
+ 1183 |   status = luaD_pcall(L, f_parser, &p, savestack(L, L->topp.p), L->errfunc);
+      |                                        ^~~~~~~~~
+ldo.c: In function 'luaD_checkminstack':
+ldo.c:239:1: warning: control reaches end of non-void function [-Wreturn-type]
+  239 | }
+      | ^
+lstrlib.c: In function 'str_rep':
+lstrlib.c:154:7: error: implicit declaration of function 'memcpy' [-Wimplicit-function-declaration]
+  154 |       memcpy(p, s, len * sizeof(char)); p += len;
+      |       ^~~~~~
+lstrlib.c:28:1: note: include '<string.h>' or provide a declaration of 'memcpy'
+   27 | #include "llimits.h"
+  +++ |+#include <string.h>
+   28 | 
+lstrlib.c:154:7: warning: incompatible implicit declaration of built-in function 'memcpy' [-Wbuiltin-declaration-mismatch]
+  154 |       memcpy(p, s, len * sizeof(char)); p += len;
+      |       ^~~~~~
+lstrlib.c:154:7: note: include '<string.h>' or provide a declaration of 'memcpy'
+lstrlib.c:159:5: warning: incompatible implicit declaration of built-in function 'memcpy' [-Wbuiltin-declaration-mismatch]
+  159 |     memcpy(p, s, len * sizeof(char));  /* last copy without separator */
+      |     ^~~~~~
+lstrlib.c:159:5: note: include '<string.h>' or provide a declaration of 'memcpy'
+lstrlib.c: In function 'match_capture':
+lstrlib.c:566:7: error: implicit declaration of function 'memcmp' [-Wimplicit-function-declaration]
+  566 |       memcmp(ms->capture[l].init, s, len) == 0)
+      |       ^~~~~~
+lstrlib.c:566:7: note: include '<string.h>' or provide a declaration of 'memcmp'
+lstrlib.c: In function 'lmemfind':
+lstrlib.c:683:44: error: implicit declaration of function 'memchr' [-Wimplicit-function-declaration]
+  683 |     while (l1 > 0 && (init = (const char *)memchr(s1, *s2, l1)) != NULL) {
+      |                                            ^~~~~~
+lstrlib.c:683:44: note: include '<string.h>' or provide a declaration of 'memchr'
+lstrlib.c:683:44: warning: incompatible implicit declaration of built-in function 'memchr' [-Wbuiltin-declaration-mismatch]
+lstrlib.c:683:44: note: include '<string.h>' or provide a declaration of 'memchr'
+lstrlib.c: In function 'nospecials':
+lstrlib.c:752:9: error: implicit declaration of function 'strpbrk' [-Wimplicit-function-declaration]
+  752 |     if (strpbrk(p + upto, SPECIALS))
+      |         ^~~~~~~
+lstrlib.c:752:9: note: include '<string.h>' or provide a declaration of 'strpbrk'
+lstrlib.c:752:9: warning: incompatible implicit declaration of built-in function 'strpbrk' [-Wbuiltin-declaration-mismatch]
+lstrlib.c:752:9: note: include '<string.h>' or provide a declaration of 'strpbrk'
+lstrlib.c:754:13: error: implicit declaration of function 'strlen' [-Wimplicit-function-declaration]
+  754 |     upto += strlen(p + upto) + 1;  /* may have more after \0 */
+      |             ^~~~~~
+lstrlib.c:754:13: note: include '<string.h>' or provide a declaration of 'strlen'
+lstrlib.c:754:13: warning: incompatible implicit declaration of built-in function 'strlen' [-Wbuiltin-declaration-mismatch]
+lstrlib.c:754:13: note: include '<string.h>' or provide a declaration of 'strlen'
+lstrlib.c: In function 'add_s':
+lstrlib.c:886:23: warning: incompatible implicit declaration of built-in function 'memchr' [-Wbuiltin-declaration-mismatch]
+  886 |   while ((p = (char *)memchr(news, L_ESC, l)) != NULL) {
+      |                       ^~~~~~
+lstrlib.c:886:23: note: include '<string.h>' or provide a declaration of 'memchr'
+lstrlib.c: In function 'quotefloat':
+lstrlib.c:1173:9: warning: incompatible implicit declaration of built-in function 'memchr' [-Wbuiltin-declaration-mismatch]
+ 1173 |     if (memchr(buff, '.', cast_uint(nb)) == NULL) {  /* no dot? */
+      |         ^~~~~~
+lstrlib.c:1173:9: note: include '<string.h>' or provide a declaration of 'memchr'
+lstrlib.c: In function 'checkformat':
+lstrlib.c:1238:11: error: implicit declaration of function 'strspn' [-Wimplicit-function-declaration]
+ 1238 |   spec += strspn(spec, flags);  /* skip flags */
+      |           ^~~~~~
+lstrlib.c:1238:11: note: include '<string.h>' or provide a declaration of 'strspn'
+lstrlib.c:1238:11: warning: incompatible implicit declaration of built-in function 'strspn' [-Wbuiltin-declaration-mismatch]
+lstrlib.c:1238:11: note: include '<string.h>' or provide a declaration of 'strspn'
+lstrlib.c: In function 'getformat':
+lstrlib.c:1258:16: warning: incompatible implicit declaration of built-in function 'strspn' [-Wbuiltin-declaration-mismatch]
+ 1258 |   size_t len = strspn(strfrmt, L_FMTFLAGSF "123456789.");
+      |                ^~~~~~
+lstrlib.c:1258:16: note: include '<string.h>' or provide a declaration of 'strspn'
+lstrlib.c:1264:3: warning: incompatible implicit declaration of built-in function 'memcpy' [-Wbuiltin-declaration-mismatch]
+ 1264 |   memcpy(form, strfrmt, len * sizeof(char));
+      |   ^~~~~~
+lstrlib.c:1264:3: note: include '<string.h>' or provide a declaration of 'memcpy'
+lstrlib.c: In function 'addlenmod':
+lstrlib.c:1274:14: warning: incompatible implicit declaration of built-in function 'strlen' [-Wbuiltin-declaration-mismatch]
+ 1274 |   size_t l = strlen(form);
+      |              ^~~~~~
+lstrlib.c:1274:14: note: include '<string.h>' or provide a declaration of 'strlen'
+lstrlib.c:1277:3: error: implicit declaration of function 'strcpy' [-Wimplicit-function-declaration]
+ 1277 |   strcpy(form + l - 1, lenmod);
+      |   ^~~~~~
+lstrlib.c:1277:3: note: include '<string.h>' or provide a declaration of 'strcpy'
+lstrlib.c:1277:3: warning: incompatible implicit declaration of built-in function 'strcpy' [-Wbuiltin-declaration-mismatch]
+lstrlib.c:1277:3: note: include '<string.h>' or provide a declaration of 'strcpy'
+lstrlib.c: In function 'str_format':
+lstrlib.c:1348:18: warning: incompatible implicit declaration of built-in function 'strlen' [-Wbuiltin-declaration-mismatch]
+ 1348 |             form[strlen(form) - 1] = 's';  /* format it as a string */
+      |                  ^~~~~~
+lstrlib.c:1348:18: note: include '<string.h>' or provide a declaration of 'strlen'
+In file included from lua.h:28,
+                 from lstrlib.c:23:
+lstrlib.c:1365:35: warning: incompatible implicit declaration of built-in function 'strlen' [-Wbuiltin-declaration-mismatch]
+ 1365 |             luaL_argcheck(L, l == strlen(s), arg, "string contains zeros");
+      |                                   ^~~~~~
+luaconf.h:657:53: note: in definition of macro 'luai_likely'
+  657 | #define luai_likely(x)          (__builtin_expect(((x) != 0), 1))
+      |                                                     ^
+lstrlib.c:1365:13: note: in expansion of macro 'luaL_argcheck'
+ 1365 |             luaL_argcheck(L, l == strlen(s), arg, "string contains zeros");
+      |             ^~~~~~~~~~~~~
+lstrlib.c:1365:35: note: include '<string.h>' or provide a declaration of 'strlen'
+luaconf.h:657:53: note: in definition of macro 'luai_likely'
+  657 | #define luai_likely(x)          (__builtin_expect(((x) != 0), 1))
+      |                                                     ^
+lstrlib.c:1365:13: note: in expansion of macro 'luaL_argcheck'
+ 1365 |             luaL_argcheck(L, l == strlen(s), arg, "string contains zeros");
+      |             ^~~~~~~~~~~~~
+lstrlib.c:1367:17: error: implicit declaration of function 'strchr' [-Wimplicit-function-declaration]
+ 1367 |             if (strchr(form, '.') == NULL && l >= 100) {
+      |                 ^~~~~~
+lstrlib.c:1367:17: note: include '<string.h>' or provide a declaration of 'strchr'
+lstrlib.c:1367:17: warning: incompatible implicit declaration of built-in function 'strchr' [-Wbuiltin-declaration-mismatch]
+lstrlib.c:1367:17: note: include '<string.h>' or provide a declaration of 'strchr'
+lstrlib.c: In function 'copywithendian':
+lstrlib.c:1608:5: warning: incompatible implicit declaration of built-in function 'memcpy' [-Wbuiltin-declaration-mismatch]
+ 1608 |     memcpy(dest, src, size);
+      |     ^~~~~~
+lstrlib.c:1608:5: note: include '<string.h>' or provide a declaration of 'memcpy'
+lstrlib.c: In function 'str_pack':
+lstrlib.c:1686:11: error: implicit declaration of function 'memset' [-Wimplicit-function-declaration]
+ 1686 |           memset(buff, LUAL_PACKPADBYTE, psize);
+      |           ^~~~~~
+lstrlib.c:1686:11: note: include '<string.h>' or provide a declaration of 'memset'
+lstrlib.c:1686:11: warning: incompatible implicit declaration of built-in function 'memset' [-Wbuiltin-declaration-mismatch]
+lstrlib.c:1686:11: note: include '<string.h>' or provide a declaration of 'memset'
+lstrlib.c:1706:26: warning: incompatible implicit declaration of built-in function 'strlen' [-Wbuiltin-declaration-mismatch]
+ 1706 |         luaL_argcheck(L, strlen(s) == len, arg, "string contains zeros");
+      |                          ^~~~~~
+luaconf.h:657:53: note: in definition of macro 'luai_likely'
+  657 | #define luai_likely(x)          (__builtin_expect(((x) != 0), 1))
+      |                                                     ^
+lstrlib.c:1706:9: note: in expansion of macro 'luaL_argcheck'
+ 1706 |         luaL_argcheck(L, strlen(s) == len, arg, "string contains zeros");
+      |         ^~~~~~~~~~~~~
+lstrlib.c:1706:26: note: include '<string.h>' or provide a declaration of 'strlen'
+luaconf.h:657:53: note: in definition of macro 'luai_likely'
+  657 | #define luai_likely(x)          (__builtin_expect(((x) != 0), 1))
+      |                                                     ^
+lstrlib.c:1706:9: note: in expansion of macro 'luaL_argcheck'
+ 1706 |         luaL_argcheck(L, strlen(s) == len, arg, "string contains zeros");
+      |         ^~~~~~~~~~~~~
+lstrlib.c: In function 'str_unpack':
+lstrlib.c:1836:22: warning: incompatible implicit declaration of built-in function 'strlen' [-Wbuiltin-declaration-mismatch]
+ 1836 |         size_t len = strlen(data + pos);
+      |                      ^~~~~~
+lstrlib.c:1836:22: note: include '<string.h>' or provide a declaration of 'strlen'
+ltable.c: In function 'resizearray':
+ltable.c:587:7: error: implicit declaration of function 'memcpy' [-Wimplicit-function-declaration]
+  587 |       memcpy(np - tomove, op - tomove, tomoveb);
+      |       ^~~~~~
+ltable.c:41:1: note: include '<string.h>' or provide a declaration of 'memcpy'
+   40 | #include "lvm.h"
+  +++ |+#include <string.h>
+   41 | 
+ltable.c:587:7: warning: incompatible implicit declaration of built-in function 'memcpy' [-Wbuiltin-declaration-mismatch]
+  587 |       memcpy(np - tomove, op - tomove, tomoveb);
+      |       ^~~~~~
+ltable.c:587:7: note: include '<string.h>' or provide a declaration of 'memcpy'
