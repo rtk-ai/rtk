@@ -1023,6 +1023,24 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^sequelize(?:\s|$|[;|&()<>])",
+        rtk_cmd: "rtk sequelize",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["sequelize"],
+        category: "Build",
+        savings_pct: 45.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^sequelize-cli(?:\s|$|[;|&()<>])",
+        rtk_cmd: "rtk sequelize-cli",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["sequelize-cli"],
+        category: "Build",
+        savings_pct: 45.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^shellcheck\b",
         rtk_cmd: "rtk shellcheck",
         pipeline_safety: PipelineSafety::ProducerOnly,
@@ -1108,6 +1126,15 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["yamllint"],
         category: "Build",
         savings_pct: 65.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^yarn(?:\s+(?:install|add|remove|upgrade|up|dedupe)(?:\s|$|[;|&()<>])|\s*$)",
+        rtk_cmd: "rtk yarn",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["yarn"],
+        category: "PackageManager",
+        savings_pct: 60.0,
         ..RtkRule::DEFAULT
     },
     RtkRule {

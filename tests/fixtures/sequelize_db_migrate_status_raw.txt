@@ -1,0 +1,8 @@
+
+Sequelize CLI [Node: 20.20.2, CLI: 6.6.5, ORM: 6.37.8]
+
+Loaded configuration file "config/config.json".
+Using environment "development".
+up 20261118024104-create-user.js
+up 20261118024105-add-age.js
+down 20261118024106-bad.js

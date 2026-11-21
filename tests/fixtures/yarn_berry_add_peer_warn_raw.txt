@@ -1,0 +1,14 @@
+➤ YN0000: · Yarn 4.5.3
+➤ YN0000: ┌ Resolution step
+➤ YN0085: │ + react-dom@npm:18.2.0, js-tokens@npm:4.0.0, loose-envify@npm:1.4.0, scheduler@npm:0.23.2
+➤ YN0000: └ Completed in 1s 51ms
+➤ YN0000: ┌ Post-resolution validation
+➤ YN0002: │ demo@workspace:. doesn't provide react (pe20cf), requested by react-dom.
+➤ YN0086: │ Some peer dependencies are incorrectly met by your project; run yarn explain peer-requirements <hash> for details, where <hash> is the six-letter p-prefixed code.
+➤ YN0000: └ Completed
+➤ YN0000: ┌ Fetch step
+➤ YN0013: │ 4 packages were added to the project (+ 4.41 MiB).
+➤ YN0000: └ Completed in 0s 211ms
+➤ YN0000: ┌ Link step
+➤ YN0000: └ Completed
+➤ YN0000: · Done with warnings in 1s 306ms

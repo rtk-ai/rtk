@@ -1,0 +1,7 @@
+➤ YN0027: this-package-does-not-exist-zzz-1920@unknown can't be resolved to a satisfying range
+➤ YN0035: Package not found
+➤ YN0035:   Response Code: 404 (Not Found)
+➤ YN0035:   Request Method: GET
+➤ YN0035:   Request URL: https://registry.yarnpkg.com/this-package-does-not-exist-zzz-1920
+
+➤ Errors happened when preparing the environment required to run this command.
