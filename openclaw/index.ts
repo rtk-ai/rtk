@@ -108,7 +108,10 @@ function tryRewrite(
 }
 
 export default function register(api: any) {
-  const pluginConfig = api.config ?? {};
+  // Current hosts hand the plugin's own settings over as `pluginConfig`; on
+  // them `config` is the host config, which carries no `verbose` (#4358).
+  // Older hosts only provide `config`.
+  const pluginConfig = api.pluginConfig ?? api.config ?? {};
   const enabled = pluginConfig.enabled !== false;
   const verbose = pluginConfig.verbose === true;
 
