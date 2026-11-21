@@ -42,7 +42,7 @@ rtk gain --reset --yes    # skip prompt (CI/scripts)
 | Flag | Description | Output |
 |------|-------------|--------|
 | `--daily` | Day-by-day breakdown | All days with full metrics |
-| `--weekly` | Week-by-week breakdown | Aggregated by Sunday-Saturday weeks |
+| `--weekly` | Week-by-week breakdown | Aggregated by Monday-Sunday weeks |
 | `--monthly` | Month-by-month breakdown | Aggregated by calendar month |
 | `--all` | All time breakdowns | Daily + Weekly + Monthly combined |
 
@@ -104,12 +104,12 @@ TOTAL            300       1.5M     300.0K       1.2M   80.0%
 ════════════════════════════════════════════════════════════════════════
 Week                      Cmds      Input     Output      Saved   Save%
 ────────────────────────────────────────────────────────────────────────
-12-28 → 01-03              300       1.5M     300.0K       1.2M   80.0%
+12-29 → 01-04              300       1.5M     300.0K       1.2M   80.0%
 ────────────────────────────────────────────────────────────────────────
 TOTAL                      300       1.5M     300.0K       1.2M   80.0%
 ```
 
-**Week definition**: Sunday to Saturday (ISO week starting Sunday at 00:00)
+**Week definition**: Monday to Sunday.
 
 ### Monthly Breakdown
 
@@ -167,7 +167,7 @@ date,commands,input_tokens,output_tokens,saved_tokens,savings_pct
 
 # Weekly Data
 week_start,week_end,commands,input_tokens,output_tokens,saved_tokens,savings_pct
-2025-12-28,2026-01-03,300,1500000,300000,1200000,80.0
+2025-12-29,2026-01-04,300,1500000,300000,1200000,80.0
 
 # Monthly Data
 month,commands,input_tokens,output_tokens,saved_tokens,savings_pct
