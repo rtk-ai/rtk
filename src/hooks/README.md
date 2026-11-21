@@ -90,8 +90,11 @@ verdict is `Ask`. A wrapper behind a prefix is only checked for deny rules and
 otherwise keeps the outer command's verdict, as on master. Ask-capable hosts
 prompt, while other hosts retain their existing native permission flow.
 Unsupported or ambiguous wrapper syntax is left unchanged for the host to
-evaluate. Line continuations are joined before the check, as the rewrite joins
-them.
+evaluate. Line continuations are joined before the check, inside quotes too:
+the inner shell parses the wrapper's script again, so `bash -c 'git \<NL>push'`
+runs `git push`. The rewrite itself joins only the continuations bash joins
+(not inside single quotes, `$'...'` or comments), and a comment that ends in a
+backslash-newline passes the command through (#5090).
 
 Unambiguously-fish scripts (a fish-only keyword such as `end`, `begin`,
 `switch`, `and`, `or`, or `not` at command position, with no POSIX
