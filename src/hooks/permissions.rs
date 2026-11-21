@@ -1403,6 +1403,9 @@ mod tests {
             "FOO= git push",
             "FOO=\"a b\" git push",
             "FOO='a b' git push",
+            // Quoted chunks inside a bare value are still one word (#3764).
+            "X=\"a\"b git push --force",
+            "X=a\"b\" git push --force",
             // Shell prefixes that only run the next word, past the host's own
             // list: the command behind them is still `git push`.
             "env git push",
