@@ -1628,7 +1628,8 @@ fn print_monthly(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
 #[derive(Serialize)]
 struct ExportData {
     summary: ExportSummary,
-    output_accounting: crate::core::tracking::OutputAccounting,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_accounting: Option<crate::core::tracking::OutputAccounting>,
     #[serde(skip_serializing_if = "Option::is_none")]
     commands: Option<Vec<crate::core::tracking::InvocationRecord>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1668,7 +1669,9 @@ fn export_json(
         .context("Failed to load token savings summary from database")?;
 
     let export = ExportData {
-        output_accounting: tracker.output_accounting(project_scope)?,
+        output_accounting: history
+            .then(|| tracker.output_accounting(project_scope))
+            .transpose()?,
         commands: history
             .then(|| tracker.invocation_history(100, project_scope))
             .transpose()?,

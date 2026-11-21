@@ -29,7 +29,7 @@ fn capture(dir: &Path, max: &str) -> String {
 
 #[test]
 fn printed_capture_hint_keeps_its_output_and_attribution_after_recapture() {
-    let dir = tempfile::tempdir().expect("directory");
+    let dir = common::tempdir();
     let raw = (1..=30)
         .map(|i| {
             format!(
@@ -72,16 +72,27 @@ fn printed_capture_hint_keeps_its_output_and_attribution_after_recapture() {
         )
         .expect("source invocation");
     let history = Connection::open(dir.path().join("history.db")).expect("history");
+    let source_commands: i64 = history
+        .query_row(
+            "SELECT COUNT(*) FROM commands WHERE invocation_id = ?1",
+            [&invocation],
+            |row| row.get(0),
+        )
+        .expect("source invocation linkage");
+    assert_eq!(source_commands, 1);
+
     let mut stmt = history
-        .prepare("SELECT source_invocation_id, source_capture_id, emitted_bytes FROM recall_events")
+        .prepare("SELECT invoking_id, source_invocation_id, source_capture_id, emitted_bytes FROM recall_events ORDER BY rowid")
         .expect("events");
-    let events: Vec<(String, String, i64)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+    let events: Vec<(String, String, String, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
         .expect("query")
         .collect::<rusqlite::Result<_>>()
         .expect("events");
     assert_eq!(events.len(), 2);
-    for (source_invocation, capture, bytes) in events {
+    assert_ne!(events[0].0, events[1].0);
+    for (invoking_id, source_invocation, capture, bytes) in events {
+        assert_ne!(invoking_id, invocation);
         assert_eq!(source_invocation, invocation);
         assert_eq!(capture, first[2..]);
         assert_eq!(bytes as usize, before.stdout.len());

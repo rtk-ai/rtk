@@ -366,12 +366,8 @@ enum RecallSchema {
     Initial = 1,
     /// `recall.recalled`, for databases created before the column existed.
     Recalled = 2,
-    /// Immutable identities for individual capture events.
-    CaptureIds = 3,
-    /// Other preview features also used stamp 3; establish our additive table.
-    CaptureIdsRecheck = 4,
-    /// Per-capture immutable snapshots, without guessing legacy metadata.
-    ImmutableCaptures = 5,
+    /// Immutable snapshots for individual captures, leaving legacy hashes untouched.
+    ImmutableCaptures = 3,
     // New schema changes go directly above this line.
     Next,
 }
@@ -391,8 +387,6 @@ impl Version for RecallSchema {
 const MIGRATIONS: &[(RecallSchema, Migration)] = &[
     (RecallSchema::Initial, migrate_initial),
     (RecallSchema::Recalled, migrate_recalled),
-    (RecallSchema::CaptureIds, migrate_capture_ids),
-    (RecallSchema::CaptureIdsRecheck, migrate_capture_ids),
     (RecallSchema::ImmutableCaptures, migrate_immutable_captures),
 ];
 
@@ -453,35 +447,24 @@ fn migrate_recalled(conn: &Connection) -> Result<()> {
     db::add_column_if_missing(conn, "recall", "recalled", "INTEGER NOT NULL DEFAULT 0")
 }
 
-fn migrate_capture_ids(conn: &Connection) -> Result<()> {
+fn migrate_immutable_captures(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS recall_captures (
-            capture_id TEXT PRIMARY KEY,
+            capture_id TEXT PRIMARY KEY NOT NULL,
             invocation_id TEXT,
             hash TEXT NOT NULL,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            command TEXT NOT NULL,
+            cwd TEXT,
+            exit_code INTEGER,
+            total_lines INTEGER NOT NULL,
+            shown_upto INTEGER NOT NULL,
+            byte_size INTEGER NOT NULL,
+            truncated INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_recall_captures_hash ON recall_captures(hash);",
     )
-    .context("Failed to create capture identities")
-}
-
-fn migrate_immutable_captures(conn: &Connection) -> Result<()> {
-    // Establish the prerequisite even for other preview schemas stamped 3.
-    migrate_capture_ids(conn)?;
-    // Never infer an old capture's metadata from a mutable payload row.
-    for (name, kind) in [
-        ("command", "TEXT"),
-        ("cwd", "TEXT"),
-        ("exit_code", "INTEGER"),
-        ("total_lines", "INTEGER"),
-        ("shown_upto", "INTEGER"),
-        ("byte_size", "INTEGER"),
-        ("truncated", "INTEGER"),
-    ] {
-        db::add_column_if_missing(conn, "recall_captures", name, kind)?;
-    }
-    Ok(())
+    .context("Failed to create immutable recall captures")
 }
 
 fn stat_family(slug: &str) -> &str {
@@ -778,7 +761,6 @@ fn store_inner(
     let shown_upto = stored_shown_upto;
     let hash = payload_hash(command, payload);
     let capture_id = super::invocation::new_id().context("generate immutable recall capture ID")?;
-    let invocation = super::invocation::current();
     let (blob, codec): (Vec<u8>, &str) = if cfg.compression {
         match gzip(payload) {
             Ok(z) => (z, "gzip"),
@@ -815,7 +797,7 @@ fn store_inner(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 capture_id,
-                invocation.id,
+                super::invocation::current(),
                 hash,
                 now_secs(),
                 command,
@@ -930,15 +912,18 @@ fn load_reference(conn: &Connection, reference: &str) -> Result<Option<Row>> {
         // guess which source invocation owns an ambiguous content identity.
         return load_by_hash(conn, reference);
     };
-    if !super::invocation::valid_id(capture_id) {
+    if capture_id.len() != 32
+        || !capture_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         anyhow::bail!("use the complete c_<capture-id> from the recovery hint");
     }
     conn.query_row(
         "SELECT c.shown_upto, c.truncated, p.codec, p.blob, c.command, p.hash,
                 c.capture_id, c.invocation_id
          FROM recall_captures c JOIN recall p ON p.hash = c.hash
-         WHERE c.capture_id = ?1 AND c.shown_upto IS NOT NULL
-           AND c.truncated IS NOT NULL AND c.command IS NOT NULL",
+         WHERE c.capture_id = ?1",
         [capture_id],
         |r| {
             let mut row = map_row(r)?;
@@ -998,7 +983,7 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
         with_cached(
             path,
             |path| open_existing_path(path).context(UNAVAILABLE),
-            |conn| recall_from(conn, &args),
+            |conn| recall_from(conn, &args, &mut std::io::stdout().lock()),
         )
     });
     match recalled {
@@ -1019,7 +1004,7 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
     }
 }
 
-fn recall_from(conn: &Connection, args: &RecallArgs) -> Result<i32> {
+fn recall_from(conn: &Connection, args: &RecallArgs, writer: &mut impl Write) -> Result<i32> {
     if args.list {
         return list_entries(conn);
     }
@@ -1066,8 +1051,7 @@ fn recall_from(conn: &Connection, args: &RecallArgs) -> Result<i32> {
         );
         return Ok(1);
     }
-    let stdout = std::io::stdout();
-    let (emitted, result) = emit_recall(&mut stdout.lock(), &out);
+    let (emitted, result) = emit_recall(writer, &out);
     if (result.is_ok() || emitted > 0)
         && let Ok(tracker) = super::tracking::Tracker::new()
     {
@@ -1095,7 +1079,6 @@ fn list_entries(conn: &Connection) -> Result<i32> {
              SELECT 'c_' || c.capture_id AS reference, c.command, c.total_lines,
                     c.shown_upto, c.exit_code, c.truncated, c.byte_size, c.created_at
              FROM recall_captures c JOIN recall p ON p.hash = c.hash
-             WHERE c.command IS NOT NULL
              UNION ALL
              SELECT hash, command, total_lines, shown_upto, exit_code, truncated,
                     byte_size, created_at FROM recall WHERE substr(hash, 1, 2) != 'p_'
@@ -1151,10 +1134,6 @@ mod tests {
     use crate::core::db::testing::{application_id, user_version};
     use crate::core::tracking;
 
-    fn init_schema(conn: &Connection) -> Result<()> {
-        db::apply_migrations(conn, &SCHEMA, MigrationMode::Always)
-    }
-
     fn temp_cfg(dir: &std::path::Path) -> RetrieverConfig {
         RetrieverConfig {
             database_path: Some(dir.join("recall_test.db")),
@@ -1163,170 +1142,30 @@ mod tests {
     }
 
     #[test]
-    fn legacy_version_four_immutable_snapshots_survive_renumbering() {
+    fn version_two_recall_adds_final_capture_schema_without_altering_legacy_rows() {
         let conn = Connection::open_in_memory().expect("db");
         migrate_initial(&conn).expect("initial");
         migrate_recalled(&conn).expect("recalled");
-        migrate_immutable_captures(&conn).expect("legacy immutable schema");
-        conn.execute(
-            "INSERT INTO recall_captures (capture_id, invocation_id, hash,
-            created_at, command, shown_upto) VALUES ('old', 'source', 'hash', 1, 'original', 7)",
-            [],
+        conn.execute_batch(
+            "INSERT INTO recall (hash, command, created_at, total_lines, shown_upto, byte_size,
+             truncated, codec, blob, recalled)
+             VALUES ('legacy-hash','legacy command',0,1,1,3,0,'raw',X'616263',1);",
         )
-        .expect("snapshot");
-        conn.pragma_update(None, "application_id", DbKind::Recall.application_id())
-            .expect("tag");
-        conn.pragma_update(None, "user_version", 4)
-            .expect("old immutable stamp");
-        for _ in 0..2 {
-            db::apply_migrations(&conn, &SCHEMA, MigrationMode::GatedByVersion).expect("upgrade");
-            assert_eq!(user_version(&conn), SCHEMA_VERSION);
-            let snapshot: (String, String, i64) = conn.query_row(
-                "SELECT invocation_id, command, shown_upto FROM recall_captures WHERE capture_id='old'",
-                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).expect("snapshot");
-            assert_eq!(snapshot, ("source".into(), "original".into(), 7));
-        }
-    }
-
-    #[test]
-    fn version_three_preview_without_captures_gains_capture_schema() {
-        // Exact additive schemas from the stats-cap and storage-budget previews.
-        let previews = [
-            r#"CREATE TRIGGER IF NOT EXISTS recall_stats_cap
-         AFTER INSERT ON recall_stats
-         WHEN (SELECT COUNT(*) FROM recall_stats) > 500
-         BEGIN
-             DELETE FROM recall_stats WHERE rowid IN (
-                 SELECT rowid FROM recall_stats WHERE rowid != NEW.rowid
-                 ORDER BY elisions + recalls ASC, rowid ASC
-                 LIMIT (SELECT COUNT(*) FROM recall_stats) - 500
-             );
-         END;
-         DELETE FROM recall_stats WHERE rowid IN (
-             SELECT rowid FROM recall_stats
-             ORDER BY elisions + recalls ASC, rowid ASC
-             LIMIT MAX((SELECT COUNT(*) FROM recall_stats) - 500, 0)
-         );"#,
-            r#"CREATE TABLE IF NOT EXISTS recall_storage (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            entries INTEGER NOT NULL,
-            blob_bytes INTEGER NOT NULL
-        );
-        INSERT INTO recall_storage (id, entries, blob_bytes)
-        SELECT 1, (SELECT COUNT(*) FROM recall),
-                  (SELECT COALESCE(SUM(length(blob)), 0) FROM recall)
-        WHERE NOT EXISTS (SELECT 1 FROM recall_storage WHERE id = 1);
-        CREATE TRIGGER IF NOT EXISTS recall_storage_insert AFTER INSERT ON recall BEGIN
-            UPDATE recall_storage SET entries = entries + 1,
-                blob_bytes = blob_bytes + length(NEW.blob) WHERE id = 1;
-        END;
-        CREATE TRIGGER IF NOT EXISTS recall_storage_update AFTER UPDATE OF blob ON recall BEGIN
-            UPDATE recall_storage SET blob_bytes = blob_bytes + length(NEW.blob) - length(OLD.blob)
-            WHERE id = 1;
-        END;
-        CREATE TRIGGER IF NOT EXISTS recall_storage_delete AFTER DELETE ON recall BEGIN
-            UPDATE recall_storage SET entries = entries - 1,
-                blob_bytes = blob_bytes - length(OLD.blob) WHERE id = 1;
-        END;"#,
-        ];
-        for (kind, sql) in previews.iter().enumerate() {
-            let conn = Connection::open_in_memory().expect("db");
-            migrate_initial(&conn).expect("initial");
-            migrate_recalled(&conn).expect("recalled");
-            conn.execute_batch(sql).expect("preview schema");
-            conn.execute_batch(
-                "INSERT INTO recall VALUES
-                ('payload','cmd','',0,0,1,1,3,0,'raw',X'616263',0);
-                INSERT INTO recall_stats VALUES ('cmd','sqlite',8,2);",
-            )
-            .expect("preview data");
-            conn.pragma_update(None, "application_id", DbKind::Recall.application_id())
-                .expect("tag");
-            conn.pragma_update(None, "user_version", 3)
-                .expect("preview stamp");
-            for _ in 0..2 {
-                db::apply_migrations(&conn, &SCHEMA, MigrationMode::GatedByVersion)
-                    .expect("upgrade");
-                assert_eq!(user_version(&conn), SCHEMA_VERSION);
-                assert_eq!(
-                    conn.query_row("SELECT COUNT(*) FROM recall_captures", [], |row| row
-                        .get::<_, i64>(0))
-                        .expect("capture table"),
-                    0
-                );
-                assert_eq!(
-                    conn.query_row("SELECT blob FROM recall WHERE hash='payload'", [], |row| {
-                        row.get::<_, Vec<u8>>(0)
-                    })
-                    .expect("payload"),
-                    b"abc"
-                );
-                assert_eq!(
-                    conn.query_row(
-                        "SELECT elisions+recalls FROM recall_stats WHERE slug='cmd'",
-                        [],
-                        |row| row.get::<_, i64>(0)
-                    )
-                    .expect("stats"),
-                    10
-                );
-                if kind == 0 {
-                    assert_eq!(conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='recall_stats_cap'", [],
-                        |row| row.get::<_, i64>(0)).expect("stats trigger"), 1);
-                } else {
-                    assert_eq!(
-                        conn.query_row(
-                            "SELECT entries, blob_bytes FROM recall_storage WHERE id=1",
-                            [],
-                            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-                        )
-                        .expect("storage totals"),
-                        (1, 3)
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn version_three_captures_upgrade_without_inventing_snapshots() {
-        let conn = Connection::open_in_memory().expect("db");
-        migrate_initial(&conn).expect("initial");
-        migrate_recalled(&conn).expect("recalled");
-        migrate_capture_ids(&conn).expect("captures");
-        conn.execute(
-            "INSERT INTO recall_captures VALUES ('old', 'source', 'hash', 1)",
-            [],
-        )
-        .expect("old capture");
-        conn.pragma_update(None, "application_id", DbKind::Recall.application_id())
-            .expect("tag");
-        conn.pragma_update(None, "user_version", RecallSchema::CaptureIds.number())
-            .expect("stamp");
-        for _ in 0..2 {
-            db::apply_migrations(&conn, &SCHEMA, MigrationMode::GatedByVersion).expect("upgrade");
-            assert_eq!(user_version(&conn), SCHEMA_VERSION);
-            let (source, command, shown): (String, Option<String>, Option<i64>) = conn.query_row(
-                "SELECT invocation_id, command, shown_upto FROM recall_captures WHERE capture_id='old'",
-                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).expect("capture");
-            assert_eq!(source, "source");
-            assert_eq!(command, None);
-            assert_eq!(shown, None);
-        }
-    }
-
-    #[test]
-    fn version_two_recall_upgrades_capture_ids_without_replaying_initial() {
-        let conn = Connection::open_in_memory().expect("db");
-        migrate_initial(&conn).expect("initial");
-        migrate_recalled(&conn).expect("recalled");
+        .expect("legacy row");
         conn.pragma_update(None, "application_id", DbKind::Recall.application_id())
             .expect("tag");
         conn.pragma_update(None, "user_version", RecallSchema::Recalled.number())
             .expect("stamp");
         for _ in 0..2 {
             db::apply_migrations(&conn, &SCHEMA, MigrationMode::GatedByVersion).expect("upgrade");
-            assert_eq!(user_version(&conn), SCHEMA_VERSION);
+            assert_eq!(user_version(&conn), 3);
+            let row = load_reference(&conn, "legacy-hash")
+                .expect("legacy lookup")
+                .unwrap();
+            assert_eq!(decode(&row).unwrap(), b"abc");
+            assert!(row.capture_id.is_none());
+            assert!(row.invocation_id.is_none());
+            assert_eq!(row.shown_upto, 1);
             assert_eq!(
                 conn.query_row("SELECT COUNT(*) FROM recall_captures", [], |row| row
                     .get::<_, i64>(0))
@@ -1457,7 +1296,8 @@ mod tests {
         .expect("payload");
         for i in 0..MAX_CAPTURE_RECORDS + 5 {
             conn.execute(
-                "INSERT INTO recall_captures (capture_id, invocation_id, hash, created_at) VALUES (?1,NULL,'hash',0)",
+                "INSERT INTO recall_captures (capture_id, hash, created_at, command, total_lines, shown_upto, byte_size, truncated)
+                 VALUES (?1,'hash',0,'cmd',1,1,1,0)",
                 [i.to_string()],
             )
             .expect("capture");
@@ -1477,31 +1317,102 @@ mod tests {
     }
 
     #[test]
-    fn emission_counts_partial_and_non_utf8_bytes() {
-        struct FailsAfterThree {
-            written: usize,
+    fn recall_writer_retries_interrupted_and_reports_write_zero_and_flush_errors() {
+        struct Writer {
+            written: Vec<u8>,
+            interrupt: bool,
+            zero: bool,
+            fail_flush: bool,
         }
-        impl Write for FailsAfterThree {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                if self.written == 3 {
+        impl Write for Writer {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                if std::mem::take(&mut self.interrupt) {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                if self.zero {
+                    return Ok(0);
+                }
+                self.written.extend_from_slice(data);
+                Ok(data.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                if self.fail_flush {
+                    Err(std::io::ErrorKind::BrokenPipe.into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let mut writer = Writer {
+            written: Vec::new(),
+            interrupt: true,
+            zero: false,
+            fail_flush: false,
+        };
+        let output = b"a\xff\n";
+        let (emitted, outcome) = emit_recall(&mut writer, output);
+        outcome.expect("retry interrupted write");
+        assert_eq!(emitted, output.len());
+        assert_eq!(writer.written, output);
+
+        writer.zero = true;
+        let (emitted, outcome) = emit_recall(&mut writer, b"not written");
+        assert_eq!(emitted, 0);
+        assert_eq!(outcome.unwrap_err().kind(), std::io::ErrorKind::WriteZero);
+
+        writer.zero = false;
+        writer.fail_flush = true;
+        let (emitted, outcome) = emit_recall(&mut writer, b"flush fails");
+        assert_eq!(emitted, 11);
+        assert_eq!(outcome.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn recall_records_only_the_partial_output_and_propagates_the_write_error() {
+        struct PartialWriter(usize);
+
+        impl Write for PartialWriter {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                if self.0 == 0 {
                     return Err(std::io::ErrorKind::BrokenPipe.into());
                 }
-                let n = bytes.len().min(3 - self.written);
-                self.written += n;
-                Ok(n)
+                let accepted = self.0.min(data.len());
+                self.0 -= accepted;
+                Ok(accepted)
             }
             fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
+                panic!("a failed write should not flush")
             }
         }
-        let (bytes, result) = emit_recall(&mut FailsAfterThree { written: 0 }, b"abcdef");
-        assert_eq!(bytes, 3);
-        assert!(result.is_err());
-        let mut out = Vec::new();
-        let (bytes, result) = emit_recall(&mut out, b"a\xff\n");
-        assert_eq!(bytes, 3);
-        assert!(result.is_ok());
-        assert_eq!(out, b"a\xff\n");
+
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let stored = store_inner(&cfg, b"first\nsecond\n", "test", Some(0), 1).unwrap();
+        let conn = open(&cfg).unwrap();
+        let args = RecallArgs {
+            hash: Some(&stored.hash),
+            full: true,
+            from: None,
+            lines: None,
+            grep: None,
+            list: false,
+        };
+        user_env::with_path("RTK_DB_PATH", Some(dir.path().join("tracking.db")), || {
+            let error =
+                recall_from(&conn, &args, &mut PartialWriter(5)).expect_err("partial write");
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::BrokenPipe
+            );
+            let tracker = tracking::Tracker::new().expect("tracking");
+            let events = tracker.recall_event_history(10, None).unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].emitted_bytes, 5);
+            assert_eq!(events[0].output_tokens, 2);
+            assert!(events[0].invoking_id.is_some());
+            assert!(events[0].source_capture_id.is_none());
+        });
     }
 
     #[test]
@@ -1693,65 +1604,12 @@ mod tests {
     }
 
     #[test]
-    fn migration_preserves_legacy_rows_and_does_not_invent_capture_snapshots() {
-        let dir = tempfile::tempdir().expect("directory");
-        let cfg = RetrieverConfig {
-            retention_days: 0,
-            ..temp_cfg(dir.path())
-        };
-        let conn = open(&cfg).expect("db");
-        insert_row(&conn, "abc123def456", "legacy");
-        conn.execute_batch(
-            "DROP TABLE recall_captures;
-            CREATE TABLE recall_captures (capture_id TEXT PRIMARY KEY, invocation_id TEXT,
-                                         hash TEXT NOT NULL, created_at INTEGER NOT NULL);",
-        )
-        .expect("old schema");
-        let id = "0123456789abcdef0123456789abcdef";
-        conn.execute(
-            "INSERT INTO recall_captures VALUES (?1, NULL, 'abc123def456', 0)",
-            [id],
-        )
-        .expect("old capture");
-        init_schema(&conn).expect("migrate");
-        init_schema(&conn).expect("idempotent migration");
-        assert!(
-            load_reference(&conn, &format!("c_{id}"))
-                .expect("lookup")
-                .is_none()
-        );
-        let legacy = load_reference(&conn, "abc123")
-            .expect("lookup")
-            .expect("legacy");
-        assert_eq!(decode(&legacy).expect("decode"), b"a");
-        assert!(legacy.capture_id.is_none());
-        assert!(legacy.invocation_id.is_none());
-        store_inner(&cfg, b"a", "legacy", None, 1).expect("new capture");
-        let legacy = load_reference(&conn, "abc123def456")
-            .expect("lookup")
-            .expect("legacy");
-        assert_eq!(decode(&legacy).expect("decode"), b"a");
-        let old_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM recall_captures WHERE capture_id = ?1 AND command IS NULL",
-                [id],
-                |r| r.get(0),
-            )
-            .expect("old capture");
-        assert_eq!(old_count, 1);
-    }
-
-    #[test]
-    fn migration_serializes_concurrent_accounting_schema_openers() {
+    fn migration_serializes_concurrent_capture_schema_openers() {
         let dir = tempfile::tempdir().expect("directory");
         let cfg = temp_cfg(dir.path());
         let conn = open(&cfg).expect("db");
-        conn.execute_batch(
-            "DROP TABLE recall_captures;
-            CREATE TABLE recall_captures (capture_id TEXT PRIMARY KEY, invocation_id TEXT,
-                                         hash TEXT NOT NULL, created_at INTEGER NOT NULL);",
-        )
-        .expect("old schema");
+        conn.execute_batch("DROP TABLE recall_captures; PRAGMA user_version = 2;")
+            .expect("develop schema");
         drop(conn);
         let path = cfg.database_path.expect("path");
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
@@ -1764,15 +1622,22 @@ mod tests {
                     conn.busy_timeout(std::time::Duration::from_secs(5))
                         .expect("busy timeout");
                     barrier.wait();
-                    init_schema(&conn).map_err(|error| format!("{error:#}"))
+                    db::apply_migrations(&conn, &SCHEMA, MigrationMode::GatedByVersion)
+                        .expect("concurrent migration");
+                    assert_eq!(user_version(&conn), 3);
+                    let captures: i64 = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM recall_captures WHERE shown_upto IS NOT NULL",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .expect("final table");
+                    assert_eq!(captures, 0);
                 })
             })
             .collect();
         for thread in threads {
-            thread
-                .join()
-                .expect("thread")
-                .unwrap_or_else(|error| panic!("simultaneous migration must succeed: {error}"));
+            thread.join().expect("simultaneous migration must succeed");
         }
     }
 

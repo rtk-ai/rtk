@@ -71,32 +71,3 @@ fn fallback_dispatch_rejects_removed_flag_without_running_child() {
     );
     assert!(stderr.contains("Usage: rtk"), "{stderr}");
 }
-
-#[test]
-fn fallback_dispatch_strips_hook_metadata_and_leading_global_flags() {
-    let (output, ran) = run_stub(
-        &[
-            "--hook-event-id",
-            "0123456789abcdef0123456789abcdef",
-            "-v",
-            "--skip-env",
-            "rtk-fallback-probe",
-            "--hook-event-id",
-            "native-value",
-        ],
-        0,
-    );
-    assert!(ran, "stub not invoked: {output:?}");
-    assert_eq!(output.status.code(), Some(0));
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "--hook-event-id\nnative-value\n"
-    );
-}
-
-#[test]
-fn fallback_dispatch_rejects_invalid_hook_metadata() {
-    let (output, ran) = run_stub(&["--hook-event-id", "invalid", "rtk-fallback-probe"], 0);
-    assert!(!ran);
-    assert_eq!(output.status.code(), Some(2));
-}
