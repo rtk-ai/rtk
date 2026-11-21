@@ -101,7 +101,7 @@ fn try_wrap_with_probes(
     // promises the argument carries the same commands, so a script RTK cannot
     // rewrite without changing what it runs is left alone, exactly as the
     // `fish -c` wrapper path leaves it.
-    if lexer::opens_disown_pair(&code) {
+    if lexer::opens_disown_pair(&code, lexer::ShellDialect::Fish) {
         return None;
     }
     // Fish single-quoted strings diverge from POSIX single-quote semantics for
