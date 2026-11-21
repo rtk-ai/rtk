@@ -568,6 +568,17 @@ fn run_streaming_search(
     Ok(result)
 }
 
+/// Passthrough argv: the agent's flags verbatim, plus `--line-buffered` only
+/// when the caller wants live output through a pipe.
+fn passthrough_args<T: AsRef<str>>(args: &[T], line_buffered: bool) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len() + usize::from(line_buffered));
+    if line_buffered {
+        out.push("--line-buffered".to_string());
+    }
+    out.extend(args.iter().map(|arg| arg.as_ref().to_string()));
+    out
+}
+
 /// Runs the agent's command verbatim for forms RTK does not group: format/shape
 /// flags and pattern-less modes (`--files`, `--type-list`).
 ///
@@ -582,20 +593,26 @@ fn passthrough<T: AsRef<str>>(
     stream_stdin: bool,
     fold_file_list: bool,
 ) -> Result<i32> {
+    let line_buffered = stream_stdin && !std::io::stdout().is_terminal();
     let mut cmd = resolved_command(engine.bin());
-    if stream_stdin && !std::io::stdout().is_terminal() {
-        // Keep passthrough output live when stdout is piped.
-        cmd.child_arg("--line-buffered");
-    }
-    for a in args {
-        cmd.child_arg(a.as_ref());
-    }
+    cmd.child_args(passthrough_args(args, line_buffered));
 
     if stream_stdin {
-        let exit_code =
+        let mut exit_code =
             stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
                 .context("search failed")?
                 .exit_code;
+        if line_buffered && exit_code >= 2 {
+            // BusyBox grep has no --line-buffered. Passthrough inherits stdio,
+            // so stderr cannot be classified here; an engine error with the
+            // live-output flag means rerun the agent's argv verbatim (#5199).
+            let mut plain = resolved_command(engine.bin());
+            plain.child_args(passthrough_args(args, false));
+            exit_code =
+                stream::run_streaming(&mut plain, StdinMode::Inherit, FilterMode::Passthrough)
+                    .context("search failed")?
+                    .exit_code;
+        }
         timer.track_passthrough(real_cmd, &tracking::passthrough_label(real_cmd));
         return Ok(exit_code);
     }
@@ -2367,6 +2384,17 @@ mod tests {
         let stdout =
             "file.txt\x003-context_before\nfile.txt\x004:match\nfile.txt\x005-context_after\n";
         assert_eq!(unparsed_signal(stdout), 0);
+    }
+
+    #[test]
+    fn test_passthrough_retry_omits_line_buffered_flag() {
+        let args = ["-o", "needle", "-"];
+        assert_eq!(
+            passthrough_args(&args, true),
+            ["--line-buffered", "-o", "needle", "-"]
+        );
+        // BusyBox rejects --line-buffered; the retry runs the agent's argv verbatim.
+        assert_eq!(passthrough_args(&args, false), ["-o", "needle", "-"]);
     }
 
     #[test]
