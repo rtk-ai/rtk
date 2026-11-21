@@ -1,0 +1,41 @@
+
+running 1 test
+test tests::lib_fails ... FAILED
+
+failures:
+
+---- tests::lib_fails stdout ----
+
+thread 'tests::lib_fails' (2625126) panicked at src/lib.rs:2:38:
+lib reason
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::lib_fails
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test it_fails ... FAILED
+
+failures:
+
+---- it_fails stdout ----
+
+thread 'it_fails' (2625129) panicked at tests/it.rs:2:17:
+it reason
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    it_fails
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

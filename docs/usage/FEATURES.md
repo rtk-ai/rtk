@@ -666,10 +666,16 @@ Shows only failures. Supports all `cargo test` arguments.
 ### `rtk cargo nextest` -- Rust tests (nextest)
 
 ```bash
-rtk cargo nextest [run|list|--lib] [args...]
+rtk cargo nextest run [args...]
 ```
 
-Filters `cargo nextest` output to show only failures.
+Summarises a test run: the tests nextest reports as `FAIL` or `TIMEOUT`, with their output, then one
+summary line. A test killed by a signal (`SIGABRT`) is counted in the summary but not listed.
+Output with no summary and no failure to show (`list`, `show-config`, `help`, `-V`, `archive`, a
+build error, a rejected option, a run that stopped before its summary after only passing tests) is
+shown as nextest printed it, stdout on stdout and stderr on stderr, with nothing stored for
+`rtk recall`. A run that stopped before its summary after a `FAIL` line shows only the failure
+blocks.
 
 ---
 

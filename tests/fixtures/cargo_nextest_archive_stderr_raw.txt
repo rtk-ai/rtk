@@ -1,0 +1,3 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+   Archiving 1 binary and 1 standard library to /tmp/a.tar.zst
+    Archived 4 files to /tmp/a.tar.zst in 0.03s
