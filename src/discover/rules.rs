@@ -403,6 +403,15 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^xcodebuild(?:\s|$)",
+        rtk_cmd: "rtk xcodebuild",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["xcodebuild"],
+        category: "Build",
+        savings_pct: 90.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?playwright(?:\s|$|[;|&()<>])",
         rtk_cmd: "rtk playwright",
         rewrite_prefixes: &[
