@@ -107,6 +107,7 @@ pub const TRAE_DIR: &str = ".trae";
 pub const TRAE_CN_DIR: &str = ".trae-cn";
 pub const CODEX_DIR: &str = ".codex";
 pub const GEMINI_DIR: &str = ".gemini";
+pub const QODER_DIR: &str = ".qoder";
 
 pub const GITHUB_DIR: &str = ".github";
 pub const COPILOT_HOOK_FILE: &str = "rtk-rewrite.json";

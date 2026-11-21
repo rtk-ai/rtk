@@ -4,7 +4,7 @@
 
 **Deployed hook artifacts** — the files and agent-specific configuration installed on user machines by `rtk init`. External scripts and plugins are thin delegates to `rtk rewrite`; native processors such as Codex call the same Rust rewrite registry directly. Zero filtering logic is duplicated in this directory.
 
-Contains per-agent hook scripts and configuration files for the supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Oh My Pi, Mistral Vibe, Trae, Google Antigravity). `rtk init` installs them.
+Contains per-agent hook scripts and configuration files for the supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Oh My Pi, Mistral Vibe, Trae, Google Antigravity, Qoder CLI). `rtk init` installs them.
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init/`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
@@ -47,6 +47,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, OpenCode 2.0 and 1.x >= 1.18.29, in-place mutation
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, local `isBashToolCallEvent` guard, in-place mutation, `~/.pi/agent/extensions/`; **shared with Oh My Pi (OMP)** — OMP installs the same file at `.omp/extensions/` via its `legacy-pi-compat` layer
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
+- **[`qoder/`](qoder/README.md)** — Awareness document + Rust binary hook (`rtk hook qoder`), `PreToolUse` transparent rewrite, `settings.json` patching
 - **[`vibe/`](vibe/README.md)** — Rust binary hook (`rtk hook vibe`), `pre_tool` entry in `~/.vibe/hooks.toml`, `hook_specific_output.tool_input` rewrite plus `system_message` for UI visibility
 - **[`antigravity/`](antigravity/README.md)** — Rust binary hook (`rtk hook antigravity`), `PreToolUse` plugin entry in `.agents/plugins/rtk/hooks.json` or `~/.gemini/config/plugins/rtk/hooks.json`, transparent rewrite via `overwrite.CommandLine`
 
@@ -68,6 +69,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
 | Oh My Pi (OMP) | TypeScript extension (`tool_call` event, shared with Pi) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
+| Qoder CLI | Rust binary (`rtk hook qoder`) | Transparent rewrite | Yes (`updatedInput`) |
 | Mistral Vibe | Rust binary (`rtk hook vibe`) | Transparent rewrite | Yes (`hook_specific_output.tool_input`) |
 
 ## JSON Formats by Agent
@@ -110,6 +112,35 @@ Each agent subdirectory has its own README with hook-specific details:
 ```
 
 Returns `{}` when no rewrite (Cursor requires JSON for all paths).
+
+### Qoder CLI (Rust Binary)
+
+Uses the same `PreToolUse` JSON protocol as Claude Code. The Rust binary (`rtk hook qoder`) reads from stdin and returns `updatedInput` for transparent command rewriting.
+
+**Input** (stdin, snake_case):
+```json
+{
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "git status"
+  }
+}
+```
+
+**Output** (stdout, transparent rewrite):
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecisionReason": "RTK auto-rewrite",
+    "updatedInput": {
+      "command": "rtk git status"
+    }
+  }
+}
+```
+
+Returns nothing (empty stdout) when the command is non-Bash, already rtk-prefixed, or not optimizable.
 
 ### Trae (Rust Binary)
 

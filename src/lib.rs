@@ -62,6 +62,8 @@ pub enum AgentTarget {
     Hermes,
     /// Factory Droid CLI
     Droid,
+    /// Qoder CLI
+    Qoder,
     /// Mistral Vibe CLI
     Vibe,
     /// Oh My Pi (OMP)
@@ -1290,6 +1292,8 @@ enum HookCommands {
     Droid,
     /// Process Google Antigravity PreToolUse hook (reads JSON from stdin)
     Antigravity,
+    /// Process Qoder CLI PreToolUse hook (reads JSON from stdin)
+    Qoder,
     /// Process Mistral Vibe CLI pre_tool hook (reads JSON from stdin)
     Vibe,
     /// Answer for OpenCode's plugin: the rewrite as JSON, or `{}` when
@@ -2378,6 +2382,9 @@ where
     } else if agent == Some(AgentTarget::Droid) {
         hooks::init::uninstall_droid(global, ctx)?;
         Ok(0)
+    } else if agent == Some(AgentTarget::Qoder) {
+        hooks::init::uninstall_qoder_mode(global, ctx)?;
+        Ok(0)
     } else if agent == Some(AgentTarget::Vibe) {
         hooks::init::uninstall_vibe(ctx)?;
         Ok(0)
@@ -3039,7 +3046,9 @@ fn run_cli() -> Result<i32> {
             } else {
                 hooks::init::PatchMode::Ask
             };
-            if show {
+            if show && agent == Some(AgentTarget::Qoder) {
+                hooks::init::show_qoder_config(global)?;
+            } else if show {
                 hooks::init::show_config(codex, agent == Some(AgentTarget::Omp))?;
             } else if uninstall && copilot {
                 if global {
@@ -3088,6 +3097,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_hermes_mode(ctx)?;
             } else if agent == Some(AgentTarget::Droid) {
                 hooks::init::run_droid_mode(global, ctx)?;
+            } else if agent == Some(AgentTarget::Qoder) {
+                hooks::init::run_qoder_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Vibe) {
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
             } else {
@@ -3668,6 +3679,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Antigravity => {
                 hooks::hook_cmd::run_antigravity()?;
+                0
+            }
+            HookCommands::Qoder => {
+                hooks::hook_cmd::run_qoder()?;
                 0
             }
             HookCommands::Vibe => {
