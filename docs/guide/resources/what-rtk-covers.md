@@ -146,6 +146,12 @@ listing into `head`, `tail`, or `cat`.
 | `helm list` | Release name, namespace, status, and chart columns |
 | `terraform plan` | Planned changes summary, resource diffs condensed |
 
+## System
+
+| Command | What changes |
+|---------|--------------|
+| `launchctl list` | Apple's own `com.apple.*` services left out and counted; every other job shown verbatim |
+
 ## Global flags
 
 These flags apply to all RTK commands and must come before the subcommand:
