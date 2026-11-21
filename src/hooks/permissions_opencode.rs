@@ -293,7 +293,7 @@ fn opencode_configs() -> Vec<Value> {
             configs.push(v);
         }
     } else if let Some(dir) = global_opencode_dir() {
-        configs.extend(read_first_config(&dir));
+        configs.extend(read_global_config(&dir));
     }
 
     if let Some(root) = project_root_with_config() {
@@ -304,6 +304,11 @@ fn opencode_configs() -> Vec<Value> {
 }
 
 fn global_opencode_dir() -> Option<PathBuf> {
+    if let Some(xdg) = user_dirs::env_path("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(Path::new(&xdg).join(OPENCODE_SUBDIR));
+    }
     Some(user_dirs::home()?.join(CONFIG_DIR).join(OPENCODE_SUBDIR))
 }
 
@@ -387,6 +392,53 @@ fn project_root_with_config() -> Option<PathBuf> {
 }
 
 const CONFIG_NAMES: [&str; 2] = ["opencode.json", "opencode.jsonc"];
+
+// OpenCode 1.x merges all three global files in this order. `config.json`
+// is global-only: it must never become a marker in the project search.
+const GLOBAL_CONFIG_NAMES: [&str; 3] = ["config.json", "opencode.json", "opencode.jsonc"];
+
+fn read_global_config(dir: &Path) -> Option<Value> {
+    GLOBAL_CONFIG_NAMES
+        .iter()
+        .filter_map(|name| read_config(&dir.join(name)))
+        .map(|mut config| {
+            normalize_permission_shorthand(&mut config);
+            for key in ["agent", "agents"] {
+                if let Some(agents) = config.get_mut(key).and_then(Value::as_object_mut) {
+                    agents.values_mut().for_each(normalize_permission_shorthand);
+                }
+            }
+            config
+        })
+        .reduce(|mut merged, config| {
+            merge_global_config(&mut merged, config);
+            merged
+        })
+}
+
+// OpenCode normalizes `permission: "ask"` to `{ "*": "ask" } before merging,
+// including in agent blocks, so a later tool map keeps the wildcard rule.
+fn normalize_permission_shorthand(config: &mut Value) {
+    if let Some(permission) = config.get_mut("permission")
+        && permission.as_str().and_then(Action::parse).is_some()
+    {
+        let action = permission.take();
+        *permission = serde_json::json!({ "*": action });
+    }
+}
+
+fn merge_global_config(target: &mut Value, source: Value) {
+    match (target, source) {
+        (Value::Object(target), Value::Object(source)) => {
+            for (key, value) in source {
+                // Updating in place keeps the original rule-key order, as
+                // OpenCode's deep merge does; new keys append at the end.
+                merge_global_config(target.entry(key).or_insert(Value::Null), value);
+            }
+        }
+        (target, source) => *target = source,
+    }
+}
 
 fn read_first_config(dir: &Path) -> Option<Value> {
     CONFIG_NAMES
@@ -614,6 +666,404 @@ mod tests {
         std::fs::create_dir_all(path.parent().expect("config path has a parent"))
             .expect("create config directory");
         std::fs::write(path, content).expect("write config file");
+    }
+
+    #[test]
+    fn global_ask_rules_use_xdg_or_the_default_config_home() {
+        use crate::hooks::permissions::{Host, check_command_for_agent};
+
+        for (setting, name) in [
+            ("xdg", "opencode.json"),
+            ("xdg", "config.json"),
+            ("unset", "config.json"),
+            ("unset", "opencode.json"),
+            ("empty", "opencode.json"),
+        ] {
+            let tmp = test_isolation::tempdir();
+            let home = tmp.path().join("home");
+            let xdg = tmp.path().join("xdg");
+            let config_home = if setting == "xdg" {
+                xdg.clone()
+            } else {
+                home.join(CONFIG_DIR)
+            };
+            write_json(
+                &config_home.join(OPENCODE_SUBDIR).join(name),
+                r#"{"permission":{"bash":{"ls *":"ask"}}}"#,
+            );
+            let value = match setting {
+                "xdg" => Some(xdg.as_path()),
+                "empty" => Some(Path::new("")),
+                _ => None,
+            };
+
+            test_isolation::with_root(&home, || {
+                user_env::with_path("XDG_CONFIG_HOME", value, || {
+                    assert_eq!(
+                        check_command_for_agent("ls -la", Host::OpenCode, None),
+                        PermissionVerdict::Ask,
+                        "XDG={setting}, {name}"
+                    );
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn xdg_and_home_rules_are_not_read_together() {
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        let xdg = tmp.path().join("xdg");
+        write_json(
+            &home
+                .join(CONFIG_DIR)
+                .join(OPENCODE_SUBDIR)
+                .join("opencode.json"),
+            r#"{"permission":{"bash":{"ls *":"deny","cat *":"ask"}}}"#,
+        );
+        write_json(
+            &xdg.join(OPENCODE_SUBDIR).join("opencode.json"),
+            r#"{"permission":{"bash":{"ls *":"ask","git *":"deny"}}}"#,
+        );
+
+        test_isolation::with_root(&home, || {
+            user_env::with_path("XDG_CONFIG_HOME", Some(&xdg), || {
+                let rules = load_opencode_rules(None);
+                assert_eq!(
+                    check_command_with_opencode_rules("ls -la", &rules),
+                    PermissionVerdict::Ask
+                );
+                assert_eq!(
+                    check_command_with_opencode_rules("git status", &rules),
+                    PermissionVerdict::Deny
+                );
+                assert_eq!(
+                    check_command_with_opencode_rules("cat file", &rules),
+                    PermissionVerdict::Default
+                );
+            });
+            user_env::with_path("XDG_CONFIG_HOME", None::<&Path>, || {
+                let rules = load_opencode_rules(None);
+                assert_eq!(
+                    check_command_with_opencode_rules("ls -la", &rules),
+                    PermissionVerdict::Deny
+                );
+                assert_eq!(
+                    check_command_with_opencode_rules("cat file", &rules),
+                    PermissionVerdict::Ask
+                );
+                assert_eq!(
+                    check_command_with_opencode_rules("git status", &rules),
+                    PermissionVerdict::Default
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn an_xdg_directory_without_config_does_not_fall_back_to_home() {
+        for create_directory in [false, true] {
+            let tmp = test_isolation::tempdir();
+            let home = tmp.path().join("home");
+            let xdg = tmp.path().join("xdg");
+            write_json(
+                &home
+                    .join(CONFIG_DIR)
+                    .join(OPENCODE_SUBDIR)
+                    .join("opencode.json"),
+                r#"{"permission":{"bash":{"ls *":"ask"}}}"#,
+            );
+            if create_directory {
+                std::fs::create_dir_all(xdg.join(OPENCODE_SUBDIR))
+                    .expect("create empty XDG directory");
+            }
+
+            test_isolation::with_root(&home, || {
+                user_env::with_path("XDG_CONFIG_HOME", Some(&xdg), || {
+                    assert_eq!(
+                        check_command_with_opencode_rules("ls -la", &load_opencode_rules(None)),
+                        PermissionVerdict::Default,
+                        "XDG directory exists: {create_directory}"
+                    );
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn global_files_merge_in_order_and_keep_distinct_rules() {
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        let dir = home.join(CONFIG_DIR).join(OPENCODE_SUBDIR);
+        write_json(
+            &dir.join("config.json"),
+            r#"{"permission":{"bash":{"ls *":"deny","cat *":"ask"}}}"#,
+        );
+        write_json(
+            &dir.join("opencode.json"),
+            r#"{"permission":{"bash":{"ls *":"allow","git *":"deny"}}}"#,
+        );
+        write_json(
+            &dir.join("opencode.jsonc"),
+            r#"{"permission":{"bash":{"git *":"ask","cargo *":"allow"}}}"#,
+        );
+
+        test_isolation::with_root(&home, || {
+            let rules = load_opencode_rules(None);
+            for (command, expected) in [
+                ("ls -la", PermissionVerdict::Allow),
+                ("cat file", PermissionVerdict::Ask),
+                ("git status", PermissionVerdict::Ask),
+                ("cargo test", PermissionVerdict::Allow),
+            ] {
+                assert_eq!(
+                    check_command_with_opencode_rules(command, &rules),
+                    expected,
+                    "{command}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn empty_global_files_do_not_hide_asks_from_other_files() {
+        for ask_file in ["config.json", "opencode.jsonc"] {
+            let tmp = test_isolation::tempdir();
+            let home = tmp.path().join("home");
+            let dir = home.join(CONFIG_DIR).join(OPENCODE_SUBDIR);
+            for name in ["config.json", "opencode.json", "opencode.jsonc"] {
+                write_json(
+                    &dir.join(name),
+                    if name == ask_file {
+                        r#"{"permission":{"bash":{"ls *":"ask"}}}"#
+                    } else {
+                        "{}"
+                    },
+                );
+            }
+
+            test_isolation::with_root(&home, || {
+                assert_eq!(
+                    check_command_with_opencode_rules("ls -la", &load_opencode_rules(None)),
+                    PermissionVerdict::Ask,
+                    "the ask in {ask_file} survives the empty files"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn global_merging_preserves_the_position_of_overwritten_patterns() {
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        let dir = home.join(CONFIG_DIR).join(OPENCODE_SUBDIR);
+        write_json(
+            &dir.join("config.json"),
+            r#"{"permission":{"bash":{"git *":"ask","git status":"allow"}}}"#,
+        );
+        write_json(
+            &dir.join("opencode.json"),
+            r#"{"permission":{"bash":{"git *":"deny"}}}"#,
+        );
+        write_json(
+            &dir.join("opencode.jsonc"),
+            r#"{"permission":{"bash":{"git diff":"ask"}}}"#,
+        );
+
+        test_isolation::with_root(&home, || {
+            let rules = load_opencode_rules(None);
+            assert_eq!(
+                check_command_with_opencode_rules("git status", &rules),
+                PermissionVerdict::Allow
+            );
+            assert_eq!(
+                check_command_with_opencode_rules("git log", &rules),
+                PermissionVerdict::Deny
+            );
+            assert_eq!(
+                check_command_with_opencode_rules("git diff", &rules),
+                PermissionVerdict::Ask
+            );
+        });
+    }
+
+    #[test]
+    fn global_shell_permissions_replace_maps_with_strings_and_strings_with_maps() {
+        for (earlier, later, ls, other) in [
+            (
+                r#"{"ls *":"ask"}"#,
+                r#""allow""#,
+                PermissionVerdict::Allow,
+                PermissionVerdict::Allow,
+            ),
+            (
+                r#""deny""#,
+                r#"{"ls *":"ask"}"#,
+                PermissionVerdict::Ask,
+                PermissionVerdict::Default,
+            ),
+        ] {
+            let tmp = test_isolation::tempdir();
+            let home = tmp.path().join("home");
+            let dir = home.join(CONFIG_DIR).join(OPENCODE_SUBDIR);
+            write_json(
+                &dir.join("config.json"),
+                &format!(r#"{{"permission":{{"bash":{earlier}}}}}"#),
+            );
+            write_json(
+                &dir.join("opencode.jsonc"),
+                &format!(r#"{{"permission":{{"bash":{later}}}}}"#),
+            );
+
+            test_isolation::with_root(&home, || {
+                let rules = load_opencode_rules(None);
+                assert_eq!(check_command_with_opencode_rules("ls -la", &rules), ls);
+                assert_eq!(check_command_with_opencode_rules("rm file", &rules), other);
+            });
+        }
+    }
+
+    #[test]
+    fn global_permission_shorthands_are_normalized_before_merging() {
+        for agent in [None, Some("build")] {
+            for shorthand_first in [false, true] {
+                let tmp = test_isolation::tempdir();
+                let home = tmp.path().join("home");
+                let dir = home.join(CONFIG_DIR).join(OPENCODE_SUBDIR);
+                let (earlier, later) = if shorthand_first {
+                    (r#""ask""#, r#"{"bash":{"ls *":"allow"}}"#)
+                } else {
+                    (r#"{"bash":{"ls *":"ask"}}"#, r#""allow""#)
+                };
+                for (name, permission) in [("config.json", earlier), ("opencode.json", later)] {
+                    let config = if agent.is_some() {
+                        format!(r#"{{"agent":{{"build":{{"permission":{permission}}}}}}}"#)
+                    } else {
+                        format!(r#"{{"permission":{permission}}}"#)
+                    };
+                    write_json(&dir.join(name), &config);
+                }
+
+                test_isolation::with_root(&home, || {
+                    let rules = load_opencode_rules(agent);
+                    assert_eq!(
+                        check_command_with_opencode_rules("ls -la", &rules),
+                        PermissionVerdict::Allow
+                    );
+                    assert_eq!(
+                        check_command_with_opencode_rules("git status", &rules),
+                        if shorthand_first {
+                            PermissionVerdict::Ask
+                        } else {
+                            PermissionVerdict::Allow
+                        },
+                        "agent={agent:?}, shorthand first: {shorthand_first}"
+                    );
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn global_agent_permissions_merge_before_the_agent_rules_are_applied() {
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        let dir = home.join(CONFIG_DIR).join(OPENCODE_SUBDIR);
+        write_json(
+            &dir.join("config.json"),
+            r#"{"permission":{"bash":{"ls *":"allow"}},"agent":{"build":{"permission":{"bash":{"ls *":"ask","cat *":"deny"}}}}}"#,
+        );
+        write_json(
+            &dir.join("opencode.json"),
+            r#"{"agent":{"build":{"description":"retained agent","permission":{"bash":{"git *":"ask"}}}}}"#,
+        );
+        write_json(
+            &dir.join("opencode.jsonc"),
+            r#"{"agent":{"build":{"permission":{"bash":{"ls *":"deny"}}}}}"#,
+        );
+
+        test_isolation::with_root(&home, || {
+            let rules = load_opencode_rules(Some("build"));
+            assert_eq!(
+                check_command_with_opencode_rules("ls -la", &rules),
+                PermissionVerdict::Deny
+            );
+            assert_eq!(
+                check_command_with_opencode_rules("cat file", &rules),
+                PermissionVerdict::Deny
+            );
+            assert_eq!(
+                check_command_with_opencode_rules("git status", &rules),
+                PermissionVerdict::Ask
+            );
+            assert_eq!(
+                check_command_with_opencode_rules("ls -la", &load_opencode_rules(None)),
+                PermissionVerdict::Allow
+            );
+        });
+    }
+
+    #[test]
+    fn a_generic_project_config_json_is_not_an_opencode_config_or_root_marker() {
+        for opencode_above in [false, true] {
+            let tmp = test_isolation::tempdir();
+            let project = tmp.path().join("project");
+            let nested = project.join("nested");
+            write_json(
+                &nested.join("config.json"),
+                r#"{"permission":{"bash":{"ls *":"ask"}}}"#,
+            );
+            if opencode_above {
+                write_json(
+                    &project.join("opencode.json"),
+                    r#"{"permission":{"bash":{"ls *":"deny"}}}"#,
+                );
+            }
+
+            test_isolation::with_root(&tmp.path().join("home"), || {
+                let _entered = test_isolation::enter(&nested);
+                assert_eq!(
+                    check_command_with_opencode_rules("ls -la", &load_opencode_rules(None)),
+                    if opencode_above {
+                        PermissionVerdict::Deny
+                    } else {
+                        PermissionVerdict::Default
+                    },
+                    "OpenCode config in an ancestor: {opencode_above}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn markdown_agents_use_the_xdg_root_for_both_directory_spellings() {
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        let xdg = tmp.path().join("xdg");
+        write_json(
+            &home
+                .join(CONFIG_DIR)
+                .join(OPENCODE_SUBDIR)
+                .join("agents")
+                .join("homeonly.md"),
+            "---\npermission:\n  bash: ask\n---\nbody\n",
+        );
+        for (directory, key) in [("agents", "permission"), ("agent", "permissions")] {
+            write_json(
+                &xdg.join(OPENCODE_SUBDIR)
+                    .join(directory)
+                    .join(format!("{directory}.md")),
+                &format!("---\n{key}:\n  bash: ask\n---\nbody\n"),
+            );
+        }
+
+        test_isolation::with_root(&home, || {
+            user_env::with_path("XDG_CONFIG_HOME", Some(&xdg), || {
+                assert!(agent_rules_unreadable(Some("agents")));
+                assert!(agent_rules_unreadable(Some("agent")));
+                assert!(!agent_rules_unreadable(Some("homeonly")));
+            });
+        });
     }
 
     #[test]
