@@ -5,6 +5,7 @@ use regex::Regex;
 use serde::Deserialize;
 use std::sync::LazyLock;
 
+use crate::core::arg_tokenizer;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{package_manager_exec, strip_ansi};
@@ -222,8 +223,9 @@ fn vitest_invocation(args: &[String]) -> TestInvocation {
         effective.push("--reporter=json".to_string());
     }
 
-    for arg in args {
-        if should_skip_vitest_arg(arg) {
+    let boundary = user_boundary(args);
+    for (i, arg) in args.iter().enumerate() {
+        if i < boundary && should_skip_vitest_arg(arg) {
             continue;
         }
         effective.push(arg.clone());
@@ -243,16 +245,24 @@ fn jest_invocation(args: &[String]) -> TestInvocation {
         // Enable JSON structured output
         "--json".to_string(),
     ];
+    let boundary = user_boundary(args);
     effective.extend(
         args.iter()
-            .filter(|arg| !should_skip_jest_arg(arg))
-            .cloned(),
+            .enumerate()
+            .filter(|(i, arg)| *i >= boundary || !should_skip_jest_arg(arg))
+            .map(|(_, arg)| arg.clone()),
     );
     TestInvocation {
         framework: "jest",
         args: effective,
         passthrough: false,
     }
+}
+
+/// Index of the user's `--`, or `args.len()`. A `run` or `--json` after it is an argument
+/// for the tool, not a mode to strip.
+fn user_boundary(args: &[String]) -> usize {
+    arg_tokenizer::injection_point(&arg_tokenizer::tokenize(args), args.len())
 }
 
 fn should_skip_jest_arg(arg: &str) -> bool {
@@ -453,6 +463,18 @@ mod tests {
         assert_eq!(
             invocation.args,
             args(&["--no-watch", "--json", "-t", "adds", "src/a.test.js"])
+        );
+    }
+
+    #[test]
+    fn test_invocation_keeps_skipped_words_after_double_dash() {
+        assert_eq!(
+            jest_invocation(&args(&["run", "--", "run", "--json"])).args,
+            args(&["--no-watch", "--json", "--", "run", "--json"])
+        );
+        assert_eq!(
+            vitest_invocation(&args(&["--", "run"])).args,
+            args(&["run", "--reporter=json", "--", "run"])
         );
     }
 
