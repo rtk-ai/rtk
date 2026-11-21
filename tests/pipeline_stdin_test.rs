@@ -59,3 +59,25 @@ fn wc_preserves_native_failure_exit_code() {
     assert!(!rtk.status.success());
     assert_eq!(rtk.status.code(), native.status.code());
 }
+
+#[test]
+fn pipe_go_test_preserves_benchmark_split_chunks() {
+    let input = r#"{"Action":"start","Package":"example.com/benchrepro"}
+{"Action":"output","Package":"example.com/benchrepro","Output":"BenchmarkX-12    \t"}
+{"Action":"output","Package":"example.com/benchrepro","Output":"      10\t      1679 ns/op\n"}"#;
+
+    let output = run_with_stdin(
+        common::rtk_command().args(["pipe", "-f", "go-test"]),
+        input.as_bytes(),
+    );
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("{\"Action\""),
+        "raw JSON was leaked: {stdout}"
+    );
+    assert!(!stdout.contains("No tests found"), "got: {stdout}");
+    assert!(stdout.contains("BenchmarkX-12"), "got: {stdout}");
+    assert!(stdout.contains("1679 ns/op"), "got: {stdout}");
+}
