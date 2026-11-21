@@ -9,3 +9,4 @@
 - `curl_cmd.rs` truncates long responses, saves full output to file for recovery
 - `wget_cmd.rs` wraps wget with output filtering
 - `psql_cmd.rs` filters PostgreSQL query output
+- `sqlcmd_cmd.rs` filters SQL Server `sqlcmd` output (ODBC and Go clients): drops each result set's dash separator row, never trims a cell, caps long result sets with a recall hint

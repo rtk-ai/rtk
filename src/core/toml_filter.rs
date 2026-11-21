@@ -272,6 +272,7 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "gh",
     "aws",
     "psql",
+    "sqlcmd",
     "pnpm",
     "err",
     "test",

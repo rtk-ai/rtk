@@ -1,0 +1,7 @@
+id         
+-----------
+          1
+
+(1 rows affected)
+Msg 208, Level 16, State 1, Server sqlhost, Line 1
+Invalid object name 'dbo.nope'.

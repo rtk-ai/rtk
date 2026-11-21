@@ -142,6 +142,7 @@ listing into `head`, `tail`, or `cat`.
 |---------|--------------|
 | `aws` | JSON condensed, relevant fields only |
 | `psql` | Query results without decoration |
+| `sqlcmd` | Result sets without the dash separator row, long ones capped |
 | `curl` | Response body only, headers stripped |
 | `helm list` | Release name, namespace, status, and chart columns |
 | `terraform plan` | Planned changes summary, resource diffs condensed |
