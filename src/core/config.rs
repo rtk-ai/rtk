@@ -122,8 +122,9 @@ pub struct HooksConfig {
     #[serde(default)]
     pub exclude_commands: Vec<String>,
 
-    /// Wrapper prefixes that should be transparently stripped before routing
-    /// to a filter, then re-prepended on the rewrite. For example, with
+    /// Wrapper prefixes that are peeled before routing to a filter and kept as
+    /// written in the rewrite, which edits only the command after them. For
+    /// example, with
     /// `transparent_prefixes = ["docker exec mycontainer"]`, the command
     /// `docker exec mycontainer git status` rewrites to
     /// `docker exec mycontainer rtk git status` instead of passing through
