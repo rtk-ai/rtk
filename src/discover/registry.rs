@@ -3079,6 +3079,7 @@ mod tests {
                 "rtk hadolint",
                 "rtk helm",
                 "rtk iptables",
+                "rtk jq",
                 "rtk lint",
                 "rtk liquibase",
                 "rtk ls",
@@ -3127,7 +3128,7 @@ mod tests {
             .map(|rule| rule.rtk_cmd)
             .collect();
 
-        assert_eq!(safe_rules, vec!["rtk grep", "rtk rg"]);
+        assert_eq!(safe_rules, vec!["rtk grep", "rtk rg", "rtk jq"]);
     }
 
     #[test]
