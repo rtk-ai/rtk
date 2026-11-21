@@ -187,7 +187,7 @@ pub fn run_validate() -> Result<i32> {
 pub fn print_hook_gaps() {
     for gap in crate::hooks::init::claude_hook_gaps() {
         println!(
-            "hook needed: {gap} — your pipeline has rules there; run `rtk init -g` so Claude Code sends those tool calls to rtk"
+            "hook needed: {gap} — your pipeline has rules there; run `rtk init -g --auto-patch` so Claude Code sends those tool calls to rtk"
         );
     }
 }
@@ -780,7 +780,7 @@ pub fn run_add(
             _ => "directives",
         };
         println!(
-            "this pipeline uses {what} — if you haven't enabled that before, run `rtk init -g` once, then restart your agent session"
+            "this pipeline uses {what} — if you haven't enabled that before, run `rtk init -g --auto-patch` once, then restart your agent session"
         );
     }
     println!("active now, merged with your other pipelines — see `rtk pipeline show`");

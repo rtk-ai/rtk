@@ -1404,24 +1404,55 @@ fn prompt_telemetry_consent() -> Result<()> {
     Ok(())
 }
 
-pub(super) fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
-    let settings_path = resolve_claude_dir()
-        .unwrap_or_else(|_| PathBuf::from(format!("~/{}", CLAUDE_DIR)))
-        .join(SETTINGS_JSON);
-    println!("\n  MANUAL STEP: Add this to {}:", settings_path.display());
-    println!("  {{");
-    println!("    \"hooks\": {{ \"PreToolUse\": [{{");
-    println!("      \"matcher\": \"Bash\",");
-    println!("      \"hooks\": [{{ \"type\": \"command\",");
-    println!("        \"command\": \"{}\"", hook_command);
-    println!("      }}]");
-    println!("    }}]}}");
-    println!("  }}");
+pub(super) fn print_manual_instructions(
+    settings_path: &Path,
+    missing: &[(&'static str, String)],
+    refreshed: &[(&'static str, String)],
+    hook_command: &str,
+    include_opencode: bool,
+) -> Result<()> {
+    print!(
+        "{}",
+        manual_step_text(settings_path, missing, refreshed, hook_command)?
+    );
     if include_opencode {
         println!("\n  Then restart Claude Code and OpenCode. Test with: git status\n");
     } else {
         println!("\n  Then restart Claude Code. Test with: git status\n");
     }
+    Ok(())
+}
+
+/// The changes `--auto-patch` would make, as steps the user can copy: the
+/// entries it would add (built by the same `insert_hook_entry`) and the
+/// matchers it would update on RTK's existing entries. Listing an existing
+/// entry under "Add" would leave the user with two that run the hook.
+fn manual_step_text(
+    settings_path: &Path,
+    missing: &[(&'static str, String)],
+    refreshed: &[(&'static str, String)],
+    hook_command: &str,
+) -> Result<String> {
+    let path = settings_path.display();
+    let mut text = String::new();
+    if !missing.is_empty() {
+        let mut root = serde_json::json!({});
+        for (event_key, matcher) in missing {
+            insert_hook_entry(&mut root, event_key, matcher, hook_command)?;
+        }
+        let snippet = serde_json::to_string_pretty(&root)
+            .context("Failed to serialize the manual hook snippet")?;
+        text.push_str(&format!("\n  MANUAL STEP: Add this to {path}:\n"));
+        for line in snippet.lines() {
+            text.push_str(&format!("  {line}\n"));
+        }
+    }
+    for (event_key, matcher) in refreshed {
+        text.push_str(&format!(
+            "\n  MANUAL STEP: In {path}, set the matcher of the {event_key} entry that runs `{hook_command}` to \"{matcher}\".\n"
+        ));
+    }
+    Ok(text)
 }
 
 /// Full uninstall for Claude, Gemini, Codex, Cursor, Pi, or OMP artifacts.
@@ -2367,6 +2398,40 @@ mod tests {
             hook_gaps(&root, &required),
             vec!["PostToolUse hook missing"]
         );
+    }
+
+    #[test]
+    fn manual_step_adds_only_missing_entries_and_updates_existing_matchers() {
+        // An existing Bash-only PreToolUse entry, and a pipeline that also wants PostToolUse.
+        let missing = vec![(POST_TOOL_USE_KEY, "Bash|Read".to_string())];
+        let refreshed = vec![(PRE_TOOL_USE_KEY, "Bash|Read".to_string())];
+        let text = manual_step_text(
+            Path::new("/home/u/.claude/settings.json"),
+            &missing,
+            &refreshed,
+            CLAUDE_HOOK_COMMAND,
+        )
+        .expect("manual step");
+
+        let added: String = text
+            .lines()
+            .skip_while(|line| {
+                !line.contains("MANUAL STEP: Add this to /home/u/.claude/settings.json:")
+            })
+            .skip(1)
+            .take_while(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let added: serde_json::Value =
+            serde_json::from_str(&added).expect("added entries are JSON");
+        assert_eq!(
+            added,
+            settings_with(serde_json::json!({ "PostToolUse": rtk_entry("Bash|Read") })),
+            "only the missing event is added; the existing PreToolUse entry is not repeated"
+        );
+        assert!(text.contains(
+            "set the matcher of the PreToolUse entry that runs `rtk hook claude` to \"Bash|Read\""
+        ));
     }
 
     #[test]
