@@ -575,12 +575,32 @@ fn name_matches(pattern: &str, name: &str, case_insensitive: bool) -> bool {
     }
 }
 
+/// The path as the listing shows it: relative to `root`, with `/` throughout.
+/// Every display string descends from here, so this is where the separator
+/// is decided once: `group_by_dir` keys on it, the grouped header appends `/`
+/// to the key, and `display_ordered` joins key and name with `/`.
 fn relative_display(entry_path: &Path, root: &str) -> String {
-    entry_path
-        .strip_prefix(root)
-        .unwrap_or(entry_path)
-        .to_string_lossy()
-        .to_string()
+    forward_slashes(
+        entry_path
+            .strip_prefix(root)
+            .unwrap_or(entry_path)
+            .to_string_lossy()
+            .to_string(),
+    )
+}
+
+/// On Windows `Path` renders its native `\`, and a header such as `a\b/` then
+/// mixed both separators in one listing (#4824). Native `find` prints `/`, and
+/// Windows accepts `/` in every path it is handed back, so `/` it is. On Unix
+/// `\` is an ordinary filename character and must stay.
+#[cfg(windows)]
+fn forward_slashes(path: String) -> String {
+    path.replace('\\', "/")
+}
+
+#[cfg(not(windows))]
+fn forward_slashes(path: String) -> String {
+    path
 }
 
 const FILTERED_CAP: usize = 1000;
@@ -1314,6 +1334,39 @@ mod tests {
         let files: Vec<String> = args(&["zebra.txt", "logs/a.txt", "alpha.txt"]);
         let ordered = display_ordered(&files);
         assert_eq!(ordered, args(&["zebra.txt", "alpha.txt", "logs/a.txt"]));
+    }
+
+    /// Windows hands `relative_display` native `\`; the listing must still read
+    /// `a/b/ f1.txt`, one separator throughout, as native `find` prints (#4824).
+    #[cfg(windows)]
+    #[test]
+    fn windows_listing_uses_forward_slashes_throughout() {
+        let root = r"C:\tmp\repro";
+        let files: Vec<String> = [r"a\f1.txt", r"a\b\f2.txt", r"a\b\c\f3.txt"]
+            .iter()
+            .map(|rel| relative_display(Path::new(&format!(r"{root}\{rel}")), root))
+            .collect();
+        assert_eq!(files, args(&["a/f1.txt", "a/b/f2.txt", "a/b/c/f3.txt"]));
+
+        let by_dir = group_by_dir(&files);
+        let mut dirs: Vec<_> = by_dir.keys().cloned().collect();
+        dirs.sort();
+        assert_eq!(dirs, args(&["a", "a/b", "a/b/c"]));
+
+        let ordered = display_ordered(&files);
+        assert!(
+            ordered.iter().all(|f| !f.contains('\\')),
+            "no native separator may survive into the listing: {ordered:?}"
+        );
+    }
+
+    /// On Unix a backslash is an ordinary filename character, not a separator,
+    /// and the normalisation must leave it alone.
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_keeps_backslashes_in_names() {
+        let shown = relative_display(Path::new(r"/repo/dir/odd\name.txt"), "/repo");
+        assert_eq!(shown, r"dir/odd\name.txt");
     }
 
     #[test]
