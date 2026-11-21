@@ -451,7 +451,9 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^docker\s+(ps|images|logs|run|exec|build|compose\s+(ps|logs|build))(?:\s|$|[;|&()<>])",
+        // `-H/--host/--context` may precede the subcommand, `-f/--file/-p/--project-name`
+        // may follow `compose`; `rtk docker` takes exactly these and forwards them (#4758).
+        pattern: r"^docker\s+(?:(?:-H|--host|--context)(?:=|\s+)\S+\s+)*(ps|images|logs|run|exec|build|compose\s+(?:(?:-f|--file|-p|--project-name)(?:=|\s+)\S+\s+)*(ps|logs|build))(?:\s|$|[;|&()<>])",
         rtk_cmd: "rtk docker",
         rewrite_prefixes: &["docker"],
         category: "Infra",
