@@ -70,6 +70,7 @@ listing into `head`, `tail`, or `cat`.
 | `ng build` | Compact Angular build tables; every bundle and diagnostic retained |
 | `prisma migrate` | Migration status only |
 | `playwright test` | Failures + trace links only |
+| `ego-browser nodejs` | Compact Ego Lite snapshots; text, refs and selectors retained; other output unchanged |
 
 ## Python
 

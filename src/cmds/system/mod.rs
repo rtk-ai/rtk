@@ -2,6 +2,7 @@ pub mod ast_grep_cmd;
 pub mod constants;
 pub mod ctest_cmd;
 pub mod deps;
+pub mod ego_browser_cmd;
 pub mod env_cmd;
 pub mod find_cmd;
 pub mod format_cmd;

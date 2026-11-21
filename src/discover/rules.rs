@@ -395,6 +395,14 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^ego-browser\s+nodejs(?:\s|$)",
+        rtk_cmd: "rtk ego-browser",
+        rewrite_prefixes: &["ego-browser"],
+        category: "Files",
+        savings_pct: 20.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^ctest(?:\s|$)",
         rtk_cmd: "rtk ctest",
         rewrite_prefixes: &["ctest"],
