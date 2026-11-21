@@ -26,6 +26,24 @@ fn store_hint(
     }
 }
 
+pub fn extract_recall_hash(hint: &str) -> Option<&str> {
+    let rest = hint.split_once("rtk recall ")?.1;
+    let hash = rest.strip_suffix(']')?.trim();
+    if hash.is_empty() { None } else { Some(hash) }
+}
+
+pub fn discard_hint_with(cfg: &RetrieverConfig, hint: &str) {
+    if let Some(hash) = extract_recall_hash(hint) {
+        retriever::discard(cfg, hash);
+    }
+}
+
+pub fn discard_hint(hint: &str) {
+    if let Some((_, cfg)) = active() {
+        discard_hint_with(&cfg, hint);
+    }
+}
+
 /// Takes the resolved mode and config so tests never reach `Config::load()`,
 /// mirroring `hooks::rewrite_cmd::evaluate_with_verdict` (#3146).
 fn tee_and_hint_with(
@@ -359,5 +377,36 @@ mod tests {
     #[test]
     fn test_force_tee_tail_hint_skips_empty() {
         assert!(force_tee_tail_hint("", "cmd", 5).is_none());
+    }
+
+    #[test]
+    fn test_discard_hint_removes_orphan_recall_entry_and_stat() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("recall.db");
+        let cfg = RetrieverConfig {
+            database_path: Some(db_path.clone()),
+            ..RetrieverConfig::default()
+        };
+        let raw = "x".repeat(1000);
+        let hint = tee_and_hint_with(RecoveryMode::Sqlite, &cfg, &raw, "pytest", 1)
+            .expect("sqlite mode stores failed run");
+        assert!(hint.starts_with("[full output: rtk recall "));
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let before_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM recall", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before_rows, 1);
+
+        discard_hint_with(&cfg, &hint);
+
+        let after_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM recall", [], |r| r.get(0))
+            .unwrap();
+        let after_stats: i64 = conn
+            .query_row("SELECT COUNT(*) FROM recall_stats", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after_rows, 0, "discarded hint must remove recall row");
+        assert_eq!(after_stats, 0, "discarded hint must roll back elision stat");
     }
 }
