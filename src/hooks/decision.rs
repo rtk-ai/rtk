@@ -164,7 +164,8 @@ impl ApprovalOwner {
 ///
 /// 1. **Deny wins outright.** Checked before anything else so a denied command
 ///    is never even considered for rewriting. A deny rule matched inside a
-///    shell wrapper's script yields `Defer` instead: no rewrite, no decision.
+///    shell wrapper's script, or one that script has too many prefixes to rule
+///    out, yields `Defer` instead: no rewrite, no decision.
 ///    A line or script too complex to read, `TooComplex`, stops here as well: every
 ///    caller defers, and the Claude hook answers for such a line before it gets here
 ///    ([`decide_for_claude_hook_at`]).
