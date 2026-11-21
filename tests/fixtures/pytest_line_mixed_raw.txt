@@ -1,0 +1,18 @@
+EFFxX.                                                                   [100%]
+==================================== ERRORS ====================================
+_________________________ ERROR at setup of test_setup _________________________
+E   ConnectionError: database unavailable
+=================================== FAILURES ===================================
+E   assert 2 == 3
+----------------------------- Captured stdout call -----------------------------
+captured.py:7: this is not a traceback
+/home/user/project/test_mixed.py:12: assert 2 == 3
+E   ValueError: last failure survives
+/home/user/project/test_mixed.py:15: ValueError: last failure survives
+=================================== XPASSES ====================================
+=========================== short test summary info ============================
+FAILED test_mixed.py::test_assertion - assert 2 == 3
+FAILED test_mixed.py::test_error - ValueError: last failure survives
+XFAIL test_mixed.py::test_expected - open ticket
+XPASS test_mixed.py::test_unexpected - fixed already
+2 failed, 1 passed, 1 xfailed, 1 xpassed, 1 error in 0.01s
