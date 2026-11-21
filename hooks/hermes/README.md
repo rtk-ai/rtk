@@ -5,10 +5,34 @@ Rewrites Hermes `terminal` tool commands to RTK equivalents before execution, so
 ## Installation
 
 ```bash
+# Default profile (~/.hermes/config.yaml):
 rtk init --agent hermes
+
+# Target a specific named profile (~/.hermes/profiles/<name>/config.yaml):
+rtk init --agent hermes --profile work
+
+# Target multiple named profiles:
+rtk init --agent hermes --profile work,prod
+rtk init --agent hermes --profile work --profile prod
+
+# Target the default config AND every named profile:
+rtk init --agent hermes --profile all
 ```
 
-The installer writes the plugin to `~/.hermes/plugins/rtk-rewrite/` and enables it through `plugins.enabled` in the Hermes config.
+The installer writes the plugin to `~/.hermes/plugins/rtk-rewrite/` (for the default profile) or `~/.hermes/profiles/<name>/plugins/rtk-rewrite/` (for named profiles) and enables it through `plugins.enabled` in the Hermes configuration. When `--profile` is omitted, the default config (`~/.hermes/config.yaml`) is modified. If a named profile directory does not exist, RTK alerts you with the available profiles.
+
+## Uninstallation
+
+```bash
+# Remove plugin and unpatch default config:
+rtk init --uninstall --agent hermes
+
+# Unpatch specific profile and remove its profile plugin:
+rtk init --uninstall --agent hermes --profile work
+
+# Unpatch default config and all profiles, removing all plugins:
+rtk init --uninstall --agent hermes --profile all
+```
 
 ## How it works
 
