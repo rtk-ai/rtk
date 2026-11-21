@@ -382,11 +382,22 @@ fn unparsed_signal(stdout: &str) -> usize {
         .count()
 }
 
-/// grep and rg both use exit 1 for "no match" and >=2 for a real engine error
-/// (unsupported flag, unreadable path). RTK must never turn a working command into
-/// a failure, so an engine error re-runs the agent's argv verbatim (#5192).
-fn engine_failed(exit_code: i32) -> bool {
-    exit_code > 1
+/// BusyBox/non-GNU grep rejects RTK's `-I`/`--null` parse aids with an
+/// "unrecognized option" (or equivalent) error. Only that case may trigger the
+/// verbatim re-run — a genuine error after matches (e.g. unreadable path in
+/// `grep -r`) must surface as-is, not cause a second run that replaces filtered
+/// output with raw (#5199).
+fn is_unsupported_parse_flag_stderr(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("unrecognized option")
+        || lower.contains("invalid option")
+        || lower.contains("illegal option")
+}
+
+/// `#5192` fallback: engine rejected our parse aids, so re-run the agent's argv
+/// verbatim instead of surfacing an error the raw command never had.
+fn engine_failed(exit_code: i32, stderr: &str, stdout_empty: bool) -> bool {
+    exit_code == 2 && stdout_empty && is_unsupported_parse_flag_stderr(stderr)
 }
 
 /// Run real grep so matches and the savings baseline match the agent's command;
@@ -530,7 +541,7 @@ fn run_streaming_search(
     max_results: usize,
     real_cmd: &str,
     detected_flags: DetectedFlags,
-) -> Result<i32> {
+) -> Result<stream::StreamResult> {
     let filter = SearchStreamFilter {
         show_file: detected_flags
             .show_file
@@ -554,7 +565,7 @@ fn run_streaming_search(
         &result.raw_stdout,
         &result.filtered,
     );
-    Ok(result.exit_code)
+    Ok(result)
 }
 
 /// Runs the agent's command verbatim for forms RTK does not group: format/shape
@@ -761,7 +772,7 @@ pub fn run(
     }
 
     if reads_piped_stdin {
-        let exit_code = run_streaming_search(
+        let result = run_streaming_search(
             &timer,
             engine,
             &extra_args,
@@ -771,7 +782,12 @@ pub fn run(
             &real_cmd,
             detected_flags,
         )?;
-        return if engine_failed(exit_code) {
+        let exit_code = result.exit_code;
+        return if engine_failed(
+            exit_code,
+            &result.raw_stderr,
+            result.raw_stdout.trim().is_empty(),
+        ) {
             passthrough(&timer, engine, args, &real_cmd, true, false)
         } else {
             Ok(exit_code)
@@ -789,9 +805,11 @@ pub fn run(
         return passthrough(&timer, engine, args, &real_cmd, false, false);
     }
 
-    // BusyBox grep rejects RTK's `-I`/`--null` parse aids with exit 2. Re-run the
-    // agent's exact argv instead of surfacing an error the raw command never had.
-    if engine_failed(exit_code) {
+    // BusyBox grep rejects RTK's `-I`/`--null` parse aids with exit 2 and no
+    // output. Re-run the agent's exact argv instead of surfacing an error the
+    // raw command never had. A genuine late error (e.g. unreadable dir) keeps
+    // its own exit code and filtered output (#5199).
+    if engine_failed(exit_code, &result.stderr, raw_output.trim().is_empty()) {
         return passthrough(&timer, engine, args, &real_cmd, false, false);
     }
 
@@ -2353,12 +2371,16 @@ mod tests {
 
     #[test]
     fn test_engine_error_falls_back_but_no_match_does_not() {
-        // grep/rg: 0 match, 1 no match, >=2 real error (BusyBox rejects -I/--null
-        // with exit 2). Only the latter may trigger the verbatim re-run (#5192).
-        assert!(!engine_failed(0));
-        assert!(!engine_failed(1));
-        assert!(engine_failed(2));
-        assert!(engine_failed(127));
+        // Only a BusyBox-style parse-aid rejection may trigger the re-run.
+        let busybox = "/bin/grep: unrecognized option: null\nBusyBox v1.36.1";
+        assert!(engine_failed(2, busybox, true));
+        assert!(!engine_failed(0, busybox, true));
+        assert!(!engine_failed(1, busybox, true));
+        // A genuine error after matches, or without the parse-aid signature,
+        // must surface as-is instead of re-running the whole search (#5199).
+        assert!(!engine_failed(2, busybox, false));
+        assert!(!engine_failed(2, "grep: dir/x: Permission denied", true));
+        assert!(!engine_failed(127, busybox, true));
     }
 
     // --- has_context_flag ---
