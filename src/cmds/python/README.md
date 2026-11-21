@@ -12,7 +12,16 @@
   summary cap keep their descriptions beside each location.
 - `pip_cmd.rs` auto-detects `uv` as a pip alternative and routes accordingly
 - `uv_cmd.rs` preserves `uv run` environment semantics: the program's own output passes through on success (bounded, with a tee hint), diagnostics are extracted on failure
-- `python -m pytest` and `python3 -m mypy` are rewritten by the hook registry to `rtk pytest` / `rtk mypy`
+- Literal `python -m pytest` invocations (including versioned, relative and
+  absolute interpreter paths) are rewritten to
+  `rtk run --filter pytest -- <original invocation>`. The direct-command runner
+  keeps the interpreter, arguments, working directory, environment and stdin;
+  it applies the existing pytest stdout filter without injecting pytest flags.
+  Reports the filter cannot recognize pass through. Existing output bounds and
+  stderr handling still apply, so this is not byte-for-byte output passthrough.
+- Interpreter flags before `-m` and dynamic interpreter names are outside this
+  rewrite's scope. Bare `pytest` retains its existing `rtk pytest` behavior.
+- `python3 -m mypy` is rewritten by the hook registry to `rtk mypy`.
 
 ## Cross-command
 
