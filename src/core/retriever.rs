@@ -678,7 +678,19 @@ pub fn store(
     match store_inner(cfg, content, command, exit_code, shown_upto.max(1)) {
         Ok(r) => Stored::Saved(r),
         Err(e) => {
-            hint_missing_table(cfg, &e);
+            if db::missing_table(&e).is_some() {
+                hint_missing_table(cfg, &e);
+            } else {
+                // Without this the cut carries no hint and no reason (#5107), e.g.
+                // in a sandbox that cannot write the data folder. Once per run.
+                static NOTICED: std::sync::Once = std::sync::Once::new();
+                NOTICED.call_once(|| {
+                    eprintln!(
+                        "[rtk] recall store unavailable ({e}): output cut in this run cannot be \
+                         recalled; run `rtk bypass <command>` for all of it"
+                    )
+                });
+            }
             Stored::Unavailable
         }
     }
