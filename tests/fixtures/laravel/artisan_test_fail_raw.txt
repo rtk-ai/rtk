@@ -1,0 +1,127 @@
+
+  [30;42;1m PASS [39;49;22m[39m Tests\Unit\ExampleTest[39m
+  [32;1m✓[39;22m[90m [39m[90mthat true is true[39m
+
+  [30;42;1m PASS [39;49;22m[39m Tests\Feature\Blog\Post10Test[39m
+  [32;1m✓[39;22m[90m [39m[90mhealth endpoint returns ok 10[39m[90m                                       [39m [90m0.32s[39m  
+  [32;1m✓[39;22m[90m [39m[90mhome page is reachable 10[39m[90m                                           [39m [90m0.04s[39m  
+  [32;1m✓[39;22m[90m [39m[90madmin dashboard 10[39m[90m                                                  [39m [90m0.02s[39m  
+
+  [30;42;1m PASS [39;49;22m[39m Tests\Feature\Blog\Post11Test[39m
+  [32;1m✓[39;22m[90m [39m[90mhealth endpoint returns ok 11[39m[90m                                       [39m [90m0.07s[39m  
+  [32;1m✓[39;22m[90m [39m[90mhome page is reachable 11[39m[90m                                           [39m [90m0.02s[39m  
+  [32;1m✓[39;22m[90m [39m[90madmin dashboard 11[39m[90m                                                  [39m [90m0.02s[39m  
+
+  [30;42;1m PASS [39;49;22m[39m Tests\Feature\Blog\Post12Test[39m
+  [32;1m✓[39;22m[90m [39m[90mhealth endpoint returns ok 12[39m[90m                                       [39m [90m0.07s[39m  
+  [32;1m✓[39;22m[90m [39m[90mhome page is reachable 12[39m[90m                                           [39m [90m0.01s[39m  
+  [32;1m✓[39;22m[90m [39m[90madmin dashboard 12[39m[90m                                                  [39m [90m0.01s[39m  
+
+  [30;42;1m PASS [39;49;22m[39m Tests\Feature\Blog\Post1Test[39m
+  [32;1m✓[39;22m[90m [39m[90mhealth endpoint returns ok 1[39m[90m                                        [39m [90m0.03s[39m  
+  [32;1m✓[39;22m[90m [39m[90mhome page is reachable 1[39m[90m                                            [39m [90m0.01s[39m  
+  [32;1m✓[39;22m[90m [39m[90madmin dashboard 1[39m[90m                                                   [39m [90m0.01s[39m  
+
+  [30;42;1m PASS [39;49;22m[39m Tests\Feature\Blog\Post2Test[39m
+  [32;1m✓[39;22m[90m [39m[90mhealth endpoint returns ok 2[39m[90m                                        [39m [90m0.03s[39m  
+  [32;1m✓[39;22m[90m [39m[90mhome page is reachable 2[39m[90m                                            [39m [90m0.01s[39m  
+  [32;1m✓[39;22m[90m [39m[90madmin dashboard 2[39m[90m                                                   [39m [90m0.01s[39m  
+
+  [30;42;1m PASS [39;49;22m[39m Tests\Feature\Blog\Post3Test[39m
+  [32;1m✓[39;22m[90m [39m[90mhealth endpoint returns ok 3[39m[90m                                        [39m [90m0.03s[39m  
+  [32;1m✓[39;22m[90m [39m[90mhome page is reachable 3[39m[90m                                            [39m [90m0.02s[39m  
+  [32;1m✓[39;22m[90m [39m[90madmin dashboard 3[39m[90m                                                   [39m [90m0.02s[39m  
+
+  [30;42;1m PASS [39;49;22m[39m Tests\Feature\Blog\Post4Test[39m
+  [32;1m✓[39;22m[90m [39m[90mhealth endpoint returns ok 4[39m[90m                                        [39m [90m0.05s[39m  
+  [32;1m✓[39;22m[90m [39m[90mhome page is reachable 4[39m[90m                                            [39m [90m0.02s[39m  
+  [32;1m✓[39;22m[90m [39m[90madmin dashboard 4[39m[90m                                                   [39m [90m0.01s[39m  
+
+  [30;42;1m PASS [39;49;22m[39m Tests\Feature\Blog\Post5Test[39m
+  [32;1m✓[39;22m[90m [39m[90mhealth endpoint returns ok 5[39m[90m                                        [39m [90m0.04s[39m  
+  [32;1m✓[39;22m[90m [39m[90mhome page is reachable 5[39m[90m                                            [39m [90m0.01s[39m  
+  [32;1m✓[39;22m[90m [39m[90madmin dashboard 5[39m[90m                                                   [39m [90m0.01s[39m  
+
+  [30;42;1m PASS [39;49;22m[39m Tests\Feature\Blog\Post6Test[39m
+  [32;1m✓[39;22m[90m [39m[90mhealth endpoint returns ok 6[39m[90m                                        [39m [90m0.03s[39m  
+  [32;1m✓[39;22m[90m [39m[90mhome page is reachable 6[39m[90m                                            [39m [90m0.01s[39m  
+  [32;1m✓[39;22m[90m [39m[90madmin dashboard 6[39m[90m                                                   [39m [90m0.01s[39m  
+
+  [30;42;1m PASS [39;49;22m[39m Tests\Feature\Blog\Post7Test[39m
+  [32;1m✓[39;22m[90m [39m[90mhealth endpoint returns ok 7[39m[90m                                        [39m [90m0.03s[39m  
+  [32;1m✓[39;22m[90m [39m[90mhome page is reachable 7[39m[90m                                            [39m [90m0.01s[39m  
+  [32;1m✓[39;22m[90m [39m[90madmin dashboard 7[39m[90m                                                   [39m [90m0.01s[39m  
+
+  [30;42;1m PASS [39;49;22m[39m Tests\Feature\Blog\Post8Test[39m
+  [32;1m✓[39;22m[90m [39m[90mhealth endpoint returns ok 8[39m[90m                                        [39m [90m0.03s[39m  
+  [32;1m✓[39;22m[90m [39m[90mhome page is reachable 8[39m[90m                                            [39m [90m0.01s[39m  
+  [32;1m✓[39;22m[90m [39m[90madmin dashboard 8[39m[90m                                                   [39m [90m0.01s[39m  
+
+  [30;42;1m PASS [39;49;22m[39m Tests\Feature\Blog\Post9Test[39m
+  [32;1m✓[39;22m[90m [39m[90mhealth endpoint returns ok 9[39m[90m                                        [39m [90m0.02s[39m  
+  [32;1m✓[39;22m[90m [39m[90mhome page is reachable 9[39m[90m                                            [39m [90m0.01s[39m  
+  [32;1m✓[39;22m[90m [39m[90madmin dashboard 9[39m[90m                                                   [39m [90m0.01s[39m  
+
+  [39;41;1m FAIL [39;49;22m[39m Tests\Feature\BrokenTest[39m
+  [31;1m⨯[39;22m[90m [39m[90mtotal is calculated[39m[90m                                                 [39m [90m0.04s[39m  
+  [31;1m⨯[39;22m[90m [39m[90mmissing route returns ok[39m[90m                                            [39m [90m0.05s[39m  
+  [31;1m⨯[39;22m[90m [39m[90mservice throws[39m[90m                                                      [39m [90m0.01s[39m  
+  [33;1m-[39;22m[90m [39m[90mskipped for now[39m[90m [39m[33m→ waiting on upstream[39m[90m                               [39m [90m0.01s[39m  
+
+  [30;42;1m PASS [39;49;22m[39m Tests\Feature\ExampleTest[39m
+  [32;1m✓[39;22m[90m [39m[90mthe application returns a successful response[39m[90m                       [39m [90m0.05s[39m  
+  [31m────────────────────────────────────────────────────────────────────────────[39m  
+  [41;1m FAILED [49;22m [1mTests\Feature\BrokenTest[22m [90m>[39m total is calculated                       
+[39;1m  Failed asserting that 48 is identical to 42.[39;22m
+
+  at [32mtests/Feature/BrokenTest.php[39m:[32m11[39m
+      7▕ class BrokenTest extends TestCase
+      8▕ {
+      9▕     public function test_total_is_calculated(): void
+     10▕     {
+  ➜  11▕         $this->assertSame(42, 6 * 8);
+     12▕     }
+     13▕ 
+     14▕     public function test_missing_route_returns_ok(): void
+     15▕     {
+
+  [33m1   [39m[39;1mtests/Feature/BrokenTest.php[39;22m:[39;1m11[39;22m
+
+  [31m────────────────────────────────────────────────────────────────────────────[39m  
+  [41;1m FAILED [49;22m [1mTests\Feature\BrokenTest[22m [90m>[39m missing route returns ok                  
+[39;1m  Expected response status code [200] but received 404.
+Failed asserting that 404 is identical to 200.[39;22m
+
+  at [32mtests/Feature/BrokenTest.php[39m:[32m16[39m
+     12▕     }
+     13▕ 
+     14▕     public function test_missing_route_returns_ok(): void
+     15▕     {
+  ➜  16▕         $this->get('/does-not-exist')->assertOk();
+     17▕     }
+     18▕ 
+     19▕     public function test_service_throws(): void
+     20▕     {
+
+  [31m────────────────────────────────────────────────────────────────────────────[39m  
+  [41;1m FAILED [49;22m [1mTests\Feature\BrokenTest[22m [90m>[39m service th… [41;1m BindingResolutionException [49;22m  
+[39;1m  Target class [App\Services\Missing] does not exist.[39;22m
+
+  at [32mvendor/laravel/framework/src/Illuminate/Container/Container.php[39m:[32m1153[39m
+    1149▕ 
+    1150▕         try {
+    1151▕             $reflector = new ReflectionClass($concrete);
+    1152▕         } catch (ReflectionException $e) {
+  ➜ 1153▕             throw new BindingResolutionException("Target class [$concrete] does not exist.", 0, $e);
+    1154▕         }
+    1155▕ 
+    1156▕         // If the type is not instantiable, the developer is attempting to resolve
+    1157▕         // an abstract type such as an Interface or Abstract Class and there is
+
+      [2m+7 vendor frames [22m
+  [33m8   [39m[39;1mtests/Feature/BrokenTest.php[39;22m:[39;1m21[39;22m
+
+
+  [90mTests:[39m    [31;1m3 failed[39;22m[90m,[39m[39m [39m[33;1m1 skipped[39;22m[90m,[39m[39m [39m[32;1m38 passed[39;22m[90m (52 assertions)[39m
+  [90mDuration:[39m [39m1.66s[39m
+

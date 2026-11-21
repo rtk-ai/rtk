@@ -1,6 +1,6 @@
 //! PHP command filter: syntax-check summaries and generic cleanup.
 
-use super::artisan_cmd::{filter_artisan_output, filter_artisan_test_output};
+use super::artisan_cmd::{ArtisanCall, filter_artisan_call, parse_artisan_call};
 use super::utils::{PhpTestRunner, detect_php_test_runner, strip_ansi_and_controls};
 use crate::core::runner;
 use crate::core::shell::display_args;
@@ -17,8 +17,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: php {}", args.join(" "));
     }
 
-    let is_artisan = args.first().map(String::as_str) == Some("artisan");
-    let is_artisan_test = is_artisan && args.get(1).map(String::as_str) == Some("test");
+    let artisan = (args.first().map(String::as_str) == Some("artisan"))
+        .then(|| parse_artisan_call(&args[1..]));
+    let is_artisan_test = artisan.as_ref().is_some_and(ArtisanCall::is_test);
     let is_lint = args.iter().any(|a| a == "-l" || a == "--syntax-check");
     let detected_runner = if is_artisan_test {
         detect_php_test_runner()
@@ -30,6 +31,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Detected artisan test runner: {:?}", detected_runner);
     }
 
+    let opts = if is_artisan_test {
+        runner::RunOptions::with_tee("artisan-test")
+    } else {
+        runner::RunOptions::default()
+    };
+
     runner::run_filtered(
         cmd,
         "php",
@@ -38,15 +45,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             if is_lint {
                 return filter_php_lint_output(raw);
             }
-            if is_artisan_test {
-                return filter_artisan_test_output(raw, detected_runner);
+            match &artisan {
+                Some(call) => filter_artisan_call(call, detected_runner, raw),
+                None => filter_php_output(raw),
             }
-            if is_artisan {
-                return filter_artisan_output(raw);
-            }
-            filter_php_output(raw)
         },
-        runner::RunOptions::default(),
+        opts,
     )
 }
 

@@ -204,6 +204,7 @@ const UNDOCUMENTED: &[&str] = &[
     "read",
     "rg",
     "rsync",
+    "sail",
     "sbt",
     "shellcheck",
     "shopify",

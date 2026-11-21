@@ -716,6 +716,16 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 70.0,
         ..RtkRule::DEFAULT
     },
+    // Only `artisan test` and `test`: other Sail commands (up, exec, artisan serve, ...) are
+    // not filtered, and RTK buffers output until exit.
+    RtkRule {
+        pattern: r"^sail\s+(?:(?:(?:php\s+)?artisan|art|a)\s+test|test)(?:\s|$)",
+        rtk_cmd: "rtk sail",
+        rewrite_prefixes: &["sail"],
+        category: "Tests",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
     RtkRule {
         pattern: r"^aws\s+",
         rtk_cmd: "rtk aws",

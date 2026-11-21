@@ -7,5 +7,6 @@ pub mod phpstan_cmd;
 pub mod phpt_cmd;
 pub mod phpunit_cmd;
 pub mod pint_cmd;
+pub mod sail_cmd;
 pub mod test_output;
 pub mod utils;
