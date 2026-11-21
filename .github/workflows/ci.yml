@@ -26,6 +26,13 @@ jobs:
           git fetch origin "${{ github.base_ref }}" --depth=1 || true
           bash scripts/check-test-presence.sh "origin/${{ github.base_ref }}"
 
+  macports-updater:
+    name: MacPorts updater tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 -m unittest discover -s scripts/tests -p test_update_macports.py
+
   fmt:
     name: fmt
     runs-on: ubuntu-latest
