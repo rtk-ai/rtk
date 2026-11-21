@@ -74,6 +74,31 @@ fn mixed_json_and_text_summarizes_events_and_keeps_diagnostics() {
 }
 
 #[test]
+fn leading_go_build_diagnostics_keep_the_test_summary() {
+    let events = concat!(
+        "{\"Action\":\"start\",\"Package\":\"example.com/proj/broken\"}\n",
+        "{\"Action\":\"fail\",\"Package\":\"example.com/proj/broken\"}\n",
+        "{\"Action\":\"fail\",\"Package\":\"example.com/proj/fails\",\"Test\":\"TestX\"}\n",
+        "{\"Action\":\"fail\",\"Package\":\"example.com/proj/fails\"}\n",
+    );
+    for header in [
+        "# example.com/proj/broken [example.com/proj/broken.test]",
+        "# example.com/proj/dependency",
+    ] {
+        let input = format!(
+            "{header}\r\nbroken/b.go:3:23: undefined: missing\r\n\thave another diagnostic\r\n{events}"
+        );
+        let shown = pipe_mode(&input, true);
+        assert_eq!(shown, pipe(&input));
+        assert!(shown.contains("[FAIL] TestX"), "{shown}");
+        assert!(
+            shown.contains("broken/b.go:3:23: undefined: missing\r\n"),
+            "{shown}"
+        );
+    }
+}
+
+#[test]
 fn valid_json_events_still_use_the_existing_filter() {
     let pass = "{\"Action\":\"run\",\"Package\":\"example.com/proj\",\"Test\":\"TestOK\"}\n{\"Action\":\"pass\",\"Package\":\"example.com/proj\",\"Test\":\"TestOK\"}\n{\"Action\":\"pass\",\"Package\":\"example.com/proj\"}\n";
     assert_eq!(pipe(pass), "Go test: 1 passed in 1 packages");

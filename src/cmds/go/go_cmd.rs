@@ -361,22 +361,55 @@ fn pipe_event_line(index: usize, line: &str) -> &str {
     }
 }
 
+fn is_go_build_text_header(line: &str) -> bool {
+    let Some(header) = line.strip_prefix("# ") else {
+        return false;
+    };
+    let mut fields = header.split_ascii_whitespace();
+    fields.next().is_some()
+        && fields
+            .next()
+            .is_none_or(|variant| variant.starts_with('[') && variant.ends_with(".test]"))
+        && fields.next().is_none()
+}
+
+fn is_go_build_text_diagnostic(line: &str) -> bool {
+    !line.trim_start().starts_with('{') && is_go_build_error_line(line)
+}
+
 /// Auto-detect only a leading Go stream, not events quoted inside other text.
-/// Cold-cache downloads may precede events; arbitrary prose, Markdown fences and
-/// diff headers must instead keep the whole input on the lossless fallback path.
-/// Build events alone are not a test report and must retain their diagnostics.
+/// Downloads and plain compiler diagnostics may precede events. A diagnostic
+/// block must start with a Go package header, and some test event evidence must
+/// follow it. Build events alone are not a test report.
 pub(crate) fn is_go_test_json(input: &str) -> bool {
-    for (index, line) in input.lines().enumerate() {
-        let line = pipe_event_line(index, line);
+    let mut lines = input.lines().enumerate().peekable();
+    while let Some((index, raw)) = lines.next() {
+        let line = pipe_event_line(index, raw);
         if line.is_empty() || line.starts_with("go: downloading ") {
             continue;
         }
-        let Some(event) = pipe_event(line) else {
-            return false;
-        };
-        if pipe_test_evidence(&event) {
-            return true;
+        if let Some(event) = pipe_event(line) {
+            if pipe_test_evidence(&event) {
+                return true;
+            }
+            continue;
         }
+        if !is_go_build_text_header(line)
+            || lines
+                .next_if(|(_, raw)| is_go_build_text_diagnostic(raw))
+                .is_none()
+        {
+            return false;
+        }
+        // Compiler diagnostics can have indented continuation lines. A JSON
+        // record ends the block even if it is indented or contains a file location.
+        while lines
+            .next_if(|(_, raw)| {
+                is_go_build_text_diagnostic(raw)
+                    || (raw.starts_with([' ', '\t']) && !raw.trim_start().starts_with('{'))
+            })
+            .is_some()
+        {}
     }
     false
 }
