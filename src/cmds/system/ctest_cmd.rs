@@ -720,38 +720,35 @@ fn render_failure_block(block: &[String]) -> Vec<String> {
     let middle_start = MAX_FAILURE_HEAD_LINES;
     let middle_end = block.len() - tail_lines;
     // A crash handler prints its backtrace after the assertion, pushing the
-    // line that names the failure into the middle: keep those lines too.
-    let kept = failure_marker_runs(&block[middle_start..middle_end]);
+    // line that names the failure into the middle: keep those lines too. A
+    // marker in the head still carries its context lines into the middle.
+    let kept = failure_marker_runs(&block[..middle_end], middle_start);
 
     let mut rendered = Vec::with_capacity(MAX_FAILURE_LINES + MAX_FAILURE_MARKER_LINES + 2);
     rendered.extend(block[..middle_start].iter().cloned());
-    let mut cursor = 0;
+    let mut cursor = middle_start;
     for (start, end) in kept {
         if start > cursor {
             rendered.push(format!("... +{} more lines", start - cursor));
         }
-        rendered.extend(
-            block[middle_start + start..middle_start + end]
-                .iter()
-                .cloned(),
-        );
+        rendered.extend(block[start..end].iter().cloned());
         cursor = end;
     }
-    let middle_len = middle_end - middle_start;
-    if middle_len > cursor {
-        rendered.push(format!("... +{} more lines", middle_len - cursor));
+    if middle_end > cursor {
+        rendered.push(format!("... +{} more lines", middle_end - cursor));
     }
     rendered.extend(block[middle_end..].iter().cloned());
     rendered
 }
 
-/// Half-open `(start, end)` runs of `middle` to keep: each failure-marker line
-/// plus the context lines after it, merged when they overlap, at most
+/// Half-open `(start, end)` runs of `lines` to keep beyond the first `shown`
+/// lines (already rendered as the head): each failure-marker line plus the
+/// context lines after it, merged when they overlap, at most
 /// `MAX_FAILURE_MARKER_LINES` lines in total.
-fn failure_marker_runs(middle: &[String]) -> Vec<(usize, usize)> {
+fn failure_marker_runs(lines: &[String], shown: usize) -> Vec<(usize, usize)> {
     let mut runs: Vec<(usize, usize)> = Vec::new();
     let mut budget = MAX_FAILURE_MARKER_LINES;
-    for (index, line) in middle.iter().enumerate() {
+    for (index, line) in lines.iter().enumerate() {
         if budget == 0 {
             break;
         }
@@ -759,10 +756,10 @@ fn failure_marker_runs(middle: &[String]) -> Vec<(usize, usize)> {
             continue;
         }
         // A marker inside the previous window extends it instead of repeating lines.
-        let covered = runs.last().map_or(0, |&(_, end)| end);
+        let covered = runs.last().map_or(shown, |&(_, end)| end);
         let start = index.max(covered);
         let end = (index + 1 + FAILURE_MARKER_CONTEXT_LINES)
-            .min(middle.len())
+            .min(lines.len())
             .min(start + budget);
         if end <= start {
             continue;
@@ -1690,6 +1687,39 @@ Errors while running CTest"#
             .filter(|line| !line.starts_with("... +"))
             .count();
         assert_eq!(shown, MAX_FAILURE_LINES + MAX_FAILURE_MARKER_LINES);
+        assert_every_line_accounted_for(&block, &rendered);
+    }
+
+    #[test]
+    fn marker_in_the_head_carries_its_context_into_the_middle() {
+        let mut block = block_of(&[
+            "setup",
+            "FAIL!  : DemoTest::early() Compared values are not the same",
+            "   Actual   (value): 1",
+            "   Expected (want) : 2",
+            "   Loc: [demo_test.cpp(42)]",
+        ]);
+        block.extend(numbered("frame", 30));
+        let rendered = render_failure_block(&block);
+
+        assert_eq!(rendered[..5], block[..5]);
+        assert_eq!(rendered[5], "... +22 more lines");
+        assert_every_line_accounted_for(&block, &rendered);
+    }
+
+    #[test]
+    fn marker_on_the_first_head_line_keeps_its_context() {
+        let mut block = block_of(&[
+            "FAIL!  : DemoTest::first() Compared values are not the same",
+            "   Actual   (value): 1",
+            "   Expected (want) : 2",
+            "   Loc: [demo_test.cpp(42)]",
+        ]);
+        block.extend(numbered("frame", 30));
+        let rendered = render_failure_block(&block);
+
+        assert_eq!(rendered[..4], block[..4]);
+        assert_eq!(rendered[4], "... +22 more lines");
         assert_every_line_accounted_for(&block, &rendered);
     }
 
