@@ -13,7 +13,7 @@ Does **not** own: hook installation/uninstallation (that's `src/hooks/init/`), t
 `rtk-awareness.md`, `rtk-awareness-high.md`, `rtk-awareness-full.md` are the agent-neutral
 instruction files embedded by `rtk init` (`RTK.md`, `GEMINI.md`, rules files, `AGENTS.md` blocks).
 `awareness.level` in `config.toml` picks one for hook-based agents; agents without a hook always get
-`rtk-awareness-full.md`, the only one that tells the agent to prefix commands with `rtk`.
+`rtk-awareness-full.md`, the only one that tells the agent to prefix external programs with `rtk`.
 
 ## Purpose
 
@@ -306,10 +306,13 @@ if (tool === "bash" || tool === "shell") {
 
 ### Hermes (Python Plugin)
 
-Mutates `args["command"]` in-place via the `pre_tool_call` hook:
+Mutates `args["command"]` in place and returns no directive, so on Hermes v2026.8.16 (0.20.2) and later another plugin's `modify` directive that sets `command` replaces the rewrite. The adapter uses a 5-second default rewrite timeout, configurable through `RTK_HERMES_TIMEOUT` (see [timeout limits](hermes/README.md#how-it-works)). Simplified success path:
 
 ```python
-result = subprocess.run(["rtk", "rewrite", command], capture_output=True, text=True, timeout=2)
+result = subprocess.run(
+    ["rtk", "rewrite", command], shell=False, stdin=subprocess.DEVNULL,
+    capture_output=True, text=True, timeout=_rewrite_timeout(),
+)
 rewritten = result.stdout.strip()
 if result.returncode in {0, 3} and rewritten and rewritten != command:
     args["command"] = rewritten
