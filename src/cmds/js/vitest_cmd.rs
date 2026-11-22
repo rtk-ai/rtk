@@ -434,10 +434,7 @@ where
         tee_hint(raw, tee_label, exit_code)
     };
 
-    match hint {
-        Some(hint) => format!("{}\n{}", filtered.text, hint),
-        None => filtered.text.clone(),
-    }
+    crate::core::runner::with_hint(&filtered.text, hint.as_deref()).into_owned()
 }
 
 #[cfg(test)]
@@ -742,5 +739,27 @@ Scope: all 6 workspace projects
         let filtered = format_test_output("vitest", text, text, false, 0);
 
         assert!(!filtered.is_parse_failure);
+    }
+
+    /// The hint goes on the line after the report, reusing the report's own terminator,
+    /// and stands alone when there is no report.
+    #[test]
+    fn test_vitest_hint_joins_without_a_blank_line() {
+        let render = |text: &str| {
+            render_test_output_with_hints(
+                &FormattedTestOutput::new(text.to_string()),
+                "raw",
+                "vitest_run",
+                1,
+                |_, _| None,
+                |_, _, _| Some("[full output: vitest_run.log]".to_string()),
+            )
+        };
+
+        assert_eq!(
+            render("Tests: 1 failed\n"),
+            "Tests: 1 failed\n[full output: vitest_run.log]"
+        );
+        assert_eq!(render(""), "[full output: vitest_run.log]");
     }
 }

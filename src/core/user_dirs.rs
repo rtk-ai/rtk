@@ -49,7 +49,7 @@ pub fn data() -> Option<PathBuf> {
 ///
 /// In a test build it is under `test_isolation::root`, so a `cargo test` run
 /// leaves the developer's own untouched. It sits under the directory
-/// `test_isolation::scratch::redirect_rtk_data` pins `XDG_CONFIG_HOME` to, so on
+/// `test_isolation::scratch::isolate_rtk` pins `XDG_CONFIG_HOME` to, so on
 /// Linux an in-process writer and a spawned `rtk` resolve the same file. A child
 /// resolves elsewhere on the other two platforms, where `dirs::config_dir()`
 /// reads no `XDG_CONFIG_HOME`: `$HOME/Library/Application Support/rtk` on macOS,

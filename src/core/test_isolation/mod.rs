@@ -10,11 +10,34 @@ mod scratch;
 use crate::core::user_dirs;
 use crate::core::user_env;
 use regex::Regex;
-use scratch::redirect_rtk_data_to;
+use scratch::isolate_rtk_in;
 pub use scratch::{isolate_git, isolate_git_config, scratch_dir, temp_git_repo, tempdir};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
+
+/// Run `f` with the process umask set to `mask`, and put the old one back
+/// after. The umask belongs to the whole process, so every test that changes it
+/// goes through here: two of them interleaving would otherwise leave it at
+/// whichever was restored last.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub fn with_umask<R>(mask: u32, f: impl FnOnce() -> R) -> R {
+    static UMASK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct Restore(libc::mode_t);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // nosemgrep: unsafe-block
+            unsafe { libc::umask(self.0) };
+        }
+    }
+    let _lock = UMASK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // nosemgrep: unsafe-block
+    let _restore = Restore(unsafe { libc::umask(mask as libc::mode_t) });
+    f()
+}
 
 /// This thread's stand-in for the user's directories: the directory a test
 /// gave [`with_root`], or else `home` in the process's scratch directory.
@@ -218,7 +241,7 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Build a `Command` for the rtk binary with the data it writes redirected to
+/// Build a `Command` for the rtk binary, isolated by [`isolate_rtk_in`] into
 /// this thread's [`root`]: the scratch directory, or the test's own.
 ///
 /// `tests/common/mod.rs` holds the twin of this for the integration tests.
@@ -231,7 +254,7 @@ pub fn rtk_command() -> Command {
     );
     // nosemgrep: dynamic-command-execution — rtk_bin's own build artefact, not a caller's program name
     let mut cmd = Command::new(bin);
-    redirect_rtk_data_to(&mut cmd, &root());
+    isolate_rtk_in(&mut cmd, &root());
     cmd
 }
 
@@ -431,18 +454,33 @@ fn call_text<'a>(code: &'a str, head: regex::Match<'_>) -> (&'a str, &'a str) {
 
 /// The environment reads that stay direct, as written, each with its reason.
 /// Each covers one read: a second identical call in the same file is refused.
-const DIRECT_READS: [(&str, &str); 4] = [
+const DIRECT_READS: [(&str, &str); 10] = [
     // Builds the `PATH` a Windows test hands a child, extending the one it runs
     // under so the child still finds its tools.
     ("src/core/utils.rs", r#"var_os("PATH")"#),
+    // The same, for the Windows test that runs itself again with a `.cmd`
+    // wrapper's directory in front of its `PATH`.
+    ("src/core/task_cmd.rs", r#"var_os("PATH")"#),
+    // Tells that re-run apart from the test that spawned it. The parent sets
+    // it on the child's command, and the child is the test binary itself, so
+    // the process environment is the only place it arrives: `user_env` holds
+    // what the calling thread set, and nothing more, in a test build.
+    ("src/core/task_cmd.rs", "var_os(WRAPPER_DIR)"),
     // Only `rtk hook audit` reaches it, and no test runs that in-process.
     // `user_dirs::home` would move it to the Windows profile folder, which is
     // #1681's question, not this scan's.
     ("src/hooks/hook_audit_cmd.rs", r#"var("HOME")"#),
     // `rtk env` shows the environment it runs in; that is its output.
     ("src/cmds/system/env_cmd.rs", "vars()"),
-    // Finds the `RTK_` variables a child would inherit, to clear them.
+    // Reads the developer's values of the variables a child keeps, and finds
+    // the `GIT_` ones a git child would inherit, to clear them.
     ("src/core/test_isolation/scratch.rs", "vars_os()"),
+    // Credential variables a pipeline names at run time, so no accessor
+    // could resolve or redirect them for a child.
+    ("src/core/classify.rs", "var(env)"),
+    ("src/core/pipeline_cmd.rs", "var(&env)"),
+    ("src/core/task_cmd.rs", "var(var)"),
+    ("src/llm_proxy.rs", "var(agent.base_url_var)"),
 ];
 
 /// The environment variable an accessor call names: a literal names itself, a
@@ -563,19 +601,50 @@ fn only_user_dirs_resolves_user_locations() {
     );
 }
 
+/// A tool a test puts on PATH for rtk to run is a shell script, and these make a
+/// shell change what it does or prints: options, a file to source, POSIX mode,
+/// `cd`'s search path, the trace prefix and the field separator.
+#[test]
+fn a_child_keeps_none_of_the_shell_settings() {
+    for name in [
+        "SHELLOPTS",
+        "BASHOPTS",
+        "BASH_ENV",
+        "ENV",
+        "POSIXLY_CORRECT",
+        "CDPATH",
+        "PS4",
+        "IFS",
+    ] {
+        assert!(!scratch::kept(name), "{name} reaches a child's tools");
+    }
+}
+
+/// A proto or volta shim on PATH finds its toolchain through these roots when
+/// the developer exports them, and under the scratch home finds none. Without
+/// them only the go -json help test fails, and only on a machine with such a
+/// toolchain; the help comparisons pass on the manager's error against itself.
+/// This pins the roots on every machine.
+#[test]
+fn a_child_keeps_where_version_managers_keep_their_toolchains() {
+    for name in ["PROTO_HOME", "VOLTA_HOME"] {
+        assert!(scratch::kept(name), "{name} does not reach a child's shims");
+    }
+}
+
 /// `user_env` keeps a test on its own side, but a spawned rtk is built without
 /// `cfg(test)` and obeys whatever it inherits. Every variable rtk reads must
 /// therefore be pinned — to a fixed value, or a path inside the scratch
-/// directory — or removed by
-/// `redirect_rtk_data`; one it merely inherits makes the child behave as the
-/// developer's shell has it, or sends it to their directories.
+/// directory — or left out of what `isolate_rtk` keeps from the developer's
+/// environment; one it keeps makes the child behave as the developer's shell
+/// has it, or sends it to their directories.
 #[test]
 fn every_variable_rtk_reads_is_redirected_for_a_child() {
     let mut read = Vec::new();
     for (relative, code) in source_code() {
         // A resolver is not exempt here, only forgiven its own forwarding: it
         // defines the accessors, so `var_os(name)` names no variable. A
-        // literal read in one is a variable the child still inherits, and
+        // literal read in one is a variable rtk reads like any other, and
         // `user_dirs` is where the next one would naturally be written.
         let resolver = RESOLVERS.contains(&relative.as_str());
         for head in ACCESSOR_READ.find_iter(&code) {
@@ -596,24 +665,39 @@ fn every_variable_rtk_reads_is_redirected_for_a_child() {
         "the scan found no read through the accessors"
     );
 
-    // Never spawned: built only to read back what `redirect_rtk_data` sets.
+    // Never spawned: built only to read back what `isolate_rtk` sets.
     let mut cmd = Command::new("rtk");
-    scratch::redirect_rtk_data(&mut cmd);
+    scratch::isolate_rtk(&mut cmd);
     let envs: Vec<_> = cmd.get_envs().collect();
     let mut leaks: Vec<_> = read
         .iter()
         .filter(|(_, name)| {
-            match envs.iter().find(|(key, _)| *key == name.as_str()) {
-                Some((_, None)) => false,
-                // Pinned: a fixed switch, or a path that must lie in scratch.
-                Some((_, Some(value))) => {
-                    let value = Path::new(value);
-                    value.is_absolute() && !value.starts_with(scratch_dir())
-                }
-                // Every inherited `RTK_` variable is cleared by prefix, and
-                // appears here only when this shell exports it.
-                None => !name.starts_with("RTK_"),
+            // Windows looks names up regardless of case.
+            let entry = envs
+                .iter()
+                .find(|(key, _)| {
+                    key.to_str().is_some_and(|key| {
+                        key == name || (cfg!(windows) && key.eq_ignore_ascii_case(name))
+                    })
+                })
+                .map(|(_, value)| *value);
+            // Removed by isolation, it never reaches the child.
+            if entry == Some(None) {
+                return false;
             }
+            let set = entry.flatten();
+            // Kept, it reaches the child with the developer's value, whether or
+            // not this shell happens to export it, unless isolation then pins it
+            // inside the scratch directory.
+            if scratch::kept(name) {
+                return !set.is_some_and(|value| Path::new(value).starts_with(scratch_dir()));
+            }
+            // Pinned: a fixed switch, or a path that must lie in scratch. Anything
+            // else was removed, or cleared with the rest of the environment.
+            set.is_some_and(|value| {
+                let value = Path::new(value);
+                value.is_absolute() && !value.starts_with(scratch_dir())
+            })
         })
         .map(|(file, name)| format!("{file}: {name}"))
         .collect();
@@ -621,8 +705,9 @@ fn every_variable_rtk_reads_is_redirected_for_a_child() {
     leaks.dedup();
     assert!(
         leaks.is_empty(),
-        "a spawned rtk inherits these from the developer's shell; pin or remove \
-         them in `redirect_rtk_data`:\n  {}",
+        "a spawned rtk reads these from the developer's environment or directories; \
+         pin them inside the scratch directory in `isolate_rtk`, or take them out of \
+         `KEPT`:\n  {}",
         leaks.join("\n  ")
     );
 }
@@ -643,7 +728,7 @@ pub(crate) fn rust_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// `user_dirs` and the variables `redirect_rtk_data` hands a child are
+/// `user_dirs` and the variables `isolate_rtk` hands a child are
 /// separate literals. Reading the child's values off a real `Command`, rather
 /// than restating them, is what makes a change to either side alone fail here
 /// instead of sending an in-process writer and a spawned `rtk` to different
@@ -664,16 +749,16 @@ fn user_dirs_agree_with_the_child_redirect() {
 
 #[cfg(target_os = "linux")]
 fn assert_user_dirs_agree_with_the_child() {
-    // Never spawned: built as `rtk_command` builds it, to read back what the
-    // redirect sets.
+    // Never spawned: built as `rtk_command` builds it, to read back what
+    // `isolate_rtk_in` sets.
     let mut cmd = Command::new("rtk");
-    redirect_rtk_data_to(&mut cmd, &root());
+    isolate_rtk_in(&mut cmd, &root());
     let child = |name: &str| {
         cmd.get_envs()
             .find(|(key, _)| *key == name)
             .and_then(|(_, value)| value)
             .map(PathBuf::from)
-            .unwrap_or_else(|| panic!("redirect_rtk_data pins {name}"))
+            .unwrap_or_else(|| panic!("isolate_rtk pins {name}"))
     };
     let rtk = crate::core::constants::RTK_DATA_DIR;
     assert_eq!(
@@ -701,4 +786,32 @@ fn entered_restores_after_a_panic() {
         before,
         "a panic must not leave the thread in the test directory"
     );
+}
+
+/// Two tests that change the umask at once must not see each other's.
+#[test]
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn with_umask_serialises_its_callers() {
+    fn current_umask() -> u32 {
+        // nosemgrep: unsafe-block
+        let seen = unsafe { libc::umask(0) };
+        // nosemgrep: unsafe-block
+        unsafe { libc::umask(seen) };
+        seen as u32
+    }
+    let seen: Vec<u32> = [0o022, 0o000]
+        .map(|mask| {
+            std::thread::spawn(move || {
+                with_umask(mask, || {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    current_umask()
+                })
+            })
+        })
+        .into_iter()
+        .map(|handle| handle.join().expect("the caller should not panic"))
+        .collect();
+
+    assert_eq!(seen, [0o022, 0o000], "each caller sees its own umask");
 }

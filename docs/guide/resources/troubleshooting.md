@@ -2,7 +2,7 @@
 title: Troubleshooting
 description: Common RTK issues and how to fix them
 sidebar:
-  order: 2
+  order: 3
 ---
 
 # Troubleshooting
@@ -46,8 +46,8 @@ rtk gain    # should now show token savings stats
 2. Initialize the hook:
    ```bash
    rtk init --global    # Claude Code
-   rtk init --global --cursor    # Cursor
-   rtk init --global --opencode  # Claude Code + OpenCode plugin
+   rtk init --global --agent cursor    # Cursor
+   rtk init --global --opencode  # OpenCode
    ```
 
 3. Restart your AI assistant.
@@ -140,7 +140,7 @@ Error: program not found
 
 **Fix:** Update to RTK v0.23.1+:
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk --branch master
+cargo install --git https://github.com/rtk-ai/rtk --branch master rtk
 rtk --version    # should be 0.23.1+
 ```
 
@@ -164,6 +164,17 @@ rtk init --global --opencode
 rtk init --show    # should show "OpenCode: plugin installed"
 ```
 
+The plugin needs OpenCode 1.18.29 or newer. With an older version, `rtk init`
+installs nothing and prints the version it found, when it can read
+`opencode --version`. Upgrade OpenCode rather than looking for a rewrite
+setting.
+
+If the plugin loads but nothing changes, check that `rtk` is on the `PATH`
+OpenCode itself sees. The plugin only resolves it from `PATH`, because
+OpenCode's shell tool does not source `.profile`, `.bashrc` or `.bash_profile`
+and a binary found elsewhere cannot be spawned as a bare `rtk`. Set
+`RTK_DISABLED=1` to confirm which way round the behaviour goes.
+
 ## `cargo install rtk` installs the wrong package
 
 If Rust Type Kit is published to crates.io under the name `rtk`, `cargo install rtk` may install the wrong one.
@@ -171,7 +182,7 @@ If Rust Type Kit is published to crates.io under the name `rtk`, `cargo install 
 Always use the explicit URL, pinned to the release branch:
 
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk --branch master
+cargo install --git https://github.com/rtk-ai/rtk --branch master rtk
 ```
 
 ## Does RTK break Claude's prompt cache?
@@ -190,6 +201,25 @@ rtk cc-economics
 ```
 
 `rtk gain` reports token savings only; the cache breakdown lives in `rtk cc-economics`.
+
+## Network calls fail behind a proxy
+
+RTK's own HTTP calls (`rtk pipeline add <url>`, `rtk pipeline search`, task workers with a remote upstream, the telemetry ping) follow `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`. Filtered commands and the hook make no network call.
+
+If one of these calls reports `Connection refused` while the target is reachable, check the proxy variables in that shell:
+
+```bash
+env | grep -i _proxy
+```
+
+- A stale or unreachable proxy makes the call fail. The error names the target, not the proxy.
+- SOCKS proxies are not supported. `socks5h://` fails the call; `socks5://` and `socks4://` are ignored and the call connects directly.
+- `localhost` and loopback addresses always connect directly.
+- To bypass the proxy for one host, add it to `NO_PROXY` as the exact host name or as a `.suffix`, with no spaces after commas:
+
+```bash
+NO_PROXY=internal.example.com,.corp.example.com rtk pipeline add https://internal.example.com/p.toml
+```
 
 ## Run the diagnostic script
 

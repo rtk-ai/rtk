@@ -22,7 +22,10 @@ fn rtk_grep(args: &[&str]) -> (String, Option<i32>) {
 }
 
 fn grep_plain(args: &[&str]) -> (String, Option<i32>) {
-    let out = Command::new("grep").args(args).output().expect("grep");
+    let out = common::native_command("grep")
+        .args(args)
+        .output()
+        .expect("grep");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         out.status.code(),
@@ -203,7 +206,7 @@ fn piped_stdin_matches_grep() {
         let mut rtk_args = vec!["grep"];
         rtk_args.extend_from_slice(&args);
         let rtk = feed(common::rtk_command().args(&rtk_args));
-        let grep = feed(Command::new("grep").args(&args));
+        let grep = feed(common::native_command("grep").args(&args));
         assert_eq!(rtk, grep, "piped stdin mismatch for {args:?}");
     }
 }

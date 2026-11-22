@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use std::io::{ErrorKind, Write};
+use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
 mod common;
@@ -12,9 +12,16 @@ fn run_with_stdin(command: &mut Command, input: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn command");
-    if let Err(error) = child.stdin.take().expect("piped stdin").write_all(input) {
-        assert_eq!(error.kind(), ErrorKind::BrokenPipe, "write stdin: {error}");
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    // A command that rejects its arguments exits before it reads stdin, so this
+    // write races that exit: EPIPE is a normal outcome, not a failure. What the
+    // caller asserts on is the exit status, which survives either way.
+    match stdin.write_all(input) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        Err(e) => panic!("write stdin: {e:?}"),
     }
+    drop(stdin);
     child.wait_with_output().expect("wait for command")
 }
 
@@ -47,7 +54,7 @@ fn wc_preserves_native_failure_exit_code() {
         common::rtk_command().args(["wc", invalid_option]),
         b"input\n",
     );
-    let native = run_with_stdin(Command::new("wc").arg(invalid_option), b"input\n");
+    let native = run_with_stdin(common::native_command("wc").arg(invalid_option), b"input\n");
 
     assert!(!rtk.status.success());
     assert_eq!(rtk.status.code(), native.status.code());

@@ -312,7 +312,7 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "go",
     "golangci-lint",
     "rewrite",
-    "proxy",
+    "bypass",
     "verify",
     "learn",
 ];
@@ -437,6 +437,44 @@ pub fn filter_parse_error(content: &str) -> Option<String> {
 }
 
 static MATCH_SET: LazyLock<RegexSet> = LazyLock::new(build_match_set);
+
+#[cfg(feature = "engine")]
+static LEADING_WORDS: LazyLock<std::collections::HashSet<String>> = LazyLock::new(|| {
+    collect_match_patterns()
+        .iter()
+        .flat_map(|pattern| leading_words(pattern))
+        .collect()
+});
+
+#[cfg(feature = "engine")]
+static LEADING_WORD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_][A-Za-z0-9_.+-]*").expect("valid regex"));
+
+#[cfg(feature = "engine")]
+fn leading_words(pattern: &str) -> Vec<String> {
+    let Some(body) = pattern.strip_prefix('^') else {
+        return Vec::new();
+    };
+    let alternatives: Vec<&str> = match body.strip_prefix('(') {
+        Some(group) => group
+            .split(')')
+            .next()
+            .unwrap_or("")
+            .trim_start_matches("?:")
+            .split('|')
+            .collect(),
+        None => vec![body],
+    };
+    alternatives
+        .iter()
+        .filter_map(|alt| LEADING_WORD.find(alt).map(|m| m.as_str().to_string()))
+        .collect()
+}
+
+#[cfg(feature = "engine")]
+pub fn is_filtered_command_word(word: &str) -> bool {
+    LEADING_WORDS.contains(word)
+}
 
 pub fn command_matches_filter(command: &str) -> bool {
     MATCH_SET.is_match(command)
@@ -907,6 +945,22 @@ mod tests {
             std::fs::write(&path, format!("{trusted}# edited\n")).expect("edit filters");
             assert_eq!(loaded(), 0, "changed since it was trusted");
         });
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn leading_words_cover_bare_and_grouped_patterns() {
+        assert_eq!(leading_words(r"^terraform\s+plan"), vec!["terraform"]);
+        assert_eq!(leading_words(r"^make\b"), vec!["make"]);
+        assert_eq!(
+            leading_words(r"^(gradle|gradlew|\./)gradlew?\b"),
+            vec!["gradle", "gradlew"]
+        );
+        assert_eq!(
+            leading_words(r"^(?:docker|podman)\s+ps"),
+            vec!["docker", "podman"]
+        );
+        assert!(leading_words("no-anchor").is_empty());
     }
 
     // Helper: build a CompiledFilter from inline TOML for tests.

@@ -93,6 +93,7 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
         "deno_test",
         crate::core::runner::TestEcosystem::Deno,
         verbose,
+        false,
     )
 }
 
