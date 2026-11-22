@@ -327,6 +327,36 @@ fn git_branch_dash_prefixed_name_after_double_dash_attempts_creation_not_a_silen
 }
 
 #[test]
+fn git_branch_in_repo_with_no_branches_prints_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    git_in_dir(dir.path(), &["init", "-q", "-b", "main"]);
+
+    let (stdout, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "branch"]);
+
+    assert_eq!(code, Some(0), "stderr={stderr:?}");
+    assert_eq!(stdout, "", "git prints nothing for an unborn repo");
+}
+
+#[test]
+fn git_branch_plain_listing_leaves_out_remote_only_refs() {
+    let dir = init_git_repo();
+    git_in_dir(
+        dir.path(),
+        &["update-ref", "refs/remotes/origin/remote-only", "HEAD"],
+    );
+
+    let (stdout, _, code) = rtk_output_in_dir(dir.path(), &["git", "branch"]);
+    let raw = git(dir.path()).arg("branch").output().expect("spawn git");
+
+    assert_eq!(code, Some(0));
+    assert!(
+        !stdout.contains("remote-only"),
+        "a plain listing is local only: {stdout:?}"
+    );
+    assert_eq!(stdout, String::from_utf8_lossy(&raw.stdout));
+}
+
+#[test]
 fn git_log_malformed_digit_run_propagates_real_git_error() {
     // "-5x" isn't a valid git log limit; real git rejects it outright ("fatal: '5x': not an
     // integer", verified against git 2.51). run_log's internal limit-parsing for this
