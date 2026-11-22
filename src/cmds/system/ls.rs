@@ -1,14 +1,19 @@
 //! Filters directory listings into a compact tree format.
 
 use super::constants::NOISE_DIRS;
-use crate::core::arg_tokenizer::{self, Attachment, Dialect, Token, TokenKind, ValueSpec};
+use crate::core::arg_tokenizer::{
+    self, Abbreviation, Attachment, Dialect, Flag, Grammar, Token, TokenKind, ValueSpec,
+};
 use crate::core::args_utils;
+use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::display_args;
+use crate::core::tracking::estimate_tokens;
 use crate::core::truncate::CAP_INVENTORY;
 use crate::core::utils::{ChildArgExt, resolved_command};
 use anyhow::Result;
 use regex::Regex;
+use std::process::Stdio;
 use std::sync::LazyLock;
 
 /// Matches the date+time portion in `ls -la` output, which serves as a
@@ -21,54 +26,71 @@ static LS_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
+/// A `[=WHEN]` option's value: attached only, since real `ls --color always` lists a file
+/// named `always` rather than reading it as the value.
+const WHEN: ValueSpec = ValueSpec::attached_only();
+
+/// A mandatory value, which claims a literal `--` as its value, as `ls -I -- -al` does.
+const MANDATORY: ValueSpec = ValueSpec::value().claiming_dash_dash();
+
+const ALL: Flag = Flag::long("all");
+const ALMOST_ALL: Flag = Flag::long("almost-all");
+const FORMAT: Flag = Flag::long("format").takes(MANDATORY);
+const FULL_TIME: Flag = Flag::long("full-time");
+const HUMAN_READABLE: Flag = Flag::long("human-readable");
+/// `-n`'s long spelling: a long listing with numeric owner and group.
+const NUMERIC_UID_GID: Flag = Flag::long("numeric-uid-gid");
+const SI: Flag = Flag::long("si");
+
 /// Every long option GNU ls accepts, transcribed from its own `--help`. Needed in full, not
 /// just the value-taking ones: ls resolves unambiguous abbreviations (`--sor time` sorts by
-/// time), and an abbreviation is only unambiguous against the whole set.
-const LONG_FLAGS: &[&str] = &[
-    "all",
-    "almost-all",
-    "author",
-    "block-size",
-    "classify",
-    "color",
-    "context",
-    "dereference",
-    "dereference-command-line",
-    "dereference-command-line-symlink-to-dir",
-    "directory",
-    "dired",
-    "escape",
-    "file-type",
-    "format",
-    "full-time",
-    "group-directories-first",
-    "help",
-    "hide",
-    "hide-control-chars",
-    "human-readable",
-    "hyperlink",
-    "ignore",
-    "ignore-backups",
-    "indicator-style",
-    "inode",
-    "kibibytes",
-    "literal",
-    "no-group",
-    "numeric-uid-gid",
-    "quote-name",
-    "quoting-style",
-    "recursive",
-    "reverse",
-    "show-control-chars",
-    "si",
-    "size",
-    "sort",
-    "tabsize",
-    "time",
-    "time-style",
-    "version",
-    "width",
-    "zero",
+/// time), and an abbreviation is only unambiguous against the whole set. Both flavours share it:
+/// they differ in their short options.
+const LONG_FLAGS: &[Flag] = &[
+    ALL,
+    ALMOST_ALL,
+    Flag::long("author"),
+    Flag::long("block-size").takes(MANDATORY),
+    Flag::long("classify").takes(WHEN),
+    Flag::long("color").takes(WHEN),
+    Flag::long("context"),
+    Flag::long("dereference"),
+    Flag::long("dereference-command-line"),
+    Flag::long("dereference-command-line-symlink-to-dir"),
+    Flag::long("directory"),
+    Flag::long("dired"),
+    Flag::long("escape"),
+    Flag::long("file-type"),
+    FORMAT,
+    FULL_TIME,
+    Flag::long("group-directories-first"),
+    Flag::long("help"),
+    Flag::long("hide").takes(MANDATORY),
+    Flag::long("hide-control-chars"),
+    HUMAN_READABLE,
+    Flag::long("hyperlink").takes(WHEN),
+    Flag::long("ignore").takes(MANDATORY),
+    Flag::long("ignore-backups"),
+    Flag::long("indicator-style").takes(MANDATORY),
+    Flag::long("inode"),
+    Flag::long("kibibytes"),
+    Flag::long("literal"),
+    Flag::long("no-group"),
+    NUMERIC_UID_GID,
+    Flag::long("quote-name"),
+    Flag::long("quoting-style").takes(MANDATORY),
+    Flag::long("recursive"),
+    Flag::long("reverse"),
+    Flag::long("show-control-chars"),
+    SI,
+    Flag::long("size"),
+    Flag::long("sort").takes(MANDATORY),
+    Flag::long("tabsize").takes(MANDATORY),
+    Flag::long("time").takes(MANDATORY),
+    Flag::long("time-style").takes(MANDATORY),
+    Flag::long("version"),
+    Flag::long("width").takes(MANDATORY),
+    Flag::long("zero"),
 ];
 
 /// Every word GNU ls accepts for `--format=WORD`. ls resolves an unambiguous abbreviation of a
@@ -96,18 +118,6 @@ fn resolve_abbrev(candidates: &[&'static str], name: &str) -> Option<&'static st
     matches.next().is_none().then_some(*first)
 }
 
-/// The option `name` names, resolving a GNU-style abbreviation.
-fn canonical_long(name: &str) -> Option<&'static str> {
-    resolve_abbrev(LONG_FLAGS, name)
-}
-
-/// The canonical long-option name `token` spells, or `None` for any other kind of token.
-fn long_name(token: &Token<'_>) -> Option<&'static str> {
-    (token.kind == TokenKind::Long)
-        .then(|| canonical_long(token.text))
-        .flatten()
-}
-
 /// Which `ls` the child process will be. The two disagree on short-option grammar outright:
 /// GNU's `-I`/`-T`/`-w` take `--ignore`/`--tabsize`/`--width` values, while on BSD all three
 /// are booleans and only `-D` takes one (a strftime format). Reading a BSD operand as a value
@@ -131,31 +141,33 @@ const HOST_FLAVOR: Flavor = if cfg!(any(
     Flavor::Gnu
 };
 
-/// `ls`'s option grammar, transcribed from GNU's `--help` and FreeBSD/macOS `ls(1)`.
-///
-/// The `[=WHEN]` flags are attached-only: real `ls --color always` lists a file named `always`
-/// rather than reading it as the value. The mandatory-value ones do claim a literal `--` as
-/// their value, as `ls -I -- -al` does.
-fn ls_takes_value(kind: TokenKind, name: &str, flavor: Flavor) -> Option<ValueSpec> {
-    match kind {
-        // BSD ls accepts no long option that takes a separate value, so the GNU table is
-        // harmless there: the flags it names are rejected by BSD ls either way.
-        TokenKind::Long => match canonical_long(name)? {
-            "color" | "classify" | "hyperlink" => Some(ValueSpec::attached_only()),
-            "block-size" | "format" | "hide" | "ignore" | "indicator-style" | "quoting-style"
-            | "sort" | "tabsize" | "time" | "time-style" | "width" => {
-                Some(ValueSpec::value().claiming_dash_dash())
-            }
-            _ => None,
-        },
-        TokenKind::Short => {
-            let takes_value = match flavor {
-                Flavor::Gnu => matches!(name, "I" | "T" | "w"),
-                Flavor::Bsd => name == "D",
-            };
-            takes_value.then(|| ValueSpec::value().claiming_dash_dash())
-        }
-        _ => None,
+/// GNU ls reads its options with `getopt_long`: short flags cluster, and a long one may be
+/// abbreviated to any prefix that names it alone.
+const LS_DIALECT: Dialect = Dialect {
+    abbreviation: Abbreviation::UniquePrefix,
+    ..Dialect::Posix
+};
+
+/// GNU ls's short options that take a value: `-I`, `-T` and `-w` take `--ignore`/`--tabsize`/
+/// `--width` values.
+const GNU_SHORT: &[Flag] = &[
+    Flag::short("I").takes(MANDATORY),
+    Flag::short("T").takes(MANDATORY),
+    Flag::short("w").takes(MANDATORY),
+];
+
+/// FreeBSD/macOS `ls(1)`: `-I`/`-T`/`-w` are booleans there, and only `-D` takes a value (a
+/// strftime format).
+const BSD_SHORT: &[Flag] = &[Flag::short("D").takes(MANDATORY)];
+
+const GNU_GRAMMAR: Grammar = Grammar::new(LS_DIALECT, &[GNU_SHORT, LONG_FLAGS]);
+const BSD_GRAMMAR: Grammar = Grammar::new(LS_DIALECT, &[BSD_SHORT, LONG_FLAGS]);
+
+/// The grammar of the `ls` the child process will be.
+fn grammar(flavor: Flavor) -> &'static Grammar {
+    match flavor {
+        Flavor::Gnu => &GNU_GRAMMAR,
+        Flavor::Bsd => &BSD_GRAMMAR,
     }
 }
 
@@ -172,7 +184,7 @@ fn is_short_in(token: &Token<'_>, letters: &[char]) -> bool {
 fn shows_dotfiles(tokens: &[Token<'_>]) -> bool {
     tokens
         .iter()
-        .any(|t| is_short_in(t, &['a', 'A']) || matches!(long_name(t), Some("all" | "almost-all")))
+        .any(|t| is_short_in(t, &['a', 'A']) || matches!(t.flag(), Some(&ALL | &ALMOST_ALL)))
 }
 
 /// What the user's arguments ask for: how to render the listing, and the argv to hand the
@@ -188,26 +200,22 @@ fn plan(args: &[String]) -> LsPlan {
 }
 
 fn plan_for(args: &[String], flavor: Flavor) -> LsPlan {
-    let tokens = arg_tokenizer::tokenize_grammar(
-        args,
-        &|kind, name| ls_takes_value(kind, name, flavor),
-        Dialect::Posix,
-    );
+    let tokens = arg_tokenizer::tokenize_grammar(args, grammar(flavor));
 
     let show_all = shows_dotfiles(&tokens);
 
     // Per `man ls`, the long listing is triggered by `-l` and also implied by
-    // `-g`, `-n`, `-o`, `--full-time` or GNU `--format=long` and `--format=verbose`.
-    // In any of those cases we preserve permission info as octal.
+    // `-g`, `-n` (`--numeric-uid-gid`), `-o`, `--full-time` or GNU `--format=long` and
+    // `--format=verbose`. In any of those cases we preserve permission info as octal.
     let show_long = tokens.iter().any(|t| {
         is_short_in(t, &['l', 'g', 'n', 'o'])
-            || match long_name(t) {
-                Some("full-time") => true,
-                Some("format") => matches!(
+            || match t.flag() {
+                Some(&FORMAT) => matches!(
                     t.value(&tokens)
                         .and_then(|word| resolve_abbrev(FORMAT_WORDS, word)),
                     Some("long" | "verbose")
                 ),
+                Some(&FULL_TIME | &NUMERIC_UID_GID) => true,
                 _ => false,
             }
     });
@@ -215,32 +223,30 @@ fn plan_for(args: &[String], flavor: Flavor) -> LsPlan {
     LsPlan {
         show_all,
         show_long,
-        child_args: build_child_args(&tokens, flavor),
+        child_args: build_child_args(&tokens),
     }
 }
 
 /// The index of a trailing flag left without the value it requires, if any. Such a flag can only
 /// be the user's very last argument — anything after it would have been consumed as its value —
 /// so no positional before it can have been `--`-protected.
-fn dangling_value_flag(tokens: &[Token<'_>], flavor: Flavor) -> Option<usize> {
+fn dangling_value_flag(tokens: &[Token<'_>]) -> Option<usize> {
     let index = tokens.len().checked_sub(1)?;
     let last = tokens.get(index)?;
-    let spec = ls_takes_value(last.kind, last.text, flavor)?;
+    let spec = last.value_spec()?;
     (spec.attachment != Attachment::AttachedOnly && last.value(tokens).is_none()).then_some(index)
 }
 
 /// Rebuilds the user's options as argv for the child `ls`, re-attaching every flag's value to
 /// the flag rather than letting it drift into the path list.
-fn build_child_args(tokens: &[Token<'_>], flavor: Flavor) -> Vec<String> {
+fn build_child_args(tokens: &[Token<'_>]) -> Vec<String> {
     // RTK asks for its own long listing, so `-l`/`-a`/`--all` from the user are redundant, and
     // the human-readable ones would pre-format the sizes RTK renders itself. Bare spellings
     // only: `--all=x` is an error the child still has to report.
-    let wants_all = tokens
-        .iter()
-        .any(|t| is_short_in(t, &['a']) || long_name(t) == Some("all"));
+    let wants_all = tokens.iter().any(|t| is_short_in(t, &['a']) || t.is(&ALL));
     let mut child_args = vec![if wants_all { "-la" } else { "-l" }.to_string()];
 
-    let dangling = dangling_value_flag(tokens, flavor);
+    let dangling = dangling_value_flag(tokens);
 
     for (index, token) in tokens.iter().enumerate() {
         if Some(index) == dangling {
@@ -249,7 +255,7 @@ fn build_child_args(tokens: &[Token<'_>], flavor: Flavor) -> Vec<String> {
         match token.kind {
             TokenKind::Long => match token.value(tokens) {
                 Some(value) => child_args.push(format!("--{}={}", token.text, value)),
-                None if matches!(long_name(token), Some("all" | "human-readable" | "si")) => {}
+                None if matches!(token.flag(), Some(&ALL | &HUMAN_READABLE | &SI)) => {}
                 None => child_args.push(format!("--{}", token.text)),
             },
             TokenKind::Short => match token.value(tokens) {
@@ -313,47 +319,81 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         display_args(args)
     };
 
-    runner::run_filtered(
+    let native = native_listing(args);
+    let listed = native
+        .as_ref()
+        .filter(|(stdout, succeeded)| *succeeded || !stdout.is_empty())
+        .map(|(stdout, _)| stdout.as_str());
+
+    runner::run_filtered_with_exit(
         cmd,
         "ls",
         &label,
-        |raw| {
-            let (entries, parsed_count, truncated, filtered) = compact_ls(raw, show_all, show_long);
-
-            // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
-            // This is safer than returning "(empty)" for a non-empty directory.
-            let has_real_content = raw
-                .lines()
-                .any(|l| !l.starts_with("total ") && !l.is_empty() && !is_dotdir(l));
-            if parsed_count == 0 && has_real_content {
-                return raw.to_string();
-            }
-
-            let mut out = entries;
-
-            if let Some(hint) = hidden_hint(&truncated, &filtered) {
-                out.push_str(&hint);
-                out.push('\n');
-            }
-
-            if verbose > 0 {
-                eprintln!(
-                    "Chars: {} → {} ({}% reduction)",
-                    raw.len(),
-                    out.len(),
-                    if !raw.is_empty() {
-                        100usize.saturating_sub(out.len() * 100 / raw.len())
-                    } else {
-                        0
-                    }
-                );
-            }
-            out
+        |raw, code| match (code, &native) {
+            (0, _) => render(raw, listed, show_all, show_long, verbose),
+            (_, Some((native, _))) => never_worse(native, raw).to_string(),
+            (_, None) => raw.to_string(),
         },
-        RunOptions::stdout_only()
-            .early_exit_on_failure()
-            .no_trailing_newline(),
+        RunOptions::stdout_only().no_trailing_newline(),
     )
+}
+
+fn native_listing(args: &[String]) -> Option<(String, bool)> {
+    let output = resolved_command("ls")
+        .child_args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    Some((
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        output.status.success(),
+    ))
+}
+
+fn render(raw: &str, native: Option<&str>, show_all: bool, show_long: bool, verbose: u8) -> String {
+    let (entries, parsed_count, truncated, filtered) = compact_ls(raw, show_all, show_long);
+
+    // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
+    // This is safer than returning "(empty)" for a non-empty directory.
+    let has_real_content = raw
+        .lines()
+        .any(|l| !l.starts_with("total ") && !l.is_empty() && !is_dotdir(l));
+    if parsed_count == 0 && has_real_content {
+        return native
+            .map_or(raw, |native| never_worse(native, raw))
+            .to_string();
+    }
+
+    if let Some(native) = native
+        && estimate_tokens(&entries) > estimate_tokens(native)
+    {
+        return native.to_string();
+    }
+
+    let mut out = entries;
+
+    if let Some(hint) = hidden_hint(&truncated, &filtered) {
+        out.push_str(&hint);
+        out.push('\n');
+    }
+
+    if verbose > 0 {
+        eprintln!(
+            "Chars: {} → {} ({}% reduction)",
+            raw.len(),
+            out.len(),
+            if !raw.is_empty() {
+                100usize.saturating_sub(out.len() * 100 / raw.len())
+            } else {
+                0
+            }
+        );
+    }
+    match native {
+        Some(native) => never_worse(native, &out).to_string(),
+        None => out,
+    }
 }
 
 /// Build the recovery hint for entries dropped from the listing —
@@ -486,7 +526,7 @@ fn perms_to_octal(perms: &str) -> Option<String> {
 ///
 /// Without `show_long`:
 ///   name/        (dirs)
-///   name  size   (files)
+///   name         (files)
 ///
 /// With `show_long` (user passed `-l`):
 ///   755  name/        (dirs)
@@ -574,9 +614,10 @@ fn compact_ls(
         });
     }
     for (name, size, octal) in &files {
-        all_lines.push(match octal {
-            Some(octal) => format!("{}  {}  {}", octal, name, size),
-            None => format!("{}  {}", name, size),
+        all_lines.push(match (show_long, octal) {
+            (false, _) => name.clone(),
+            (true, Some(octal)) => format!("{}  {}  {}", octal, name, size),
+            (true, None) => format!("{}  {}", name, size),
         });
     }
 
@@ -599,6 +640,85 @@ fn compact_ls(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::arg_tokenizer::{TakesValueRow, assert_takes_value_table};
+
+    /// The long options both flavours share: every one GNU ls has, with the spec each takes.
+    const LONG_ROWS: [TakesValueRow; 3] = [
+        (
+            TokenKind::Long,
+            &[
+                "all",
+                "almost-all",
+                "author",
+                "context",
+                "dereference",
+                "dereference-command-line",
+                "dereference-command-line-symlink-to-dir",
+                "directory",
+                "dired",
+                "escape",
+                "file-type",
+                "full-time",
+                "group-directories-first",
+                "help",
+                "hide-control-chars",
+                "human-readable",
+                "ignore-backups",
+                "inode",
+                "kibibytes",
+                "literal",
+                "no-group",
+                "numeric-uid-gid",
+                "quote-name",
+                "recursive",
+                "reverse",
+                "show-control-chars",
+                "si",
+                "size",
+                "version",
+                "zero",
+            ],
+            None,
+        ),
+        (
+            TokenKind::Long,
+            &["classify", "color", "hyperlink"],
+            Some(WHEN),
+        ),
+        (
+            TokenKind::Long,
+            &[
+                "block-size",
+                "format",
+                "hide",
+                "ignore",
+                "indicator-style",
+                "quoting-style",
+                "sort",
+                "tabsize",
+                "time",
+                "time-style",
+                "width",
+            ],
+            Some(MANDATORY),
+        ),
+    ];
+
+    #[test]
+    fn test_grammars_match_their_tables() {
+        let flavours: [(&Grammar, TakesValueRow); 2] = [
+            (
+                &GNU_GRAMMAR,
+                (TokenKind::Short, &["I", "T", "w"], Some(MANDATORY)),
+            ),
+            (&BSD_GRAMMAR, (TokenKind::Short, &["D"], Some(MANDATORY))),
+        ];
+        for (grammar, short) in flavours {
+            let mut table = LONG_ROWS.to_vec();
+            table.push(short);
+            assert_takes_value_table(grammar, &table);
+        }
+    }
 
     #[test]
     fn test_compact_basic() {
@@ -612,8 +732,8 @@ mod tests {
         assert!(entries.contains("src/"));
         assert!(entries.contains("Cargo.toml"));
         assert!(entries.contains("README.md"));
-        assert!(entries.contains("1.2K")); // 1234 bytes
-        assert!(entries.contains("5.5K")); // 5678 bytes
+        assert!(!entries.contains("1.2K"));
+        assert!(!entries.contains("5.5K"));
         assert!(!entries.contains("drwx")); // no permissions
         assert!(!entries.contains("staff")); // no group
         assert!(!entries.contains("total")); // no total
@@ -746,6 +866,19 @@ mod tests {
         assert!(plan_of(&["--format=long"]).show_long);
         assert!(plan_of(&["--format", "verbose"]).show_long);
         assert!(!plan_of(&["--format", "across"]).show_long);
+    }
+
+    #[test]
+    fn test_plan_numeric_uid_gid_implies_long_listing_in_every_spelling() {
+        for args in [&["-n"][..], &["--numeric-uid-gid"], &["--numeric"]] {
+            assert!(plan_of(args).show_long, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn test_plan_full_time_implies_long_listing() {
+        assert!(plan_of(&["--full-time"]).show_long);
+        assert!(plan_bsd(&["--full-time"]).show_long);
     }
 
     #[test]
@@ -1074,7 +1207,7 @@ mod tests {
         let input = "total 8\n\
                      -rw-r--r--  1 fjeanne utilisa. du domaine    0 Mar 31 16:18 empty.txt\n\
                      -rw-r--r--  1 fjeanne utilisa. du domaine 1234 Mar 31 16:18 data.json\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, true);
         assert!(
             entries.contains("empty.txt"),
             "should contain 'empty.txt', got: {entries}"
@@ -1102,7 +1235,7 @@ mod tests {
         // Some systems show year instead of time for old files
         let input = "total 8\n\
                      -rw-r--r--  1 user staff  5678 Dec 25  2024 archive.tar\n";
-        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, true);
         assert!(
             entries.contains("archive.tar"),
             "should contain filename, got: {entries}"
@@ -1265,6 +1398,139 @@ mod tests {
             "short format must not include octal perms, got: {entries}"
         );
         assert!(entries.contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn test_compact_short_format_is_names_only() {
+        let input = "total 48\n\
+                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
+                     lrwxr-xr-x  1 user  staff    10 Jan  1 12:00 link -> target\n";
+        let (entries, _parsed, _truncated, _hidden) = compact_ls(input, false, false);
+        assert_eq!(entries, "src/\nCargo.toml\nlink -> target\n");
+    }
+
+    fn long_line(kind: char, name: &str) -> String {
+        format!("{kind}rw-r--r--  1 user  staff  1234 Jan  1 12:00 {name}\n")
+    }
+
+    fn one_per_line(names: &[&str]) -> String {
+        names.iter().map(|name| format!("{name}\n")).collect()
+    }
+
+    #[test]
+    fn test_render_bare_ls_is_native_when_markers_cost_more() {
+        let raw: String = ["src", "docs", "tests", "a.rs"]
+            .iter()
+            .map(|n| long_line(if n.contains('.') { '-' } else { 'd' }, n))
+            .collect();
+        let native = one_per_line(&["a.rs", "docs", "src", "tests"]);
+        assert_eq!(render(&raw, Some(&native), false, false, 0), native);
+    }
+
+    #[test]
+    fn test_render_bare_ls_is_native_when_the_hint_costs_more() {
+        let raw = format!(
+            "{}{}{}",
+            long_line('-', "Cargo.toml"),
+            long_line('d', "target"),
+            long_line('-', "README.md")
+        );
+        let native = one_per_line(&["Cargo.toml", "README.md", "target"]);
+        assert_eq!(render(&raw, Some(&native), false, false, 0), native);
+    }
+
+    #[test]
+    fn test_render_bare_ls_keeps_compact_when_it_saves() {
+        let files: Vec<String> = (0..CAP_INVENTORY + 40)
+            .map(|i| format!("file_with_a_long_name_{i:03}.txt"))
+            .collect();
+        let mut raw: String = files.iter().map(|name| long_line('-', name)).collect();
+        raw.push_str(&long_line('d', "node_modules"));
+        let mut names: Vec<&str> = files.iter().map(String::as_str).collect();
+        names.push("node_modules");
+        let native = one_per_line(&names);
+        let out = render(&raw, Some(&native), false, false, 0);
+        assert!(out.starts_with("file_with_a_long_name_000.txt\n"), "{out}");
+        assert!(out.contains("... (40 more, 1 filtered)"), "{out}");
+        assert!(estimate_tokens(&out) < estimate_tokens(&native));
+    }
+
+    #[test]
+    fn test_render_bare_ls_never_exceeds_native() {
+        let names = [
+            "a",
+            "src",
+            "node_modules",
+            "target",
+            ".git",
+            "x.rs",
+            "my file",
+        ];
+        for n in 0..=names.len() {
+            for dirs_mask in 0..(1u32 << n) {
+                let raw: String = names[..n]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| {
+                        long_line(if (dirs_mask >> i) & 1 == 1 { 'd' } else { '-' }, name)
+                    })
+                    .collect();
+                let native = one_per_line(&names[..n]);
+                let out = render(&raw, Some(&native), false, false, 0);
+                assert!(
+                    estimate_tokens(&out) <= estimate_tokens(&native),
+                    "rtk ls emitted {out:?} for native {native:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_render_unparsed_listing_is_held_to_native() {
+        let raw = "Desktop:\ntotal 0\n\ngo:\ntotal 0\n";
+        let native = "Desktop:\n\ngo:\n";
+        assert_eq!(render(raw, Some(native), false, false, 0), native);
+        assert_eq!(render(raw, None, false, false, 0), raw);
+    }
+
+    #[test]
+    fn test_render_unrecognised_date_format_is_held_to_native() {
+        let raw = "total 8\n\
+                   -rw-r--r--  1 user  staff  1234 Oct 28 16:25:03 2026 Cargo.toml\n\
+                   drwxr-xr-x  2 user  staff    64 Oct 28 16:25:03 2026 src\n";
+        let native = "Cargo.toml\nsrc\n";
+        assert_eq!(render(raw, Some(native), false, false, 0), native);
+    }
+
+    #[test]
+    fn test_render_long_listing_keeps_compact_when_it_saves() {
+        let raw = format!("{}{}", long_line('d', "src"), long_line('-', "a.rs"));
+        let compact = "644  src/\n644  a.rs  1.2K\n";
+        assert_eq!(render(&raw, Some(&raw), false, true, 0), compact);
+        assert_eq!(render(&raw, None, false, true, 0), compact);
+    }
+
+    #[test]
+    fn test_render_long_listing_is_held_to_native() {
+        let raw = format!("{}{}", long_line('d', "src"), long_line('-', "a.rs"));
+        let native = "a.rs\n";
+        assert_eq!(render(&raw, Some(native), false, true, 0), native);
+    }
+
+    #[test]
+    fn test_render_without_native_keeps_compact() {
+        let raw = format!("{}{}", long_line('d', "src"), long_line('-', "a.rs"));
+        assert_eq!(render(&raw, None, false, false, 0), "src/\na.rs\n");
+    }
+
+    #[test]
+    fn test_render_empty_directory_matches_bare_ls() {
+        let raw = "total 0\n\
+                   drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .\n\
+                   drwxr-xr-x  2 user  staff  64 Jan  1 12:00 ..\n";
+        assert_eq!(render(raw, Some(""), false, false, 0), "");
+        assert_eq!(render(raw, None, false, true, 0), "(empty)\n");
     }
 
     #[test]

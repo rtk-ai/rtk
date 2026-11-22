@@ -1,6 +1,8 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
-use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec, is_digit_run};
+use crate::core::arg_tokenizer::{
+    self, Dialect, Flag, Grammar, Token, TokenKind, ValueSpec, is_digit_run,
+};
 use crate::core::args_utils;
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
@@ -12,6 +14,7 @@ use crate::core::stream::{
 use crate::core::tracking;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 use crate::core::user_dirs;
+use crate::core::user_env;
 use crate::core::utils::{exit_code_from_status, join_with_overflow, resolved_command, strip_ansi};
 use anyhow::{Context, Result};
 use std::ffi::OsString;
@@ -32,6 +35,7 @@ pub enum GitCommand {
     Fetch,
     Stash { subcommand: Option<String> },
     Worktree,
+    LsTree,
 }
 
 impl GitCommand {
@@ -51,6 +55,7 @@ impl GitCommand {
             GitCommand::Fetch => "fetch",
             GitCommand::Stash { .. } => "stash",
             GitCommand::Worktree => "worktree",
+            GitCommand::LsTree => "ls-tree",
         }
     }
 }
@@ -95,8 +100,18 @@ fn git_cmd_c_locale(global_args: &[String]) -> Command {
     cmd
 }
 
+/// `git status`'s `-s`/`--short`.
+const SHORT_FORMAT: Flag = Flag::pair("s", "short");
+
+/// `git status`'s `-b`/`--branch`.
+const SHOW_BRANCH: Flag = Flag::pair("b", "branch");
+
+/// The `git status` flags RTK's compact form reproduces, the only ones it checks for. Both are
+/// booleans and nothing else is declared, so no flag here consumes a following token.
+const STATUS_GRAMMAR: Grammar = Grammar::new(Dialect::Posix, &[&[SHOW_BRANCH, SHORT_FORMAT]]);
+
 fn uses_compact_status_path(args: &[String]) -> bool {
-    let tokens = arg_tokenizer::tokenize(args);
+    let tokens = arg_tokenizer::tokenize_grammar(args, &STATUS_GRAMMAR);
 
     if tokens.is_empty() {
         return true;
@@ -105,15 +120,15 @@ fn uses_compact_status_path(args: &[String]) -> bool {
     let mut saw_branch = false;
     let mut saw_flag = false;
     for token in &tokens {
-        match (token.kind, token.text) {
+        match (token.kind, token.flag()) {
             // A `--` with no pathspec after it selects nothing, so `git status -sb --` is
             // `git status -sb`, and a lone `--` is plain `git status`.
             (TokenKind::DashDash, _) => {}
-            (TokenKind::Short, "b") | (TokenKind::Long, "branch") => {
+            (_, Some(&SHOW_BRANCH)) => {
                 saw_branch = true;
                 saw_flag = true;
             }
-            (TokenKind::Short, "s") | (TokenKind::Long, "short") => saw_flag = true,
+            (_, Some(&SHORT_FORMAT)) => saw_flag = true,
             _ => return false,
         }
     }
@@ -179,6 +194,7 @@ pub fn run(
             run_stash(subcommand.as_deref(), args, verbose, global_args)
         }
         GitCommand::Worktree => run_worktree(args, verbose, global_args),
+        GitCommand::LsTree => run_ls_tree(args, verbose, global_args),
     }
 }
 
@@ -194,64 +210,43 @@ fn split_stash_region(region: &[String]) -> (Option<String>, Vec<String>) {
     }
 }
 
-/// `-s`/`--no-patch` ask `git diff` for no body at all, so there is nothing to compact and
-/// RTK's own `--stat` header would answer a question the user did not ask. On `git show` the
-/// same flags ask for the commit summary, which is exactly what the compact form prints, so
-/// this is deliberately not part of [`diff_wants_raw_shape`].
-fn suppresses_diff_body(token: &Token<'_>) -> bool {
-    matches!(
-        (token.kind, token.text),
-        (TokenKind::Long, "no-patch" | "quiet") | (TokenKind::Short, "s")
-    )
+/// Whether `git diff`'s arguments ask for no body at all: `-s`/`--no-patch` and `--quiet`
+/// leave nothing to compact, and RTK's own `--stat` header would answer a question the user did
+/// not ask. On `git show` the suppressors ask for the commit summary, which is exactly what the
+/// compact form prints ([`body_is_suppressed`]), so this is not part of
+/// [`diff_wants_raw_shape`].
+fn suppresses_diff_body(tokens: &DiffTokens<'_>) -> bool {
+    tokens
+        .iter()
+        .any(|t| matches!(t.flag(), Some(&NO_PATCH | &DIFF_QUIET)))
 }
 
-/// True for a token asking git for patch output: `-p`/`-u`/`--patch`, and the context-width
-/// flags that imply a patch (`-U3`, `--unified=3`, `-W`/`--function-context`).
-/// Whether the body ends up suppressed once git's own arbitration is applied: `-s`,
-/// `--no-patch` and `--quiet` lose to a *later* `-p`/`--patch`/`-U<n>` and win over an earlier
-/// one (`git show -s -p` prints the diff, `git show -p -s` does not -- git 2.53). Taking the
-/// suppressors order-independently swallowed a patch the user had asked for last.
-fn body_is_suppressed(tokens: &[Token<'_>]) -> bool {
+/// Whether `git show`'s body ends up suppressed once git's own arbitration is applied (git
+/// 2.53): `-s`/`--no-patch` and a patch request resolve by last flag wins, and `-q`/`--quiet`
+/// suppresses only when no patch request is present.
+fn body_is_suppressed(tokens: &LogTokens<'_>) -> bool {
     // `-s`/`--no-patch` and a patch request resolve by last flag wins: `git show -s -p` prints
     // the diff, `git show -p -s` does not (git 2.53).
     let mut suppressed = false;
-    for token in tokens {
-        if hard_suppresses_diff_body(token) {
-            suppressed = true;
-        } else if requests_patch_output(token) {
-            suppressed = false;
+    for token in tokens.iter() {
+        match token.flag() {
+            Some(&NO_PATCH) => suppressed = true,
+            _ if requests_patch_output(token) => suppressed = false,
+            _ => {}
         }
     }
-    // `--quiet` does not play that game. In `show` it loses to a patch request from either
-    // side -- `--quiet -p` and `-p --quiet` both print the diff -- and only suppresses when
-    // nothing else asked for output. Treating it as a third spelling of `-s` dropped a patch
-    // the user had asked for.
-    suppressed || (tokens.iter().any(is_quiet_flag) && !tokens.iter().any(requests_patch_output))
+    // `-q`/`--quiet` does not play that game. In `show` it loses to a patch request from
+    // either side -- `-q -p` and `-p -q` both print the diff -- and only suppresses when
+    // nothing else asked for output.
+    let quiet = tokens.iter().any(|t| t.is(&LOG_QUIET));
+    suppressed || (quiet && !tokens.iter().any(requests_patch_output))
 }
 
-/// `--quiet`, which is `--exit-code`'s companion rather than a shape flag. Only `run_diff`
-/// treats it as one, and there it takes the raw route before any of this is consulted.
-fn is_quiet_flag(token: &Token<'_>) -> bool {
-    (token.kind, token.text) == (TokenKind::Long, "quiet")
-}
-
-/// The suppressors that really do replace the body: `-s` and its long spelling.
-fn hard_suppresses_diff_body(token: &Token<'_>) -> bool {
-    matches!(
-        (token.kind, token.text),
-        (TokenKind::Long, "no-patch") | (TokenKind::Short, "s")
-    )
-}
-
+/// True for a token asking git for patch output: `-p`/`-u`/`--patch`, and the context-width
+/// flags that imply a patch (`-U3`, `--unified=3`, `-W`/`--function-context`). `token` is read
+/// with [`LOG_GRAMMAR`] or [`DIFF_GRAMMAR`]: `git stash show`'s grammar has no `-u` patch flag.
 fn requests_patch_output(token: &Token<'_>) -> bool {
-    match token.kind {
-        TokenKind::Long => matches!(
-            token.text,
-            "patch" | "patch-with-stat" | "patch-with-raw" | "unified" | "function-context"
-        ),
-        TokenKind::Short => matches!(token.text, "p" | "u" | "U" | "W"),
-        _ => false,
-    }
+    token.is_one_of(PATCH_REQUESTS)
 }
 
 /// `args` with any `--oneline` removed, by the token's own `source_index` so a pathspec of that
@@ -259,7 +254,7 @@ fn requests_patch_output(token: &Token<'_>) -> bool {
 fn args_without_oneline(args: &[String], tokens: &[Token<'_>]) -> Vec<String> {
     let dropped: Vec<usize> = tokens
         .iter()
-        .filter(|t| t.kind == TokenKind::Long && t.text == "oneline")
+        .filter(|t| t.is(&ONELINE))
         .map(|t| t.source_index)
         .collect();
     if dropped.is_empty() {
@@ -327,10 +322,8 @@ fn run_diff(
     let timer = tracking::TimedExecution::start();
     let tracked = with_args("git diff", &display_args(args));
 
-    let tokens = tokenize_git_diff_args(args);
-    let wants_stat = tokens
-        .iter()
-        .any(|t| diff_wants_raw_shape(t, &tokens) || suppresses_diff_body(t));
+    let tokens = tokenize_diff_args(args);
+    let wants_stat = diff_wants_raw_shape(&tokens) || suppresses_diff_body(&tokens);
 
     // Compact diff is the default RTK behavior; --no-compact is RTK's own pseudo-flag. The
     // strip below removes the arg this token came from, so detection and removal can't
@@ -466,7 +459,7 @@ fn run_diff(
 fn show_wants_format(tokens: &[Token<'_>]) -> bool {
     tokens
         .iter()
-        .any(|t| t.kind == TokenKind::Long && matches!(t.text, "format" | "pretty"))
+        .any(|t| matches!(t.flag(), Some(&FORMAT | &PRETTY)))
 }
 
 fn show_cmd(
@@ -504,20 +497,22 @@ fn run_show(
     // colon'd pathspec as a `<rev>:<path>` blob and dump it instead of a commit-diff.
     let args = &args_utils::restore_double_dash(args);
     let tracked = with_args("git show", &display_args(args));
+    // Every question below about what an argument is reads these tokens.
+    let tokens = tokenize_log_args(args);
 
     // Pick one of three handlers for `git show`. `show_route` decides the blob case
     // FIRST (see its docs): the two branches below are mutually exclusive on `route`,
     // so their source order does not affect which one runs.
-    let positionals = show_positionals(args);
+    let positionals = show_positionals(args, &tokens);
     // Authoritative blob decision (belt-and-suspenders). `show_route` is the cheap pure
     // pre-filter: does ANY positional look like it could name a blob (`rev:path`, a bare
     // hex object id, a `^{blob}`/`^{}` peel)? Only then do we probe with
-    // `git cat-file -t` — and we probe EVERY such positional, not just the first. The
-    // cluster-aware `show_positionals` already drops option-value operands (`-S 'url:1'`,
-    // the `-G` value in `-wG a:b HEAD:blob`, …), but probing all candidates means that
-    // even if the walker ever missed some exotic short-flag cluster, a non-object like
-    // `a:b` is still rejected by `cat-file` and the REAL blob elsewhere on the line is
-    // rescued instead of being silently dropped or misrouted through lossy decoding.
+    // `git cat-file -t` — and we probe EVERY such positional, not just the first.
+    // `show_positionals` already drops option-value operands (`-S 'url:1'`, the `-G` value
+    // in `-wG a:b HEAD:blob`, …), but probing all candidates means that even if the grammar
+    // ever missed some option's value, a non-object like `a:b` is still rejected by
+    // `cat-file` and the REAL blob elsewhere on the line is rescued instead of being
+    // silently dropped or misrouted through lossy decoding.
     //   * exactly one blob  → window it (the byte-safe path below),
     //   * more than one      → git concatenates the objects with no separator, so the
     //                          hint can't reconstruct them → raw passthrough,
@@ -525,14 +520,14 @@ fn run_show(
     // Any presence of a blob object takes the byte-safe path: its output carries raw
     // blob bytes that the commit-diff path's lossy UTF-8 decode would corrupt (a Latin-1
     // `0xF1` becomes the `U+FFFD` replacement char — verified).
-    let (route, blob_objects) = match show_route(args) {
+    let (route, blob_objects) = match show_route(args, &tokens) {
         ShowRoute::Blob => {
-            let blobs: Vec<&str> = blob_candidates(args)
+            let blobs: Vec<&String> = blob_candidates(args, &tokens)
                 .into_iter()
                 .filter(|c| probe_is_blob(global_args, c))
                 .collect();
             if blobs.is_empty() {
-                (commit_or_stat_route(args), blobs)
+                (commit_or_stat_route(&tokens), blobs)
             } else {
                 (ShowRoute::Blob, blobs)
             }
@@ -660,7 +655,7 @@ fn run_show(
         // single-object print stays byte-identical to git there too.
         let can_window = positionals.len() == 1
             && blob_objects.len() == 1
-            && !has_content_transform_flag(args)
+            && !has_content_transform_flag(&tokens)
             && !has_trailing_pathspec(args);
         if can_window {
             let shown = compact_blob_show(text, blob_objects[0], global_args);
@@ -682,7 +677,6 @@ fn run_show(
 
     // The compacted commit-diff path from here down. `show_route` above already decided the
     // blob and summary cases, so what is left is the one shape RTK renders itself.
-    let tokens = tokenize_git_diff_args(args);
 
     // Get raw output for tracking
     let mut raw_cmd = git_cmd(global_args);
@@ -743,7 +737,7 @@ fn run_show(
     // `-p`, which outranks RTK's `--no-patch` -- HEAD's stat and patch under another
     // commit's header.
     let stat_args = args_without_oneline(args, &tokens);
-    let stat_tokens = tokenize_git_diff_args(&stat_args);
+    let stat_tokens = tokenize_log_args(&stat_args);
     let mut stat_cmd = show_cmd(
         global_args,
         &stat_args,
@@ -803,14 +797,11 @@ fn run_show(
 fn emits_word_diff(tokens: &[Token]) -> bool {
     let mut word_diff = false;
     for token in tokens {
-        if token.kind != TokenKind::Long {
-            continue;
-        }
-        match token.text {
-            "word-diff" => word_diff = token.attached != Some("none"),
+        match token.flag() {
             // `--color-words[=<regex>]` takes a regex rather than a mode, so there is no `none`
             // to honour on that spelling.
-            "color-words" | "word-diff-regex" => word_diff = true,
+            Some(&COLOR_WORDS | &WORD_DIFF_REGEX) => word_diff = true,
+            Some(&WORD_DIFF) => word_diff = token.attached != Some("none"),
             _ => {}
         }
     }
@@ -867,19 +858,22 @@ fn is_blob_show_arg(arg: &str) -> bool {
         && arg.chars().any(|c| c != ':')
 }
 
-/// The positional (non-option) arguments of a `git show` — its objects. A flag's own value
-/// operand (`-S 'url:1'`, the `-G` value in a `-wG a:b` cluster) and everything past `--`
-/// are excluded, so a colon in either is never mistaken for a `<rev>:<path>` blob. A
-/// trailing `-- <path>` beside a real object is thus ignored rather than emptying the list.
+/// The positional (non-option) arguments of a `git show` — its objects — read with the same
+/// grammar as the rest of `run_show` ([`LOG_GRAMMAR`]). Options and the value tokens they
+/// consume (`-S 'url:1'`, `-L 1,2:file`, the `-G` value in `-wG a:b`) are not positionals, so
+/// an option operand that happens to contain a colon is never mistaken for a blob and
+/// truncated. A solo-only `-n` inside a cluster consumes nothing, as in git, which reads the
+/// `2` of `git show -pn 2 X:y` as an object. Args after a `--` are pathspecs, never objects, so
+/// a colon in a filename there (`-- weird:name`) is excluded; a trailing `-- <path>` beside a
+/// real object arg is thus ignored (git still dumps the blob) rather than emptying the list.
 ///
-/// Uses `diff`'s grammar, not `log`'s: `git show -wl 100` consumes the `100` as the rename
-/// limit, where log's `-l` is solo-only and would leave it looking like a second object.
-fn show_positionals(args: &[String]) -> Vec<&str> {
-    let tokens = tokenize_git_diff_args(args);
-    arg_tokenizer::before_dashdash(&tokens)
+/// `tokens` are `args` read with [`LOG_GRAMMAR`] ([`tokenize_log_args`]), as every helper of
+/// `run_show` below takes them.
+fn show_positionals<'a>(args: &'a [String], tokens: &[Token<'_>]) -> Vec<&'a String> {
+    arg_tokenizer::before_dashdash(tokens)
         .iter()
         .filter(|t| t.is_free_positional())
-        .map(|t| t.text)
+        .filter_map(|t| args.get(t.source_index))
         .collect()
 }
 
@@ -887,23 +881,22 @@ fn show_positionals(args: &[String]) -> Vec<&str> {
 /// windowing candidates. ALL of them are returned (not just the first) so `run_show`
 /// can `cat-file`-probe every one: a value operand a missed exotic cluster might leave
 /// behind is rejected by the probe, while the real blob elsewhere on the line is found.
-fn blob_candidates(args: &[String]) -> Vec<&str> {
-    show_positionals(args)
+fn blob_candidates<'a>(args: &'a [String], tokens: &[Token<'_>]) -> Vec<&'a String> {
+    show_positionals(args, tokens)
         .into_iter()
         .filter(|a| is_blob_show_arg(a))
         .collect()
 }
 
-/// Whether a `git show` invocation carries any content-transforming flag
-/// (`--textconv`/`--filters`/`--ext-diff`) that rewrites a blob's bytes. The `git show
-/// <rev>:<path> | tail` recovery hint omits these flags, so its output would not match
-/// what git printed; their presence forces byte-identical raw passthrough instead of
-/// windowing. The `--no-*` spellings restore the default (no rewrite) and are safe, so
-/// only the enabling spellings count. Flags precede `--`, so scan up to it.
-fn has_content_transform_flag(args: &[String]) -> bool {
-    args.iter()
-        .take_while(|a| *a != "--")
-        .any(|a| matches!(a.as_str(), "--textconv" | "--filters" | "--ext-diff"))
+/// Whether a `git show` invocation carries a content-transforming flag
+/// ([`CONTENT_TRANSFORMS`]) that rewrites a blob's bytes. The `git show <rev>:<path> | tail`
+/// recovery hint omits these flags, so its output would not match what git printed; their
+/// presence forces byte-identical raw passthrough instead of windowing. Read from tokens: in
+/// `--grep --textconv` the `--textconv` is `--grep`'s pattern, and past `--` it is a path.
+fn has_content_transform_flag(tokens: &[Token<'_>]) -> bool {
+    arg_tokenizer::before_dashdash(tokens)
+        .iter()
+        .any(|t| t.is_one_of(CONTENT_TRANSFORMS))
 }
 
 /// Whether a `-- <pathspec>` with at least one path after it is present. Empirically
@@ -940,28 +933,27 @@ enum ShowRoute {
 /// decision is a `git cat-file -t` probe run by `run_show` (see `probe_is_blob`) on
 /// those candidates — the pre-filter
 /// keeps the probe off every other invocation.
-fn show_route(args: &[String]) -> ShowRoute {
-    if !blob_candidates(args).is_empty() {
+fn show_route(args: &[String], tokens: &[Token<'_>]) -> ShowRoute {
+    if !blob_candidates(args, tokens).is_empty() {
         return ShowRoute::Blob;
     }
-    commit_or_stat_route(args)
+    commit_or_stat_route(tokens)
 }
 
 /// Classify a `git show` that is NOT a blob dump: `--stat`/`--format`/word-diff
 /// summary passthrough vs. a compacted commit-diff. Split out from `show_route` so
 /// `run_show` can fall back to it when the `cat-file` probe rejects a `rev:path`
 /// candidate (a flag value like `-S 'url:1'`, or a tree/commit/bogus object).
-fn commit_or_stat_route(args: &[String]) -> ShowRoute {
+fn commit_or_stat_route(tokens: &[Token<'_>]) -> ShowRoute {
     // Tokenized, not string-matched: a pathspec named `--stat` past the boundary is not the
     // flag, `--prettyish` is not `--pretty`, and the shapes RTK cannot compact are more than
     // the three stat spellings -- `--raw`, `--name-only`, `--check` and the rest route here
     // too. A word/color-word diff has no unified-diff markers for `compact_diff` to read, so
     // it passes through like a summary; it only ever applies to a commit-diff, so it is
     // checked after the blob case above.
-    let tokens = tokenize_git_diff_args(args);
-    if tokens.iter().any(|t| show_wants_raw_shape(t, &tokens))
-        || show_wants_format(&tokens)
-        || emits_word_diff(&tokens)
+    if tokens.iter().any(|t| show_wants_raw_shape(t, tokens))
+        || show_wants_format(tokens)
+        || emits_word_diff(tokens)
     {
         return ShowRoute::StatOrFormat;
     }
@@ -1553,7 +1545,41 @@ const REFUSAL_EXIT_CODE: i32 = 128;
 /// The two lengths `%H` can print, one per object format git has.
 const SHA1_NAME_LEN: usize = 40;
 const SHA256_NAME_LEN: usize = 64;
+/// Closes every commit in the format RTK asks for when the user named none, which is what
+/// lets the filtered path find commit boundaries in what git printed.
+const LOG_ENTRY_MARKER: &str = "---END---";
+/// Opens every commit of that format when RTK asks for one commit past its limit, in git's
+/// spelling: the control character, the commit's `%m` mark, its full object name and a space.
+/// What git prints after a commit's marker (a directory summary, a stat line) and what a file
+/// or a message holds can start with the control character too, but not with the whole of
+/// this, so it is what tells a commit from the rest. It is stripped before anything is
+/// rendered, printed or tracked.
+const LOG_ENTRY_START_SPEC: &str = "%x01%m%H ";
+const LOG_ENTRY_START: char = '\u{1}';
+/// What `%m` prints for a commit of a walk without `--boundary`: `<` and `>` for the two sides
+/// of a symmetric difference (`>` when there is one side only), `=` for a commit whose patch
+/// the other side has too and `^` for one outside the range.
+const OPENING_MARKS: [char; 4] = ['<', '>', '=', '^'];
 const DEFAULT_LOG_LIMIT_ARG: &str = "-10";
+/// The limit the filtered path allows a user-chosen format, which is counted in lines: a
+/// compact shape fits many more commits in the same reading budget.
+const COMPACT_LOG_LIMIT: usize = 50;
+/// The width a log line is cut to when RTK set the limit.
+const LOG_LINE_WIDTH: usize = 80;
+
+/// True when `exit_code` says git refused the command rather than ran it, which owes the user
+/// nothing beyond git's own error. A negative code is a git that crashed: Windows reports the
+/// NTSTATUS of the crash (-1073741819 for an access violation) as the exit code.
+fn refused_by_git(exit_code: i32) -> bool {
+    !(0..REFUSAL_EXIT_CODE).contains(&exit_code)
+}
+
+/// The one wording for a cap RTK applied, so both paths say the same thing and name the same
+/// escape. `unit` is what the cap took: commits, or the lines of a user format whose commits
+/// RTK cannot tell apart.
+fn cap_notice(limit: usize, unit: &str) -> String {
+    format!("[rtk] capped at {limit} {unit}; pass -n <count> for more")
+}
 
 /// `git log <args>` for the raw passthrough, carrying RTK's default limit unless the user named
 /// one. [`run_passthrough`] streams straight to the terminal, so the limit has to be in the args
@@ -1693,15 +1719,17 @@ fn is_commit_name(record: &str) -> bool {
 /// probes above answer different questions.
 fn selects_by_diff(tokens: &[Token<'_>]) -> bool {
     arg_tokenizer::before_dashdash(tokens).iter().any(|t| {
-        match t.kind {
-            TokenKind::Long => matches!(
-                t.text,
-                "find-object" | "diff-filter" | "pickaxe-regex" | "pickaxe-all"
-            ),
-            // `-S<string>` and `-G<regex>`.
-            TokenKind::Short => matches!(t.text, "S" | "G"),
-            _ => false,
-        }
+        matches!(
+            t.flag(),
+            Some(
+                &DIFF_FILTER
+                    | &FIND_OBJECT
+                    | &PICKAXE_G
+                    | &PICKAXE_ALL
+                    | &PICKAXE_REGEX
+                    | &PICKAXE_S
+            )
+        )
     })
 }
 
@@ -1744,16 +1772,15 @@ fn log_probe_args(args: &[String], tokens: &[Token<'_>]) -> Vec<String> {
     let keep_merge_diffs = selects_by_diff(tokens);
     let mut dropped: Vec<usize> = Vec::new();
     for token in tokens {
-        if token.kind != TokenKind::Long {
-            continue;
-        }
-        let drop = match token.text {
-            "pretty" | "format" | "oneline" | "skip" | "output" | "exit-code" | "check"
-            | "line-prefix" | "graph" | "reverse" => true,
+        let drop = match token.flag() {
+            Some(
+                &CHECK | &EXIT_CODE | &FORMAT | &GRAPH | &LINE_PREFIX | &ONELINE | &OUTPUT
+                | &PRETTY | &REVERSE | &SKIP,
+            ) => true,
             // Dropped here rather than by the predicate below, which cannot take a flag's
             // separate-token value with it: `--diff-merges combined` would leave the
             // `combined` behind, and git would read it as a revision.
-            "diff-merges" => !keep_merge_diffs && diffs_merge_commits(token, tokens),
+            Some(&DIFF_MERGES) => !keep_merge_diffs && diffs_merge_commits(token, tokens),
             _ => false,
         };
         if !drop {
@@ -1774,7 +1801,7 @@ fn log_probe_args(args: &[String], tokens: &[Token<'_>]) -> Vec<String> {
         .map(|(_, arg)| arg.clone())
         .collect();
     // Re-tokenized, because the drop above shifted every index `tokens` holds.
-    let kept_tokens = tokenize_git_log_args(&kept);
+    let kept_tokens = tokenize_log_args(&kept);
     args_without_flags(&kept, &kept_tokens, |token| {
         probe_prints_a_patch(token, &kept_tokens, keep_merge_diffs)
     })
@@ -1787,15 +1814,12 @@ fn log_probe_args(args: &[String], tokens: &[Token<'_>]) -> Vec<String> {
 /// selection outright: on a repository whose merges carry content from neither parent,
 /// `git log -S evil` selects nothing and `git log -c -S evil` selects 149.
 fn diffs_merge_commits(token: &Token<'_>, tokens: &[Token<'_>]) -> bool {
-    // Every `--diff-merges` format but `off`/`none` gives merges a diff, `first-parent` and
-    // `separate` as much as the combined ones. git takes the value attached or as the next
-    // token, so both spellings are read.
-    if token.kind == TokenKind::Long && token.text == "diff-merges" {
-        return !matches!(token.value(tokens), None | Some("none" | "off"));
-    }
-    match token.kind {
-        TokenKind::Long => matches!(token.text, "cc" | "remerge-diff"),
-        TokenKind::Short => token.text == "c",
+    match token.flag() {
+        Some(&COMBINED | &DENSE_COMBINED | &REMERGE_DIFF) => true,
+        // Every `--diff-merges` format but `off`/`none` gives merges a diff, `first-parent` and
+        // `separate` as much as the combined ones. git takes the value attached or as the next
+        // token, so both spellings are read.
+        Some(&DIFF_MERGES) => !matches!(token.value(tokens), None | Some("none" | "off")),
         _ => false,
     }
 }
@@ -1818,7 +1842,7 @@ fn probe_prints_a_patch(token: &Token<'_>, tokens: &[Token<'_>], keep_merge_diff
     if diffs_merge_commits(token, tokens) {
         return !keep_merge_diffs;
     }
-    requests_patch_output(token) || (token.kind, token.text) == (TokenKind::Long, "binary")
+    requests_patch_output(token) || token.is(&BINARY)
 }
 
 /// True when the user asked for `--graph`, whose parent rewriting the probe has to reproduce
@@ -1826,7 +1850,7 @@ fn probe_prints_a_patch(token: &Token<'_>, tokens: &[Token<'_>], keep_merge_diff
 fn wants_graph(tokens: &[Token<'_>]) -> bool {
     arg_tokenizer::before_dashdash(tokens)
         .iter()
-        .any(|t| t.kind == TokenKind::Long && t.text == "graph")
+        .any(|t| t.is(&GRAPH))
 }
 
 /// The user's own `--skip`, which RTK's has to absorb: git takes the last one, and RTK's is
@@ -1835,7 +1859,7 @@ fn wants_graph(tokens: &[Token<'_>]) -> bool {
 fn user_skip(tokens: &[Token<'_>]) -> usize {
     tokens
         .iter()
-        .rfind(|t| t.kind == TokenKind::Long && t.text == "skip")
+        .rfind(|t| t.is(&SKIP))
         .and_then(|t| t.value(tokens))
         .and_then(|value| value.parse().ok())
         .unwrap_or(0)
@@ -1856,6 +1880,541 @@ fn bounds_the_walk(tokens: &[Token<'_>]) -> bool {
     })
 }
 
+/// True when `--output=<file>` sends the walk to a file instead of to RTK, which leaves RTK
+/// with nothing to read it out of.
+fn redirects_output(tokens: &[Token<'_>]) -> bool {
+    tokens.iter().any(|t| t.is(&OUTPUT))
+}
+
+/// True when the filtered path can ask git for one commit past its limit and drop it again,
+/// which answers whether the cap cut without walking the history twice.
+///
+/// Five shapes cannot. `--output=<file>` puts the walk in the user's file, where the extra
+/// commit would stay. `--reverse` flips the order *after* the limit has chosen the commits,
+/// so the extra one arrives first and dropping the overflow would drop HEAD. `--boundary`
+/// appends the commits just outside what the limit chose, which depend on the limit: asked
+/// for one more, git names other boundary commits, and the walk shown is no longer the one
+/// the user's limit gives. `--log-size` prints the size of each message as git rendered
+/// it, which counts the opening that is stripped afterwards. And a run that prints text of
+/// its own ahead of a commit's format output, see [`prints_ahead_of_a_commit`]: that text sits
+/// between the last commit shown and the opening of the extra one, so it would stay in the
+/// walk the user is shown.
+fn fetches_one_past_the_limit(
+    global_args: &[String],
+    env: impl Fn(&str) -> Option<String>,
+    tokens: &[Token<'_>],
+) -> bool {
+    !redirects_output(tokens)
+        && !prints_ahead_of_a_commit(global_args, env, tokens)
+        && !tokens
+            .iter()
+            .any(|t| matches!(t.flag(), Some(&BOUNDARY | &LOG_SIZE | &REVERSE)))
+}
+
+/// True when the arguments or the environment make git print text ahead of a commit's format
+/// output: the verdict on its signature (`--show-signature`, or `log.showSignature` given
+/// with `-c` or in the environment) and the bar of `--show-linear-break`. Git writes it between
+/// the previous commit's last line and the commit, so the text of the commit past the limit
+/// would end up in the window. `env` reads a variable of the environment git will run in.
+fn prints_ahead_of_a_commit(
+    global_args: &[String],
+    env: impl Fn(&str) -> Option<String>,
+    tokens: &[Token<'_>],
+) -> bool {
+    /// The most `GIT_CONFIG_KEY_<n>` variables looked at.
+    const ENV_KEYS: usize = 256;
+    let in_environment = || {
+        env("GIT_CONFIG_PARAMETERS")
+            .is_some_and(|set| set.to_ascii_lowercase().contains(SIGNATURE_KEY))
+            || env("GIT_CONFIG_COUNT")
+                .and_then(|count| count.parse::<usize>().ok())
+                .is_some_and(|count| {
+                    (0..count.min(ENV_KEYS)).any(|n| {
+                        env(&format!("GIT_CONFIG_KEY_{n}"))
+                            .is_some_and(|key| key.eq_ignore_ascii_case(SIGNATURE_KEY))
+                    })
+                })
+    };
+    arg_tokenizer::before_dashdash(tokens)
+        .iter()
+        .any(|t| matches!(t.flag(), Some(&SHOW_LINEAR_BREAK | &SHOW_SIGNATURE)))
+        || sets_signature_verdict(global_args, &env)
+        || in_environment()
+}
+
+/// The git config key behind `log.showSignature`, lower-cased: git compares the section and the
+/// variable name without regard to case.
+const SIGNATURE_KEY: &str = "log.showsignature";
+
+/// git's global `-c <key>[=<value>]`.
+const GLOBAL_CONFIG: Flag = Flag::short("c").takes(VALUE);
+
+/// git's global `--config-env=<key>=<variable>`.
+const GLOBAL_CONFIG_ENV: Flag = Flag::long("config-env").takes(VALUE);
+
+/// git's own global options that take a value: the ones whose next argument is a path or a
+/// setting, not an option of `git` itself.
+const GLOBAL_FLAGS: &[Flag] = &[
+    Flag::long("attr-source").takes(VALUE),
+    Flag::short("C").takes(VALUE),
+    GLOBAL_CONFIG,
+    GLOBAL_CONFIG_ENV,
+    Flag::long("git-dir").takes(VALUE),
+    Flag::long("namespace").takes(VALUE),
+    Flag::long("super-prefix").takes(VALUE),
+    Flag::long("work-tree").takes(VALUE),
+];
+
+/// The grammar of the options between `git` and its subcommand.
+const GLOBAL_GRAMMAR: Grammar = Grammar::new(Dialect::Posix, &[GLOBAL_FLAGS]);
+
+/// True for a value git reads as a false boolean, in the spellings RTK recognises: empty,
+/// `false`, `no`, `off` in any case, and an integer made of zeros. Anything else, including a
+/// value git would refuse, counts as a signature verdict being asked for, which only costs the
+/// run a probe.
+fn is_false_boolean(value: &str) -> bool {
+    let digits = value.strip_prefix(['+', '-']).unwrap_or(value);
+    ["", "false", "no", "off"]
+        .iter()
+        .any(|spelling| value.eq_ignore_ascii_case(spelling))
+        || (!digits.is_empty() && digits.bytes().all(|b| b == b'0'))
+}
+
+/// True when the global options turn `log.showSignature` on: `-c <key>[=<value>]` or
+/// `--config-env=<key>=<variable>`, with any value but a false one. `env` reads the variable
+/// `--config-env` names.
+fn sets_signature_verdict(global_args: &[String], env: &impl Fn(&str) -> Option<String>) -> bool {
+    let tokens = arg_tokenizer::tokenize_grammar(global_args, &GLOBAL_GRAMMAR);
+    tokens.iter().any(|t| {
+        let Some(setting) = t.value(&tokens) else {
+            return false;
+        };
+        let (key, source) = match setting.split_once('=') {
+            Some((key, source)) => (key, Some(source)),
+            None => (setting, None),
+        };
+        if !key.eq_ignore_ascii_case(SIGNATURE_KEY) {
+            return false;
+        }
+        match t.flag() {
+            // `-c <key>` with no value is a true boolean.
+            Some(&GLOBAL_CONFIG) => source.is_none_or(|value| !is_false_boolean(value)),
+            Some(&GLOBAL_CONFIG_ENV) => !source
+                .and_then(env)
+                .is_some_and(|value| is_false_boolean(&value)),
+            _ => false,
+        }
+    })
+}
+
+/// True when the user asked for merge commits, so RTK must not add `--no-merges`. Any
+/// `--min-parents=N` with N >= 2 asks for merges, for every such N: `--no-merges` beside
+/// `--min-parents=3` would select nothing at all.
+fn log_wants_merges(tokens: &[Token<'_>]) -> bool {
+    tokens.iter().any(|t| match t.flag() {
+        Some(&MERGES | &NO_MERGES) => true,
+        Some(&MIN_PARENTS) => t
+            .attached
+            .is_some_and(|v| v.parse::<u32>().is_ok_and(|n| n >= 2)),
+        _ => false,
+    })
+}
+
+/// The arguments [`walk_exceeds_limit`] is asked about from the filtered path: the user's own,
+/// behind RTK's `--no-merges` when the filtered path put one on the command it ran.
+///
+/// Without it the probe measures a wider walk than the one that was printed: a history of
+/// merges over a handful of ordinary commits would claim a cap that never cut. It goes *first*
+/// because git refuses an option that follows a positional -- and because behind a bare `--`
+/// in the user's arguments it becomes a second pathspec, where git does not error at all and
+/// the merges quietly stay in.
+fn filtered_probe_args(args: &[String], wants_merges: bool) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len() + 1);
+    if !wants_merges {
+        out.push("--no-merges".to_string());
+    }
+    out.extend(args.iter().cloned());
+    out
+}
+
+/// An over-fetched run split at its limit: the part RTK shows, and whether a commit lay past
+/// it.
+struct LogWindow {
+    /// The run up to the first commit past the limit, or all of it when nothing lay past,
+    /// without the openings of its commits.
+    shown: String,
+    /// A commit past the limit existed, which is the whole answer to whether the cap cut.
+    past: bool,
+}
+
+/// What ends a record of git's output: `-z` swaps the newline for a NUL.
+const RECORD_ENDS: [char; 2] = ['\n', '\0'];
+
+/// The characters `--graph` draws ahead of a line: its rails and the mark of a commit, which
+/// is `o` for a boundary one, the side it is on under `--left-right` and `=` for one the other
+/// side has a patch-equivalent of under `--cherry-mark`.
+const GRAPH_RAILS: [char; 12] = [' ', '|', '*', 'o', '\\', '/', '_', '-', '.', '<', '>', '='];
+
+/// A commit's opening within a record of git's output.
+struct Opening {
+    /// Where the opening starts in the record.
+    at: usize,
+    /// How many bytes it takes up.
+    len: usize,
+}
+
+/// Where a commit opens in `record`: the whole of [`LOG_ENTRY_START_SPEC`] as git renders it,
+/// at the start of the line, or behind the rails `--graph` draws when the run has them. The
+/// control character on its own is content, and so is a line that opens like a commit without
+/// a full object name in it.
+fn opening_in(record: &str, graph: bool) -> Option<Opening> {
+    let at = record.find(LOG_ENTRY_START)?;
+    if at > 0
+        && !(graph
+            && strip_ansi(&record[..at])
+                .chars()
+                .all(|c| GRAPH_RAILS.contains(&c)))
+    {
+        return None;
+    }
+    let after = &record[at + LOG_ENTRY_START.len_utf8()..];
+    let mark = after.chars().next()?;
+    if !OPENING_MARKS.contains(&mark) {
+        return None;
+    }
+    let name = &after[mark.len_utf8()..];
+    let name_len = hex_prefix_len(name);
+    if !matches!(name_len, SHA1_NAME_LEN | SHA256_NAME_LEN)
+        || name.as_bytes().get(name_len) != Some(&b' ')
+    {
+        return None;
+    }
+    Some(Opening {
+        at,
+        len: LOG_ENTRY_START.len_utf8() + mark.len_utf8() + name_len + 1,
+    })
+}
+
+/// `window` without the opening of each commit. Only the first opening after a marker (or at
+/// the start of the run) is one: what a commit prints between its opening and its marker, and
+/// what git adds after the marker, may hold the character as content.
+fn without_openings(window: &str, graph: bool) -> String {
+    let mut out = String::with_capacity(window.len());
+    let mut between_commits = true;
+    for record in window.split_inclusive(RECORD_ENDS) {
+        match opening_in(record, graph).filter(|_| between_commits) {
+            Some(opening) => {
+                out.push_str(&record[..opening.at]);
+                out.push_str(&record[opening.at + opening.len..]);
+                between_commits = false;
+            }
+            None => out.push_str(record),
+        }
+        if record.contains(LOG_ENTRY_MARKER) {
+            between_commits = true;
+        }
+    }
+    out
+}
+
+/// Splits a run in RTK's own format where [`filter_log_output`] stops rendering: after the
+/// `limit`-th marker-delimited block. `past` is whether a commit *starts* beyond it, and the
+/// window then ends where that commit opens, so everything git printed for the last commit
+/// within the limit, a directory summary or a patch included, is still in it. Git's separator
+/// between that commit and the next stays out, as it does when git is asked for the limit
+/// itself.
+///
+/// A commit is told from the text git prints after its marker (a directory summary, a stat
+/// line, a patch) by the [`Opening`] that opens it in the format, so what git adds after a
+/// commit does not read as another commit. The window is the render's, not a count of commits:
+/// a message that quotes the marker splits its commit in two blocks, and the render really
+/// does drop the last commit of a history that fits the cap, which is a cut to announce.
+fn entries_window(stdout: &str, limit: usize, graph: bool) -> LogWindow {
+    let mut markers = 0;
+    let mut between_commits = true;
+    let mut offset = 0;
+    for record in stdout.split_inclusive(RECORD_ENDS) {
+        if opening_in(record, graph).is_some() && between_commits {
+            between_commits = false;
+            if markers >= limit {
+                let window = stdout[..offset]
+                    .strip_suffix(RECORD_ENDS)
+                    .unwrap_or(&stdout[..offset]);
+                return LogWindow {
+                    shown: without_openings(window, graph),
+                    past: true,
+                };
+            }
+        }
+        let closed = record.matches(LOG_ENTRY_MARKER).count();
+        if closed > 0 {
+            markers += closed;
+            between_commits = true;
+        }
+        offset += record.len();
+    }
+    LogWindow {
+        shown: without_openings(stdout, graph),
+        past: false,
+    }
+}
+
+/// The flags that print lines of their own beside a commit's one-line format: the set
+/// [`prints_one_line_per_commit`] describes.
+const LINES_BESIDE_A_COMMIT: &[Flag] = &[
+    CUMULATIVE,
+    DD,
+    DIRSTAT,
+    DIRSTAT_BY_FILE,
+    LINE_LOG,
+    NOTES,
+    SHOW_NOTES,
+    SHOW_NOTES_BY_DEFAULT,
+    STANDARD_NOTES,
+    STAT_COUNT,
+    STAT_GRAPH_WIDTH,
+    STAT_NAME_WIDTH,
+    STAT_WIDTH,
+    NUL_TERMINATED,
+];
+
+/// True when the walk is printed one line to a commit, so that a line past the limit is a
+/// commit past it: `oneline` is the chosen format, by its own flag or by name. `--graph` draws
+/// rails between the lines, `--notes` and `--show-notes-by-default` add the notes under a
+/// commit, `-L` and `--dd` its patch, the `--stat-*` settings a diffstat, `-X`/`--dirstat`,
+/// `--dirstat-by-file` and `--cumulative` a dirstat, and `-z` ends a commit with a NUL instead
+/// of a newline, so none of those is read that way. Anything else that adds lines is found in
+/// the run itself, by [`oneline_window`], at the cost of asking git again.
+fn prints_one_line_per_commit(tokens: &[Token<'_>]) -> bool {
+    let before = arg_tokenizer::before_dashdash(tokens);
+    chosen_log_format(tokens).is_some_and(|t| t.is(&ONELINE) || t.value(tokens) == Some("oneline"))
+        && !wants_graph(tokens)
+        && !before.iter().any(|t| t.is_one_of(LINES_BESIDE_A_COMMIT))
+}
+
+/// How many lowercase hex digits `s` starts with, which is the length of the object name it
+/// opens with when it opens with one.
+fn hex_prefix_len(s: &str) -> usize {
+    s.bytes()
+        .take_while(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        .count()
+}
+
+/// The marks git can put ahead of a commit it prints without `--graph` or `--boundary`: the
+/// sides of `--left-right`, and `=` and `+` under `--cherry-mark`. `^`, git's mark for a commit
+/// outside the range, is accepted too, though the walks read here do not print one. `%m` has
+/// its own, narrower set, [`OPENING_MARKS`].
+const REVISION_MARKS: [char; 5] = ['<', '>', '=', '+', '^'];
+
+/// True when `line` is what `--oneline` prints for a commit: an abbreviated object name, then
+/// the rest of the line, behind one of the [`REVISION_MARKS`] and a space.
+fn is_oneline_entry(line: &str) -> bool {
+    // `color.ui=always` puts an escape in front of the name.
+    let uncoloured = if line.contains('\x1b') {
+        std::borrow::Cow::Owned(strip_ansi(line))
+    } else {
+        std::borrow::Cow::Borrowed(line)
+    };
+    let plain = uncoloured
+        .strip_prefix(REVISION_MARKS)
+        .and_then(|rest| rest.strip_prefix(' '))
+        .unwrap_or(&uncoloured);
+    let name_len = hex_prefix_len(plain);
+    // A NUL ends a commit under `-z`, so a line holding one holds several commits.
+    !plain.contains('\0')
+        && (4..=SHA256_NAME_LEN).contains(&name_len)
+        && matches!(
+            plain[name_len..].chars().next(),
+            None | Some(' ' | '\t' | '\n' | '\r')
+        )
+}
+
+/// Splits a run printed one line to a commit at its `limit`-th line, which is where its commits
+/// end, so a line past the limit is a commit past it.
+///
+/// `None` when a line is not a commit's: something the arguments did not show adds lines of
+/// its own, and the lines are no longer commits to count.
+fn oneline_window(stdout: &str, limit: usize) -> Option<LogWindow> {
+    let mut lines = 0;
+    let mut window_end = stdout.len();
+    let mut offset = 0;
+    for line in stdout.split_inclusive('\n') {
+        if !is_oneline_entry(line) {
+            return None;
+        }
+        lines += 1;
+        offset += line.len();
+        if lines == limit {
+            window_end = offset;
+        }
+    }
+    Some(LogWindow {
+        shown: stdout[..window_end].to_string(),
+        past: lines > limit,
+    })
+}
+
+/// The format flag that decides how the walk is printed: the last one wins, as it does in git.
+fn chosen_log_format<'t, 'a>(tokens: &'t [Token<'a>]) -> Option<&'t Token<'a>> {
+    tokens
+        .iter()
+        .rfind(|t| matches!(t.flag(), Some(&FORMAT | &ONELINE | &PRETTY)))
+}
+
+/// The pretty formats git builds in. Each ends a commit with a newline, which is how `git
+/// log -1 --pretty=<name>` ends for every one of them, and a `pretty.<name>` alias of the
+/// same name is ignored by git, so the name alone settles it.
+const BUILTIN_LOG_FORMATS: [&str; 9] = [
+    "oneline",
+    "short",
+    "medium",
+    "full",
+    "fuller",
+    "reference",
+    "email",
+    "mboxrd",
+    "raw",
+];
+
+/// True when the user's format ends every commit with a newline (`--oneline`, the built-in
+/// formats, `tformat:`, a bare template, which git reads as `tformat:`), where `format:` puts
+/// one between commits and leaves the last open. A name that is not built in may be a
+/// `pretty.<name>` alias of either kind, and is left undecided.
+fn newline_closes_each_commit(tokens: &[Token<'_>]) -> bool {
+    chosen_log_format(tokens).is_some_and(|t| {
+        t.is(&ONELINE)
+            || t.value(tokens).is_some_and(|value| {
+                BUILTIN_LOG_FORMATS.contains(&value)
+                    || value.starts_with("tformat:")
+                    || (value.contains('%') && !value.starts_with("format:"))
+            })
+    })
+}
+
+/// An upper bound on the commits git returned, for a shape RTK did not choose and so cannot
+/// read commit boundaries out of. `None` when nothing can be concluded.
+///
+/// Git puts a newline after each commit (`--oneline`, a built-in format, `--pretty=tformat:`,
+/// a bare template, which `--pretty` and `--format` both read as `tformat:`) or between them
+/// (`format:`, spelled by either flag). Where each is closed by one, the newline that closes
+/// the last is set aside; where it is a separator it is not, since the last commit can render
+/// as nothing and leave it standing at the end. The pieces left are the commits, and more of
+/// them when the template prints newlines of its own, never fewer.
+///
+/// The exception is a template that renders to nothing at all: `--format=` prints fifty
+/// commits as zero bytes, separators and all. A template that merely *expands* to nothing
+/// still gets its separator, so for every format RTK can see prints something, empty output
+/// bounds the walk at zero.
+fn at_most_commits(stdout: &str, tokens: &[Token<'_>]) -> Option<usize> {
+    if stdout.is_empty() {
+        return format_certainly_prints(tokens).then_some(0);
+    }
+    let separated = if newline_closes_each_commit(tokens) {
+        stdout.strip_suffix('\n').unwrap_or(stdout)
+    } else {
+        stdout
+    };
+    Some(separated.split('\n').count())
+}
+
+/// True when the arguments alone show that the user's format renders a commit as at least one
+/// byte, which is what lets empty output mean an empty walk.
+///
+/// A literal template says so: it is written out, and any non-empty one carries its separator.
+/// A bare name does not -- `--pretty=<name>` reaches `pretty.<name>` in the user's config,
+/// which can resolve to `tformat:` and print nothing at all, so those are left undecided
+/// rather than read as an empty history.
+fn format_certainly_prints(tokens: &[Token<'_>]) -> bool {
+    let Some(chosen) = chosen_log_format(tokens) else {
+        return false;
+    };
+    if chosen.is(&ONELINE) {
+        return true;
+    }
+    chosen.value(tokens).is_some_and(|value| {
+        let spelled_out = value.starts_with("format:") || value.starts_with("tformat:");
+        let template = value
+            .strip_prefix("format:")
+            .or_else(|| value.strip_prefix("tformat:"))
+            .unwrap_or(value);
+        !template.is_empty() && (spelled_out || template.contains('%'))
+    })
+}
+
+/// What the limit the filtered path injected took away.
+#[derive(Debug, PartialEq)]
+enum LogCut {
+    /// Whole commits past the ones shown.
+    Commits,
+    /// Lines of a user-chosen format, which RTK read in full and did not print.
+    Lines,
+}
+
+/// What the filtered path owes a word about, or `None` when the limit it injected took nothing
+/// away.
+///
+/// Where RTK can read the commits out of the run it already made, it does: it asked git for
+/// one commit more than it shows, so a commit past the limit being there is the whole answer.
+/// That costs no second walk, which matters most for exactly the walks where a second one is
+/// expensive -- `-S`, `-G` and the other diff-based filters re-scan the whole history.
+/// `past_window` is that answer, when the run could be read: RTK's own format, and a user
+/// format printed one line to a commit.
+///
+/// The shapes that cannot be read that way have to ask git, but only where the run leaves the
+/// question open.
+///
+/// Under any other format the user chose, the cap is counted in lines, because RTK cannot find
+/// the commit boundaries: a multi-line `--pretty` loses whole commits long before the fiftieth
+/// line, and that cut is visible in the output. `user_lines` holds those lines, and the cut is
+/// the content past the limit: blank lines alone take nothing away. Short of the cap the run
+/// still settles it, through the separator bound rather than the line count. Only between the
+/// two does the probe run here; a cut in lines that is stored for recall asks git separately
+/// whether commits lay past the ones fetched. And `--output=<file>` sends the walk somewhere
+/// RTK can neither filter nor count, so there it always does.
+fn filtered_log_cut(
+    global_args: &[String],
+    args: &[String],
+    tokens: &[Token<'_>],
+    stdout: &str,
+    limit: usize,
+    user_lines: Option<&[String]>,
+    past_window: Option<bool>,
+) -> Option<LogCut> {
+    let probed = || filtered_walk_exceeds(global_args, args, tokens, limit);
+
+    if let Some(past) = past_window {
+        return past.then_some(LogCut::Commits);
+    }
+    if let Some(lines) = user_lines {
+        if lines.iter().skip(limit).any(|line| !line.trim().is_empty()) {
+            return Some(LogCut::Lines);
+        }
+        // Short of the limit git was given, so git ran out of history before the limit could
+        // bite and no second walk is needed to say so. Worth the bound: this is where a
+        // `-S`/`-G` filter that matches little ends up, and re-walking for it costs as much
+        // as the command did. `--output=<file>` is excluded because RTK never saw that walk
+        // at all; the bound would read the empty stdout as an empty history.
+        if !redirects_output(tokens) && at_most_commits(stdout, tokens).is_some_and(|n| n < limit) {
+            return None;
+        }
+        return probed().then_some(LogCut::Commits);
+    }
+    probed().then_some(LogCut::Commits)
+}
+
+/// Whether the history holds commits past the `limit` the filtered path asked git for, which
+/// takes a walk of its own.
+fn filtered_walk_exceeds(
+    global_args: &[String],
+    args: &[String],
+    tokens: &[Token<'_>],
+    limit: usize,
+) -> bool {
+    let probe_args = filtered_probe_args(args, log_wants_merges(tokens));
+    let probe_tokens = tokenize_log_args(&probe_args);
+    walk_exceeds_limit(global_args, &probe_args, &probe_tokens, limit) == Some(true)
+}
+
 fn run_log(
     args: &[String],
     _max_lines: Option<usize>,
@@ -1863,7 +2422,7 @@ fn run_log(
     global_args: &[String],
 ) -> Result<i32> {
     let tracked = with_args("git log", &display_args(args));
-    let tokens = tokenize_git_log_args(args);
+    let tokens = tokenize_log_args(args);
 
     if tokens.iter().any(|t| log_wants_raw_shape(t, &tokens)) {
         let capped = raw_log_is_capped(&tokens);
@@ -1903,16 +2462,15 @@ fn run_log(
         // keeps the small codes for what the diff machinery found in a walk it ran and
         // printed in full -- 1 for `--exit-code`'s differences, 2 for `--check`'s whitespace
         // errors. Reading the boundary rather than the flags keeps the next such flag from
-        // silencing the notice again. The one exception is `-h`: git 2.56 answers it with
-        // its usage and exit 0, so a walk that never ran looks like one that did.
-        let refused = result.exit_code >= REFUSAL_EXIT_CODE || asks_for_usage(&tokens);
-        if !refused
+        // silencing the notice again.
+        //
+        // A `-h` ran no walk either: git 2.56 answers it with its usage and exit 0, so the
+        // exit code alone reads it as a walk that ran.
+        if !refused_by_git(result.exit_code)
+            && !asks_for_usage(&tokens)
             && walk_exceeds_limit(global_args, args, &tokens, DEFAULT_LOG_LIMIT) == Some(true)
         {
-            eprintln!(
-                "[rtk] capped at {} commits; pass -n <count> for more",
-                DEFAULT_LOG_LIMIT
-            );
+            eprintln!("{}", cap_notice(DEFAULT_LOG_LIMIT, "commits"));
         }
         if !result.success() {
             return Ok(result.exit_code);
@@ -1922,61 +2480,79 @@ fn run_log(
 
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = git_cmd(global_args);
-    cmd.arg("log");
-
     // Check if user provided format flags
-    let has_format_flag = tokens
-        .iter()
-        .any(|t| t.kind == TokenKind::Long && matches!(t.text, "format" | "oneline" | "pretty"));
+    let has_format_flag = chosen_log_format(&tokens).is_some();
 
     // Check if user provided limit flag (-N, -n N, --max-count=N, --max-count N)
     let has_limit_flag = has_limit_flag(&tokens);
 
-    // Apply RTK defaults only if user didn't specify them
-    // Use %b (body) to preserve first line of commit body for agent context
-    // (BREAKING CHANGE, Closes #xxx, design notes)
-    if !has_format_flag {
-        cmd.args(["--pretty=format:%h %s (%ar) <%an>%n%b%n---END---"]);
-    }
-
-    // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise
+    // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise.
     let (limit, user_set_limit) = if has_limit_flag {
         // User explicitly passed -N / -n N / --max-count=N → respect their choice
-        let n = parse_limit_from_tokens(&tokens).unwrap_or(10);
-        (n, true)
+        (parse_limit_from_tokens(&tokens).unwrap_or(10), true)
     } else if has_format_flag {
         // --oneline / --pretty without -N: user wants compact output, allow more
-        cmd.arg("-50");
-        (50, false)
+        (COMPACT_LOG_LIMIT, false)
     } else {
-        // No flags at all: default to 10
-        cmd.arg(DEFAULT_LOG_LIMIT_ARG);
-        (10, false)
+        (DEFAULT_LOG_LIMIT, false)
     };
 
-    // Only add --no-merges if user didn't explicitly request merge commits. Any
-    // `--min-parents=N` with N >= 2 asks for merges; pinning it to 2 let `--min-parents=3`
-    // collect RTK's `--no-merges` as well, and the two constraints select nothing at all.
-    let wants_merges = tokens.iter().any(|t| {
-        t.kind == TokenKind::Long
-            && (t.text == "merges"
-                || t.text == "no-merges"
-                || (t.text == "min-parents"
-                    && t.attached
-                        .is_some_and(|v| v.parse::<u32>().is_ok_and(|n| n >= 2))))
-    });
-    // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
-    if !wants_merges && !has_limit_flag {
-        cmd.arg("--no-merges");
-    }
+    // One commit more than will be shown, so the run answers for itself whether the cap cut
+    // and no second walk of the history is needed to find out. Only where RTK chose the
+    // format, or where the format prints one line to a commit, can it tell the commits in the
+    // run apart.
+    let reads_lines = prints_one_line_per_commit(&tokens);
+    let overfetch = !has_limit_flag
+        && (!has_format_flag || reads_lines)
+        && fetches_one_past_the_limit(global_args, user_env::var, &tokens);
 
-    // Pass all user arguments
-    for arg in args {
-        cmd.arg(arg);
-    }
+    let log_command = |overfetched: bool| {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("log");
+        // Apply RTK defaults only if user didn't specify them
+        // Use %b (body) to preserve first line of commit body for agent context
+        // (BREAKING CHANGE, Closes #xxx, design notes)
+        if !has_format_flag {
+            let start = if overfetched {
+                LOG_ENTRY_START_SPEC
+            } else {
+                ""
+            };
+            cmd.arg(format!(
+                "--pretty=format:{start}%h %s (%ar) <%an>%n%b%n{LOG_ENTRY_MARKER}"
+            ));
+        }
+        if !has_limit_flag {
+            cmd.arg(format!("-{}", limit + usize::from(overfetched)));
+        }
+        // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
+        if !log_wants_merges(&tokens) && !has_limit_flag {
+            cmd.arg("--no-merges");
+        }
+        cmd.args(args);
+        cmd
+    };
 
-    let result = exec_capture(&mut cmd).context("Failed to run git log")?;
+    let mut result = exec_capture(&mut log_command(overfetch)).context("Failed to run git log")?;
+
+    // The commit past the limit was fetched to answer one question and is not part of the
+    // walk the user asked for, so everything downstream works from the run without it: the
+    // render, the fallback that prints raw when filtering would cost more, the lines stored
+    // for recall, and the savings ledger. Printing it would contradict the very notice it is
+    // there to produce. A one-line run with a line that is not a commit's, from a flag that
+    // adds lines of its own, cannot be cut at its commits, so git is asked again for the
+    // limit itself and the run is read as any other user format.
+    let mut window = None;
+    if overfetch && result.success() {
+        window = if reads_lines {
+            oneline_window(&result.stdout, limit)
+        } else {
+            Some(entries_window(&result.stdout, limit, wants_graph(&tokens)))
+        };
+        if window.is_none() {
+            result = exec_capture(&mut log_command(false)).context("Failed to run git log")?;
+        }
+    }
 
     if !result.success() {
         eprintln!("{}", result.stderr);
@@ -1986,121 +2562,534 @@ fn run_log(
     if verbose > 0 {
         eprintln!("Git log output:");
     }
+    let shown_raw = window
+        .as_ref()
+        .map_or(result.stdout.as_str(), |window| window.shown.as_str());
+    let past_window = window.as_ref().map(|window| window.past);
+
+    // A format the user chose is shown line by line, each line cut to width. Every line of the
+    // walk is cut once: the first `limit` are printed, and the rest are stored if the walk
+    // turns out to be cut.
+    let user_lines: Option<Vec<String>> =
+        has_format_flag.then(|| format_user_log_lines(shown_raw, log_line_width(user_set_limit)));
 
     // Post-process: truncate long messages, cap lines only if RTK set the default
-    let filtered = filter_log_output(&result.stdout, limit, user_set_limit, has_format_flag);
-    let filtered = never_worse(&result.stdout, &filtered).to_string();
-    println!("{}", filtered);
+    let filtered = match &user_lines {
+        Some(lines) => shown_user_log_lines(lines, limit, user_set_limit).join("\n"),
+        None => filter_log_output(shown_raw, limit, user_set_limit),
+    };
+    let filtered = never_worse(shown_raw, &filtered).to_string();
 
-    timer.track(
-        &tracked,
-        &format!("rtk {tracked}"),
-        &result.stdout,
-        &filtered,
-    );
+    // This path bounds the walk too, and what it prints carries no sign that anything is
+    // missing: an agent reading ten entries takes them for the whole history. The notice
+    // goes to stderr, because stdout is the filtered log an agent parses.
+    //
+    // The gate is the condition this path capped under, which is wider than the raw-shape
+    // one: a revision range leaves that path uncapped but not this one, so `git log
+    // HEAD~20..HEAD` really does show ten of the twenty asked for and really does owe a word.
+    let mut notice = None;
+    let mut hint = None;
+    if !user_set_limit {
+        let cut = filtered_log_cut(
+            global_args,
+            args,
+            &tokens,
+            &result.stdout,
+            limit,
+            user_lines.as_deref(),
+            past_window,
+        );
+        match cut {
+            Some(LogCut::Commits) => notice = Some(cap_notice(limit, "commits")),
+            // RTK holds the lines it cut and stores them for recall. The hint closes the
+            // output, where the agent finds it. What is stored is the lines as they are shown,
+            // cut to width, and newline-terminated so that a blank last line is still counted
+            // among the hidden ones.
+            Some(LogCut::Lines) => {
+                let mut walk = user_lines.as_deref().unwrap_or_default().join("\n");
+                walk.push('\n');
+                match crate::core::tee::force_tee_tail_hint(&walk, "git-log", limit + 1) {
+                    Some(stored) => {
+                        hint = Some(stored);
+                        // Commits past the ones git was asked for are not among the lines
+                        // stored, so those still get the commit notice. Lines that run past
+                        // the limit say nothing about where the commits end, so git is asked.
+                        if filtered_walk_exceeds(global_args, args, &tokens, limit) {
+                            notice = Some(cap_notice(limit, "commits"));
+                        }
+                    }
+                    // Recall is off or could not store the lines, so the only way back to
+                    // what was cut is git itself, and the `-n` it is told to pass brings the
+                    // commits past the limit back with them.
+                    None => notice = Some(cap_notice(limit, "lines")),
+                }
+            }
+            None => {}
+        }
+    }
+
+    // The hint is weighed with the lines it closes. When git's own output costs fewer tokens
+    // than the lines shown with the hint, it is printed instead: every line is shown and
+    // nothing is left to recall, while the commits past the ones git returned still get their
+    // notice. The lines are joined without a terminator, so a blank last line leaves its
+    // separator at the end; the newline that closes it is added here, or the hint would be
+    // read as following that separator and the blank line would be lost.
+    let shown = match hint {
+        Some(hint) => {
+            crate::core::runner::emit_guarded(&format!("{filtered}\n"), Some(&hint), shown_raw)
+        }
+        None => {
+            println!("{}", filtered);
+            filtered
+        }
+    };
+    if let Some(notice) = notice {
+        eprintln!("{notice}");
+    }
+
+    timer.track(&tracked, &format!("rtk {tracked}"), shown_raw, &shown);
 
     Ok(0)
 }
 
-/// The long flags `git log`, `diff` and `show` all take a value for. Shared deliberately: these
-/// are revision-walk options all three parse the same way. The *short* grammar is where they
-/// differ, so each subcommand states its own below.
+/// `--flag=v` or `--flag v`, the spec of most rows below.
+const VALUE: ValueSpec = ValueSpec::value();
+
+/// The long flags `git log`, `diff` and `show` all take a value for, and `-n`, which git spells
+/// `--max-count` too. Shared deliberately: these are revision-walk options all three parse the
+/// same way.
 ///
 /// E.g. `--grep -p` searches messages for the literal string "-p"; it does not request patch
 /// output.
-fn shared_long_takes_value(name: &str) -> bool {
-    matches!(
-        name,
-        "after"
-            | "anchored"
-            | "author"
-            | "before"
-            | "color-moved-ws"
-            | "committer"
-            | "date"
-            | "decorate-refs"
-            | "decorate-refs-exclude"
-            | "diff-algorithm"
-            | "diff-filter"
-            | "diff-merges"
-            | "dst-prefix"
-            | "encoding"
-            | "exclude"
-            | "find-object"
-            | "glob"
-            | "grep"
-            | "grep-reflog"
-            | "ignore-matching-lines"
-            | "inter-hunk-context"
-            | "line-prefix"
-            | "max-age"
-            | "max-count"
-            | "max-depth"
-            | "min-age"
-            | "output"
-            | "output-indicator-context"
-            | "output-indicator-new"
-            | "output-indicator-old"
-            | "rotate-to"
-            | "since"
-            | "since-as-filter"
-            | "skip"
-            | "skip-to"
-            | "src-prefix"
-            | "stat-count"
-            | "stat-graph-width"
-            | "stat-name-width"
-            | "stat-width"
-            | "until"
-            | "word-diff-regex"
-            | "ws-error-highlight"
-    )
-}
+const REV_WALK_LONG_FLAGS: &[Flag] = &[
+    Flag::long("after").takes(VALUE),
+    Flag::long("anchored").takes(VALUE),
+    Flag::long("author").takes(VALUE),
+    Flag::long("before").takes(VALUE),
+    Flag::long("color-moved-ws").takes(VALUE),
+    Flag::long("committer").takes(VALUE),
+    Flag::long("date").takes(VALUE),
+    Flag::long("decorate-refs").takes(VALUE),
+    Flag::long("decorate-refs-exclude").takes(VALUE),
+    Flag::long("diff-algorithm").takes(VALUE),
+    DIFF_FILTER,
+    DIFF_MERGES,
+    Flag::long("dst-prefix").takes(VALUE),
+    Flag::long("encoding").takes(VALUE),
+    Flag::long("exclude").takes(VALUE),
+    FIND_OBJECT,
+    Flag::long("glob").takes(VALUE),
+    Flag::long("grep").takes(VALUE),
+    Flag::long("grep-reflog").takes(VALUE),
+    Flag::long("inter-hunk-context").takes(VALUE),
+    LINE_PREFIX,
+    Flag::long("max-age").takes(VALUE),
+    MAX_COUNT,
+    Flag::long("max-depth").takes(VALUE),
+    Flag::long("min-age").takes(VALUE),
+    OUTPUT,
+    OUTPUT_INDICATOR_CONTEXT,
+    OUTPUT_INDICATOR_NEW,
+    OUTPUT_INDICATOR_OLD,
+    Flag::long("rotate-to").takes(VALUE),
+    Flag::long("since").takes(VALUE),
+    Flag::long("since-as-filter").takes(VALUE),
+    SKIP,
+    Flag::long("skip-to").takes(VALUE),
+    Flag::long("src-prefix").takes(VALUE),
+    STAT_COUNT,
+    STAT_GRAPH_WIDTH,
+    STAT_NAME_WIDTH,
+    STAT_WIDTH,
+    Flag::long("until").takes(VALUE),
+    WORD_DIFF_REGEX,
+    Flag::long("ws-error-highlight").takes(VALUE),
+];
 
-/// `git log`'s grammar. `-M`/`-U`/`-C`/`-B` take an optional attached number and never a
-/// separate token; `-n` and `-l` take one only when solo (`git log -pn 2` fails against git
-/// 2.53, and `-l` is kept solo-only out of caution -- only run_log uses this, where a stray
-/// positional is inert).
-fn log_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    match kind {
-        TokenKind::Long => shared_long_takes_value(name).then(ValueSpec::value),
-        TokenKind::Short => match name {
-            "B" | "C" | "M" | "U" => Some(ValueSpec::attached_only()),
-            "G" | "I" | "L" | "O" | "S" => Some(ValueSpec::value()),
-            "l" | "n" => Some(ValueSpec::solo_only()),
-            _ => None,
-        },
-        _ => None,
+/// `-n`/`--max-count`. `-n` takes a separate value only when solo: `git log -pn 2` fails
+/// against git 2.53.
+const MAX_COUNT: Flag = Flag::pair("n", "max-count").takes(ValueSpec::solo_only());
+/// `--diff-filter=<filter>`.
+const DIFF_FILTER: Flag = Flag::long("diff-filter").takes(VALUE);
+/// `--diff-merges=<format>`.
+const DIFF_MERGES: Flag = Flag::long("diff-merges").takes(VALUE);
+/// `--find-object=<object-id>`.
+const FIND_OBJECT: Flag = Flag::long("find-object").takes(VALUE);
+/// `--line-prefix=<prefix>`.
+const LINE_PREFIX: Flag = Flag::long("line-prefix").takes(VALUE);
+/// `--output=<file>`.
+const OUTPUT: Flag = Flag::long("output").takes(VALUE);
+/// `--skip=<number>`.
+const SKIP: Flag = Flag::long("skip").takes(VALUE);
+/// `--word-diff-regex=<regex>`.
+const WORD_DIFF_REGEX: Flag = Flag::long("word-diff-regex").takes(VALUE);
+/// `--output-indicator-new=<char>`, the marker of an added line in place of `+`.
+const OUTPUT_INDICATOR_NEW: Flag = Flag::long("output-indicator-new").takes(VALUE);
+/// `--output-indicator-old=<char>`, the marker of a removed line in place of `-`.
+const OUTPUT_INDICATOR_OLD: Flag = Flag::long("output-indicator-old").takes(VALUE);
+/// `--output-indicator-context=<char>`, the marker of a context line in place of a space.
+const OUTPUT_INDICATOR_CONTEXT: Flag = Flag::long("output-indicator-context").takes(VALUE);
+/// `--stat-width=<width>`: `--stat` with its width, as `--stat=<width>` is.
+const STAT_WIDTH: Flag = Flag::long("stat-width").takes(VALUE);
+/// `--stat-name-width=<width>`: `--stat` with its name width.
+const STAT_NAME_WIDTH: Flag = Flag::long("stat-name-width").takes(VALUE);
+/// `--stat-graph-width=<width>`: `--stat` with its graph width.
+const STAT_GRAPH_WIDTH: Flag = Flag::long("stat-graph-width").takes(VALUE);
+/// `--stat-count=<count>`: `--stat` with its line count.
+const STAT_COUNT: Flag = Flag::long("stat-count").takes(VALUE);
+
+/// The flags whose short spelling `git log`, `diff` and `show` take a value for, which all
+/// three parse the same way, each declared with its long spelling when git has one.
+/// `-B`/`--break-rewrites`, `-C`/`--find-copies`, `-M`/`--find-renames`, `-U`/`--unified` and
+/// `-X`/`--dirstat` take an optional attached value and never a separate token: git 2.53 reads
+/// the `50` of `-M 50` and `--find-renames 50` as a revision. `-I`/`--ignore-matching-lines`
+/// takes a separate one. `-l` is the rename limit, and takes the rest of its argument or the
+/// next one wherever it sits in a cluster: the `5` of `-wl 5`, `-pl 5`, `-cl 5` and `-ml 5` is
+/// `-l`'s value. git 2.53, under `log` and `show` alike, reads it so after `-p`, `-u`, `-s`,
+/// `-w` and `-W`; after `-c`, `-m` and `-t` it reads the `5` as a revision and exits 128 before
+/// printing anything, and RTK passes that failure on. `git stash show` reads its tokens with
+/// this grammar too, where `-wl 5` is an error: `stash show` takes the `5` as its stash before
+/// the revision machinery sees `-l`.
+const REV_WALK_SHORT_FLAGS: &[Flag] = &[
+    Flag::pair("B", "break-rewrites").takes(ValueSpec::attached_only()),
+    DIRSTAT,
+    Flag::pair("C", "find-copies").takes(ValueSpec::attached_only()),
+    Flag::pair("M", "find-renames").takes(ValueSpec::attached_only()),
+    PICKAXE_G,
+    Flag::pair("I", "ignore-matching-lines").takes(VALUE),
+    LINE_LOG,
+    Flag::short("l").takes(VALUE),
+    Flag::short("O").takes(VALUE),
+    PICKAXE_S,
+    UNIFIED,
+];
+
+/// `-U<n>`/`--unified=<n>`.
+const UNIFIED: Flag = Flag::pair("U", "unified").takes(ValueSpec::attached_only());
+/// `-X[<param>,...]`/`--dirstat[=<param>,...]`: git reads `-Xfiles` as the parameter `files`,
+/// `-Xp` as the parameter `p`, and `-pX` as `-p` then `-X`.
+const DIRSTAT: Flag = Flag::pair("X", "dirstat").takes(ValueSpec::attached_only());
+/// `-L<start>,<end>:<file>`/`-L:<funcname>:<file>`, the line log, which has no long spelling
+/// (git 2.53's `git log -h` lists `-L <range:file>` alone).
+const LINE_LOG: Flag = Flag::short("L").takes(VALUE);
+/// `-G<regex>`.
+const PICKAXE_G: Flag = Flag::short("G").takes(VALUE);
+/// `-S<string>`.
+const PICKAXE_S: Flag = Flag::short("S").takes(VALUE);
+
+/// The other `git log`, `diff` and `show` flags RTK checks for. The long spellings that take a
+/// value (`--pretty[=<format>]`, `--format=<format>`, `--stat[=<width>]`, ...) take it only
+/// attached: git 2.53 reads the token after each as a revision.
+const REV_WALK_OUTPUT_FLAGS: &[Flag] = &[
+    BINARY,
+    BOUNDARY,
+    COMBINED,
+    DENSE_COMBINED,
+    CHECK,
+    COLOR_WORDS,
+    COMPACT_SUMMARY,
+    CUMULATIVE,
+    DD,
+    DIRSTAT_BY_FILE,
+    EXIT_CODE,
+    EXT_DIFF,
+    FILTERS,
+    FORMAT,
+    FUNCTION_CONTEXT,
+    GRAPH,
+    LOG_SIZE,
+    MERGES,
+    MIN_PARENTS,
+    NAME_ONLY,
+    NAME_STATUS,
+    NO_MERGES,
+    NO_PATCH,
+    NOTES,
+    NUMSTAT,
+    ONELINE,
+    PATCH,
+    PATCH_WITH_RAW,
+    PATCH_WITH_STAT,
+    PICKAXE_ALL,
+    PICKAXE_REGEX,
+    PRETTY,
+    RAW,
+    REMERGE_DIFF,
+    REVERSE,
+    SHORTSTAT,
+    SHOW_LINEAR_BREAK,
+    SHOW_NOTES,
+    SHOW_NOTES_BY_DEFAULT,
+    SHOW_SIGNATURE,
+    STANDARD_NOTES,
+    STAT,
+    SUMMARY,
+    TEXTCONV,
+    WORD_DIFF,
+    NUL_TERMINATED,
+];
+
+/// `--graph`, whose rail the log probe drops and whose parent rewriting it asks back for.
+const GRAPH: Flag = Flag::long("graph");
+/// `--reverse`, which moves where `--max-count` applies, so the log probe drops it.
+const REVERSE: Flag = Flag::long("reverse");
+/// `--boundary`.
+const BOUNDARY: Flag = Flag::long("boundary");
+/// `--log-size`.
+const LOG_SIZE: Flag = Flag::long("log-size");
+/// `--show-signature`.
+const SHOW_SIGNATURE: Flag = Flag::long("show-signature");
+/// `--show-linear-break[=<barrier>]`.
+const SHOW_LINEAR_BREAK: Flag = Flag::long("show-linear-break").takes(ValueSpec::attached_only());
+/// `--notes[=<ref>]`.
+const NOTES: Flag = Flag::long("notes").takes(ValueSpec::attached_only());
+/// `--show-notes[=<ref>]`, `--notes` under its older name.
+const SHOW_NOTES: Flag = Flag::long("show-notes").takes(ValueSpec::attached_only());
+/// `--standard-notes`.
+const STANDARD_NOTES: Flag = Flag::long("standard-notes");
+/// `--show-notes-by-default`.
+const SHOW_NOTES_BY_DEFAULT: Flag = Flag::long("show-notes-by-default");
+
+/// `-p`/`--patch`, which `git log`, `show` and `diff` spell `-u` too ([`PATCH_U`]).
+const PATCH: Flag = Flag::pair("p", "patch");
+/// `-u`, the second short spelling of `-p`/`--patch` under `git log`, `show` and `diff`. Not in
+/// [`REV_WALK_OUTPUT_FLAGS`]: `git stash show` reads `-u` as `--include-untracked`
+/// ([`STASH_UNTRACKED`]) before the diff options see it.
+const PATCH_U: Flag = Flag::short("u");
+/// `-s`/`--no-patch`.
+const NO_PATCH: Flag = Flag::pair("s", "no-patch");
+/// `--patch-with-raw`.
+const PATCH_WITH_RAW: Flag = Flag::long("patch-with-raw");
+/// `--patch-with-stat`.
+const PATCH_WITH_STAT: Flag = Flag::long("patch-with-stat");
+/// `-W`/`--function-context`.
+const FUNCTION_CONTEXT: Flag = Flag::pair("W", "function-context");
+/// `-c`, the combined diff.
+const COMBINED: Flag = Flag::short("c");
+/// `--cc`, the dense combined diff.
+const DENSE_COMBINED: Flag = Flag::long("cc");
+/// `--remerge-diff`.
+const REMERGE_DIFF: Flag = Flag::long("remerge-diff");
+/// `--binary`.
+const BINARY: Flag = Flag::long("binary");
+/// `--check`.
+const CHECK: Flag = Flag::long("check");
+/// `--compact-summary`.
+const COMPACT_SUMMARY: Flag = Flag::long("compact-summary");
+/// `--exit-code`.
+const EXIT_CODE: Flag = Flag::long("exit-code");
+/// `--name-only`.
+const NAME_ONLY: Flag = Flag::long("name-only");
+/// `--name-status`.
+const NAME_STATUS: Flag = Flag::long("name-status");
+/// `--numstat`.
+const NUMSTAT: Flag = Flag::long("numstat");
+/// `--quiet` as `git diff` and `git stash show` read it: no output, and the exit code says
+/// whether there were differences. `-q` is not its short spelling there: git 2.53's `git diff -q`
+/// with no revision prints the patch and exits 0, and `git diff -q HEAD~1`,
+/// `git diff --cached -q` and `git stash show -q` are usage errors (129).
+const DIFF_QUIET: Flag = Flag::long("quiet");
+/// `-q`/`--quiet` as `git log` and `git show` read it, which `git log -h` and `git show -h` list
+/// as `-q, --[no-]quiet  suppress diff output` (git 2.53).
+const LOG_QUIET: Flag = Flag::pair("q", "quiet");
+/// `--raw`.
+const RAW: Flag = Flag::long("raw");
+/// `--shortstat`.
+const SHORTSTAT: Flag = Flag::long("shortstat");
+/// `--stat[=<width>[,<name-width>[,<count>]]]`.
+const STAT: Flag = Flag::long("stat").takes(ValueSpec::attached_only());
+/// `--summary`.
+const SUMMARY: Flag = Flag::long("summary");
+/// `--dirstat-by-file[=<param>,...]`, `--dirstat=files,<param>,...` under another name.
+const DIRSTAT_BY_FILE: Flag = Flag::long("dirstat-by-file").takes(ValueSpec::attached_only());
+/// `--cumulative`, `--dirstat=cumulative` under another name.
+const CUMULATIVE: Flag = Flag::long("cumulative");
+/// `--dd`, `--diff-merges=first-parent -p` in one flag: a first-parent patch for every commit.
+const DD: Flag = Flag::long("dd");
+/// `-z`, which ends git's records with a NUL: `log`'s commits, `show`'s objects, and the
+/// `--raw`/`--numstat` fields.
+const NUL_TERMINATED: Flag = Flag::short("z");
+/// `--oneline`.
+const ONELINE: Flag = Flag::long("oneline");
+/// `--format=<format>`.
+const FORMAT: Flag = Flag::long("format").takes(ValueSpec::attached_only());
+/// `--pretty[=<format>]`.
+const PRETTY: Flag = Flag::long("pretty").takes(ValueSpec::attached_only());
+/// `--word-diff[=<mode>]`.
+const WORD_DIFF: Flag = Flag::long("word-diff").takes(ValueSpec::attached_only());
+/// `--color-words[=<regex>]`.
+const COLOR_WORDS: Flag = Flag::long("color-words").takes(ValueSpec::attached_only());
+/// `--merges`.
+const MERGES: Flag = Flag::long("merges");
+/// `--no-merges`.
+const NO_MERGES: Flag = Flag::long("no-merges");
+/// `--min-parents=<number>`.
+const MIN_PARENTS: Flag = Flag::long("min-parents").takes(ValueSpec::attached_only());
+/// `--pickaxe-all`.
+const PICKAXE_ALL: Flag = Flag::long("pickaxe-all");
+/// `--pickaxe-regex`.
+const PICKAXE_REGEX: Flag = Flag::long("pickaxe-regex");
+/// `--textconv`, which runs a blob through its textconv filter.
+const TEXTCONV: Flag = Flag::long("textconv");
+/// `--filters`, `cat-file`'s option for the working-tree filters. git 2.53's `show` rejects it,
+/// and the raw route hands that error back unchanged.
+const FILTERS: Flag = Flag::long("filters");
+/// `--ext-diff`, which lets an external diff helper rewrite the output.
+const EXT_DIFF: Flag = Flag::long("ext-diff");
+
+/// The flags that rewrite a blob's bytes on the way out. The `--no-*` spellings restore the
+/// default and are different options.
+const CONTENT_TRANSFORMS: &[Flag] = &[EXT_DIFF, FILTERS, TEXTCONV];
+
+/// The flags asking git for patch output: `-p`/`-u`/`--patch`, and the context-width flags that
+/// imply a patch (`-U3`, `--unified=3`, `-W`/`--function-context`).
+const PATCH_REQUESTS: &[Flag] = &[
+    FUNCTION_CONTEXT,
+    PATCH,
+    PATCH_WITH_RAW,
+    PATCH_WITH_STAT,
+    PATCH_U,
+    UNIFIED,
+];
+
+/// The flags that change the *shape* of `git log`'s raw output (patch text, diffstat, name
+/// lists) in a way incompatible with RTK's injected `--pretty=format` markers.
+/// `-W`/`--function-context` is *not* here: against git 2.53 it leaves `git log`
+/// byte-identical to plain log.
+const LOG_RAW_SHAPES: &[Flag] = &[
+    // A binary patch is meant to be fed back to `git apply`; compacting it destroys that, so
+    // it takes the raw route rather than merely being kept out of the header.
+    BINARY,
+    // `--cc`/`--remerge-diff` imply `-p` on merge commits (8 diff lines against git 2.53 where
+    // plain log has none), and the log compaction drops the patch with no tee to recover it
+    // from. `-c` is the combined-diff form of `--cc`.
+    COMBINED,
+    DENSE_COMBINED,
+    REMERGE_DIFF,
+    COMPACT_SUMMARY,
+    CUMULATIVE,
+    // A first-parent patch for every commit, which the log compaction cannot represent, as
+    // `-p` does.
+    DD,
+    DIRSTAT,
+    DIRSTAT_BY_FILE,
+    // `-L` prints each commit that touches the traced range with its patch of that range,
+    // which the one-line-per-commit compaction cannot represent, as with `-p`; `show` prints
+    // git's line log as is too.
+    LINE_LOG,
+    // Prefixes every output line, including the `diff --git`/`@@` markers the compaction keys
+    // on, so nothing parses and the body came back empty.
+    LINE_PREFIX,
+    NAME_ONLY,
+    NAME_STATUS,
+    NUMSTAT,
+    PATCH,
+    PATCH_WITH_RAW,
+    PATCH_WITH_STAT,
+    RAW,
+    SHORTSTAT,
+    // Each of these is `--stat` with one of its parameters: git 2.53 prints the diffstat for
+    // any of them.
+    STAT,
+    STAT_COUNT,
+    STAT_GRAPH_WIDTH,
+    STAT_NAME_WIDTH,
+    STAT_WIDTH,
+    SUMMARY,
+    PATCH_U,
+    // `-U<n>` makes `git log` emit a patch the one-line-per-commit compaction cannot
+    // represent, as `-p` does.
+    UNIFIED,
+];
+
+/// The flags that send `git show` and `git diff` down the raw route whatever else is asked,
+/// and that are no raw shape for `git log`.
+const SHOW_RAW_SHAPES: &[Flag] = &[
+    // `--check` reports whitespace errors and exits 2; `--exit-code` prints the whole patch
+    // and exits 1.
+    CHECK,
+    EXIT_CODE,
+    // These replace the `+`, `-` and ` ` markers of a patch line, which `compact_diff` reads;
+    // a plain `git log` prints no patch for them to change.
+    OUTPUT_INDICATOR_CONTEXT,
+    OUTPUT_INDICATOR_NEW,
+    OUTPUT_INDICATOR_OLD,
+    // NUL-terminated records (`show`'s objects, the `--raw` and `--numstat` fields) are for a
+    // program to split, and `compact_diff` keeps no NULs to split on. Not a log shape: the
+    // filtered `git log` keeps the NUL that ends each commit.
+    NUL_TERMINATED,
+];
+
+/// The grammar of `git log` and `git show`: the revision-walk and diff options they share with
+/// `git diff`, and `-q`/`--quiet`, which their own option parser pairs.
+const LOG_GRAMMAR: Grammar = Grammar::new(
+    Dialect::Posix,
+    &[
+        REV_WALK_LONG_FLAGS,
+        REV_WALK_OUTPUT_FLAGS,
+        REV_WALK_SHORT_FLAGS,
+        &[LOG_QUIET, PATCH_U],
+    ],
+);
+
+/// The grammar of `git diff`: the revision-walk and diff options, `-u` as `-p`, and the diff
+/// machinery's `--quiet`, which has no short spelling.
+const DIFF_GRAMMAR: Grammar = Grammar::new(
+    Dialect::Posix,
+    &[
+        REV_WALK_LONG_FLAGS,
+        REV_WALK_OUTPUT_FLAGS,
+        REV_WALK_SHORT_FLAGS,
+        &[DIFF_QUIET, PATCH_U],
+    ],
+);
+
+use read::{DiffTokens, LogTokens, tokenize_diff_args, tokenize_log_args};
+
+/// Token lists whose type names the grammar that read them, built only by the functions here.
+/// A predicate asking for a flag that one of these grammars declares and the other does not
+/// (`-q`/`--quiet` under `log` and `show`, `--quiet` under `diff`) takes the matching type, so
+/// it never reads tokens of the other grammar. Each derefs to `[Token]` for the questions both
+/// grammars answer alike.
+mod read {
+    use super::{DIFF_GRAMMAR, LOG_GRAMMAR};
+    use crate::core::arg_tokenizer::{self, Token};
+    use std::ops::Deref;
+
+    /// `git log`'s and `git show`'s arguments, read with [`LOG_GRAMMAR`].
+    pub(super) struct LogTokens<'a>(Vec<Token<'a>>);
+
+    /// `git diff`'s arguments, read with [`DIFF_GRAMMAR`].
+    pub(super) struct DiffTokens<'a>(Vec<Token<'a>>);
+
+    impl<'a> Deref for LogTokens<'a> {
+        type Target = [Token<'a>];
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
     }
-}
 
-/// `diff`/`show`'s grammar. Same long list, but `-l` is the rename limit here and *does*
-/// cluster: `git diff -wl 100` works where `git log -cl 2` does not. Sharing log's short
-/// grammar made RTK read the 100 as a pathspec and splice its own flags in front of it.
-fn diff_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    match kind {
-        TokenKind::Long => shared_long_takes_value(name).then(ValueSpec::value),
-        TokenKind::Short => match name {
-            "B" | "C" | "M" | "U" => Some(ValueSpec::attached_only()),
-            "G" | "I" | "L" | "O" | "S" | "l" => Some(ValueSpec::value()),
-            "n" => Some(ValueSpec::solo_only()),
-            _ => None,
-        },
-        _ => None,
+    impl<'a> Deref for DiffTokens<'a> {
+        type Target = [Token<'a>];
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
     }
-}
 
-fn tokenize_git_diff_args(args: &[String]) -> Vec<Token<'_>> {
-    arg_tokenizer::tokenize_grammar(args, &diff_takes_value, Dialect::Posix)
-}
+    /// `git log`'s and `git show`'s arguments, read with [`LOG_GRAMMAR`].
+    pub(super) fn tokenize_log_args(args: &[String]) -> LogTokens<'_> {
+        LogTokens(arg_tokenizer::tokenize_grammar(args, &LOG_GRAMMAR))
+    }
 
-fn tokenize_git_log_args(args: &[String]) -> Vec<Token<'_>> {
-    arg_tokenizer::tokenize_grammar(args, &log_takes_value, Dialect::Posix)
+    /// `git diff`'s arguments, read with [`DIFF_GRAMMAR`].
+    pub(super) fn tokenize_diff_args(args: &[String]) -> DiffTokens<'_> {
+        DiffTokens(arg_tokenizer::tokenize_grammar(args, &DIFF_GRAMMAR))
+    }
 }
 
 #[cfg(test)]
 fn real_flag_args(args: &[String]) -> Vec<&str> {
-    tokenize_git_log_args(args)
+    tokenize_log_args(args)
         .iter()
         .filter(|t| matches!(t.kind, TokenKind::Long | TokenKind::Short))
         .map(|t| t.text)
@@ -2116,101 +3105,65 @@ fn asks_for_usage(tokens: &[Token<'_>]) -> bool {
         .any(|t| t.kind == TokenKind::Short && t.text == "h")
 }
 
-/// True for git log flags that change the *shape* of git's raw output (patch text, diffstat,
-/// name lists) in a way incompatible with RTK's injected `--pretty=format` markers, requiring
-/// the raw passthrough path instead. `diff`/`show` use the narrower
-/// [`diff_wants_raw_shape`]/[`show_wants_raw_shape`] instead.
+/// True for git log flags that change the *shape* of git's raw output ([`LOG_RAW_SHAPES`]),
+/// requiring the raw passthrough path instead. `diff`/`show` use the narrower
+/// [`diff_wants_raw_shape`]/[`show_wants_raw_shape`]. `token` is read with
+/// [`LOG_GRAMMAR`] or [`DIFF_GRAMMAR`], which both declare every flag it asks about.
 fn log_wants_raw_shape(token: &Token<'_>, tokens: &[Token<'_>]) -> bool {
-    // Every `--diff-merges` format but `off`/`none` emits a patch (git 2.53), and log's
-    // one-line-per-commit compaction cannot represent one -- the same reason `-p` is listed
-    // below. git takes the value attached or as the next token, so both spellings are read.
-    if token.kind == TokenKind::Long && token.text == "diff-merges" {
-        return !matches!(token.value(tokens), None | Some("none" | "off"));
-    }
-    match token.kind {
-        TokenKind::Long => matches!(
-            token.text,
-            // A binary patch is meant to be fed back to `git apply`; compacting it destroys
-            // that, so it takes the raw route rather than merely being kept out of the header.
-            "binary"
-                // `--cc`/`--remerge-diff` imply `-p` on merge commits (8 diff lines against
-                // git 2.53 where plain log has none), and the log compaction drops the patch
-                // with no tee to recover it from.
-                | "cc"
-                | "remerge-diff"
-                | "compact-summary"
-                | "dirstat"
-                // Prefixes every output line, including the `diff --git`/`@@` markers the
-                // compaction keys on, so nothing parses and the body came back empty.
-                | "line-prefix"
-                | "name-only"
-                | "name-status"
-                | "numstat"
-                | "patch"
-                | "patch-with-raw"
-                | "patch-with-stat"
-                | "raw"
-                | "shortstat"
-                | "stat"
-                | "summary"
-                | "unified"
-        ),
-        // `-U<n>` makes `git log` emit a patch the one-line-per-commit compaction cannot
-        // represent, and `-c` is the combined-diff form of `--cc`. `-W`/`--function-context`
-        // is *not* here: against git 2.53 it leaves `git log` byte-identical to plain log.
-        TokenKind::Short => matches!(token.text, "U" | "c" | "p" | "u"),
-        _ => false,
+    match token.flag() {
+        // Every `--diff-merges` format but `off`/`none` emits a patch (git 2.53), and log's
+        // one-line-per-commit compaction cannot represent one -- the same reason `-p` is listed
+        // in LOG_RAW_SHAPES. git takes the value attached or as the next token, so both
+        // spellings are read.
+        Some(&DIFF_MERGES) => !matches!(token.value(tokens), None | Some("none" | "off")),
+        _ => token.is_one_of(LOG_RAW_SHAPES),
     }
 }
 
-/// `diff`'s raw-output grammar: `show`'s, plus `--quiet`. A strict superset, so it composes
-/// rather than repeating the list -- `git diff --quiet` prints nothing and exits 1 on a
-/// difference (git 2.53), so there is nothing to compact and the exit code has to survive.
-fn diff_wants_raw_shape(token: &Token<'_>, tokens: &[Token<'_>]) -> bool {
-    matches!((token.kind, token.text), (TokenKind::Long, "quiet"))
-        || show_wants_raw_shape(token, tokens)
+/// Whether `git diff`'s arguments ask for a raw output shape: `show`'s, plus `--quiet`. A strict
+/// superset, so it composes rather than repeating the list -- `git diff --quiet` prints nothing
+/// and exits 1 on a difference (git 2.53), so there is nothing to compact and the exit code has
+/// to survive.
+fn diff_wants_raw_shape(tokens: &DiffTokens<'_>) -> bool {
+    tokens
+        .iter()
+        .any(|t| t.is(&DIFF_QUIET) || show_wants_raw_shape(t, tokens))
 }
 
-/// `show`'s raw-output grammar. `--check` reports whitespace errors and exits 2; `--exit-code`
-/// prints the whole patch and exits 1. `--quiet` is deliberately absent: in `show` it is a
-/// synonym of `-s` (exit 0, body suppressed, git 2.53), which [`suppresses_diff_body`] renders
-/// as the compact summary -- claiming it here made `git show --quiet` raw-pass the header its
-/// own synonyms compact.
+/// `show`'s raw-output grammar, which starts from the [`SHOW_RAW_SHAPES`]. `-q`/`--quiet` is
+/// absent: in `show` it suppresses the diff and exits 0 (git 2.53), which
+/// [`body_is_suppressed`] renders as the compact summary.
 ///
-/// Excludes `--patch`/`-p`/`-u` and `--unified`/`-U`: unlike `log`, `diff`/`show`'s default
-/// output already *is* patch text, so those are redundant with the default rather than a shape
-/// RTK cannot produce. Delegates the rest to [`log_wants_raw_shape`] so the two can't drift.
+/// Excludes `-p`/`-u`/`--patch`, `-U`/`--unified` and `--dd`: unlike `log`, `diff`/`show`'s
+/// default output already *is* patch text, so those are redundant with the default rather than
+/// a shape RTK cannot produce. Delegates the rest to [`log_wants_raw_shape`] so the two can't
+/// drift. `token` is read with [`LOG_GRAMMAR`] or [`DIFF_GRAMMAR`], as there.
 fn show_wants_raw_shape(token: &Token<'_>, tokens: &[Token<'_>]) -> bool {
-    if matches!(
-        (token.kind, token.text),
-        (TokenKind::Long, "check" | "exit-code")
-    ) {
-        return true;
-    }
-    // Only `--diff-merges`' combined formats produce the two marker columns `compact_diff`
-    // misreads -- the same reason `-c`/`--cc` are raw here. The rest are ordinary
-    // single-column patches, which is already `show`'s default output.
-    if token.kind == TokenKind::Long && token.text == "diff-merges" {
-        return matches!(
+    match token.flag() {
+        // `-c` stays raw: it is the combined-diff form of `--cc`, not a patch request, and
+        // `compact_diff` reads a combined diff's two marker columns as one -- `git show -c` on
+        // a merge reported `+54 -8` where git's own stat says 156 insertions and 0 deletions.
+        // `--dd` is a first-parent patch, one marker column, which is the default output with
+        // the merge's parent chosen.
+        Some(&DD | &PATCH | &PATCH_U | &UNIFIED) => false,
+        // Only `--diff-merges`' combined formats produce the two marker columns `compact_diff`
+        // misreads -- the same reason `-c`/`--cc` are raw here. The rest are ordinary
+        // single-column patches, which is already `show`'s default output.
+        Some(&DIFF_MERGES) => matches!(
             token.value(tokens),
             Some("c" | "cc" | "combined" | "dense-combined")
-        );
+        ),
+        // Shares no flag with the arms above (pinned by
+        // `show_raw_shapes_share_no_flag_with_the_patch_arms`).
+        _ if token.is_one_of(SHOW_RAW_SHAPES) => true,
+        _ => log_wants_raw_shape(token, tokens),
     }
-    // `-c` is the exception: it is the combined-diff form of `--cc`, not a patch request, and
-    // `compact_diff` reads a combined diff's two marker columns as one -- `git show -c` on a
-    // merge reported `+54 -8` where git's own stat says 156 insertions and 0 deletions.
-    if (token.kind == TokenKind::Short && token.text != "c")
-        || (token.kind == TokenKind::Long && matches!(token.text, "patch" | "unified"))
-    {
-        return false;
-    }
-    log_wants_raw_shape(token, tokens)
 }
 
 /// Test-only convenience wrapper.
 #[cfg(test)]
 fn requests_raw_log_output(args: &[String]) -> bool {
-    let tokens = tokenize_git_log_args(args);
+    let tokens = tokenize_log_args(args);
     tokens.iter().any(|t| log_wants_raw_shape(t, &tokens))
 }
 
@@ -2220,31 +3173,33 @@ fn requests_raw_log_output(args: &[String]) -> bool {
 /// instead; this convenience wrapper exists for tests.
 #[cfg(test)]
 fn parse_user_limit(args: &[String]) -> Option<usize> {
-    parse_limit_from_tokens(&tokenize_git_log_args(args))
+    parse_limit_from_tokens(&tokenize_log_args(args))
+}
+
+/// True for the `-N` count shorthand (`-20`), which the tokenizer keeps as one `Short` token.
+fn is_numeric_count(token: &Token<'_>) -> bool {
+    token.kind == TokenKind::Short && is_digit_run(token.text)
 }
 
 /// True if the user explicitly requested a commit-count limit (-N, -n N, --max-count=N,
 /// --max-count N).
 fn has_limit_flag(tokens: &[Token<'_>]) -> bool {
-    tokens.iter().any(|t| match t.kind {
-        TokenKind::Long => t.text == "max-count",
-        // "n" only counts if it actually captured a value -- e.g. clustered with another short
-        // flag (log_takes_value's solo_only spec refuses to link a value there), it's
-        // just an inert letter, not a real limit request.
-        TokenKind::Short => (t.text == "n" && t.value(tokens).is_some()) || is_digit_run(t.text),
-        _ => false,
+    tokens.iter().any(|t| {
+        is_numeric_count(t)
+            // `-n` only counts if it actually captured a value -- clustered with another short
+            // flag (its solo-only spec refuses to link a value there), it's just an inert
+            // letter, not a real limit request.
+            || (t.is(&MAX_COUNT) && (t.kind == TokenKind::Long || t.value(tokens).is_some()))
     })
 }
 
 fn parse_limit_from_tokens(tokens: &[Token<'_>]) -> Option<usize> {
     for token in tokens {
-        let value = match token.kind {
-            // --max-count=20 (attached) or --max-count 20 (two-token form).
-            TokenKind::Long if token.text == "max-count" => token.value(tokens),
-            // -20 (combined digit form): the token itself is the count.
-            TokenKind::Short if is_digit_run(token.text) => Some(token.text),
-            // -n 20 (two-token form) or -n's value if ever attached.
-            TokenKind::Short if token.text == "n" => token.value(tokens),
+        let value = match token.flag() {
+            // --max-count=20, --max-count 20, -n 20, or -n's value if ever attached.
+            Some(&MAX_COUNT) => token.value(tokens),
+            // -20 (combined digit form): the token itself is the count, and no declared flag.
+            _ if is_numeric_count(token) => Some(token.text),
             _ => None,
         };
         if let Some(n) = value.and_then(|v| v.parse::<usize>().ok()) {
@@ -2254,33 +3209,37 @@ fn parse_limit_from_tokens(tokens: &[Token<'_>]) -> Option<usize> {
     None
 }
 
+/// The width a log line is cut to: wider under a count the user set, so a commit keeps the
+/// context an LLM needs.
+fn log_line_width(user_set_limit: bool) -> usize {
+    if user_set_limit { 120 } else { LOG_LINE_WIDTH }
+}
+
+/// The lines of a user-chosen format as they are shown: each cut to `width`. The one place the
+/// shown form of such a line is defined, so the recall store and the display cannot differ.
+fn format_user_log_lines(output: &str, width: usize) -> Vec<String> {
+    output.lines().map(|l| truncate_line(l, width)).collect()
+}
+
+/// The lines of a user-chosen format that are printed: all of them under a count the user set,
+/// the first `limit` otherwise.
+fn shown_user_log_lines(lines: &[String], limit: usize, user_set_limit: bool) -> &[String] {
+    if user_set_limit {
+        lines
+    } else {
+        &lines[..lines.len().min(limit)]
+    }
+}
+
 /// When `user_set_limit` is true, the user explicitly passed `-N` to git log,
 /// so we skip line capping (git already returns exactly N commits) and use a
 /// wider truncation threshold (120 chars) to preserve commit context that LLMs
 /// need for rebase/squash operations.
-pub(crate) fn filter_log_output(
-    output: &str,
-    limit: usize,
-    user_set_limit: bool,
-    user_format: bool,
-) -> String {
-    let truncate_width = if user_set_limit { 120 } else { 80 };
-
-    // When user specified their own format (--oneline, --pretty, --format),
-    // RTK did not inject ---END--- markers. Use simple line-based truncation.
-    if user_format {
-        let lines: Vec<&str> = output.lines().collect();
-        let max_lines = if user_set_limit { lines.len() } else { limit };
-        return lines
-            .iter()
-            .take(max_lines)
-            .map(|l| truncate_line(l, truncate_width))
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
+pub(crate) fn filter_log_output(output: &str, limit: usize, user_set_limit: bool) -> String {
+    let truncate_width = log_line_width(user_set_limit);
 
     // RTK injected format: split output into commit blocks separated by ---END---
-    let commits: Vec<&str> = output.split("---END---").collect();
+    let commits: Vec<&str> = output.split(LOG_ENTRY_MARKER).collect();
     let max_commits = if user_set_limit { commits.len() } else { limit };
 
     let mut result = Vec::new();
@@ -2795,7 +3754,7 @@ fn format_checkout_output(args: &[String], raw: &str, exit_code: i32) -> String 
 }
 
 fn format_checkout_success(args: &[String], raw: &str) -> String {
-    let tokens = arg_tokenizer::tokenize_grammar(args, &checkout_takes_value, Dialect::Posix);
+    let tokens = arg_tokenizer::tokenize_grammar(args, &CHECKOUT_GRAMMAR);
 
     if let Some(restored) = checkout_restored_count(&tokens) {
         return format!(
@@ -2848,16 +3807,25 @@ fn format_checkout_success(args: &[String], raw: &str) -> String {
 /// `--conflict` a style, `--pathspec-from-file` a file (all confirmed against git 2.53, which
 /// answers "requires a value"). `-t`/`--track`/`--detach` and any other `-`-prefixed token are
 /// booleans. Shared by every `checkout_*_arg` helper below via one
-/// [`arg_tokenizer::tokenize`] call instead of each hand-rolling its own scan over `args`.
-fn checkout_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    match kind {
-        TokenKind::Long => {
-            matches!(name, "conflict" | "orphan" | "pathspec-from-file").then(ValueSpec::value)
-        }
-        TokenKind::Short => matches!(name, "B" | "b").then(ValueSpec::value),
-        _ => None,
-    }
-}
+/// [`arg_tokenizer::tokenize_grammar`] call instead of each hand-rolling its own scan over
+/// `args`.
+const CHECKOUT_GRAMMAR: Grammar = Grammar::new(
+    Dialect::Posix,
+    &[&[
+        RESET_BRANCH,
+        NEW_BRANCH,
+        Flag::long("conflict").takes(VALUE),
+        ORPHAN,
+        Flag::long("pathspec-from-file").takes(VALUE),
+    ]],
+);
+
+/// `git checkout --orphan <new-branch>`.
+const ORPHAN: Flag = Flag::long("orphan").takes(VALUE);
+/// `git checkout -b <new-branch>`.
+const NEW_BRANCH: Flag = Flag::short("b").takes(VALUE);
+/// `git checkout -B <new-branch>`.
+const RESET_BRANCH: Flag = Flag::short("B").takes(VALUE);
 
 fn checkout_restored_count(tokens: &[Token<'_>]) -> Option<usize> {
     let separator = arg_tokenizer::dashdash_index(tokens)?;
@@ -2869,17 +3837,16 @@ fn checkout_restored_count(tokens: &[Token<'_>]) -> Option<usize> {
 }
 
 fn checkout_new_branch_arg<'a>(tokens: &[Token<'a>]) -> Option<&'a str> {
-    tokens.iter().find_map(|t| match t.kind {
-        TokenKind::Long if t.text == "orphan" => t.value(tokens),
-        TokenKind::Short if t.text == "b" => t.value(tokens),
-        _ => None,
-    })
+    tokens
+        .iter()
+        .find(|t| matches!(t.flag(), Some(&NEW_BRANCH | &ORPHAN)))
+        .and_then(|t| t.value(tokens))
 }
 
 fn checkout_reset_branch_arg<'a>(tokens: &[Token<'a>]) -> Option<&'a str> {
     tokens
         .iter()
-        .find(|t| t.kind == TokenKind::Short && t.text == "B")
+        .find(|t| t.is(&RESET_BRANCH))
         .and_then(|t| t.value(tokens))
 }
 
@@ -3116,29 +4083,56 @@ fn run_pull(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
     Ok(0)
 }
 
-fn branch_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    // -c/-C/-m/-M/-d/-D are followed by positional branch names, not a "flag value" in the
-    // attached/separate-value sense, so they're excluded here. -u IS a genuine value-taking flag
-    // (its short form takes the same single upstream-ref value as --set-upstream-to) and must be
-    // included alongside its long form, or `git branch -u origin/main` leaves "origin/main" as
-    // an unlinked Positional token instead of -u's linked value.
-    match kind {
-        TokenKind::Long => matches!(
-            name,
-            "contains"
-                | "format"
-                | "merged"
-                | "no-contains"
-                | "no-merged"
-                | "points-at"
-                | "set-upstream-to"
-                | "sort"
-        )
-        .then(ValueSpec::value),
-        TokenKind::Short => (name == "u").then(ValueSpec::value),
-        _ => None,
-    }
-}
+/// `-u`/`--set-upstream-to`, a genuine value-taking flag taking a single upstream ref, so
+/// `git branch -u origin/main` links "origin/main" to `-u` rather than leaving it an unlinked
+/// positional.
+const SET_UPSTREAM_TO: Flag = Flag::pair("u", "set-upstream-to").takes(VALUE);
+
+/// The `git branch` flags that write rather than list. `-c`/`-C`/`-m`/`-M`/`-d`/`-D` are
+/// followed by positional branch names, not a "flag value" in the attached/separate-value
+/// sense, so they are booleans.
+const BRANCH_ACTIONS: &[Flag] = &[
+    Flag::short("C"),
+    Flag::pair("c", "copy"),
+    Flag::short("D"),
+    Flag::pair("d", "delete"),
+    Flag::long("edit-description"),
+    Flag::short("M"),
+    Flag::pair("m", "move"),
+    SET_UPSTREAM_TO,
+    Flag::long("unset-upstream"),
+];
+
+/// `git branch --format`, which makes each line whatever the caller's template says. The
+/// listing is then theirs: it has none of the `* ` and `remotes/` markers the compact form
+/// reads.
+const BRANCH_FORMAT: Flag = Flag::long("format").takes(VALUE);
+
+/// The `git branch` flags that select or format a list. `-l`/`--list` lists the local
+/// branches, matching its patterns when given some, where a bare pattern would create a
+/// branch; `-a`/`--all` and `-r`/`--remotes` add the remote-tracking ones.
+const BRANCH_LIST_MODES: &[Flag] = &[
+    Flag::pair("a", "all"),
+    Flag::long("contains").takes(VALUE),
+    BRANCH_FORMAT,
+    Flag::pair("l", "list"),
+    Flag::long("merged").takes(VALUE),
+    Flag::long("no-contains").takes(VALUE),
+    Flag::long("no-merged").takes(VALUE),
+    Flag::long("points-at").takes(VALUE),
+    Flag::pair("r", "remotes"),
+    Flag::long("sort").takes(VALUE),
+];
+
+/// `git branch --show-current`, which prints one name rather than a list.
+const SHOW_CURRENT: Flag = Flag::long("show-current");
+
+/// `git branch`'s grammar: its value-taking flags, which are all actions or list modes, and the
+/// booleans RTK checks for.
+const BRANCH_GRAMMAR: Grammar = Grammar::new(
+    Dialect::Posix,
+    &[BRANCH_ACTIONS, BRANCH_LIST_MODES, &[SHOW_CURRENT]],
+);
 
 fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
@@ -3148,41 +4142,16 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         eprintln!("git branch");
     }
 
-    let tokens = arg_tokenizer::tokenize_grammar(args, &branch_takes_value, Dialect::Posix);
+    let tokens = arg_tokenizer::tokenize_grammar(args, &BRANCH_GRAMMAR);
 
     // Detect write operations: delete, rename, copy, upstream tracking
-    let has_action_flag = tokens.iter().any(|t| match t.kind {
-        TokenKind::Short => matches!(t.text, "C" | "D" | "M" | "c" | "d" | "m" | "u"),
-        TokenKind::Long => matches!(
-            t.text,
-            "edit-description" | "set-upstream-to" | "unset-upstream"
-        ),
-        _ => false,
-    });
+    let has_action_flag = tokens.iter().any(|t| t.is_one_of(BRANCH_ACTIONS));
 
     // Detect flags that produce specific output (not a branch list)
-    let has_show_flag = tokens
-        .iter()
-        .any(|t| t.kind == TokenKind::Long && t.text == "show-current");
+    let has_show_flag = tokens.iter().any(|t| t.is(&SHOW_CURRENT));
 
     // Detect list-mode flags
-    let has_list_flag = tokens.iter().any(|t| match t.kind {
-        TokenKind::Short => matches!(t.text, "a" | "r"),
-        TokenKind::Long => matches!(
-            t.text,
-            "all"
-                | "contains"
-                | "format"
-                | "list"
-                | "merged"
-                | "no-contains"
-                | "no-merged"
-                | "points-at"
-                | "remotes"
-                | "sort"
-        ),
-        _ => false,
-    });
+    let has_list_flag = tokens.iter().any(|t| t.is_one_of(BRANCH_LIST_MODES));
 
     // Detect positional arguments (not flags) — indicates branch creation. A value consumed by
     // a preceding flag (e.g. -u/--set-upstream-to's upstream ref) is that flag's value, not an
@@ -3269,20 +4238,29 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(result.exit_code);
     }
 
-    let filtered = filter_branch_output(&result.stdout);
-    let filtered = never_worse(&result.stdout, &filtered).to_string();
-    println!("{}", filtered);
+    let compact;
+    let filtered: &str = if tokens.iter().any(|t| t.is(&BRANCH_FORMAT)) {
+        &result.stdout
+    } else {
+        compact = filter_branch_output(&result.stdout);
+        never_worse(&result.stdout, &compact)
+    };
+    print!("{}", filtered);
 
     timer.track(
         &tracked,
         &format!("rtk {tracked}"),
         &result.stdout,
-        &filtered,
+        filtered,
     );
 
     Ok(0)
 }
 
+/// Compacts a `git branch` listing, one newline-terminated line per entry. An empty listing
+/// (`-r` with no remotes, `--list` matching nothing) stays empty, as git prints it. A listing
+/// whose every line is a remote's `HEAD -> ...` alias, which the compact form leaves out
+/// (`-a --list '*HEAD*'`), leaves nothing to compact, so it is git's listing unchanged.
 fn filter_branch_output(output: &str) -> String {
     let mut current = String::new();
     let mut local: Vec<String> = Vec::new();
@@ -3313,7 +4291,11 @@ fn filter_branch_output(output: &str) -> String {
     }
 
     let mut result = Vec::new();
-    result.push(format!("* {}", current));
+    // A filtered list (`--list 'feat*'`, `--merged X`) can leave the current branch out, and
+    // git then prints no `* ` line either.
+    if !current.is_empty() {
+        result.push(format!("* {}", current));
+    }
 
     if !local.is_empty() {
         for b in &local {
@@ -3341,7 +4323,10 @@ fn filter_branch_output(output: &str) -> String {
         }
     }
 
-    result.join("\n")
+    if result.is_empty() {
+        return output.to_string();
+    }
+    result.iter().map(|line| format!("{line}\n")).collect()
 }
 
 fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
@@ -3407,19 +4392,42 @@ fn format_stash_message(subcommand: Option<&str>, result: &CaptureResult) -> Str
     }
 }
 
-/// True if `-p`/`--patch` was requested. Note: `-u` means `--include-untracked` here, not `-p`.
+/// `git stash show`'s own options, which it reads before handing the rest to the diff
+/// machinery: `-u`/`--[no-]include-untracked` and `--only-untracked` (git 2.53's
+/// `git stash show -h`).
+const STASH_UNTRACKED: &[Flag] = &[
+    Flag::pair("u", "include-untracked"),
+    Flag::long("no-include-untracked"),
+    Flag::long("only-untracked"),
+];
+
+/// The grammar of `git stash show`: the revision-walk and diff options the rest goes to, and
+/// its own options ([`STASH_UNTRACKED`]), where `-u` is `--include-untracked` and `--quiet`
+/// has no short spelling.
 ///
-/// The "nothing takes a value" predicate *is* `stash show`'s grammar for this question, not a
-/// placeholder: git parses `-p`/`-u` itself before handing the rest to the revision machinery,
-/// so no flag it sees here consumes a following token, and treating one as if it did swallowed
-/// the `-p` after it (confirmed against git 2.53 with `git stash show --author -p`).
-fn stash_show_wants_patch(args: &[String]) -> bool {
-    let tokens = arg_tokenizer::tokenize(args);
-    tokens.iter().any(|t| match t.kind {
-        TokenKind::Long => t.text == "patch",
-        TokenKind::Short => t.text == "p",
-        _ => false,
-    })
+/// A value-taking option takes the flag after it, as the revision machinery takes it: in
+/// `git stash show --author -p` git 2.53 reads `-p` as the author, and prints the patch only
+/// because any argument makes `stash show` print one; in `--author --word-diff` it prints a
+/// plain patch.
+const STASH_SHOW_GRAMMAR: Grammar = Grammar::new(
+    Dialect::Posix,
+    &[
+        REV_WALK_LONG_FLAGS,
+        REV_WALK_OUTPUT_FLAGS,
+        REV_WALK_SHORT_FLAGS,
+        STASH_UNTRACKED,
+        &[DIFF_QUIET],
+    ],
+);
+
+/// `git stash show`'s arguments, read with [`STASH_SHOW_GRAMMAR`].
+fn tokenize_stash_show_args(args: &[String]) -> Vec<Token<'_>> {
+    arg_tokenizer::tokenize_grammar(args, &STASH_SHOW_GRAMMAR)
+}
+
+/// True if `-p`/`--patch` is one of `git stash show`'s options.
+fn stash_show_wants_patch(tokens: &[Token<'_>]) -> bool {
+    tokens.iter().any(|t| t.is(&PATCH))
 }
 
 fn run_stash(
@@ -3459,7 +4467,8 @@ fn run_stash(
             );
         }
         Some("show") => {
-            let asked_for_patch = stash_show_wants_patch(args);
+            let tokens = tokenize_stash_show_args(args);
+            let asked_for_patch = stash_show_wants_patch(&tokens);
 
             let mut cmd = git_cmd(global_args);
             cmd.args(["stash", "show"]);
@@ -3485,10 +4494,7 @@ fn run_stash(
                     .lines()
                     .any(|line| line.starts_with("diff --git ") || line.starts_with("diff --cc "));
 
-            // Log's grammar, unlike `stash_show_wants_patch`'s: `stash show` parses `-p`/`-u`
-            // itself, but hands the rest to the revision machinery, which does consume a
-            // following `--word-diff` as `--author`'s value.
-            let filtered = if patch_mode && !emits_word_diff(&tokenize_git_log_args(args)) {
+            let filtered = if patch_mode && !emits_word_diff(&tokens) {
                 compact_diff(&result.stdout, 100)
             } else if patch_mode {
                 result.stdout.clone()
@@ -3683,12 +4689,18 @@ fn diffstat_row(line: &str) -> Option<String> {
 fn worktree_asked_for_report(tokens: &[Token<'_>]) -> bool {
     arg_tokenizer::before_dashdash(tokens)
         .iter()
-        .any(|t| match t.kind {
-            TokenKind::Long => matches!(t.text, "dry-run" | "verbose"),
-            TokenKind::Short => matches!(t.text, "n" | "v"),
-            _ => false,
-        })
+        .any(|t| matches!(t.flag(), Some(&DRY_RUN | &VERBOSE)))
 }
+
+/// `git worktree`'s `-n`/`--dry-run`.
+const DRY_RUN: Flag = Flag::pair("n", "dry-run");
+
+/// `git worktree`'s `-v`/`--verbose`.
+const VERBOSE: Flag = Flag::pair("v", "verbose");
+
+/// The `git worktree` flags RTK checks for. Both are booleans and nothing else is declared, so
+/// no flag here consumes a following token.
+const WORKTREE_GRAMMAR: Grammar = Grammar::new(Dialect::Posix, &[&[DRY_RUN, VERBOSE]]);
 
 fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
@@ -3700,7 +4712,7 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
 
     // The subcommand is the first positional, not any arg that happens to spell one (a
     // worktree path named "move", say).
-    let tokens = arg_tokenizer::tokenize(args);
+    let tokens = arg_tokenizer::tokenize_grammar(args, &WORKTREE_GRAMMAR);
     let subcommand = arg_tokenizer::before_dashdash(&tokens)
         .iter()
         .find(|t| t.is_free_positional())
@@ -3836,6 +4848,158 @@ fn filter_worktree_list(output: &str) -> String {
     result.join("\n")
 }
 
+/// True when `git ls-tree` with `args` prints a plain path list: `--name-only` (or its alias
+/// `--name-status`) with nothing but `-r`, `-t`, `-d`, `--full-name`, `--full-tree`,
+/// `--abbrev` and positionals beside it. Everything else -- the default
+/// `<mode> <type> <object>\t<path>` lines, `-l`, `-z`, `--format`, `--object-only`, or a
+/// flag rtk does not know, including git's abbreviations of the ones it does -- is not one
+/// path per line, so it passes through byte-identical.
+pub(crate) fn ls_tree_folds<T: AsRef<str>>(args: &[T]) -> bool {
+    let tokens = arg_tokenizer::tokenize_grammar(args, &LS_TREE_GRAMMAR);
+    let name_only = tokens
+        .iter()
+        .any(|t| matches!(t.flag(), Some(&NAME_ONLY | &NAME_STATUS)));
+    name_only
+        && tokens.iter().all(|t| match t.kind {
+            TokenKind::Positional | TokenKind::DashDash => true,
+            TokenKind::Short | TokenKind::Long => t.is_one_of(LS_TREE_PATH_LIST_FLAGS),
+        })
+}
+
+/// The `git ls-tree` flags that leave its `--name-only` listing a plain path list.
+const LS_TREE_PATH_LIST_FLAGS: &[Flag] = &[
+    Flag::long("abbrev").takes(ValueSpec::attached_only()),
+    Flag::short("d"),
+    Flag::long("full-name"),
+    Flag::long("full-tree"),
+    NAME_ONLY,
+    NAME_STATUS,
+    Flag::short("r"),
+    Flag::short("t"),
+];
+
+/// The grammar `git ls-tree`'s arguments are read with.
+const LS_TREE_GRAMMAR: Grammar = Grammar::new(Dialect::Posix, &[LS_TREE_PATH_LIST_FLAGS]);
+
+/// Folds a `git ls-tree --name-only` listing into one line per run of paths that share a
+/// directory, `src/cmds/git/ diff_cmd.rs gh_cmd.rs`, with `./` standing for no directory part.
+/// Runs follow git's order, so joining each directory to each of its names gives back git's
+/// list line for line.
+///
+/// A path that a space-separated line cannot carry stands alone, in double quotes: a path
+/// git C-quoted is printed as git printed it, and it always holds a `\` escape; a path with a
+/// space is wrapped in quotes with nothing escaped, which is unambiguous because git leaves
+/// spaces unquoted but quotes any path holding a `"` or `\`.
+///
+/// `None` when the listing is not a newline-terminated list of two or more paths, or when
+/// folding would not make it smaller.
+fn fold_ls_tree_paths(listing: &str) -> Option<String> {
+    let body = listing.strip_suffix('\n')?;
+    let mut out = String::with_capacity(listing.len());
+    let mut run_dir: Option<&str> = None;
+    let mut paths = 0usize;
+    for path in body.split('\n') {
+        if path.is_empty() || path.ends_with('/') {
+            return None;
+        }
+        paths += 1;
+        if path.starts_with('"') || path.contains(' ') {
+            if run_dir.take().is_some() {
+                out.push('\n');
+            }
+            if path.starts_with('"') {
+                out.push_str(path);
+            } else {
+                out.push('"');
+                out.push_str(path);
+                out.push('"');
+            }
+            out.push('\n');
+            continue;
+        }
+        let (dir, name) = match path.rfind('/') {
+            Some(slash) => path.split_at(slash + 1),
+            None => ("./", path),
+        };
+        if run_dir != Some(dir) {
+            if run_dir.is_some() {
+                out.push('\n');
+            }
+            out.push_str(dir);
+            run_dir = Some(dir);
+        }
+        out.push(' ');
+        out.push_str(name);
+    }
+    if run_dir.is_some() {
+        out.push('\n');
+    }
+    (paths >= 2 && out.len() < listing.len()).then_some(out)
+}
+
+/// What rtk prints for a `git ls-tree` run that produced `stdout`: the folded listing when
+/// `args` ask for a plain path list, git succeeded, and folding makes it smaller; `None`
+/// means git's bytes go out unchanged.
+fn render_ls_tree(args: &[String], stdout: &[u8], success: bool) -> Option<String> {
+    if !success || !ls_tree_folds(args) {
+        return None;
+    }
+    std::str::from_utf8(stdout)
+        .ok()
+        .and_then(fold_ls_tree_paths)
+}
+
+fn run_ls_tree(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    use std::io::Write;
+
+    let timer = tracking::TimedExecution::start();
+    let tracked = with_args("git ls-tree", &display_args(args));
+    let passthrough = tracking::passthrough_label(&tracked);
+
+    if !ls_tree_folds(args) {
+        if verbose > 0 {
+            eprintln!("git ls-tree passthrough: {:?}", args);
+        }
+        let status = git_cmd(global_args)
+            .arg("ls-tree")
+            .args(args)
+            .status()
+            .context("Failed to run git ls-tree")?;
+        timer.track_passthrough(&tracked, &passthrough);
+        return Ok(exit_code_from_status(&status, "git ls-tree"));
+    }
+
+    if verbose > 0 {
+        eprintln!("git ls-tree (paths folded by directory)");
+    }
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("ls-tree").args(args);
+    let result =
+        crate::core::stream::exec_capture_bytes(&mut cmd).context("Failed to run git ls-tree")?;
+    std::io::stderr()
+        .write_all(&result.stderr)
+        .context("Failed to write git ls-tree stderr")?;
+
+    match render_ls_tree(args, &result.stdout, result.success()) {
+        Some(folded) => {
+            std::io::stdout()
+                .lock()
+                .write_all(folded.as_bytes())
+                .context("Failed to write git ls-tree output")?;
+            let raw = String::from_utf8_lossy(&result.stdout);
+            timer.track(&tracked, &format!("rtk {tracked}"), &raw, &folded);
+            Ok(result.exit_code)
+        }
+        None => emit_raw_bytes_passthrough(
+            &result.stdout,
+            &tracked,
+            &passthrough,
+            &timer,
+            result.exit_code,
+        ),
+    }
+}
+
 /// Runs an unsupported git subcommand by passing it through directly
 pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
@@ -3860,6 +5024,7 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::arg_tokenizer::{TakesValueRow, assert_takes_value_table};
 
     /// What reaches git decides which page comes back, and a wrong subcommand still returns
     /// a plausible one. Pins every part the argv is assembled from.
@@ -3915,6 +5080,7 @@ mod tests {
             (GitCommand::Branch, "branch"),
             (GitCommand::Fetch, "fetch"),
             (GitCommand::Worktree, "worktree"),
+            (GitCommand::LsTree, "ls-tree"),
             (GitCommand::Stash { subcommand: None }, "stash"),
         ] {
             assert_eq!(cmd.git_name(), name, "{cmd:?}");
@@ -3922,11 +5088,46 @@ mod tests {
     }
     use crate::core::test_isolation;
 
+    /// [`super::show_positionals`] on `args`, tokenized as `run_show` tokenizes them.
+    fn show_positionals(args: &[String]) -> Vec<&String> {
+        super::show_positionals(args, &tokenize_log_args(args))
+    }
+
+    /// [`super::blob_candidates`] on `args`, tokenized as `run_show` tokenizes them.
+    fn blob_candidates(args: &[String]) -> Vec<&String> {
+        super::blob_candidates(args, &tokenize_log_args(args))
+    }
+
+    /// [`super::show_route`] on `args`, tokenized as `run_show` tokenizes them.
+    fn show_route(args: &[String]) -> ShowRoute {
+        super::show_route(args, &tokenize_log_args(args))
+    }
+
+    /// [`super::has_content_transform_flag`] on `args`, tokenized as `run_show` tokenizes them.
+    fn has_content_transform_flag(args: &[String]) -> bool {
+        super::has_content_transform_flag(&tokenize_log_args(args))
+    }
+
+    /// [`show_wants_raw_shape`] for any of `args`, tokenized as `run_show` does.
+    fn show_args_want_raw_shape(args: &[String]) -> bool {
+        let tokens = tokenize_log_args(args);
+        tokens.iter().any(|t| show_wants_raw_shape(t, &tokens))
+    }
+
+    /// [`diff_wants_raw_shape`] on `args`, tokenized as `run_diff` does.
+    fn diff_args_want_raw_shape(args: &[String]) -> bool {
+        diff_wants_raw_shape(&tokenize_diff_args(args))
+    }
+
+    fn owned(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
     #[test]
     fn test_branch_dash_u_links_its_upstream_value_not_a_free_positional() {
         // -u's short form must link its value like its long form --set-upstream-to does.
         let args = vec!["-u".to_string(), "origin/main".to_string()];
-        let tokens = arg_tokenizer::tokenize_grammar(&args, &branch_takes_value, Dialect::Posix);
+        let tokens = arg_tokenizer::tokenize_grammar(&args, &BRANCH_GRAMMAR);
         assert_eq!(tokens[0].kind, TokenKind::Short);
         assert_eq!(tokens[0].text, "u");
         assert_eq!(tokens[0].value(&tokens), Some("origin/main"));
@@ -3938,14 +5139,77 @@ mod tests {
     }
 
     #[test]
+    fn test_branch_flags_read_every_spelling_git_pairs() {
+        let is = |args: &[&str], flags: &[Flag]| {
+            let args = owned(args);
+            let tokens = arg_tokenizer::tokenize_grammar(&args, &BRANCH_GRAMMAR);
+            tokens.iter().any(|t| t.is_one_of(flags))
+        };
+        // `-l` is `--list`: git 2.53 lists the local branches for `git branch -l` and the
+        // matching ones for `git branch -l 'feat*'`, where the bare pattern would create one.
+        for args in [&["-l"][..], &["--list"], &["-l", "feat*"], &["-vl"]] {
+            assert!(is(args, BRANCH_LIST_MODES), "{args:?} lists");
+        }
+        // `-d`/`-m`/`-c` and their long spellings write, as `-D`/`-M`/`-C` do.
+        for args in [
+            &["-d", "x"][..],
+            &["--delete", "x"],
+            &["-D", "x"],
+            &["-m", "x"],
+            &["--move", "x"],
+            &["-M", "x"],
+            &["-c", "x"],
+            &["--copy", "x"],
+            &["-C", "x"],
+        ] {
+            assert!(is(args, BRANCH_ACTIONS), "{args:?} writes");
+        }
+        assert!(!is(&["feature"], BRANCH_ACTIONS));
+    }
+
+    #[test]
+    fn test_dash_capital_x_is_dirstat_with_an_attached_value_only() {
+        // git 2.53 reads `-Xp` as the dirstat parameter `p`, `-pX` as `-p` then `-X`, and
+        // `-X files` as `-X` then a revision named `files`.
+        let args = owned(&["-Xp"]);
+        let tokens = tokenize_log_args(&args);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].flag(), Some(&DIRSTAT));
+        assert_eq!(tokens[0].attached, Some("p"));
+        assert!(!tokens.iter().any(requests_patch_output));
+
+        let args = owned(&["-pX"]);
+        let tokens = tokenize_log_args(&args);
+        assert_eq!(tokens[0].flag(), Some(&PATCH));
+        assert_eq!(tokens[1].flag(), Some(&DIRSTAT));
+        assert_eq!(tokens[1].attached, None);
+
+        let args = owned(&["-X", "files"]);
+        let tokens = tokenize_log_args(&args);
+        assert!(tokens[1].is_free_positional());
+
+        // `-X` routes raw wherever `--dirstat` does.
+        for spelling in [
+            &["-X"][..],
+            &["-Xfiles"],
+            &["--dirstat"],
+            &["--dirstat=files"],
+        ] {
+            let args = owned(spelling);
+            assert!(requests_raw_log_output(&args), "{spelling:?}");
+            assert!(show_args_want_raw_shape(&args), "{spelling:?}");
+        }
+    }
+
+    #[test]
     fn test_checkout_new_branch_arg_accepts_glued_short_flag() {
         // `-bmy-branch` (glued) and `-b my-branch` (separate) must both work.
         let args = vec!["-bmy-branch".to_string()];
-        let tokens = arg_tokenizer::tokenize_grammar(&args, &checkout_takes_value, Dialect::Posix);
+        let tokens = arg_tokenizer::tokenize_grammar(&args, &CHECKOUT_GRAMMAR);
         assert_eq!(checkout_new_branch_arg(&tokens), Some("my-branch"));
 
         let args = vec!["-b".to_string(), "my-branch".to_string()];
-        let tokens = arg_tokenizer::tokenize_grammar(&args, &checkout_takes_value, Dialect::Posix);
+        let tokens = arg_tokenizer::tokenize_grammar(&args, &CHECKOUT_GRAMMAR);
         assert_eq!(checkout_new_branch_arg(&tokens), Some("my-branch"));
     }
 
@@ -3953,8 +5217,18 @@ mod tests {
     fn test_checkout_reset_branch_arg_accepts_glued_short_flag() {
         // Same glued-form guarantee as -b, for -B (force-create/reset).
         let args = vec!["-Bmy-branch".to_string()];
-        let tokens = arg_tokenizer::tokenize_grammar(&args, &checkout_takes_value, Dialect::Posix);
+        let tokens = arg_tokenizer::tokenize_grammar(&args, &CHECKOUT_GRAMMAR);
         assert_eq!(checkout_reset_branch_arg(&tokens), Some("my-branch"));
+    }
+
+    #[test]
+    fn test_checkout_new_branch_arg_reads_orphan() {
+        // `--orphan <new-branch>` names the branch it creates, attached or as the next argument.
+        for args in [&["--orphan", "fresh"][..], &["--orphan=fresh"]] {
+            let args = owned(args);
+            let tokens = arg_tokenizer::tokenize_grammar(&args, &CHECKOUT_GRAMMAR);
+            assert_eq!(checkout_new_branch_arg(&tokens), Some("fresh"), "{args:?}");
+        }
     }
 
     #[test]
@@ -4399,7 +5673,7 @@ mod tests {
 
     fn word_diff_from(args: &[&str]) -> bool {
         let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        emits_word_diff(&tokenize_git_log_args(&args))
+        emits_word_diff(&tokenize_log_args(&args))
     }
 
     #[test]
@@ -4822,6 +6096,25 @@ mod tests {
         assert_eq!(blob_candidates(&args), vec![&"HEAD:Cargo.toml".to_string()]);
     }
 
+    /// A transform flag is read from tokens: as `--grep`'s pattern or past `--` it transforms
+    /// nothing, and git 2.53 prints the plain blob.
+    #[test]
+    fn test_content_transform_flags_are_read_from_tokens() {
+        for flag in ["--ext-diff", "--filters", "--textconv"] {
+            assert!(has_content_transform_flag(&show_args(&[flag, "HEAD:f"])));
+            assert!(!has_content_transform_flag(&show_args(&[
+                "--grep", flag, "HEAD:f"
+            ])));
+            assert!(!has_content_transform_flag(&show_args(&[
+                "HEAD:f", "--", flag
+            ])));
+        }
+        assert!(!has_content_transform_flag(&show_args(&[
+            "--no-textconv",
+            "HEAD:f"
+        ])));
+    }
+
     #[test]
     fn test_blob_candidates_skip_flag_operand_with_colon() {
         // Blocking bug #2: `-S 'url:1'`'s operand contains a colon but is the value of
@@ -4869,6 +6162,25 @@ mod tests {
         // A boolean-only cluster (`-wp`) consumes nothing: the object stays a candidate.
         let args = show_args(&["-wp", "HEAD:big.txt"]);
         assert_eq!(blob_candidates(&args), vec![&"HEAD:big.txt".to_string()]);
+    }
+
+    #[test]
+    fn test_show_positionals_read_git_shows_own_short_grammar() {
+        // git 2.53 reads `-n` as taking a value only when it is the whole argument: in
+        // `git show -pn 2 X:y` the `2` is an object (`fatal: ambiguous argument '2'`).
+        let args = show_args(&["-pn", "2", "HEAD:big.txt"]);
+        assert_eq!(show_positionals(&args), ["2", "HEAD:big.txt"]);
+        let args = show_args(&["-pn", "HEAD~1", "HEAD:big.txt"]);
+        assert_eq!(show_positionals(&args), ["HEAD~1", "HEAD:big.txt"]);
+        // Solo, `-n` takes the next argument.
+        let args = show_args(&["-n", "2", "HEAD:big.txt"]);
+        assert_eq!(show_positionals(&args), ["HEAD:big.txt"]);
+        // `-l` takes the next argument after `-w`: `git show -wl 5 X:y` dumps the one blob.
+        let args = show_args(&["-wl", "5", "HEAD:big.txt"]);
+        assert_eq!(show_positionals(&args), ["HEAD:big.txt"]);
+        // An attached-only flag takes the rest of its cluster and never the next argument.
+        let args = show_args(&["-M50", "HEAD:big.txt"]);
+        assert_eq!(show_positionals(&args), ["HEAD:big.txt"]);
     }
 
     #[test]
@@ -5145,6 +6457,28 @@ mod tests {
     }
 
     #[test]
+    fn test_filter_branch_output_without_the_current_branch() {
+        // `git branch -l 'feat*'` on main (git 2.53): only the matching branches, no `* ` line.
+        let output = "  feat-a\n  feature\n";
+        assert_eq!(filter_branch_output(output), "  feat-a\n  feature\n");
+    }
+
+    /// `git branch -r` with no remotes and `git branch --list 'nomatch*'` print nothing (git
+    /// 2.53), and so does the filter.
+    #[test]
+    fn test_filter_branch_output_empty_listing_prints_nothing() {
+        assert_eq!(filter_branch_output(""), "");
+    }
+
+    /// `git branch -a --list '*HEAD*'` in a repo whose remote has a `HEAD` (git 2.53) lists only
+    /// the alias, which the compact form leaves out, so the filter prints git's listing.
+    #[test]
+    fn test_filter_branch_output_head_alias_only_is_gits_listing() {
+        let output = "  remotes/origin/HEAD -> origin/main\n";
+        assert_eq!(filter_branch_output(output), output);
+    }
+
+    #[test]
     fn test_filter_branch_no_remotes() {
         let output = "* main\n  develop\n";
         let result = filter_branch_output(output);
@@ -5347,7 +6681,7 @@ mod tests {
     fn test_worktree_asked_for_report() {
         let report = |args: &[&str]| {
             let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-            worktree_asked_for_report(&arg_tokenizer::tokenize(&owned))
+            worktree_asked_for_report(&arg_tokenizer::tokenize_grammar(&owned, &WORKTREE_GRAMMAR))
         };
         // `add` writes two progress lines that "ok" exists to replace, and has no --dry-run or
         // --verbose of its own.
@@ -5358,6 +6692,8 @@ mod tests {
             &["prune", "-n"][..],
             &["prune", "--dry-run"][..],
             &["prune", "-v"][..],
+            &["prune", "--verbose"][..],
+            &["prune", "-nv"][..],
         ] {
             assert!(report(spelling), "{spelling:?} asks for a report");
         }
@@ -5494,7 +6830,7 @@ A  added.rs
     #[test]
     fn test_filter_log_output() {
         let output = "abc1234 This is a commit message (2 days ago) <author>\n\n---END---\ndef5678 Another commit (1 week ago) <other>\n\n---END---\n";
-        let result = filter_log_output(output, 10, false, false);
+        let result = filter_log_output(output, 10, false);
         assert!(result.contains("abc1234"));
         assert!(result.contains("def5678"));
         assert_eq!(result.lines().count(), 2);
@@ -5504,7 +6840,7 @@ A  added.rs
     fn test_filter_log_output_with_body() {
         // Commit with body: first non-trailer body line should appear indented
         let output = "abc1234 feat: add feature (2 days ago) <author>\nBREAKING CHANGE: removed old API\nSigned-off-by: Author <a@b.com>\n---END---\ndef5678 fix: typo (1 day ago) <other>\n\n---END---\n";
-        let result = filter_log_output(output, 10, false, false);
+        let result = filter_log_output(output, 10, false);
         assert!(result.contains("abc1234"));
         assert!(result.contains("BREAKING CHANGE: removed old API"));
         assert!(!result.contains("Signed-off-by:"));
@@ -5518,7 +6854,7 @@ A  added.rs
     fn test_filter_log_output_skips_trailers() {
         // Body with only trailers should not produce a body line
         let output = "abc1234 chore: bump (1 day ago) <bot>\nSigned-off-by: Bot <bot@ci>\nCo-authored-by: Human <h@b>\n---END---\n";
-        let result = filter_log_output(output, 10, false, false);
+        let result = filter_log_output(output, 10, false);
         assert!(result.contains("abc1234"));
         assert!(!result.contains("Signed-off-by:"));
         assert!(!result.contains("Co-authored-by:"));
@@ -5528,7 +6864,7 @@ A  added.rs
     #[test]
     fn test_filter_log_output_truncate_long() {
         let long_line = "abc1234 ".to_string() + &"x".repeat(100) + " (2 days ago) <author>";
-        let result = filter_log_output(&long_line, 10, false, false);
+        let result = filter_log_output(&long_line, 10, false);
         assert!(result.chars().count() < long_line.chars().count());
         assert!(result.contains("..."));
         assert!(result.chars().count() <= 80);
@@ -5540,7 +6876,7 @@ A  added.rs
             .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
             .collect::<Vec<_>>()
             .join("\n");
-        let result = filter_log_output(&output, 5, false, false);
+        let result = filter_log_output(&output, 5, false);
         assert_eq!(result.lines().count(), 5);
     }
 
@@ -5551,7 +6887,7 @@ A  added.rs
             .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
             .collect::<Vec<_>>()
             .join("\n");
-        let result = filter_log_output(&output, 20, true, false);
+        let result = filter_log_output(&output, 20, true);
         assert_eq!(
             result.lines().count(),
             20,
@@ -5566,8 +6902,8 @@ A  added.rs
         assert!(line_90_chars.chars().count() > 80);
         assert!(line_90_chars.chars().count() < 120);
 
-        let result_default = filter_log_output(&line_90_chars, 10, false, false);
-        let result_user = filter_log_output(&line_90_chars, 10, true, false);
+        let result_default = filter_log_output(&line_90_chars, 10, false);
+        let result_user = filter_log_output(&line_90_chars, 10, true);
 
         // Default truncates at 80 chars
         assert!(
@@ -5635,6 +6971,30 @@ A  added.rs
     }
 
     #[test]
+    fn test_line_log_routes_raw_under_log_and_show() {
+        // `git log -L 1,2:f` prints each commit that touches lines 1-2 of `f` with its patch of
+        // that range (git 2.53), which a one-line-per-commit log cannot represent.
+        for args in [
+            &["-L", "1,2:f"][..],
+            &["-L1,2:f"],
+            &["-L", ":main:src/main.rs"],
+            &["-wL", "1,2:f"],
+        ] {
+            let args = owned(args);
+            let tokens = tokenize_log_args(&args);
+            assert!(tokens.iter().any(|t| t.is(&LINE_LOG)), "{args:?}");
+            assert!(
+                !tokens.iter().any(|t| t.is_free_positional()),
+                "{args:?}: the range is -L's value"
+            );
+            assert!(requests_raw_log_output(&args), "log {args:?}");
+            assert!(show_args_want_raw_shape(&args), "show {args:?}");
+        }
+        // Past `--` it is a path.
+        assert!(!requests_raw_log_output(&owned(&["--", "-L"])));
+    }
+
+    #[test]
     fn test_patch_flag_after_pathspec_separator_is_ignored() {
         // `git log -- -p` means "show history for a path literally named -p",
         // not "show patches" — the flag lookalike appears after `--`.
@@ -5681,6 +7041,65 @@ A  added.rs
         }
     }
 
+    /// The diffstat and dirstat parameters that are flags of their own (`git range-diff -h`
+    /// lists them among the diff output format options, git 2.53): each prints the stat or the
+    /// dirstat as `--stat`/`-X` do, so `log`, `show` and `diff` route them raw. `-z` ends every
+    /// record with a NUL, raw for `show` and `diff` and not for `log`, whose filtered run keeps
+    /// the NUL that ends each commit. `--dd` is a first-parent patch, raw for `log` and
+    /// `show`/`diff`'s default output there.
+    #[test]
+    fn test_stat_parameters_and_dirstat_synonyms_take_the_raw_route() {
+        let raw_everywhere: &[&[&str]] = &[
+            &["--stat-width=60"],
+            &["--stat-width", "60"],
+            &["--stat-count=1"],
+            &["--stat-name-width=10"],
+            &["--stat-graph-width=10"],
+            &["--dirstat-by-file"],
+            &["--dirstat-by-file=10"],
+            &["--cumulative"],
+        ];
+        for args in raw_everywhere {
+            let args = owned(args);
+            assert!(requests_raw_log_output(&args), "log {args:?}");
+            assert!(show_args_want_raw_shape(&args), "show {args:?}");
+            assert!(diff_args_want_raw_shape(&args), "diff {args:?}");
+        }
+
+        for args in [&["-z"][..], &["-1z"]] {
+            let args = owned(args);
+            assert!(!requests_raw_log_output(&args), "log {args:?}");
+            assert!(show_args_want_raw_shape(&args), "show {args:?}");
+            assert!(diff_args_want_raw_shape(&args), "diff {args:?}");
+        }
+
+        let args = owned(&["--dd"]);
+        assert!(requests_raw_log_output(&args));
+        assert!(!show_args_want_raw_shape(&args));
+        assert!(!diff_args_want_raw_shape(&args));
+
+        // A value, not the flag: `--grep --cumulative` searches messages for the string.
+        let args = owned(&["--grep", "--cumulative"]);
+        assert!(!requests_raw_log_output(&args));
+    }
+
+    /// The output indicators replace the `+`, `-` and ` ` markers `compact_diff` reads (git
+    /// 2.53: `git diff --output-indicator-old=Y` compacted to `-0` where git removed 3 lines), so
+    /// `show` and `diff` print git's patch. A plain `git log` prints no patch for them to change.
+    #[test]
+    fn test_output_indicators_are_raw_for_show_and_diff_only() {
+        for args in [
+            &["--output-indicator-new=X"][..],
+            &["--output-indicator-old", "Y"],
+            &["--output-indicator-context=Z"],
+        ] {
+            let args = owned(args);
+            assert!(!requests_raw_log_output(&args), "log {args:?}");
+            assert!(show_args_want_raw_shape(&args), "show {args:?}");
+            assert!(diff_args_want_raw_shape(&args), "diff {args:?}");
+        }
+    }
+
     #[test]
     fn a_short_h_asks_for_usage_but_a_value_or_pathspec_does_not() {
         for (args, expected) in [
@@ -5693,7 +7112,7 @@ A  added.rs
         ] {
             let args: Vec<String> = args.into_iter().map(String::from).collect();
             assert_eq!(
-                asks_for_usage(&tokenize_git_log_args(&args)),
+                asks_for_usage(&tokenize_log_args(&args)),
                 expected,
                 "{args:?}"
             );
@@ -5704,12 +7123,19 @@ A  added.rs
     fn test_diff_show_raw_shape_excludes_patch_flags() {
         for flag in ["--patch", "-p", "-u"] {
             let args = vec![flag.to_string()];
-            let tokens = tokenize_git_log_args(&args);
             assert!(
-                !tokens.iter().any(|t| show_wants_raw_shape(t, &tokens))
-                    && !tokens.iter().any(|t| diff_wants_raw_shape(t, &tokens)),
+                !show_args_want_raw_shape(&args) && !diff_args_want_raw_shape(&args),
                 "{flag} must stay on diff/show's compact path, not the raw passthrough path"
             );
+        }
+    }
+
+    /// `show_wants_raw_shape` answers its patch and `--diff-merges` arms before it asks
+    /// [`SHOW_RAW_SHAPES`], which is only right while the two share no flag.
+    #[test]
+    fn show_raw_shapes_share_no_flag_with_the_patch_arms() {
+        for flag in [DD, DIFF_MERGES, PATCH, PATCH_U, UNIFIED] {
+            assert!(!SHOW_RAW_SHAPES.contains(&flag), "{flag:?}");
         }
     }
 
@@ -5728,10 +7154,8 @@ A  added.rs
             "--summary",
         ] {
             let args = vec![flag.to_string()];
-            let tokens = tokenize_git_log_args(&args);
             assert!(
-                tokens.iter().any(|t| show_wants_raw_shape(t, &tokens))
-                    && tokens.iter().any(|t| diff_wants_raw_shape(t, &tokens)),
+                show_args_want_raw_shape(&args) && diff_args_want_raw_shape(&args),
                 "{flag} changes output shape and should still request the raw passthrough path"
             );
         }
@@ -5830,13 +7254,19 @@ A  added.rs
     }
 
     #[test]
-    fn test_diff_grammar_differs_from_logs_where_git_does() {
-        // `git diff -wl 100` clusters (rename limit); `git log -cl 2` does not. Sharing log's
-        // predicate made RTK read the 100 as a pathspec and splice its own flags before it.
+    fn test_rename_limit_takes_its_value_inside_a_cluster() {
+        // `-l` is the rename limit and takes the next argument wherever it sits in a cluster.
+        // git 2.53 runs `git log -p -wl 100` and `git show -wl 100` with 100 as the limit, and
+        // a 100 read as a pathspec would get RTK's own flags spliced in front of it. After
+        // `-c`, `-m` or `-t` git reads the 100 as a revision and exits 128, which RTK passes
+        // on; RTK does not model that split.
         let args = vec!["-wl".to_string(), "100".to_string()];
-        let tokens = tokenize_git_diff_args(&args);
-        assert_eq!(tokens[1].text, "l");
-        assert_eq!(tokens[1].value(&tokens), Some("100"));
+        let (log, diff) = (tokenize_log_args(&args), tokenize_diff_args(&args));
+        for tokens in [&log[..], &diff[..]] {
+            assert_eq!(tokens[1].text, "l");
+            assert_eq!(tokens[1].value(tokens), Some("100"));
+            assert!(!tokens[2].is_free_positional());
+        }
 
         // Options git's own completion helper lists as value-taking that RTK had missed: their
         // values were read as free positionals, which is what the project-path and pathspec
@@ -5848,7 +7278,7 @@ A  added.rs
             "min-age",
         ] {
             let args = vec![format!("--{opt}"), "x".to_string(), "HEAD".to_string()];
-            let tokens = tokenize_git_diff_args(&args);
+            let tokens = tokenize_log_args(&args);
             assert_eq!(tokens[0].value(&tokens), Some("x"), "--{opt}");
             assert!(
                 !tokens[1].is_free_positional(),
@@ -5862,8 +7292,8 @@ A  added.rs
         // Every short flag in `-pl` shares one source_index, so dropping the whole arg took
         // `-l` with it and left its `100` behind as a bogus revision.
         let rebuild = |args: &[&str]| -> Vec<String> {
-            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-            let tokens = tokenize_git_diff_args(&args);
+            let args = owned(args);
+            let tokens = tokenize_log_args(&args);
             args_without_patch_shape(&args, &tokens)
         };
 
@@ -5888,11 +7318,11 @@ A  added.rs
             .iter()
             .map(|a| a.to_string())
             .collect();
-        let tokens = tokenize_git_diff_args(&args);
+        let tokens = tokenize_log_args(&args);
         let stat_args = args_without_oneline(&args, &tokens);
         assert_eq!(stat_args, vec!["-p", "deadbee"]);
 
-        let stat_tokens = tokenize_git_diff_args(&stat_args);
+        let stat_tokens = tokenize_log_args(&stat_args);
         assert_eq!(
             args_without_patch_shape(&stat_args, &stat_tokens),
             vec!["deadbee"],
@@ -5911,12 +7341,12 @@ A  added.rs
         // written there outranks RTK's header flags wherever they are placed -- the header
         // then carried the whole patch and RTK printed it again, compacted.
         let args = vec!["HEAD~1".to_string(), "-p".to_string()];
-        let tokens = tokenize_git_diff_args(&args);
+        let tokens = tokenize_log_args(&args);
         assert_eq!(args_without_patch_shape(&args, &tokens), vec!["HEAD~1"]);
 
         for flag in ["-p", "-u", "--patch", "-U5", "-W", "--function-context"] {
             let args = vec![flag.to_string()];
-            let tokens = tokenize_git_diff_args(&args);
+            let tokens = tokenize_log_args(&args);
             assert!(
                 args_without_patch_shape(&args, &tokens).is_empty(),
                 "{flag}"
@@ -5924,7 +7354,7 @@ A  added.rs
         }
         // A flag that only tunes the diff must survive into the header.
         let args = vec!["-w".to_string()];
-        let tokens = tokenize_git_diff_args(&args);
+        let tokens = tokenize_log_args(&args);
         assert_eq!(args_without_patch_shape(&args, &tokens), vec!["-w"]);
     }
 
@@ -5934,47 +7364,67 @@ A  added.rs
         // summary, which is exactly what the compact form prints.
         for flag in ["-s", "--no-patch"] {
             let args = vec![flag.to_string()];
-            let tokens = tokenize_git_diff_args(&args);
-            assert!(tokens.iter().any(suppresses_diff_body), "{flag}");
+            let diff = tokenize_diff_args(&args);
+            assert!(suppresses_diff_body(&diff), "{flag}");
+            let show = tokenize_log_args(&args);
             assert!(
-                !tokens.iter().any(|t| show_wants_raw_shape(t, &tokens)),
+                !show_args_want_raw_shape(&args),
                 "{flag} must stay on show's compact path"
             );
+            assert!(body_is_suppressed(&show), "{flag}");
         }
         // --check replaces the body with a whitespace report in both.
         let args = vec!["--check".to_string()];
-        let tokens = tokenize_git_diff_args(&args);
-        assert!(tokens.iter().any(|t| show_wants_raw_shape(t, &tokens)));
-        assert!(tokens.iter().any(|t| diff_wants_raw_shape(t, &tokens)));
+        assert!(show_args_want_raw_shape(&args));
+        assert!(diff_args_want_raw_shape(&args));
     }
 
     #[test]
     fn test_quiet_is_raw_for_diff_but_compact_for_show() {
-        // Verified against git 2.53: `git diff --quiet` prints nothing and exits 1 on a
-        // difference, while `git show --quiet` exits 0 and prints the header its synonyms
-        // `-s`/`--no-patch` compact. Claiming it for show raw-passed that header.
+        // git 2.53: `git diff --quiet` prints nothing and exits 1 on a difference, so it takes
+        // the raw route for its exit code. `git show --quiet` exits 0 and prints the commit
+        // header, as `-s`/`--no-patch` do.
         let args = vec!["--quiet".to_string()];
-        let tokens = tokenize_git_diff_args(&args);
+        let diff = tokenize_diff_args(&args);
+        assert!(diff_args_want_raw_shape(&args), "diff needs the exit code");
+        assert!(suppresses_diff_body(&diff));
+        let show = tokenize_log_args(&args);
         assert!(
-            tokens.iter().any(|t| diff_wants_raw_shape(t, &tokens)),
-            "diff needs the exit code"
+            !show_args_want_raw_shape(&args),
+            "show's --quiet renders as the compact summary"
         );
-        assert!(
-            !tokens.iter().any(|t| show_wants_raw_shape(t, &tokens)),
-            "show's --quiet is -s, which suppresses_diff_body renders as the summary"
+        assert!(body_is_suppressed(&show));
+    }
+
+    #[test]
+    fn test_dash_q_is_quiet_for_log_and_show_but_not_for_diff() {
+        // `git log -h` and `git show -h` list `-q, --[no-]quiet  suppress diff output`;
+        // `git diff -h` lists no `-q`, and `git diff -q` prints the patch and exits 0 (git 2.53).
+        assert_eq!(
+            LOG_GRAMMAR.flag(TokenKind::Short, "q"),
+            LOG_GRAMMAR.flag(TokenKind::Long, "quiet"),
+            "-q and --quiet are one flag under log and show"
         );
-        assert!(tokens.iter().any(suppresses_diff_body));
+        assert_eq!(DIFF_GRAMMAR.flag(TokenKind::Short, "q"), None);
+
+        // `git show -q` prints the commit header and no diffstat, as `git show --quiet` does.
+        let args = vec!["-q".to_string()];
+        let show = tokenize_log_args(&args);
+        assert!(!show_args_want_raw_shape(&args));
+        assert!(body_is_suppressed(&show));
+
+        // Under diff `-q` suppresses nothing and takes no raw route.
+        let diff = tokenize_diff_args(&args);
+        assert!(!suppresses_diff_body(&diff));
+        assert!(!diff_args_want_raw_shape(&args));
     }
 
     #[test]
     fn test_raw_log_passthrough_keeps_rtks_default_limit() {
         let built = |args: &[&str]| {
             let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-            let tokens = tokenize_git_log_args(&owned);
-            assert!(
-                tokens.iter().any(|t| log_wants_raw_shape(t, &tokens)),
-                "{args:?} must route raw"
-            );
+            let tokens = tokenize_log_args(&owned);
+            assert!(requests_raw_log_output(&owned), "{args:?} must route raw");
             raw_log_passthrough_args(&owned, raw_log_is_capped(&tokens))
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())
@@ -6010,7 +7460,7 @@ A  added.rs
     fn test_show_keeps_compacting_under_oneline() {
         let gate = |args: &[&str]| {
             let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-            show_wants_format(&tokenize_git_diff_args(&owned))
+            show_wants_format(&tokenize_log_args(&owned))
         };
         // The user's own format displaces RTK's summary entirely: nothing to compact around.
         assert!(gate(&["--pretty=format:%H"]));
@@ -6025,13 +7475,17 @@ A  added.rs
     fn test_body_suppression_follows_gits_last_flag_wins() {
         // git 2.53: `git show -s -p` prints the diff, `git show -p -s` does not. Taking the
         // suppressors order-independently swallowed a patch the user asked for last.
-        // `--quiet` is deliberately not in the last-wins group: git show ignores it for shape
+        // `-q`/`--quiet` is not in the last-wins group: git show ignores it for shape
         // whenever a patch is requested, from either side, and honours it only when nothing
         // else asked for output. Every row measured against git 2.53.
-        let cases: [(&[&str], bool); 13] = [
+        let cases: [(&[&str], bool); 17] = [
             (&["-s"], true),
             (&["--no-patch"], true),
             (&["--quiet"], true),
+            (&["-q"], true),
+            (&["-q", "-p"], false),
+            (&["-p", "-q"], false),
+            (&["-q", "-s", "-p"], false),
             (&["-s", "-p"], false),
             (&["-p", "-s"], true),
             (&["--no-patch", "--patch"], false),
@@ -6045,7 +7499,7 @@ A  added.rs
         ];
         for (args, expected) in cases {
             let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-            let tokens = tokenize_git_diff_args(&owned);
+            let tokens = tokenize_log_args(&owned);
             assert_eq!(body_is_suppressed(&tokens), expected, "{args:?}");
         }
     }
@@ -6054,7 +7508,7 @@ A  added.rs
     fn test_raw_log_limit_leaves_an_explicitly_bounded_walk_alone() {
         let built = |args: &[&str]| {
             let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-            let tokens = tokenize_git_log_args(&owned);
+            let tokens = tokenize_log_args(&owned);
             raw_log_passthrough_args(&owned, raw_log_is_capped(&tokens))
                 .iter()
                 .any(|a| a == DEFAULT_LOG_LIMIT_ARG)
@@ -6085,16 +7539,8 @@ A  added.rs
             &["--line-prefix", "--stat"][..],
         ] {
             let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-            let log = tokenize_git_log_args(&owned);
-            assert!(
-                log.iter().any(|t| log_wants_raw_shape(t, &log)),
-                "{args:?} on log"
-            );
-            let diff = tokenize_git_diff_args(&owned);
-            assert!(
-                diff.iter().any(|t| diff_wants_raw_shape(t, &diff)),
-                "{args:?} on diff"
-            );
+            assert!(requests_raw_log_output(&owned), "{args:?} on log");
+            assert!(diff_args_want_raw_shape(&owned), "{args:?} on diff");
         }
     }
 
@@ -6104,11 +7550,9 @@ A  added.rs
         // emits a patch, and only the combined ones use the two `@@@` marker columns.
         let route = |args: &[&str]| {
             let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-            let log = tokenize_git_log_args(&owned);
-            let show = tokenize_git_diff_args(&owned);
             (
-                log.iter().any(|t| log_wants_raw_shape(t, &log)),
-                show.iter().any(|t| show_wants_raw_shape(t, &show)),
+                requests_raw_log_output(&owned),
+                show_args_want_raw_shape(&owned),
             )
         };
 
@@ -6167,24 +7611,16 @@ A  added.rs
         // back as `+54 -8` against git's own 156 insertions / 0 deletions.
         for flag in ["-c", "--cc"] {
             let args = vec![flag.to_string()];
-            let tokens = tokenize_git_diff_args(&args);
             assert!(
-                tokens.iter().any(|t| show_wants_raw_shape(t, &tokens)),
+                show_args_want_raw_shape(&args),
                 "{flag} must take show's raw route"
             );
-            assert!(
-                tokens.iter().any(|t| diff_wants_raw_shape(t, &tokens)),
-                "{flag} for diff too"
-            );
+            assert!(diff_args_want_raw_shape(&args), "{flag} for diff too");
         }
         // The other short flags stay on the compact path: they only restate the default.
         for flag in ["-p", "-u", "-U3"] {
             let args = vec![flag.to_string()];
-            let tokens = tokenize_git_diff_args(&args);
-            assert!(
-                !tokens.iter().any(|t| show_wants_raw_shape(t, &tokens)),
-                "{flag}"
-            );
+            assert!(!show_args_want_raw_shape(&args), "{flag}");
         }
     }
 
@@ -6193,7 +7629,7 @@ A  added.rs
         // Neither changes `git log`'s output at all (byte-identical to plain `git log`
         // against git 2.53), so routing them raw skipped RTK's own -10 and printed the
         // entire history.
-        for flag in ["--quiet", "--exit-code"] {
+        for flag in ["--exit-code", "-q", "--quiet"] {
             let args = vec![flag.to_string()];
             assert!(
                 !requests_raw_log_output(&args),
@@ -6206,11 +7642,11 @@ A  added.rs
     fn test_stat_header_flags_land_before_the_users_pathspec_boundary() {
         // `--no-patch --stat` after the user's `--` would be pathspecs, not options.
         let args = vec!["--".to_string(), "src/".to_string()];
-        let tokens = tokenize_git_log_args(&args);
+        let tokens = tokenize_log_args(&args);
         assert_eq!(arg_tokenizer::injection_point(&tokens, args.len()), 0);
 
         let args = vec!["-p".to_string()];
-        let tokens = tokenize_git_log_args(&args);
+        let tokens = tokenize_log_args(&args);
         assert_eq!(arg_tokenizer::injection_point(&tokens, args.len()), 1);
     }
 
@@ -6220,9 +7656,9 @@ A  added.rs
         // value and `-- a:b` is a pathspec, and neither should force raw passthrough.
         let blob = |args: &[&str]| -> bool {
             let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-            // diff's grammar, the one run_show actually uses: log's disagrees on clustered
-            // `-l`, so the test would assert a classification that never ships.
-            let tokens = tokenize_git_diff_args(&args);
+            // The grammar run_show reads (`LOG_GRAMMAR`), where a clustered `-l` takes its
+            // value.
+            let tokens = tokenize_log_args(&args);
             arg_tokenizer::before_dashdash(&tokens)
                 .iter()
                 .any(|t| t.is_free_positional() && is_blob_show_arg(t.text))
@@ -6284,49 +7720,697 @@ A  added.rs
 
     #[test]
     fn test_stash_show_wants_patch_ignores_dash_p_pathspec_after_double_dash() {
+        let wants_patch =
+            |args: &[&str]| stash_show_wants_patch(&tokenize_stash_show_args(&owned(args)));
         // A pathspec literally named "-p" after `--` must not be mistaken for the flag.
-        let args = vec!["--".to_string(), "-p".to_string()];
-        assert!(!stash_show_wants_patch(&args));
-
-        let args = vec!["-p".to_string()];
-        assert!(stash_show_wants_patch(&args));
-        let args = vec!["--patch".to_string()];
-        assert!(stash_show_wants_patch(&args));
+        assert!(!wants_patch(&["--", "-p"]));
+        assert!(wants_patch(&["-p"]));
+        assert!(wants_patch(&["--patch"]));
     }
 
+    /// The revision machinery takes the flag after a value-taking option as its value: git 2.53
+    /// reads the `-p` of `git stash show --author -p` as the author (and prints a patch only
+    /// because any argument makes `stash show` print one, which `run_stash` reads from the
+    /// output), and the `--word-diff` of `--author --word-diff` too, printing a plain patch.
     #[test]
-    fn test_stash_show_wants_patch_does_not_swallow_dash_p_as_log_only_option_value() {
-        // git log's grammar (where --author takes a separate value) must not apply here.
-        let args = vec!["--author".to_string(), "-p".to_string()];
-        assert!(stash_show_wants_patch(&args));
-
-        let args = vec!["--grep".to_string(), "-p".to_string()];
-        assert!(stash_show_wants_patch(&args));
+    fn test_stash_show_value_options_take_the_next_flag() {
+        for args in [["--author", "-p"], ["--grep", "-p"]] {
+            let args = owned(&args);
+            assert!(
+                !stash_show_wants_patch(&tokenize_stash_show_args(&args)),
+                "{args:?}"
+            );
+        }
+        let args = owned(&["--author", "--word-diff"]);
+        assert!(!emits_word_diff(&tokenize_stash_show_args(&args)));
+        let args = owned(&["--word-diff"]);
+        assert!(emits_word_diff(&tokenize_stash_show_args(&args)));
     }
 
+    /// `-u` is `--include-untracked` for `git stash show` (git 2.53's `git stash show -h`), not
+    /// `-p` as under `git log`, `show` and `diff`: conflating them routed `-u`'s stat-only output
+    /// through compact_diff, which only renders patch content, producing silently empty output.
     #[test]
-    fn test_stash_show_wants_patch_does_not_treat_dash_u_as_patch() {
-        // -u means --include-untracked for stash show, not -p (unlike git log, where -u is a
-        // -p synonym) -- conflating them routed -u's stat-only output through compact_diff,
-        // which only renders patch content, producing silently empty output.
-        let args = vec!["-u".to_string()];
-        assert!(!stash_show_wants_patch(&args));
-
-        let args = vec!["-u".to_string(), "-p".to_string()];
-        assert!(stash_show_wants_patch(&args));
+    fn test_stash_show_reads_dash_u_as_include_untracked() {
+        let untracked = STASH_SHOW_GRAMMAR.flag(TokenKind::Short, "u");
+        assert!(untracked.is_some());
+        assert_eq!(
+            untracked,
+            STASH_SHOW_GRAMMAR.flag(TokenKind::Long, "include-untracked")
+        );
+        let wants_patch =
+            |args: &[&str]| stash_show_wants_patch(&tokenize_stash_show_args(&owned(args)));
+        assert!(!wants_patch(&["-u"]));
+        assert!(wants_patch(&["-u", "-p"]));
+        assert!(wants_patch(&["-up"]));
     }
 
     #[test]
     fn test_has_limit_flag_ignores_a_clustered_n_with_no_captured_value() {
         // A clustered "n" with no captured value (e.g. "-cn") must not count as a limit.
         let args = vec!["-cn".to_string(), "2".to_string()];
-        let tokens = tokenize_git_log_args(&args);
+        let tokens = tokenize_log_args(&args);
         assert!(!has_limit_flag(&tokens));
 
         // The bare, standalone form still counts.
         let args = vec!["-n".to_string(), "2".to_string()];
-        let tokens = tokenize_git_log_args(&args);
+        let tokens = tokenize_log_args(&args);
         assert!(has_limit_flag(&tokens));
+
+        // `--max-count` counts in every spelling, `-N` too; `-n` is its short spelling.
+        for args in [&["--max-count"][..], &["--max-count=3"], &["-20"], &["-n3"]] {
+            let args = owned(args);
+            assert!(has_limit_flag(&tokenize_log_args(&args)), "{args:?}");
+        }
+        assert_eq!(
+            LOG_GRAMMAR.flag(TokenKind::Short, "n"),
+            LOG_GRAMMAR.flag(TokenKind::Long, "max-count")
+        );
+    }
+
+    #[test]
+    fn filtered_probe_puts_rtks_no_merges_ahead_of_every_user_argument() {
+        // Two failures ride on the position, not on the presence. Behind a bare pathspec git
+        // refuses the whole command -- "option '--no-merges' must come before non-option
+        // arguments" -- and the probe reports nothing. Behind a `--` it does not error at
+        // all: git reads it as a second pathspec, and the probe quietly measures a walk with
+        // the merges still in it.
+        for args in [
+            vec!["f.txt".to_string()],
+            vec!["--".to_string(), "f.txt".to_string()],
+            vec!["--oneline".to_string(), "f.txt".to_string()],
+        ] {
+            let built = filtered_probe_args(&args, false);
+            assert_eq!(
+                built.first().map(String::as_str),
+                Some("--no-merges"),
+                "{args:?} must carry RTK's --no-merges first, got {built:?}"
+            );
+            assert_eq!(&built[1..], &args[..], "{args:?} must be forwarded intact");
+        }
+    }
+
+    #[test]
+    fn filtered_probe_leaves_no_merges_out_when_the_user_asked_for_merges() {
+        let args = vec!["--merges".to_string()];
+        assert_eq!(filtered_probe_args(&args, true), args);
+    }
+
+    #[test]
+    fn log_wants_merges_holds_rtks_no_merges_back_for_every_merge_choice() {
+        let wants = |args: &[&str]| log_wants_merges(&tokenize_log_args(&owned(args)));
+        // The user already chose: merges only, merges never, or at least two parents.
+        for args in [
+            &["--merges"][..],
+            &["--min-parents=2"],
+            &["--min-parents=3"],
+            &["--no-merges"],
+        ] {
+            assert!(wants(args), "{args:?}");
+        }
+        // `--min-parents=1` does not ask for merges, so RTK's `--no-merges` still applies.
+        assert!(!wants(&["--min-parents=1"]));
+        assert!(!wants(&["--oneline"]));
+    }
+
+    /// What `%m` prints for a commit of a plain walk.
+    const SIDE_MARK: char = '>';
+
+    /// The opening RTK's format gives a commit: the control character, a mark, the full object
+    /// name and a space.
+    fn opening_marked(mark: char, name: &str) -> String {
+        format!("{LOG_ENTRY_START}{mark}{name} ")
+    }
+
+    fn opening(n: usize) -> String {
+        opening_marked(SIDE_MARK, &format!("{n:040x}"))
+    }
+
+    /// A commit as git prints it in RTK's format, without its opening.
+    fn block(n: usize, body: &str) -> String {
+        format!("abc{n} subject (1 day ago) <a>\n{body}\n{LOG_ENTRY_MARKER}")
+    }
+
+    fn entry(n: usize, body: &str) -> String {
+        format!("{}{}", opening(n), block(n, body))
+    }
+
+    #[test]
+    fn the_window_ends_where_the_commits_within_the_limit_end() {
+        // RTK asks git for one commit past its limit and never renders it, so counting it on
+        // the raw side of the ledger would credit RTK with compressing its own request.
+        let run: String = (0..3).map(|n| entry(n, "")).collect::<Vec<_>>().join("\n");
+        let overfetched = format!("{run}\n{}", entry(3, ""));
+        let shown: String = (0..3).map(|n| block(n, "")).collect::<Vec<_>>().join("\n");
+
+        let window = entries_window(&overfetched, 3, false);
+        assert!(window.past);
+        assert_eq!(window.shown, shown);
+        // A walk that ended on its own is left whole.
+        let window = entries_window(&run, 3, false);
+        assert!(!window.past);
+        assert_eq!(window.shown, shown);
+        let window = entries_window("", 3, false);
+        assert!(!window.past);
+        assert_eq!(window.shown, "");
+    }
+
+    #[test]
+    fn a_oneline_run_is_cut_at_its_limit_th_line() {
+        let run = "aaaa111 one\nbbbb222 two\ncccc333 three\n";
+        let window = oneline_window(run, 2).expect("every line is a commit's");
+        assert!(window.past);
+        assert_eq!(window.shown, "aaaa111 one\nbbbb222 two\n");
+        for limit in [3, 4] {
+            let window = oneline_window(run, limit).expect("every line is a commit's");
+            assert!(!window.past, "{limit}");
+            assert_eq!(window.shown, run, "{limit}");
+        }
+        let window = oneline_window("", 2).expect("an empty run");
+        assert!(!window.past);
+        assert_eq!(window.shown, "");
+        // A line that is not a commit's leaves the lines uncounted.
+        assert!(oneline_window("aaaa111 one\n    a note\nbbbb222 two\n", 1).is_none());
+    }
+
+    #[test]
+    fn a_oneline_entry_is_an_object_name_then_the_rest_of_the_line() {
+        for line in [
+            "aaaa111 subject\n",
+            "aaaa111\n",
+            "aaaa111",
+            "aaaa111\trefs/heads/main subject\n",
+            "aaaa111 (HEAD -> main) subject\r\n",
+            "aaaa111\r\n",
+            "^ aaaa111 outside the range\n",
+            "\x1b[33maaaa111\x1b[m subject\n",
+            "< aaaa111 left side\n",
+            "> aaaa111 right side\n",
+            "= aaaa111 patch-equivalent\n",
+            "+ aaaa111 not equivalent\n",
+        ] {
+            assert!(is_oneline_entry(line), "{line:?}");
+        }
+        for line in [
+            "aaa subject\n",
+            "aaaa111x subject\n",
+            "    Notes:\n",
+            "| aaaa111 subject\n",
+            "<aaaa111 subject\n",
+            "aaaa111 one\0bbbb222 two\0",
+            "\n",
+            "",
+            &format!("{} subject\n", "a".repeat(SHA256_NAME_LEN + 1)),
+        ] {
+            assert!(!is_oneline_entry(line), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_run_of_one_line_per_commit_is_read_by_its_lines() {
+        let reads = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            prints_one_line_per_commit(&tokenize_log_args(&args))
+        };
+        for args in [
+            &["--oneline"][..],
+            &["--pretty=oneline"],
+            &["--format=oneline"],
+            &["--pretty=format:%h", "--oneline"],
+            &["--oneline", "--", "--graph"],
+            &["--oneline", "--decorate", "--left-right"],
+            &["--oneline", "-m", "--merges"],
+        ] {
+            assert!(reads(args), "{args:?}");
+        }
+        for args in [
+            &[][..],
+            &["--pretty=short"],
+            &["--oneline", "--pretty=format:%h"],
+            &["--oneline", "--graph"],
+            &["--oneline", "--notes"],
+            &["--oneline", "--notes=review"],
+            &["--oneline", "--show-notes"],
+            &["--oneline", "--standard-notes"],
+            &["--oneline", "--show-notes-by-default"],
+            &["--oneline", "-z"],
+            &["--oneline", "-pz"],
+            &["--oneline", "-L1,3:f.txt"],
+            &["--oneline", "-L", "1,3:f.txt"],
+            &["--oneline", "--dd"],
+            &["--oneline", "--stat-count=1"],
+            &["--oneline", "--stat-width=60"],
+            &["--oneline", "--stat-name-width=20"],
+            &["--oneline", "--stat-graph-width=10"],
+            &["--oneline", "-X"],
+            &["--oneline", "--dirstat-by-file"],
+            &["--oneline", "--cumulative"],
+        ] {
+            assert!(!reads(args), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn text_after_a_commits_marker_is_not_a_commit() {
+        // `--dirstat`, `--stat-count` and the like print after a commit's marker. Only an
+        // opening starts a commit, and the text belongs to the commit it follows: the window
+        // ends where the next one opens, and not at the marker.
+        let entry = |n: usize| format!("{}\n 100.0% d/\n", entry(n, ""));
+        let walk: String = (0..3).map(entry).collect::<Vec<_>>().join("\n");
+        assert!(!entries_window(&walk, 3, false).past);
+        let walk = format!("{walk}\n{}", entry(3));
+        let window = entries_window(&walk, 3, false);
+        assert!(window.past);
+        assert!(
+            window
+                .shown
+                .ends_with(&format!("{LOG_ENTRY_MARKER}\n 100.0% d/\n")),
+            "{:?}",
+            window.shown
+        );
+        assert!(!window.shown.contains("abc3"));
+    }
+
+    #[test]
+    fn a_message_quoting_the_marker_is_a_cut_only_when_the_render_drops_a_commit() {
+        // The quoted marker splits one commit across two blocks, which pushes the commits after
+        // it out of the window. Quoted by the last commit it costs nothing; quoted before it,
+        // the last commit is one the render really does drop.
+        let entry = |n: usize, body: &str| format!("{}\n", entry(n, body));
+        let quoting_last: String = (0..3)
+            .map(|n| entry(n, if n == 2 { LOG_ENTRY_MARKER } else { "" }))
+            .collect();
+        assert!(!entries_window(&quoting_last, 3, false).past);
+        let quoting_middle: String = (0..3)
+            .map(|n| entry(n, if n == 1 { LOG_ENTRY_MARKER } else { "" }))
+            .collect();
+        assert!(entries_window(&quoting_middle, 3, false).past);
+    }
+
+    #[test]
+    fn the_character_that_opens_a_commit_is_content_anywhere_else() {
+        // A file's lines come out of `-L` and a message's out of `%b`, so either can hold the
+        // opening character. Only the whole opening, at the start of a record between a marker
+        // and the commit it opens, is one: it is the only thing stripped, and the only thing
+        // that can be a commit past the limit.
+        let entry = |n: usize, body: &str| format!("{}\n", entry(n, body));
+        let run = |commits: usize, patch: &str| -> String {
+            (0..commits).map(|n| entry(n, "")).collect::<String>() + patch
+        };
+        for graph in [false, true] {
+            // In the middle of a line.
+            let patch = "\n+v1\u{1}x\n";
+            let window = entries_window(&run(3, patch), 3, graph);
+            assert!(!window.past, "content after the last commit forged a cut");
+            assert!(window.shown.contains("+v1\u{1}x"), "{:?}", window.shown);
+            assert!(entries_window(&run(4, patch), 3, graph).past);
+
+            // At the start of a line a patch keeps: a context line, a removed one.
+            let patch = "\n \u{1}a\n-\u{1}b\n+\u{1}c\n";
+            let window = entries_window(&run(3, patch), 3, graph);
+            assert!(!window.past, "graph {graph}: {:?}", window.shown);
+            assert!(window.shown.ends_with(patch), "{:?}", window.shown);
+            let window = entries_window(&run(4, patch), 3, graph);
+            assert!(window.past);
+            assert!(!window.shown.contains("abc3"), "{:?}", window.shown);
+
+            // Something that reads like an opening up to its object name.
+            for forged in [
+                format!("\u{1}{SIDE_MARK}{} x\n", "a".repeat(39)),
+                format!("\u{1}{SIDE_MARK}{} x\n", "a".repeat(41)),
+                format!("\u{1}{SIDE_MARK}{} x\n", "A".repeat(40)),
+                format!("\u{1}{SIDE_MARK}{}x\n", "a".repeat(40)),
+                format!("\u{1}?{} x\n", "a".repeat(40)),
+                format!("\u{1}{SIDE_MARK}{} x\n", "a".repeat(63)),
+                format!("\u{1}{} x\n", "a".repeat(40)),
+                "\u{1}abc9 s\n".to_string(),
+            ] {
+                let window = entries_window(&run(3, &forged), 3, graph);
+                assert!(!window.past, "graph {graph}: {forged:?}");
+                assert!(window.shown.ends_with(&forged), "{forged:?}");
+            }
+        }
+
+        // In a message, in the middle of a line or at the start of one.
+        let body = "line\u{1}x\n\u{1}second";
+        let walk: String = (0..3).map(|n| entry(n, body)).collect();
+        let window = entries_window(&walk, 3, false);
+        assert!(!window.past);
+        assert_eq!(window.shown.matches('\u{1}').count(), 6);
+        assert!(!window.shown.contains(&opening(0)));
+
+        // A whole opening quoted by a message belongs to the message: it is not stripped and
+        // it is not a commit.
+        let quoted = format!("{}quoted", opening(9));
+        for graph in [false, true] {
+            let walk: String = (0..3).map(|n| entry(n, &quoted)).collect();
+            let window = entries_window(&walk, 3, graph);
+            assert!(!window.past);
+            assert_eq!(
+                window.shown.matches(&quoted).count(),
+                3,
+                "{:?}",
+                window.shown
+            );
+        }
+
+        // A line that holds a whole opening, behind the rails the walk does not draw, is
+        // content too; it takes the rails of `--graph` to be a commit.
+        let railed = format!(" {}abc9 s\n", opening(9));
+        let window = entries_window(&run(3, &railed), 3, false);
+        assert!(!window.past);
+        assert!(window.shown.ends_with(&railed));
+        assert!(entries_window(&run(3, &railed), 3, true).past);
+    }
+
+    #[test]
+    fn the_opening_survives_graph_rails_colour_and_nul_separators() {
+        let name = "e".repeat(40);
+        let open = |mark: char| opening_marked(mark, &name);
+        // `--graph` puts its rails ahead of every line, the opening's too.
+        let graphed = format!(
+            "* {}abc0 s\n| ---END---\n* {}abc1 s\n| ---END---\n",
+            open('>'),
+            open('>')
+        );
+        let window = entries_window(&graphed, 1, true);
+        assert!(window.past);
+        assert_eq!(window.shown, "* abc0 s\n| ---END---");
+        // Without `--graph` the same lines are not at the start of a record.
+        assert!(!entries_window(&graphed, 1, false).past);
+        // A boundary commit is drawn `o`, and `--left-right` draws the side.
+        for rail in ["o", "<", ">", "="] {
+            let graphed = format!(
+                "* {}abc0 s\n---END---\n{rail} {}abc1 s\n---END---\n",
+                open('>'),
+                open('>')
+            );
+            assert!(entries_window(&graphed, 1, true).past, "{rail}");
+        }
+        let coloured = format!("\u{1b}[31m*\u{1b}[m {}abc0 s\n---END---\n", open('>'));
+        assert_eq!(
+            entries_window(&coloured, 1, true).shown,
+            "\u{1b}[31m*\u{1b}[m abc0 s\n---END---\n"
+        );
+        // `-z` ends a record with a NUL.
+        let nul_separated = format!(
+            "{}abc0 s\n---END---\0{}abc1 s\n---END---\0",
+            open('>'),
+            open('<')
+        );
+        let window = entries_window(&nul_separated, 1, false);
+        assert!(window.past);
+        assert_eq!(window.shown, "abc0 s\n---END---");
+        assert!(!entries_window(&nul_separated, 2, false).past);
+        // An object name is as long as the repository's format makes it.
+        let sha256 = format!(
+            "{}abc0 s\n---END---\n{}abc1 s\n---END---\n",
+            opening_marked('>', &"f".repeat(64)),
+            opening_marked('>', &"f".repeat(64))
+        );
+        let window = entries_window(&sha256, 1, false);
+        assert!(window.past);
+        assert_eq!(window.shown, "abc0 s\n---END---");
+    }
+
+    #[test]
+    fn every_mark_git_prints_for_a_commit_opens_one() {
+        let name = "b".repeat(40);
+        let entry = |n: usize| format!("{}\n", entry(n, ""));
+        let selected: String = (0..3).map(entry).collect();
+        for mark in OPENING_MARKS {
+            let walk = format!(
+                "{selected}{}{}\n",
+                opening_marked(mark, &name),
+                block(3, "")
+            );
+            let window = entries_window(&walk, 3, false);
+            assert!(window.past, "{mark}");
+            assert!(!window.shown.contains(LOG_ENTRY_START), "{mark}");
+            assert!(!window.shown.contains("abc3"), "{mark}");
+        }
+    }
+
+    #[test]
+    fn only_the_opening_of_a_commit_is_stripped_from_what_follows_it() {
+        // The shape `-L` prints after a commit: its lines, a context line, a removed one and an
+        // added one, any of which may hold the opening character.
+        let patch = "\n \u{1}a\n-\u{1}b\n+v\u{1}x\n";
+        let run = format!("{}{patch}", entry(0, ""));
+        assert_eq!(
+            without_openings(&run, false),
+            format!("{}{patch}", block(0, ""))
+        );
+    }
+
+    #[test]
+    fn a_log_size_run_is_not_fetched_past_the_limit() {
+        let fetched = |args: &[&str]| {
+            let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            fetches_one_past_the_limit(&[], |_| None, &tokenize_log_args(&owned))
+        };
+        assert!(fetched(&[]));
+        assert!(fetched(&["--stat"]));
+        for shape in ["--log-size", "--reverse", "--boundary", "--output=o.txt"] {
+            assert!(!fetched(&[shape]), "{shape}");
+        }
+    }
+
+    #[test]
+    fn a_run_that_prints_text_ahead_of_a_commit_is_not_fetched_past_the_limit() {
+        let fetched = |global: &[&str], env: &[(&str, &str)], args: &[&str]| {
+            let global: Vec<String> = global.iter().map(|a| a.to_string()).collect();
+            let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            let env = |name: &str| {
+                env.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_string())
+            };
+            fetches_one_past_the_limit(&global, env, &tokenize_log_args(&owned))
+        };
+        for shape in [
+            vec!["--show-signature"],
+            vec!["--show-linear-break"],
+            vec!["--show-linear-break=--"],
+        ] {
+            assert!(!fetched(&[], &[], &shape), "{shape:?}");
+        }
+        assert!(!fetched(&["-c", "log.showSignature=true"], &[], &[]));
+        assert!(!fetched(&["-clog.showsignature=1"], &[], &[]));
+        assert!(!fetched(
+            &[],
+            &[
+                ("GIT_CONFIG_COUNT", "2"),
+                ("GIT_CONFIG_KEY_0", "core.abbrev"),
+                ("GIT_CONFIG_KEY_1", "log.showSignature"),
+            ],
+            &[]
+        ));
+        assert!(!fetched(
+            &[],
+            &[("GIT_CONFIG_PARAMETERS", "'log.showSignature=true'")],
+            &[]
+        ));
+        // A word after `--` is a pathspec, and a config key that is not the verdict's is not it.
+        assert!(fetched(&[], &[], &["--", "--show-signature"]));
+        assert!(fetched(&["-c", "log.decorate=short"], &[], &[]));
+        assert!(fetched(
+            &[],
+            &[
+                ("GIT_CONFIG_COUNT", "1"),
+                ("GIT_CONFIG_KEY_0", "log.decorate"),
+                ("GIT_CONFIG_VALUE_0", "log.showSignature"),
+            ],
+            &[]
+        ));
+        // A key past the count is not read.
+        assert!(fetched(
+            &[],
+            &[
+                ("GIT_CONFIG_COUNT", "1"),
+                ("GIT_CONFIG_KEY_1", "log.showSignature"),
+            ],
+            &[]
+        ));
+        assert!(fetched(&[], &[], &["--graph"]));
+    }
+
+    /// Whether the global options `global` turn the signature verdict on, in an environment that
+    /// holds `env`.
+    fn signature_verdict(global: &[&str], env: &[(&str, &str)]) -> bool {
+        let global: Vec<String> = global.iter().map(|a| a.to_string()).collect();
+        let env = |name: &str| {
+            env.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        };
+        sets_signature_verdict(&global, &env)
+    }
+
+    #[test]
+    fn a_config_value_git_reads_as_false_does_not_turn_the_signature_verdict_on() {
+        for value in ["false", "False", "no", "OFF", "0", "00", "-0", ""] {
+            let setting = format!("log.showSignature={value}");
+            assert!(!signature_verdict(&["-c", &setting], &[]), "{setting}");
+        }
+        for value in ["true", "yes", "on", "1", "2", "maybe", " "] {
+            let setting = format!("log.showSignature={value}");
+            assert!(signature_verdict(&["-c", &setting], &[]), "{setting}");
+        }
+        // The key is compared without regard to case, and a key with no value is a true one.
+        assert!(signature_verdict(&["-c", "LOG.SHOWSIGNATURE=true"], &[]));
+        assert!(signature_verdict(&["-c", "log.showsignature"], &[]));
+        assert!(!signature_verdict(&["-c", "log.decorate=short"], &[]));
+    }
+
+    #[test]
+    fn the_signature_verdict_is_read_from_every_form_of_the_option() {
+        assert!(signature_verdict(&["-clog.showSignature=true"], &[]));
+        assert!(!signature_verdict(&["-clog.showSignature=off"], &[]));
+        assert!(signature_verdict(
+            &[
+                "-C",
+                "repo",
+                "-c",
+                "core.abbrev=9",
+                "-c",
+                "log.showSignature=1"
+            ],
+            &[]
+        ));
+        // `--config-env` names a variable that holds the value.
+        let sig = |value| [("SIG", value)];
+        for global in [
+            ["--config-env=log.showSignature=SIG"].as_slice(),
+            ["--config-env", "log.showSignature=SIG"].as_slice(),
+        ] {
+            assert!(signature_verdict(global, &sig("true")), "{global:?}");
+            assert!(signature_verdict(global, &[]), "{global:?}");
+            assert!(!signature_verdict(global, &sig("off")), "{global:?}");
+        }
+        assert!(!signature_verdict(
+            &["--config-env=log.decorate=SIG"],
+            &sig("true")
+        ));
+    }
+
+    #[test]
+    fn text_that_is_not_a_setting_does_not_turn_the_signature_verdict_on() {
+        assert!(!signature_verdict(
+            &["-C", "/home/me/log.showsignature-notes"],
+            &[]
+        ));
+        assert!(!signature_verdict(&["-C", "log.showSignature=true"], &[]));
+        assert!(!signature_verdict(
+            &["--git-dir=/log.showSignature=true"],
+            &[]
+        ));
+        assert!(!signature_verdict(
+            &["--git-dir", "/x/log.showSignature"],
+            &[]
+        ));
+        assert!(!signature_verdict(
+            &["-c", "core.pager=log.showSignature=true"],
+            &[]
+        ));
+        assert!(!signature_verdict(&["--no-pager"], &[]));
+    }
+
+    #[test]
+    fn a_closing_newline_is_not_a_commit() {
+        let bound = |args: &[&str], stdout: &str| {
+            let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            at_most_commits(stdout, &tokenize_log_args(&owned))
+        };
+        // Forty-nine commits, each closed by a newline, are forty-nine and not fifty.
+        let forty_nine: String = (0..49).map(|i| format!("abc{i:04} s\n")).collect();
+        assert_eq!(bound(&["--oneline"], &forty_nine), Some(49));
+        let fifty: String = (0..50).map(|i| format!("abc{i:04} s\n")).collect();
+        assert_eq!(bound(&["--oneline"], &fifty), Some(50));
+        assert_eq!(bound(&["--pretty=tformat:%h"], "a\nb\n"), Some(2));
+        assert_eq!(bound(&["--format=%h"], "a\nb\n"), Some(2));
+        assert_eq!(bound(&["--format=tformat:%h"], "a\nb\n"), Some(2));
+        assert_eq!(bound(&["--pretty=%h"], "a\nb\n"), Some(2));
+        // `--pretty=format:` leaves the last one open, and that is the same count.
+        let open = ["--pretty=format:%h"];
+        assert_eq!(bound(&open, "a\nb\nc"), Some(3));
+        // `--format=format:` is the same format as `--pretty=format:`: the newline that ends
+        // fifty commits rendered as no bytes is a separator, not a close.
+        assert_eq!(bound(&["--format=format:%b"], &"\n".repeat(49)), Some(50));
+        assert_eq!(bound(&["--format=format:%h"], "a\nb\nc"), Some(3));
+        // A newline at the end of it separates the last commit from nothing: fifty commits that
+        // render as no bytes are forty-nine newlines.
+        assert_eq!(bound(&["--pretty=format:"], &"\n".repeat(49)), Some(50));
+        // A template that prints a newline of its own can only raise the bound.
+        assert_eq!(bound(&open, "a\n\nb\n"), Some(4));
+        assert_eq!(bound(&["--oneline"], ""), Some(0));
+        assert_eq!(bound(&["--format="], ""), None);
+    }
+
+    #[test]
+    fn a_format_is_classed_by_whether_git_closes_or_separates_its_commits() {
+        let closes = |args: &[&str]| {
+            let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            newline_closes_each_commit(&tokenize_log_args(&owned))
+        };
+        // Every format git builds in ends a commit with a newline, by either flag.
+        for name in [
+            "oneline",
+            "short",
+            "medium",
+            "full",
+            "fuller",
+            "reference",
+            "email",
+            "mboxrd",
+            "raw",
+        ] {
+            assert!(closes(&[&format!("--pretty={name}")]), "--pretty={name}");
+            assert!(closes(&[&format!("--format={name}")]), "--format={name}");
+        }
+        assert!(closes(&["--oneline"]));
+        assert!(closes(&["--pretty=tformat:%h"]));
+        assert!(closes(&["--format=tformat:%h"]));
+        assert!(closes(&["--format=%h"]));
+        assert!(closes(&["--pretty=%h"]));
+        // `format:` separates, whichever flag spells it.
+        assert!(!closes(&["--pretty=format:%h"]));
+        assert!(!closes(&["--format=format:%h"]));
+        // A name git does not build in is a `pretty.<name>` alias, which may be either.
+        assert!(!closes(&["--pretty=changelog"]));
+        assert!(!closes(&["--pretty=ref"]));
+        assert!(!closes(&["--pretty=Reference"]));
+        assert!(!closes(&[]));
+        // The last format flag wins, as it does in git.
+        assert!(!closes(&["--oneline", "--pretty=format:%h"]));
+        assert!(closes(&["--pretty=format:%h", "--pretty=reference"]));
+    }
+
+    #[test]
+    fn git_refuses_from_128_up_and_runs_the_walk_below_it() {
+        // 1 and 2 are what `--exit-code` and `--check` report on a walk git printed in full.
+        for code in [0, 1, 2, 127] {
+            assert!(!refused_by_git(code), "{code}");
+        }
+        for code in [128, 129, 130, 255] {
+            assert!(refused_by_git(code), "{code}");
+        }
+        // A git that crashed on Windows reports the NTSTATUS, which is negative.
+        for code in [-1, -1073741819, i32::MIN] {
+            assert!(refused_by_git(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn user_format_lines_are_cut_to_width_and_shown_up_to_the_limit() {
+        let long = format!("    {}", "word ".repeat(30));
+        let output = format!("commit abc\n{long}\nAuthor: t\ncommit def\n{long}\n");
+        let stored = format_user_log_lines(&output, LOG_LINE_WIDTH);
+        assert_eq!(stored.len(), 5);
+        assert!(stored.iter().all(|l| l.chars().count() <= LOG_LINE_WIDTH));
+        assert!(stored[1].ends_with("..."), "{:?}", stored[1]);
+        assert_eq!(shown_user_log_lines(&stored, 3, false), &stored[..3]);
+        assert_eq!(shown_user_log_lines(&stored, 3, true), &stored[..]);
     }
 
     #[test]
@@ -6433,7 +8517,7 @@ A  added.rs
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let output = filter_log_output(&input, 10, false, false);
+        let output = filter_log_output(&input, 10, false);
         let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
         assert!(
             savings >= 60.0,
@@ -6475,7 +8559,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     fn test_filter_log_output_multibyte() {
         // Thai characters: each is 3 bytes. A line with >80 bytes but few chars
         let thai_msg = format!("abc1234 {} (2 days ago) <author>", "ก".repeat(30));
-        let result = filter_log_output(&thai_msg, 10, false, false);
+        let result = filter_log_output(&thai_msg, 10, false);
         // Should not panic
         assert!(result.contains("abc1234"));
         // The line has 30 Thai chars + other text, so > 80 chars total
@@ -6487,7 +8571,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     fn test_filter_log_output_emoji() {
         let emoji_msg = "abc1234 🎉🎊🎈🎁🎂🎄🎃🎆🎇✨🎉🎊🎈🎁🎂🎄🎃🎆🎇✨ (1 day ago) <user>";
-        let result = filter_log_output(emoji_msg, 10, false, false);
+        let result = filter_log_output(emoji_msg, 10, false);
         // Should not panic
         // 20 emoji + ~30 other chars = ~50 chars < 80, no truncation needed
         assert!(result.contains("abc1234"));
@@ -6626,17 +8710,17 @@ no changes added to commit (use "git add" and/or "git commit -a")
     }
 
     /// Regression test: --oneline and other user format flags must preserve all commits.
-    /// Before fix, filter_log_output split on ---END--- which doesn't exist when
-    /// the user specifies their own format, resulting in only 2 commits surviving.
+    /// A user format carries no ---END--- markers, so it is shown line by line.
     #[test]
-    fn test_filter_log_output_user_format_oneline() {
+    fn test_user_format_log_lines_oneline() {
         let oneline_output = "abc1234 feat: add feature\n\
                               def5678 fix: typo\n\
                               ghi9012 chore: bump deps\n\
                               jkl3456 docs: update readme\n\
                               mno7890 test: add tests\n";
 
-        let result = filter_log_output(oneline_output, 10, false, true);
+        let lines = format_user_log_lines(oneline_output, LOG_LINE_WIDTH);
+        let result = shown_user_log_lines(&lines, 10, false).join("\n");
         // All 5 lines must survive — no ---END--- splitting
         assert_eq!(result.lines().count(), 5);
         assert!(result.contains("abc1234"));
@@ -6644,7 +8728,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     }
 
     #[test]
-    fn test_filter_log_output_user_format_with_limit() {
+    fn test_user_format_log_lines_with_limit() {
         let oneline_output = "abc1234 feat: add feature\n\
                               def5678 fix: typo\n\
                               ghi9012 chore: bump deps\n\
@@ -6652,12 +8736,13 @@ no changes added to commit (use "git add" and/or "git commit -a")
                               mno7890 test: add tests\n";
 
         // user_set_limit=true means respect all lines (no cap)
-        let result = filter_log_output(oneline_output, 3, true, true);
-        assert_eq!(result.lines().count(), 5);
+        let lines = format_user_log_lines(oneline_output, LOG_LINE_WIDTH);
+        let result = shown_user_log_lines(&lines, 3, true);
+        assert_eq!(result.len(), 5);
 
         // user_set_limit=false means cap at limit
-        let result = filter_log_output(oneline_output, 3, false, true);
-        assert_eq!(result.lines().count(), 3);
+        let result = shown_user_log_lines(&lines, 3, false);
+        assert_eq!(result.len(), 3);
     }
 
     /// Regression test: `git branch <name>` must create, not list.
@@ -6928,7 +9013,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
             "abc1234 feat: big change (1 day ago) <author>\n{}\n---END---\n",
             body_lines
         );
-        let result = filter_log_output(&output, 10, false, false);
+        let result = filter_log_output(&output, 10, false);
         assert!(
             result.contains("+3 lines omitted"),
             "Expected '+3 lines omitted' when 6 body lines truncated to 3, got:\n{}",
@@ -7084,7 +9169,7 @@ To https://github.com/foo/bar.git
 
     fn probe_args(args: &[&str]) -> Vec<String> {
         let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        let tokens = tokenize_git_log_args(&owned);
+        let tokens = tokenize_log_args(&owned);
         log_probe_args(&owned, &tokens)
     }
 
@@ -7156,10 +9241,583 @@ To https://github.com/foo/bar.git
     }
 
     #[test]
+    fn log_probe_args_drops_every_flag_that_decides_what_git_does_with_the_walk() {
+        for flag in [
+            "--check",
+            "--exit-code",
+            "--format=%H",
+            "--graph",
+            "--line-prefix=> ",
+            "--oneline",
+            "--output=walk.txt",
+            "--pretty=short",
+            "--reverse",
+            "--skip=2",
+        ] {
+            assert_eq!(
+                probe_args(&[flag, "HEAD~3..HEAD"]),
+                vec!["HEAD~3..HEAD"],
+                "{flag}"
+            );
+        }
+        // A separate-token value goes with its flag.
+        assert_eq!(
+            probe_args(&["--skip", "2", "HEAD~3..HEAD"]),
+            vec!["HEAD~3..HEAD"]
+        );
+    }
+
+    #[test]
+    fn selects_by_diff_reads_every_diff_based_filter() {
+        let selects = |args: &[&str]| selects_by_diff(&tokenize_log_args(&owned(args)));
+        for args in [
+            &["--diff-filter=A"][..],
+            &["--find-object=abc123"],
+            &["-Gneedle"],
+            &["--pickaxe-all"],
+            &["--pickaxe-regex"],
+            &["-Sneedle"],
+        ] {
+            assert!(selects(args), "{args:?}");
+        }
+        assert!(!selects(&["--oneline", "HEAD~3..HEAD"]));
+        // Past `--` it is a pathspec, not a filter.
+        assert!(!selects(&["--", "--pickaxe-all"]));
+    }
+
+    /// `--graph` draws a rail in front of every record and `--reverse` moves where
+    /// `--max-count` applies, so neither reaches the probe; a pathspec past `--` spelled like
+    /// one stays.
+    #[test]
+    fn log_probe_args_drops_graph_and_reverse() {
+        assert!(probe_args(&["--graph"]).is_empty());
+        assert!(probe_args(&["--reverse"]).is_empty());
+        assert_eq!(
+            probe_args(&["--graph", "--", "--reverse"]),
+            vec!["--", "--reverse"]
+        );
+    }
+
+    #[test]
     fn log_probe_args_drops_a_line_prefix_in_either_spelling() {
         // Its text lands in front of every record, and the commit names came back unreadable
         // behind it.
         assert!(probe_args(&["-p", "--line-prefix=zz"]).is_empty());
         assert!(probe_args(&["-p", "--line-prefix", "zz"]).is_empty());
+    }
+
+    /// Rebuilds git's `--name-only` lines from a folded listing, reading it the way
+    /// `fold_ls_tree_paths` documents it.
+    fn unfold_ls_tree(folded: &str) -> String {
+        let mut paths = String::new();
+        for line in folded.lines() {
+            if let Some(inner) = line.strip_prefix('"') {
+                if line.contains('\\') {
+                    paths.push_str(line);
+                } else {
+                    paths.push_str(inner.strip_suffix('"').expect("closing quote"));
+                }
+                paths.push('\n');
+                continue;
+            }
+            let mut words = line.split(' ');
+            let dir = words.next().expect("directory");
+            assert!(
+                dir.ends_with('/'),
+                "a fold line starts with its directory: {line:?}"
+            );
+            let dir = if dir == "./" { "" } else { dir };
+            for name in words {
+                paths.push_str(dir);
+                paths.push_str(name);
+                paths.push('\n');
+            }
+        }
+        paths
+    }
+
+    fn ls_tree_args(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    const LS_TREE_LISTING: &str =
+        include_str!("../../../tests/fixtures/git/ls_tree_name_only_raw.txt");
+
+    #[test]
+    fn ls_tree_fold_rebuilds_a_real_listing_line_for_line() {
+        let args = ls_tree_args(&["-r", "--name-only", "HEAD"]);
+        let folded = render_ls_tree(&args, LS_TREE_LISTING.as_bytes(), true).expect("folds");
+        assert_eq!(unfold_ls_tree(&folded), LS_TREE_LISTING);
+        assert!(folded.starts_with(".cargo/ config.toml\n"), "{folded}");
+        assert!(
+            folded.contains("\nsrc/cmds/git/ README.md diff_cmd.rs "),
+            "one line per directory run:\n{folded}"
+        );
+    }
+
+    #[test]
+    fn ls_tree_fold_savings_match_the_declared_figure() {
+        let args = ls_tree_args(&["-r", "--name-only", "HEAD"]);
+        let folded = render_ls_tree(&args, LS_TREE_LISTING.as_bytes(), true).expect("folds");
+        let savings = 100.0 - folded.len() as f64 / LS_TREE_LISTING.len() as f64 * 100.0;
+        assert!(
+            savings >= 20.0,
+            "ls-tree fold: expected >=20%, got {savings:.1}%"
+        );
+        let declared = crate::discover::rules::RULES
+            .iter()
+            .find(|r| r.rtk_cmd == "rtk git")
+            .and_then(|r| r.subcmd_savings.iter().find(|(sub, _)| *sub == "ls-tree"))
+            .map(|(_, pct)| *pct)
+            .expect("ls-tree declares its savings");
+        assert!(
+            (savings - declared).abs() < 1.0,
+            "subcmd_savings says {declared}%, the captured listing measures {savings:.1}%"
+        );
+    }
+
+    #[test]
+    fn ls_tree_fold_keeps_unsplittable_paths_on_their_own_lines() {
+        let listing = concat!(
+            "Cargo.toml\n",
+            "README.md\n",
+            "dir with space/a.rs\n",
+            "my file.txt\n",
+            "\"quote\\\"name\"\n",
+            "\"src/\\303\\251.rs\"\n",
+            "src/lib.rs\n",
+            "src/main.rs\n",
+            "src/parser.rs\n",
+            "src/runner.rs\n",
+        );
+        let args = ls_tree_args(&["-r", "--name-only", "HEAD"]);
+        let folded = render_ls_tree(&args, listing.as_bytes(), true).expect("folds");
+        assert_eq!(
+            folded,
+            concat!(
+                "./ Cargo.toml README.md\n",
+                "\"dir with space/a.rs\"\n",
+                "\"my file.txt\"\n",
+                "\"quote\\\"name\"\n",
+                "\"src/\\303\\251.rs\"\n",
+                "src/ lib.rs main.rs parser.rs runner.rs\n",
+            )
+        );
+        assert_eq!(unfold_ls_tree(&folded), listing);
+    }
+
+    #[test]
+    fn ls_tree_fold_follows_git_order_instead_of_merging_directories() {
+        let listing = "src/a.rs\nsrc/cmds/x.rs\nsrc/cmds/y.rs\nsrc/lib.rs\nsrc/main.rs\n";
+        let args = ls_tree_args(&["-r", "--name-only"]);
+        let folded = render_ls_tree(&args, listing.as_bytes(), true).expect("folds");
+        assert_eq!(
+            folded,
+            "src/ a.rs\nsrc/cmds/ x.rs y.rs\nsrc/ lib.rs main.rs\n"
+        );
+        assert_eq!(unfold_ls_tree(&folded), listing);
+    }
+
+    #[test]
+    fn ls_tree_renders_git_bytes_unless_a_plain_path_list_shrinks() {
+        let name_only = ls_tree_args(&["-r", "--name-only", "HEAD"]);
+        let listing = LS_TREE_LISTING.as_bytes();
+        // One path, nothing to fold.
+        assert_eq!(render_ls_tree(&name_only, b"src/main.rs\n", true), None);
+        // Folding that does not shrink the listing.
+        assert_eq!(render_ls_tree(&name_only, b"a/x\nb/y\n", true), None);
+        // git failed: its stdout is not a listing to trust.
+        assert_eq!(render_ls_tree(&name_only, listing, false), None);
+        // Not UTF-8, missing final newline, a blank line: not a listing rtk reads.
+        assert_eq!(
+            render_ls_tree(&name_only, b"a/\xff\na/y\na/z\n", true),
+            None
+        );
+        assert_eq!(
+            render_ls_tree(&name_only, b"src/a.rs\nsrc/b.rs", true),
+            None
+        );
+        assert_eq!(
+            render_ls_tree(&name_only, b"src/a.rs\n\nsrc/b.rs\n", true),
+            None
+        );
+        // `--name-status` is git's alias for `--name-only`.
+        let name_status = ls_tree_args(&["-r", "--name-status", "HEAD"]);
+        assert!(render_ls_tree(&name_status, listing, true).is_some());
+    }
+
+    #[test]
+    fn ls_tree_folds_only_plain_path_list_forms() {
+        for folds in [
+            &["--name-only", "HEAD"][..],
+            &["-r", "--name-only", "HEAD"],
+            &["-rt", "--name-status", "HEAD", "src"],
+            &["-d", "--name-only", "--full-name", "HEAD"],
+            &[
+                "--name-only",
+                "--full-tree",
+                "--abbrev=8",
+                "HEAD",
+                "--",
+                "src",
+            ],
+        ] {
+            assert!(ls_tree_folds(folds), "{folds:?} should fold");
+        }
+        for verbatim in [
+            &["HEAD"][..],
+            &["-r", "HEAD"],
+            &["-l", "--name-only", "HEAD"],
+            &["--long", "--name-only", "HEAD"],
+            &["-z", "--name-only", "HEAD"],
+            &["-rz", "--name-only", "HEAD"],
+            &["--name-only", "--format=%(path)", "HEAD"],
+            &["--name-only", "--format", "%(path)", "HEAD"],
+            &["--name-only", "--object-only", "HEAD"],
+            &["--name-o", "HEAD"],
+            &["--name-only", "-h"],
+            &["HEAD", "--", "--name-only"],
+        ] {
+            assert!(!ls_tree_folds(verbatim), "{verbatim:?} must pass through");
+        }
+    }
+
+    // --- Declared grammars: each checked against an explicit table of what it answers ---
+
+    /// The revision-walk long flags `git log`, `diff` and `show` take a value for.
+    const REV_WALK_LONG: &[&str] = &[
+        "after",
+        "anchored",
+        "author",
+        "before",
+        "color-moved-ws",
+        "committer",
+        "date",
+        "decorate-refs",
+        "decorate-refs-exclude",
+        "diff-algorithm",
+        "diff-filter",
+        "diff-merges",
+        "dst-prefix",
+        "encoding",
+        "exclude",
+        "find-object",
+        "glob",
+        "grep",
+        "grep-reflog",
+        "ignore-matching-lines",
+        "inter-hunk-context",
+        "line-prefix",
+        "max-age",
+        "max-count",
+        "max-depth",
+        "min-age",
+        "output",
+        "output-indicator-context",
+        "output-indicator-new",
+        "output-indicator-old",
+        "rotate-to",
+        "since",
+        "since-as-filter",
+        "skip",
+        "skip-to",
+        "src-prefix",
+        "stat-count",
+        "stat-graph-width",
+        "stat-name-width",
+        "stat-width",
+        "until",
+        "word-diff-regex",
+        "ws-error-highlight",
+    ];
+
+    /// The rows [`LOG_GRAMMAR`], [`DIFF_GRAMMAR`] and [`STASH_SHOW_GRAMMAR`] all declare.
+    const REV_WALK_ROWS: &[TakesValueRow] = &[
+        (TokenKind::Long, REV_WALK_LONG, Some(ValueSpec::value())),
+        (
+            TokenKind::Long,
+            &[
+                "break-rewrites",
+                "color-words",
+                "dirstat",
+                "dirstat-by-file",
+                "find-copies",
+                "find-renames",
+                "format",
+                "min-parents",
+                "notes",
+                "pretty",
+                "show-linear-break",
+                "show-notes",
+                "stat",
+                "unified",
+                "word-diff",
+            ],
+            Some(ValueSpec::attached_only()),
+        ),
+        (
+            TokenKind::Long,
+            &[
+                "binary",
+                "boundary",
+                "cc",
+                "check",
+                "compact-summary",
+                "cumulative",
+                "dd",
+                "exit-code",
+                "ext-diff",
+                "filters",
+                "function-context",
+                "graph",
+                "log-size",
+                "merges",
+                "name-only",
+                "name-status",
+                "no-merges",
+                "no-patch",
+                "numstat",
+                "oneline",
+                "patch",
+                "patch-with-raw",
+                "patch-with-stat",
+                "pickaxe-all",
+                "pickaxe-regex",
+                "raw",
+                "remerge-diff",
+                "reverse",
+                "shortstat",
+                "show-notes-by-default",
+                "show-signature",
+                "standard-notes",
+                "summary",
+                "textconv",
+            ],
+            None,
+        ),
+        (
+            TokenKind::Short,
+            &["B", "C", "M", "U", "X"],
+            Some(ValueSpec::attached_only()),
+        ),
+        (
+            TokenKind::Short,
+            &["G", "I", "L", "l", "O", "S"],
+            Some(ValueSpec::value()),
+        ),
+        (TokenKind::Short, &["n"], Some(ValueSpec::solo_only())),
+        (TokenKind::Short, &["c", "p", "s", "W", "z"], None),
+    ];
+
+    /// Asserts that `grammar` declares the [`REV_WALK_ROWS`] and `extra`, and nothing else.
+    #[track_caller]
+    fn assert_rev_walk_table(grammar: &Grammar, extra: &[TakesValueRow]) {
+        let rows: Vec<TakesValueRow> = REV_WALK_ROWS.iter().chain(extra).copied().collect();
+        assert_takes_value_table(grammar, &rows);
+    }
+
+    #[test]
+    fn test_log_grammar_matches_its_table() {
+        assert_rev_walk_table(
+            &LOG_GRAMMAR,
+            &[
+                (TokenKind::Long, &["quiet"][..], None),
+                (TokenKind::Short, &["q", "u"][..], None),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_diff_grammar_matches_its_table() {
+        assert_rev_walk_table(
+            &DIFF_GRAMMAR,
+            &[
+                (TokenKind::Long, &["quiet"][..], None),
+                (TokenKind::Short, &["u"][..], None),
+            ],
+        );
+    }
+
+    /// Every option git 2.53 spells both ways (`git range-diff -h` lists the diff options
+    /// `log`, `diff` and `show` share; `git log -h` and `git show -h` add `-q`/`--quiet`) that a
+    /// grammar declares is one flag, so a question asked of one spelling is answered for the
+    /// other.
+    #[test]
+    fn test_rev_walk_grammars_pair_git_spellings() {
+        for (grammar, short, long) in
+            [(&LOG_GRAMMAR, "q", "quiet")]
+                .into_iter()
+                .chain(REV_WALK_PAIRS.iter().flat_map(|&(short, long)| {
+                    [(&LOG_GRAMMAR, short, long), (&DIFF_GRAMMAR, short, long)]
+                }))
+        {
+            let flag = grammar.flag(TokenKind::Short, short);
+            assert!(flag.is_some(), "-{short} is declared");
+            assert_eq!(
+                flag,
+                grammar.flag(TokenKind::Long, long),
+                "-{short} and --{long} are one flag"
+            );
+        }
+    }
+
+    /// The short and long spellings git 2.53 pairs among the options `log`, `diff` and `show`
+    /// share.
+    const REV_WALK_PAIRS: &[(&str, &str)] = &[
+        ("B", "break-rewrites"),
+        ("C", "find-copies"),
+        ("I", "ignore-matching-lines"),
+        ("M", "find-renames"),
+        ("U", "unified"),
+        ("W", "function-context"),
+        ("X", "dirstat"),
+        ("n", "max-count"),
+        ("p", "patch"),
+        ("s", "no-patch"),
+    ];
+
+    #[test]
+    fn test_global_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &GLOBAL_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &[
+                        "attr-source",
+                        "config-env",
+                        "git-dir",
+                        "namespace",
+                        "super-prefix",
+                        "work-tree",
+                    ],
+                    Some(ValueSpec::value()),
+                ),
+                (TokenKind::Short, &["C", "c"], Some(ValueSpec::value())),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_ls_tree_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &LS_TREE_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &["abbrev"],
+                    Some(ValueSpec::attached_only()),
+                ),
+                (
+                    TokenKind::Long,
+                    &["full-name", "full-tree", "name-only", "name-status"],
+                    None,
+                ),
+                (TokenKind::Short, &["d", "r", "t"], None),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_status_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &STATUS_GRAMMAR,
+            &[
+                (TokenKind::Long, &["branch", "short"], None),
+                (TokenKind::Short, &["b", "s"], None),
+            ],
+        );
+    }
+
+    /// [`STASH_SHOW_GRAMMAR`] declares the rows the revision-walk grammars share, without `-u`
+    /// as `-p`, and `stash show`'s own options.
+    #[test]
+    fn test_stash_show_grammar_matches_its_table() {
+        assert_rev_walk_table(
+            &STASH_SHOW_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &[
+                        "include-untracked",
+                        "no-include-untracked",
+                        "only-untracked",
+                        "quiet",
+                    ][..],
+                    None,
+                ),
+                (TokenKind::Short, &["u"][..], None),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_worktree_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &WORKTREE_GRAMMAR,
+            &[
+                (TokenKind::Long, &["dry-run", "verbose"], None),
+                (TokenKind::Short, &["n", "v"], None),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_checkout_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &CHECKOUT_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &["conflict", "orphan", "pathspec-from-file"],
+                    Some(ValueSpec::value()),
+                ),
+                (TokenKind::Short, &["B", "b"], Some(ValueSpec::value())),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_branch_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &BRANCH_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &[
+                        "contains",
+                        "format",
+                        "merged",
+                        "no-contains",
+                        "no-merged",
+                        "points-at",
+                        "set-upstream-to",
+                        "sort",
+                    ],
+                    Some(ValueSpec::value()),
+                ),
+                (TokenKind::Short, &["u"], Some(ValueSpec::value())),
+                (
+                    TokenKind::Long,
+                    &[
+                        "all",
+                        "copy",
+                        "delete",
+                        "edit-description",
+                        "list",
+                        "move",
+                        "remotes",
+                        "show-current",
+                        "unset-upstream",
+                    ],
+                    None,
+                ),
+                (
+                    TokenKind::Short,
+                    &["a", "C", "c", "D", "d", "l", "M", "m", "r"],
+                    None,
+                ),
+            ],
+        );
     }
 }
