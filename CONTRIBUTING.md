@@ -92,7 +92,7 @@ RTK also provides an engine with pipelines and a daemon, allowing you to build b
 
 - Interactive TUIs (htop, vim, less): not batch-mode compatible
 - Binary output (images, compiled artifacts): no text to filter
-- Trivial commands: not worth the overhead and may loose important informations
+- Trivial commands: not worth the overhead and may lose important information
 - Commands with no text output: nothing to compress
 - Others features not related to a LLM-proxy like RTK
 

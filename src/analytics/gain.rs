@@ -12,6 +12,34 @@ use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+#[cfg(windows)]
+fn requires_plain_console_output(mode: Option<u32>) -> bool {
+    use windows_sys::Win32::System::Console::{
+        ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+    };
+    let ansi = ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    mode.is_some_and(|mode| mode & ansi != ansi)
+}
+
+/// A legacy console is a terminal, but displays ANSI escapes literally. Leave
+/// pipes and pseudo-terminals to `colored`'s usual terminal and environment checks.
+#[cfg(windows)]
+pub(crate) fn configure_console_color() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::GetConsoleMode;
+
+    let stdout = std::io::stdout();
+    let mut mode = 0;
+    // SAFETY: stdout owns the handle for this call and mode is writable.
+    #[allow(unsafe_code)]
+    let has_mode = unsafe { GetConsoleMode(stdout.as_raw_handle(), &mut mode) } != 0;
+    if requires_plain_console_output(has_mode.then_some(mode))
+        && crate::core::user_env::var("CLICOLOR_FORCE").is_none_or(|value| value == "0")
+    {
+        colored::control::set_override(false);
+    }
+}
+
 /// `--format json` for the attribution views: the same rows the text view
 /// prints, as data. Sections appear only when their flag was asked for.
 fn attribution_json(
@@ -115,12 +143,38 @@ pub fn run_reset(yes: bool) -> Result<bool> {
     tracker
         .reset_all()
         .context("Failed to reset token savings")?;
-    crate::core::retriever::reset_stats().context("Failed to reset recall stats")?;
+    // The reset replays the steps, so only a new open knows whether that worked.
+    if let Ok(tracker) = Tracker::new() {
+        report_not_upgraded(tracker.not_upgraded());
+    }
+    // The tracking history is already gone, so that is said before the failure of an
+    // unusable recall store (another database's file, a locked or failed migration,
+    // read-only) is returned.
+    if let Err(e) = crate::core::retriever::reset_stats() {
+        crate::core::retriever::report_missing_table(&e);
+        println!("{}", styled("Token savings reset to zero.", true));
+        return Err(e.context("recall stats were not reset"));
+    }
+    report_not_upgraded(crate::core::retriever::not_upgraded());
     println!(
         "{}",
         styled("Token savings and recall stats reset to zero.", true)
     );
     Ok(true)
+}
+
+/// A database that failed to upgrade is used as it is, so a report says so.
+fn report_not_upgraded(note: Option<String>) {
+    if let Some(note) = note {
+        eprintln!("rtk: {note}");
+    }
+}
+
+/// The tracking database for a report.
+fn tracker_for_report(context: &'static str) -> Result<Tracker> {
+    let tracker = Tracker::new().context(context)?;
+    report_not_upgraded(tracker.not_upgraded());
+    Ok(tracker)
 }
 
 pub fn run_attribution(
@@ -131,7 +185,7 @@ pub fn run_attribution(
     shadow: bool,
     format: &str,
 ) -> Result<()> {
-    let tracker = Tracker::new().context("Failed to open tracking database")?;
+    let tracker = tracker_for_report("Failed to open tracking database")?;
     const DAYS: u32 = 30;
 
     if format == "json" {
@@ -393,7 +447,7 @@ pub fn hook_slices_for(
 pub fn run_pipeline_detail(name: &str) -> Result<()> {
     let sanitized = crate::core::utils::sanitize_for_terminal(name);
     let name = sanitized.as_str();
-    let tracker = Tracker::new().context("Failed to open tracking database")?;
+    let tracker = tracker_for_report("Failed to open tracking database")?;
     const DAYS: u32 = 30;
 
     let hook_total = tracker
@@ -645,13 +699,14 @@ pub fn run(
     if recalls && !reset {
         return show_recall_stats();
     }
-    let tracker = Tracker::new().context("Failed to initialize tracking database")?;
     let project_scope = resolve_project_scope(project)?; // added: resolve project path
 
     if reset {
         run_reset(yes)?;
         return Ok(());
     }
+
+    let tracker = tracker_for_report("Failed to initialize tracking database")?;
 
     if failures {
         return show_failures(&tracker);
@@ -1444,7 +1499,10 @@ fn show_recall_stats() -> Result<()> {
         RecoveryMode::Tee => "tee",
         RecoveryMode::Disabled => "disabled",
     };
-    let stats = crate::core::retriever::stats_snapshot()?;
+    let stats = crate::core::retriever::stats_snapshot()
+        .inspect_err(crate::core::retriever::report_missing_table)
+        .context("Recall store unavailable")?;
+    report_not_upgraded(crate::core::retriever::not_upgraded());
 
     println!("{}", styled("RTK Recall Efficiency", true));
     println!("{}", "═".repeat(60));
@@ -1919,11 +1977,6 @@ fn print_pro_hint_if_due(tracker: &Tracker) {
         "{}",
         "Across a team? Spend by team and person, budgets, audit: pro.rtk-ai.app".dimmed()
     );
-    println!(
-        "{}",
-        "(once a day at most; pro_hint = false under [display] in config.toml turns it off)"
-            .dimmed()
-    );
     println!();
     if let Some(m) = marker {
         let _ = std::fs::write(m, b"");
@@ -1933,6 +1986,25 @@ fn print_pro_hint_if_due(tracker: &Tracker) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn plain_output_only_for_consoles_that_cannot_render_ansi() {
+        use windows_sys::Win32::System::Console::{
+            ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WRAP_AT_EOL_OUTPUT,
+        };
+
+        let legacy = ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT;
+        assert!(requires_plain_console_output(Some(legacy)));
+        assert!(requires_plain_console_output(Some(
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        )));
+        assert!(!requires_plain_console_output(Some(
+            legacy | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        )));
+        // Pipes, including MSYS pseudo-terminals, have no Win32 console mode.
+        assert!(!requires_plain_console_output(None));
+    }
 
     #[test]
     fn pro_hint_waits_a_week_then_once_a_day() {
