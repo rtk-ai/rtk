@@ -1,0 +1,19 @@
+{"Time":"2026-10-21T08:56:11.235301189-07:00","Action":"start","Package":"example.com/rtk-pipe-fixture/cases"}
+{"Time":"2026-10-21T08:56:11.235558807-07:00","Action":"start","Package":"example.com/rtk-pipe-fixture/empty"}
+{"Time":"2026-10-21T08:56:11.235597986-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/empty","Output":"?   \texample.com/rtk-pipe-fixture/empty\t[no test files]\n"}
+{"Time":"2026-10-21T08:56:11.235614431-07:00","Action":"skip","Package":"example.com/rtk-pipe-fixture/empty","Elapsed":0}
+{"Time":"2026-10-21T08:56:11.237387735-07:00","Action":"run","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestAttr"}
+{"Time":"2026-10-21T08:56:11.237426393-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestAttr","Output":"=== RUN   TestAttr\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:11.237439873-07:00","Action":"attr","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestAttr","Key":"issue","Value":"4455"}
+{"Time":"2026-10-21T08:56:11.237443569-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestAttr","Output":"=== ATTR  TestAttr issue 4455\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:11.237450139-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestAttr","Output":"--- PASS: TestAttr (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:11.237452673-07:00","Action":"pass","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestAttr","Elapsed":0}
+{"Time":"2026-10-21T08:56:11.237456739-07:00","Action":"run","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestArtifact"}
+{"Time":"2026-10-21T08:56:11.237459022-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestArtifact","Output":"=== RUN   TestArtifact\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:11.237486183-07:00","Action":"artifacts","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestArtifact","Path":"/tmp/tmp.UBRcAdtmdL/artifacts/_artifacts/cases/TestArtifact/4065905604"}
+{"Time":"2026-10-21T08:56:11.237493825-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestArtifact","Output":"=== ARTIFACTS TestArtifact /tmp/tmp.UBRcAdtmdL/artifacts/_artifacts/cases/TestArtifact/4065905604\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:11.237526935-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestArtifact","Output":"--- PASS: TestArtifact (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:11.237540956-07:00","Action":"pass","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestArtifact","Elapsed":0}
+{"Time":"2026-10-21T08:56:11.237544661-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Output":"PASS\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:11.237876221-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Output":"ok  \texample.com/rtk-pipe-fixture/cases\t0.002s\n"}
+{"Time":"2026-10-21T08:56:11.237890253-07:00","Action":"pass","Package":"example.com/rtk-pipe-fixture/cases","Elapsed":0.003}

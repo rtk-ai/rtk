@@ -1,1 +1,2 @@
-automod::dir!(pub "src/cmds/jvm");
+pub mod gradlew_cmd;
+pub mod mvn_cmd;

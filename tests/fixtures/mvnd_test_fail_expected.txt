@@ -1,0 +1,27 @@
+[INFO] Scanning for projects...
+[INFO] -----------------< com.example.rtk:multifail-skeleton >-----------------
+[INFO] Building multifail-skeleton 1.0.0-SNAPSHOT
+[INFO] Running com.example.rtk.BoomTest
+[ERROR] Tests run: 1, Failures: 0, Errors: 1, Skipped: 0, Time elapsed: 0.089 s <<< FAILURE! -- in com.example.rtk.BoomTest
+[ERROR] com.example.rtk.BoomTest.boom -- Time elapsed: 0.046 s <<< ERROR!
+java.lang.IllegalStateException: boom: errors-only class for fixture capture
+	at com.example.rtk.BoomTest.boom(BoomTest.java:8)
+[INFO] Running com.example.rtk.CalcTest
+[ERROR] Tests run: 3, Failures: 1, Errors: 1, Skipped: 0, Time elapsed: 0.022 s <<< FAILURE! -- in com.example.rtk.CalcTest
+[ERROR] com.example.rtk.CalcTest.failOne -- Time elapsed: 0.007 s <<< FAILURE!
+org.opentest4j.AssertionFailedError: failOne: addition should equal five ==> expected: <5> but was: <4>
+	at com.example.rtk.CalcTest.failOne(CalcTest.java:12)
+[ERROR] com.example.rtk.CalcTest.failTwo -- Time elapsed: 0.004 s <<< ERROR!
+java.lang.IllegalStateException: failTwo: induced error for fixture capture
+	at com.example.rtk.CalcTest.failTwo(CalcTest.java:17)
+[INFO] Results:
+[ERROR] Failures: 
+[ERROR]   CalcTest.failOne:12 failOne: addition should equal five ==> expected: <5> but was: <4>
+[ERROR] Errors: 
+[ERROR]   BoomTest.boom:8 IllegalState boom: errors-only class for fixture capture
+[ERROR]   CalcTest.failTwo:17 IllegalState failTwo: induced error for fixture capture
+[ERROR] Tests run: 16, Failures: 1, Errors: 2, Skipped: 0
+[INFO] BUILD FAILURE
+[INFO] Total time:  1.198 s (Wall Clock)
+[INFO] Finished at: 2026-08-12T12:13:31-04:00
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.5.5:test (default-test) on project multifail-skeleton: There are test failures.

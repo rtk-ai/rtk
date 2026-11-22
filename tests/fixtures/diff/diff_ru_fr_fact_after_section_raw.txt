@@ -1,0 +1,7 @@
+diff -ru g1/f.txt g2/f.txt
+--- g1/f.txt	2026-09-07 19:16:09.515858853 +0000
++++ g2/f.txt	2026-09-07 19:16:09.515858853 +0000
+@@ -1 +1 @@
+-a
++b
+Seulement dans g1: onlyleft.txt

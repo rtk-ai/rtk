@@ -7,8 +7,10 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use tempfile::TempDir;
+
+mod common;
 
 const LEGACY_STOCK: &str = r#"{
   "version": 1,
@@ -87,7 +89,7 @@ impl Sandbox {
     }
 
     fn run_hook(&self, payload: &str) -> (String, String, Option<i32>) {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rtk"))
+        let mut child = common::rtk_command()
             .args(["hook", "copilot"])
             .current_dir(&self.project)
             .env("HOME", &self.home)
@@ -410,6 +412,15 @@ fn unwritable_hooks_dir_never_breaks_the_hook() {
     let mut perms = std::fs::metadata(&hooks_dir).expect("meta").permissions();
     perms.set_mode(0o555);
     std::fs::set_permissions(&hooks_dir, perms.clone()).expect("chmod");
+
+    let probe = hooks_dir.join(".rtk-perm-probe");
+    if std::fs::write(&probe, b"x").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        perms.set_mode(0o755);
+        let _ = std::fs::set_permissions(&hooks_dir, perms);
+        eprintln!("skipped: filesystem does not enforce write permissions (running as root?)");
+        return;
+    }
 
     let (stdout, stderr, code) = sb.run_hook(LEGACY_PAYLOAD);
 

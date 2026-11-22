@@ -2,8 +2,10 @@
 
 use crate::core::guard::never_worse;
 use crate::core::tracking;
-use anyhow::{bail, Context, Result};
+use crate::core::utils::{from_json_str, strip_leading_bom};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
@@ -48,19 +50,9 @@ pub fn run(file: &Path, max_depth: usize, schema_only: bool, verbose: u8) -> Res
     let content = fs::read_to_string(file)
         .with_context(|| format!("Failed to read file: {}", file.display()))?;
 
-    let output = if schema_only {
-        filter_json_string(&content, max_depth)?
-    } else {
-        filter_json_compact(&content, max_depth)?
-    };
-    let shown = never_worse(&content, &output);
+    let shown = render_json(&content, max_depth, schema_only)?;
     println!("{}", shown);
-    timer.track(
-        &format!("cat {}", file.display()),
-        "rtk json",
-        &content,
-        shown,
-    );
+    timer.track(&super::read::cat_label(file), "rtk json", &content, &shown);
     Ok(())
 }
 
@@ -78,21 +70,52 @@ pub fn run_stdin(max_depth: usize, schema_only: bool, verbose: u8) -> Result<()>
         .read_to_string(&mut content)
         .context("Failed to read from stdin")?;
 
-    let output = if schema_only {
-        filter_json_string(&content, max_depth)?
-    } else {
-        filter_json_compact(&content, max_depth)?
-    };
-    let shown = never_worse(&content, &output);
+    let shown = render_json(&content, max_depth, schema_only)?;
     println!("{}", shown);
-    timer.track("cat - (stdin)", "rtk json -", &content, shown);
+    timer.track("cat - (stdin)", "rtk json -", &content, &shown);
     Ok(())
+}
+
+/// Filter `content` and fall back to it verbatim if the filtered form isn't
+/// smaller. Strips a leading BOM once, up front, and compares/falls back
+/// against the *stripped* content — otherwise a raw fallback would still
+/// carry the BOM into piped output (`rtk json foo.json | jq .` failing to
+/// parse it) even though `filter_json_*` already tolerates a BOM on input.
+///
+/// `schema_only` skips the fallback entirely rather than falling back through
+/// it — see the comment on that branch.
+///
+/// Returns `Cow` rather than an owned `String`: the raw-fallback case can
+/// then stay a zero-copy borrow of `content` instead of paying for another
+/// full copy of the (potentially large) input on every fallback.
+fn render_json<'a>(content: &'a str, max_depth: usize, schema_only: bool) -> Result<Cow<'a, str>> {
+    let content = strip_leading_bom(content);
+    if schema_only {
+        // `--keys-only` asks for the structure without the values, so the raw
+        // fallback prints every value back. Raw JSON is not a rendering of the
+        // answer, so there is no pair for never_worse to compare: the schema
+        // is the answer, and in compact form it is also smaller than the input
+        // in practice. Bypassing the guard is therefore the only correct path.
+        return Ok(Cow::Owned(filter_json_string(content, max_depth)?));
+    }
+    let output = filter_json_compact(content, max_depth)?;
+    let shown = never_worse(content, &output);
+    // never_worse hands back one of its two inputs (no allocation); compare
+    // the `&str` fat pointers to tell which, instead of re-deriving the
+    // decision. Comparing the whole slice, not just `as_ptr()`, so a future
+    // never_worse that returns a sub-slice of `content` is not mistaken for
+    // `content` itself -- that would silently re-expand the output.
+    Ok(if std::ptr::eq(shown, content) {
+        Cow::Borrowed(content)
+    } else {
+        Cow::Owned(output)
+    })
 }
 
 /// Parse a JSON string and return compact representation with values preserved.
 /// Long strings are truncated, arrays are summarized.
 pub fn filter_json_compact(json_str: &str, max_depth: usize) -> Result<String> {
-    let value: Value = serde_json::from_str(json_str).context("Failed to parse JSON")?;
+    let value: Value = from_json_str(json_str).context("Failed to parse JSON")?;
     Ok(compact_json(&value, 0, max_depth))
 }
 
@@ -183,96 +206,94 @@ fn compact_json(value: &Value, depth: usize, max_depth: usize) -> String {
 /// Parse a JSON string and return its schema representation (types only, no values).
 /// Useful for piping JSON from other commands (e.g., `gh api`, `curl`).
 pub fn filter_json_string(json_str: &str, max_depth: usize) -> Result<String> {
-    let value: Value = serde_json::from_str(json_str).context("Failed to parse JSON")?;
+    let value: Value = from_json_str(json_str).context("Failed to parse JSON")?;
     Ok(extract_schema(&value, 0, max_depth))
 }
 
-fn extract_schema(value: &Value, depth: usize, max_depth: usize) -> String {
-    let indent = "  ".repeat(depth);
+/// Keys rendered per object; any remaining keys are summarized as `...+N`.
+const MAX_SCHEMA_KEYS: usize = 16;
 
+/// Render `value` as a compact schema (`{a:int,b:{c:string}}`), with no
+/// indentation or newlines. On real payloads that is far smaller than the
+/// input; a short string value or a small array can still cost a few bytes
+/// more (`"a":"b"` becomes `a:string`).
+fn extract_schema(value: &Value, depth: usize, max_depth: usize) -> String {
     if depth > max_depth {
-        return format!("{}...", indent);
+        return "...".to_string();
     }
 
     match value {
-        Value::Null => format!("{}null", indent),
-        Value::Bool(_) => format!("{}bool", indent),
+        Value::Null => "null".to_string(),
+        Value::Bool(_) => "bool".to_string(),
         Value::Number(n) => {
             if n.is_i64() {
-                format!("{}int", indent)
+                "int".to_string()
             } else {
-                format!("{}float", indent)
+                "float".to_string()
             }
         }
         Value::String(s) => {
             if s.len() > 50 {
-                format!("{}string[{}]", indent, s.len())
+                format!("string[{}]", s.len())
             } else if s.is_empty() {
-                format!("{}string", indent)
+                "string".to_string()
+            } else if s.starts_with("http") {
+                "url".to_string()
+            } else if s.contains('-') && s.len() == 10 {
+                "date?".to_string()
             } else {
-                // Check if it looks like a URL, date, etc.
-                if s.starts_with("http") {
-                    format!("{}url", indent)
-                } else if s.contains('-') && s.len() == 10 {
-                    format!("{}date?", indent)
-                } else {
-                    format!("{}string", indent)
-                }
+                "string".to_string()
             }
         }
         Value::Array(arr) => {
             if arr.is_empty() {
-                format!("{}[]", indent)
+                "[]".to_string()
             } else {
                 let first_schema = extract_schema(&arr[0], depth + 1, max_depth);
-                let trimmed = first_schema.trim();
                 if arr.len() == 1 {
-                    format!("{}[\n{}\n{}]", indent, first_schema, indent)
+                    format!("[{}]", first_schema)
                 } else {
-                    format!("{}[{}] ({})", indent, trimmed, arr.len())
+                    format!("[{}] ({})", first_schema, arr.len())
                 }
             }
         }
         Value::Object(map) => {
             if map.is_empty() {
-                format!("{}{{}}", indent)
+                "{}".to_string()
             } else {
-                let mut lines = vec![format!("{}{{", indent)];
                 let mut keys: Vec<_> = map.keys().collect();
                 keys.sort();
 
+                let mut parts = Vec::new();
                 for (i, key) in keys.iter().enumerate() {
-                    let val = &map[*key];
-                    let val_schema = extract_schema(val, depth + 1, max_depth);
-                    let val_trimmed = val_schema.trim();
-
-                    // Inline simple types
-                    let is_simple = matches!(
-                        val,
-                        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
-                    );
-
-                    if is_simple {
-                        if i < keys.len() - 1 {
-                            lines.push(format!("{}  {}: {},", indent, key, val_trimmed));
-                        } else {
-                            lines.push(format!("{}  {}: {}", indent, key, val_trimmed));
-                        }
-                    } else {
-                        lines.push(format!("{}  {}:", indent, key));
-                        lines.push(val_schema);
-                    }
-
-                    // Limit keys shown
-                    if i >= 15 {
-                        lines.push(format!("{}  ... +{} more keys", indent, keys.len() - i - 1));
+                    if i >= MAX_SCHEMA_KEYS {
+                        parts.push(format!("...+{}", keys.len() - i));
                         break;
                     }
+                    let val_schema = extract_schema(&map[*key], depth + 1, max_depth);
+                    parts.push(format!("{}:{}", schema_key(key), val_schema));
                 }
-                lines.push(format!("{}}}", indent));
-                lines.join("\n")
+                format!("{{{}}}", parts.join(","))
             }
         }
+    }
+}
+
+/// A key that could be read as schema syntax (empty, a delimiter, a `...`
+/// marker, whitespace or a control character) is printed JSON-quoted; any
+/// other key stays bare.
+fn schema_key(key: &str) -> Cow<'_, str> {
+    let bare = !key.is_empty()
+        && !key.starts_with("...")
+        && !key.chars().any(|c| {
+            c.is_whitespace()
+                || c.is_control()
+                || matches!(c, ',' | ':' | '{' | '}' | '[' | ']' | '"' | '\\')
+        });
+    if bare {
+        Cow::Borrowed(key)
+    } else {
+        Cow::Owned(Value::from(key).to_string())
     }
 }
 
@@ -356,6 +377,54 @@ mod tests {
     }
 
     #[test]
+    fn test_compact_parses_bom_prefixed_json() {
+        let json = "\u{feff}{\"name\": \"test\", \"count\": 42}";
+        let output = filter_json_compact(json, 5).expect("BOM-prefixed JSON must parse");
+        assert!(output.contains("name"));
+        assert!(output.contains("42"));
+        // Same input without BOM produces identical output.
+        assert_eq!(output, filter_json_compact(&json[3..], 5).unwrap());
+    }
+
+    #[test]
+    fn test_schema_parses_bom_prefixed_json() {
+        let json = "\u{feff}{\"name\": \"test\", \"count\": 42}";
+        let output = filter_json_string(json, 5).expect("BOM-prefixed JSON must parse");
+        assert!(output.contains("string"));
+        assert!(output.contains("int"));
+        assert_eq!(output, filter_json_string(&json[3..], 5).unwrap());
+    }
+
+    #[test]
+    fn test_render_json_fallback_strips_bom_when_filtered_is_larger() {
+        // A minified BOM-prefixed package.json: compact_json pretty-prints
+        // with indentation, so `filtered` ends up larger than the minified
+        // raw and never_worse falls back to raw. If that comparison (and the
+        // returned string) still carries the BOM, `rtk json foo.json | jq .`
+        // fails to parse — the exact bug this fix closes.
+        let raw = "\u{feff}{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"e\":5}";
+        let stripped = strip_leading_bom(raw);
+
+        // render_json takes the raw, un-stripped content directly — the same
+        // shape run()/run_stdin() hand it after fs::read_to_string /
+        // reading stdin. It must strip internally, not rely on the caller.
+        let shown = render_json(raw, 5, false).expect("must render");
+
+        // Sanity: this exercises the raw-fallback path (a zero-copy borrow
+        // of the stripped content), not the filtered/owned one.
+        assert!(
+            matches!(shown, Cow::Borrowed(_)),
+            "raw fallback should borrow, not allocate: {shown:?}"
+        );
+        assert_eq!(shown, stripped, "expected the raw (BOM-stripped) fallback");
+        assert!(
+            !shown.starts_with('\u{feff}'),
+            "fallback output must not carry a BOM into piped output: {shown:?}"
+        );
+        let _: Value = serde_json::from_str(&shown).expect("fallback output must parse as JSON");
+    }
+
+    #[test]
     fn test_compact_truncates_pure_multibyte_string() {
         assert_value_truncated(&"日本語テスト".repeat(85));
     }
@@ -363,5 +432,145 @@ mod tests {
     #[test]
     fn test_compact_truncates_mixed_ascii_multibyte_string() {
         assert_value_truncated(&("a".repeat(76) + &"日本語".repeat(5)));
+    }
+
+    #[test]
+    fn test_keys_only_never_prints_values() {
+        // `--keys-only` promises to strip values, but never_worse used to hand
+        // the raw JSON back whenever the schema was longer — printing the very
+        // values the flag exists to hide. Short values make that the common
+        // case, so a small config or credential file leaked while a large one
+        // did not. Assert on quotes: these keys print bare, so a `"` anywhere
+        // in the output can only have come from a raw value.
+        let short_values = format!(
+            "{{{}}}",
+            (0..11)
+                .map(|i| format!("\"k{i}\":\"v{i}\""))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        for raw in [r#"{"a":1,"b":"secretvalue","c":3}"#, short_values.as_str()] {
+            let shown = render_json(raw, 5, true).expect("must render");
+            assert!(
+                !shown.contains('"'),
+                "keys-only output quoted a value: {shown:?}"
+            );
+            assert!(
+                shown.contains("string"),
+                "expected a schema, got: {shown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_keys_only_schema_is_no_longer_than_input() {
+        // `--keys-only` always prints the schema. On these inputs the compact
+        // form is no longer than the minified input, where the indented layout
+        // was: leak.json 31 → 36 B and the 4-level chain 30 → 79 B.
+        for raw in [
+            r#"{"a":1,"b":"secretvalue","c":3}"#,
+            r#"{"a":{"b":{"c":{"d":"deep"}}}}"#,
+        ] {
+            let shown = render_json(raw, 5, true).expect("must render");
+            assert!(
+                shown.len() <= raw.len(),
+                "schema is {} B for a {} B input: {shown:?}",
+                shown.len(),
+                raw.len()
+            );
+            assert!(
+                !shown.contains('"'),
+                "keys-only output quoted a value: {shown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_keys_only_prints_schema_where_never_worse_would_pick_raw() {
+        // Short values make the schema the longer output; never_worse would
+        // print these inputs verbatim, values included.
+        for (raw, expected) in [
+            (
+                r#"{"cc":"FR","n":"3","ok":"Y"}"#,
+                "{cc:string,n:string,ok:string}",
+            ),
+            ("[1,2]", "[int] (2)"),
+        ] {
+            assert_eq!(never_worse(raw, expected), raw, "guard premise for {raw}");
+            let shown = render_json(raw, 5, true).expect("must render");
+            assert_eq!(shown, expected, "for {raw}");
+        }
+    }
+
+    #[test]
+    fn test_keys_only_schema_beats_real_captures() {
+        for raw in [
+            include_str!("../../../tests/fixtures/glab_mr_list_raw.json"),
+            include_str!("../../../tests/fixtures/ast_grep_lazylock_raw.json"),
+        ] {
+            let shown = render_json(raw, 5, true).expect("must render");
+            assert!(
+                shown.len() * 2 < raw.len(),
+                "schema is {} B for a {} B capture",
+                shown.len(),
+                raw.len()
+            );
+            assert!(
+                !shown.contains('"'),
+                "keys-only output quoted a value: {shown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_keys_only_key_cap_never_reports_zero() {
+        let make = |n: usize| {
+            format!(
+                "{{{}}}",
+                (0..n)
+                    .map(|i| format!("\"k{i:02}\":1"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
+
+        let sixteen = filter_json_string(&make(16), 5).expect("16-key object must parse");
+        assert_eq!(sixteen.matches(":int").count(), 16, "{sixteen:?}");
+        assert!(
+            !sixteen.contains("+0"),
+            "16-key object reported an empty cap: {sixteen:?}"
+        );
+
+        let seventeen = filter_json_string(&make(17), 5).expect("17-key object must parse");
+        assert_eq!(seventeen.matches(":int").count(), 16, "{seventeen:?}");
+        assert!(
+            seventeen.contains("...+1"),
+            "17-key object should show 16 keys plus +1: {seventeen:?}"
+        );
+    }
+
+    #[test]
+    fn test_keys_only_quotes_keys_that_read_as_syntax() {
+        for (raw, expected) in [
+            (r#"{"user_id":1,"a.b":2}"#, "{a.b:int,user_id:int}"),
+            (r#"{"a":{"b":1,"c":1}}"#, "{a:{b:int,c:int}}"),
+            (r#"{"a":{"b:int,c":1}}"#, r#"{a:{"b:int,c":int}}"#),
+            (r#"{"a,b":1}"#, r#"{"a,b":int}"#),
+            (r#"{"}":1}"#, r#"{"}":int}"#),
+            (r#"{"[x]":1}"#, r#"{"[x]":int}"#),
+            (r#"{"a\nb":1}"#, r#"{"a\nb":int}"#),
+            (r#"{"a b":1}"#, r#"{"a b":int}"#),
+            (r#"{"a\u0001b":1}"#, r#"{"a\u0001b":int}"#),
+            (r#"{"a\"b":1}"#, r#"{"a\"b":int}"#),
+            (r#"{"a\\b":1}"#, r#"{"a\\b":int}"#),
+            (r#"{"":1}"#, r#"{"":int}"#),
+            (r#"{"...+3":1}"#, r#"{"...+3":int}"#),
+            (r#"{"say \"hi\"":1}"#, r#"{"say \"hi\"":int}"#),
+            (r#"{"https://x.io:443":1}"#, r#"{"https://x.io:443":int}"#),
+        ] {
+            let shown = filter_json_string(raw, 5).expect("must parse");
+            assert_eq!(shown, expected, "for {raw}");
+        }
     }
 }

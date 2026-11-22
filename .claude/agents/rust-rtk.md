@@ -89,7 +89,7 @@ pub fn filter_git_log(input: &str) -> String {
 
 ### Token Count Validation (Testing Critical)
 
-All filters **MUST** verify token savings claims (60-90%) in tests:
+All filters **MUST** verify the ≥20% savings floor in tests:
 
 ```rust
 #[cfg(test)]
@@ -113,10 +113,10 @@ mod tests {
 
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
 
-        // RTK promise: 60-90% savings
+        // RTK floor: >=20% savings
         assert!(
-            savings >= 60.0,
-            "Git log filter: expected ≥60% savings, got {:.1}%",
+            savings >= 20.0,
+            "Git log filter: expected ≥20% savings, got {:.1}%",
             savings
         );
 
@@ -126,7 +126,7 @@ mod tests {
 }
 ```
 
-**Why**: Token savings claims (60-90%) must be **verifiable**. Tests with real fixtures prevent regressions. If savings drop below 60%, it's a release blocker.
+**Why**: Token savings (≥20% floor) must be **verifiable**. Tests with real fixtures prevent regressions. If savings drop below 20%, it's a release blocker.
 
 ### Cross-Platform Shell Escaping
 
@@ -235,11 +235,11 @@ mod tests {
         // Verify format preservation
         assert!(output.contains("test result:"));
 
-        // Verify token savings ≥60%
+        // Verify token savings ≥20%
         let input_tokens = count_tokens(input);
         let output_tokens = count_tokens(&output);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
-        assert!(savings >= 60.0, "Expected ≥60% savings, got {:.1}%", savings);
+        assert!(savings >= 20.0, "Expected ≥20% savings, got {:.1}%", savings);
     }
 
     #[test]
@@ -315,7 +315,7 @@ fn test_real_git_log() {
 - `src/core/config.rs` - User configuration (~/.config/rtk/config.toml)
 
 **Command modules** (`src/cmds/<ecosystem>/`):
-- `src/cmds/git/` - git.rs, gh_cmd.rs, gt_cmd.rs, diff_cmd.rs
+- `src/cmds/git/` - git_cmd.rs, gh_cmd.rs, gt_cmd.rs, diff_cmd.rs
 - `src/cmds/rust/` - cargo_cmd.rs, runner.rs
 - `src/cmds/js/` - lint_cmd.rs, tsc_cmd.rs, next_cmd.rs, prettier_cmd.rs, playwright_cmd.rs, prisma_cmd.rs, vitest_cmd.rs, pnpm_cmd.rs, npm_cmd.rs
 - `src/cmds/python/` - ruff_cmd.rs, pytest_cmd.rs, mypy_cmd.rs, pip_cmd.rs
@@ -325,7 +325,7 @@ fn test_real_git_log() {
 - `src/cmds/system/` - ls.rs, tree.rs, read.rs, grep_cmd.rs, find_cmd.rs, etc.
 
 **Hook & analytics** (`src/hooks/`, `src/analytics/`):
-- `src/hooks/init.rs` - rtk init command
+- `src/hooks/init/` - rtk init command
 - `src/analytics/gain.rs` - rtk gain command
 
 **Tests**:
@@ -395,7 +395,7 @@ docker run --rm -v $(pwd):/rtk -w /rtk rust:latest cargo test  # Linux via Docke
 
 ✅ **DO** provide fallback to raw command on filter failure
 ✅ **DO** compile fixed, reused regexes once with `LazyLock<Regex>`
-✅ **DO** verify token savings claims in tests (≥60%)
+✅ **DO** verify token savings claims in tests (≥20%)
 ✅ **DO** test on macOS + Linux + Windows (via CI or manual)
 ✅ **DO** run `cargo fmt && cargo clippy --all-targets && cargo test` before commit
 ✅ **DO** benchmark startup time with `hyperfine` (<10ms target)
@@ -437,7 +437,7 @@ mod tests {
         let output = filter_newcmd(input).unwrap();
 
         let savings = calculate_savings(input, &output);
-        assert!(savings >= 60.0, "Expected ≥60% savings, got {:.1}%", savings);
+        assert!(savings >= 20.0, "Expected ≥20% savings, got {:.1}%", savings);
     }
 }
 ```
@@ -516,7 +516,7 @@ rtk newcmd args
 |--------|--------|--------------|
 | Startup time | <10ms | `hyperfine 'rtk git status'` |
 | Memory overhead | <5MB | `/usr/bin/time -l rtk git status` |
-| Token savings | 60-90% | Tests with `count_tokens()` |
+| Token savings | ≥20% floor | Tests with `count_tokens()` |
 | Binary size | <5MB stripped | `ls -lh target/release/rtk` |
 
 **Performance regressions are release blockers** - always benchmark before/after changes.

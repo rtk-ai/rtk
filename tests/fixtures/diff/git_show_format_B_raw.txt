@@ -1,0 +1,16 @@
+subject
+
+see the diff
+diff shows it plainly
+more prose
+
+
+diff --git a/w.txt b/w.txt
+index 1fe2748..1efdad7 100644
+--- a/w.txt
++++ b/w.txt
+@@ -1,3 +1,4 @@
+ one TWO three
+ four five SIX
+ seven
++zz

@@ -7,8 +7,10 @@
 
 use std::process::Command;
 
+mod common;
+
 fn rtk(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_rtk"))
+    common::rtk_command()
         .env("LC_ALL", "C")
         // Point the hook check at a directory that does not exist, so it reports
         // "no Claude Code here" and stays silent. Without this, a developer who
@@ -26,7 +28,8 @@ fn rtk(args: &[&str]) -> std::process::Output {
 }
 
 fn grep_exit(args: &[&str]) -> Option<i32> {
-    Command::new("grep")
+    common::native_command("grep")
+        .env("LC_ALL", "C")
         .args(args)
         .output()
         .expect("grep")

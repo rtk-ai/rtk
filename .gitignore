@@ -1,5 +1,11 @@
 # Build
 /target
+proxy/target/
+# proxy/Cargo.lock IS committed: `proxy/` is its own workspace root (not a
+# member of the root one, which would break `cargo install --git`), and a
+# binary crate's lockfile belongs in the repository so a release is
+# reproducible. It also pins libsqlite3-sys, which must match the root's.
+.cargo-cross/
 
 # Environment & Secrets
 .env
@@ -11,6 +17,9 @@
 credentials.json
 secrets.json
 *.secret
+
+# Local Claude Code config (may contain machine-local settings/tokens)
+.claude/settings.local.json
 
 # IDE
 .idea/
@@ -36,6 +45,8 @@ benchmark-report.md
 
 # SQLite databases
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 rtk_tracking.db
@@ -48,3 +59,15 @@ claudedocs
 
 # icm 
 .fastembed_cache/
+
+# Release archives, produced at the repo root by the packaging steps. Build
+# output, never committed.
+/rtk-*.tar.gz
+/rtk-*.zip
+
+# A SQLite sentinel, never a real file. Committing one makes the repo
+# impossible to check out on Windows, where `:` cannot appear in a path.
+:memory:
+
+__pycache__/
+*.pyc

@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
   <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk" alt="Release"></a>
-  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
+  <a href="#licence"><img src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20BUSL--1.1-blue.svg" alt="License: Apache-2.0 and BUSL-1.1"></a>
   <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1478373640461488159?label=Discord&logo=discord" alt="Discord"></a>
   <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk" alt="Homebrew"></a>
 </p>
@@ -72,6 +72,14 @@ Les nombres de tokens rapportes par RTK sont estimes avec `octets / 4` : RTK n'e
 brew install rtk
 ```
 
+### winget (Windows)
+
+La manière la plus simple d'installer sur Windows — une seule commande, aucune modification de PATH requise :
+
+```powershell
+winget install rtk-ai.rtk
+```
+
 ### Installation rapide (Linux/macOS)
 
 ```bash
@@ -81,7 +89,17 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 ### Cargo
 
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk
+cargo install --git https://github.com/rtk-ai/rtk rtk
+```
+
+### Édition Apache-2.0 (open source uniquement, usage commercial autorisé)
+
+Le même binaire `rtk` compilé sans le moteur de compression BUSL-1.1 : le système de réécriture de hooks et tous les filtres de commandes, sous Apache-2.0 seul.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | RTK_EDITION=oss sh
+brew install rtk-ai/tap/rtk-oss
+cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
 ```
 
 ### Verification
@@ -96,11 +114,13 @@ rtk gain        # Doit afficher les statistiques d'economies
 ## Demarrage rapide
 
 ```bash
-# 1. Installer le hook pour Claude Code (recommande)
-rtk init --global
+# 1. Installer le hook pour l'outil d'IA correspondant
+rtk init --global               # Claude Code (par defaut)
 # Suivre les instructions pour enregistrer dans ~/.claude/settings.json
+rtk init --agent trae           # Trae (projet)
+rtk init --global --agent trae  # Trae (global)
 
-# 2. Redemarrer Claude Code, puis tester
+# 2. Redemarrer l'outil d'IA correspondant, puis tester
 git status  # Automatiquement reecrit en rtk git status
 ```
 
@@ -135,7 +155,7 @@ rtk read file.rs                # Lecture intelligente
 rtk read file.rs -l aggressive  # Signatures uniquement
 rtk find "*.rs" .               # Resultats compacts
 rtk grep "pattern" .            # Resultats groupes par fichier
-rtk diff file1 file2            # Diff condense
+rtk diff file1 file2            # Diff condense (code 0 : identiques, 1 : differents, 2 : erreur de lecture)
 ```
 
 ### Git
@@ -155,7 +175,7 @@ rtk vitest                      # Vitest compact
 rtk pytest                      # Tests Python (-90%)
 rtk go test                     # Tests Go (-90%)
 rtk cargo test                  # Tests Cargo (-90%)
-rtk test <cmd>                  # Echecs uniquement (-90%)
+rtk test <cmd> [args...]        # Echecs uniquement (-90%), argv direct
 ```
 
 ### Build & Lint
@@ -198,7 +218,7 @@ mode = "failures"
 
 ## Documentation
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Resoudre les problemes courants
+- **[TROUBLESHOOTING.md](docs/guide/resources/troubleshooting.md)** - Resoudre les problemes courants
 - **[INSTALL.md](INSTALL.md)** - Guide d'installation detaille
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Architecture technique
 
@@ -210,7 +230,7 @@ Rejoignez la communaute sur [Discord](https://discord.gg/RySmvNF5kF).
 
 ## Licence
 
-Licence Apache 2.0 - voir [LICENSE](LICENSE) pour les details.
+Licence Apache 2.0 pour la CLI — voir [LICENSE](LICENSE). Les composants `engine/` et `proxy/` sont sous licence BUSL-1.1 (voir leurs fichiers LICENSE).
 
 ## Avertissement
 

@@ -1,6 +1,11 @@
 //! Hook installation and lifecycle management for AI coding agents.
 
 pub mod constants;
+// Shares `hook_cmd`'s constraint: it runs inside the hook, where stray output
+// corrupts the JSON protocol. `from_agent` is the one exception and carries its
+// own allow -- it is reached only from the `rtk hook check` CLI.
+#[deny(clippy::print_stdout, clippy::print_stderr)]
+pub mod decision;
 pub mod hook_audit_cmd;
 pub mod hook_check;
 #[deny(clippy::print_stdout, clippy::print_stderr)]
@@ -8,19 +13,85 @@ pub mod hook_cmd;
 pub mod init;
 pub mod integrity;
 pub mod permissions;
+pub mod permissions_opencode;
+#[deny(clippy::print_stdout, clippy::print_stderr)]
+#[cfg(feature = "engine")]
+pub mod posthook;
 pub mod rewrite_cmd;
+#[deny(clippy::print_stdout, clippy::print_stderr)]
+#[cfg(feature = "engine")]
+pub mod session_start;
 pub mod trust;
 pub mod verify_cmd;
 
-pub fn is_claude_hook_command(command: &str) -> bool {
+fn is_rtk_binary(binary: &str) -> bool {
+    let binary_name = binary.rsplit(['/', '\\']).next().unwrap_or(binary);
+    matches!(binary_name, "rtk" | "rtk.exe")
+}
+
+fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
+    let mut tokens = crate::discover::lexer::tokenize_with_newlines(command);
+    // Ignore only literal LF operator tokens at the command's boundaries.
+    // The lexer also reports the CR of a CRLF pair as an LF operator; checking
+    // the source byte leaves that token for the guard below, and the word check
+    // after shell_split would reject the CR anyway.
+    while tokens.first().is_some_and(|token| {
+        matches!(token.kind, crate::discover::lexer::TokenKind::Operator)
+            && token.value == "\n"
+            && command.as_bytes().get(token.offset) == Some(&b'\n')
+    }) {
+        tokens.remove(0);
+    }
+    while tokens.last().is_some_and(|token| {
+        matches!(token.kind, crate::discover::lexer::TokenKind::Operator)
+            && token.value == "\n"
+            && command.as_bytes().get(token.offset) == Some(&b'\n')
+    }) {
+        tokens.pop();
+    }
+    if tokens.iter().any(|token| match token.kind {
+        crate::discover::lexer::TokenKind::Operator
+        | crate::discover::lexer::TokenKind::Pipe(_)
+        | crate::discover::lexer::TokenKind::Redirect => true,
+        crate::discover::lexer::TokenKind::Shellism => token.value == "&",
+        _ => false,
+    }) {
+        return false;
+    }
+
     let parts = crate::discover::lexer::shell_split(command);
-    let [binary, hook, claude] = parts.as_slice() else {
+    let [parsed_binary, hook, target] = parts.as_slice() else {
         return false;
     };
 
-    let binary_name = binary.rsplit(['/', '\\']).next().unwrap_or(binary);
+    is_rtk_binary(parsed_binary) && hook == "hook" && target == agent
+}
 
-    binary_name == "rtk" && hook == "hook" && claude == "claude"
+pub fn is_claude_hook_command(command: &str) -> bool {
+    is_rtk_hook_command(command, "claude")
+}
+
+pub fn is_legacy_rewrite_hook(command: &str) -> bool {
+    let parts = crate::discover::lexer::shell_split(command);
+    let [word] = parts.as_slice() else {
+        return false;
+    };
+
+    let filename = word.rsplit(['/', '\\']).next().unwrap_or(word);
+    filename == constants::REWRITE_HOOK_FILE
+}
+
+#[cfg(feature = "engine")]
+static HOOK_AGENT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+#[cfg(feature = "engine")]
+pub(crate) fn set_hook_agent(agent: &str) {
+    let _ = HOOK_AGENT.set(Some(agent.to_string()));
+}
+
+#[cfg(feature = "engine")]
+pub(crate) fn hook_agent() -> Option<String> {
+    HOOK_AGENT.get().cloned().flatten()
 }
 
 #[cfg(test)]
@@ -34,6 +105,9 @@ mod tests {
         assert!(is_claude_hook_command(
             "\"/opt/homebrew/bin/rtk\" hook claude"
         ));
+        assert!(is_claude_hook_command(
+            "/Users/jane/My\\ Apps/rtk hook claude"
+        ));
     }
 
     #[test]
@@ -41,5 +115,46 @@ mod tests {
         assert!(!is_claude_hook_command("not-rtk hook claude"));
         assert!(!is_claude_hook_command("/opt/homebrew/bin/rtk hook cursor"));
         assert!(!is_claude_hook_command("echo rtk hook claude"));
+    }
+
+    #[test]
+    fn legacy_rewrite_hook_matches_direct_invocations() {
+        assert!(is_legacy_rewrite_hook("rtk-rewrite.sh"));
+        assert!(is_legacy_rewrite_hook("~/.claude/hooks/rtk-rewrite.sh"));
+        assert!(is_legacy_rewrite_hook("/path/to/rtk-rewrite.sh"));
+        assert!(is_legacy_rewrite_hook("./hooks/rtk-rewrite.sh"));
+        assert!(is_legacy_rewrite_hook("\"/path/to/rtk-rewrite.sh\""));
+        assert!(is_legacy_rewrite_hook(
+            "\"/Users/John Doe/.claude/hooks/rtk-rewrite.sh\""
+        ));
+        assert!(is_legacy_rewrite_hook(
+            "'C:\\Users\\test\\.claude\\hooks\\rtk-rewrite.sh'"
+        ));
+        assert!(is_legacy_rewrite_hook(
+            "C:/Users/test/.claude/hooks/rtk-rewrite.sh"
+        ));
+    }
+
+    #[test]
+    fn legacy_rewrite_hook_rejects_non_invocations() {
+        assert!(!is_legacy_rewrite_hook("echo rtk-rewrite.sh"));
+        assert!(!is_legacy_rewrite_hook("/custom/rtk-rewrite.sh.backup"));
+        assert!(!is_legacy_rewrite_hook(
+            "python3 /custom/audit.py --label rtk-rewrite.sh"
+        ));
+        assert!(!is_legacy_rewrite_hook(
+            "audit.sh --mirror ~/.claude/hooks/rtk-rewrite.sh"
+        ));
+        assert!(!is_legacy_rewrite_hook(
+            "~/.claude/hooks/rtk-rewrite.sh && logger -t audit done"
+        ));
+        assert!(!is_legacy_rewrite_hook(
+            "~/.claude/hooks/rtk-rewrite.sh | tee -a /tmp/audit.log"
+        ));
+        assert!(!is_legacy_rewrite_hook(
+            "~/.claude/hooks/rtk-rewrite.sh --flag"
+        ));
+        assert!(!is_legacy_rewrite_hook("/custom/my-rtk-rewrite.sh"));
+        assert!(!is_legacy_rewrite_hook(""));
     }
 }

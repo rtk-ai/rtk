@@ -1,0 +1,17 @@
+commit 5654fed456e06c2bdf277ad4bdd76a62650e542e
+Merge: b0d50c2 a89dece
+Author: Fixture <fix@example.com>
+Date:   Sat Aug 29 22:45:43 2026 -0400
+
+    merge left (resolved)
+
+diff --cc cfile.txt
+index 1d8f578,259a44b..2ddc488
+--- a/cfile.txt
++++ b/cfile.txt
+@@@ -1,3 -1,3 +1,3 @@@
+  shared head
+- conflict line MAIN
+ -conflict line LEFT
+++conflict line RESOLVED
+  shared tail
