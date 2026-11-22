@@ -11,13 +11,11 @@ use crate::core::user_dirs;
 use crate::core::user_env;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use regex::Regex;
 use serde_json::Value;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::LazyLock;
 
 /// Compute `days` ago from now, clamped instead of panicking on overflow.
 ///
@@ -38,46 +36,13 @@ pub fn days_ago_cutoff(days: u64) -> DateTime<Utc> {
         .unwrap_or(DateTime::<Utc>::MIN_UTC)
 }
 
-/// Truncates a string to `max_len` characters, appending `...` if needed.
-///
-/// # Arguments
-/// * `s` - The string to truncate
-/// * `max_len` - Maximum length before truncation (minimum 3 to include "...")
-///
-/// # Examples
-/// ```
-/// use rtk::utils::truncate;
-/// assert_eq!(truncate("hello world", 8), "hello...");
-/// assert_eq!(truncate("hi", 10), "hi");
-/// ```
-pub fn truncate(s: &str, max_len: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max_len {
-        s.to_string()
-    } else if max_len < 3 {
-        // If max_len is too small, just return "..."
-        "...".to_string()
-    } else {
-        format!("{}...", s.chars().take(max_len - 3).collect::<String>())
-    }
-}
+pub use rtk_text::{strip_ansi, truncate};
 
-/// Strip ANSI escape codes (colors, styles) from a string.
-///
-/// # Arguments
-/// * `text` - Text potentially containing ANSI escape codes
-///
-/// # Examples
-/// ```
-/// use rtk::utils::strip_ansi;
-/// let colored = "\x1b[31mError\x1b[0m";
-/// assert_eq!(strip_ansi(colored), "Error");
-/// ```
-pub fn strip_ansi(text: &str) -> String {
-    static ANSI_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap());
-
-    ANSI_RE.replace_all(text, "").to_string()
+pub fn sanitize_for_terminal(text: &str) -> String {
+    strip_ansi(text)
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .collect()
 }
 
 /// Strip one or more leading UTF-8 BOMs (`EF BB BF`, sometimes doubled),
@@ -188,7 +153,7 @@ pub fn format_cpt(cpt: f64) -> String {
 /// ```
 /// use rtk::utils::join_with_overflow;
 /// let items = vec!["a".to_string(), "b".to_string()];
-/// assert_eq!(join_with_overflow(&items, 5, 3, "items"), "a\nb\n... +2 more items");
+/// assert_eq!(join_with_overflow(&items, 5, 3, "items"), "a\nb\n… +2 more items");
 /// assert_eq!(join_with_overflow(&items, 2, 3, "items"), "a\nb");
 /// ```
 pub fn join_with_overflow(items: &[String], total: usize, max: usize, label: &str) -> String {
@@ -233,21 +198,17 @@ pub fn ok_confirmation(action: &str, detail: &str) -> String {
 /// `128 + signal` per Unix convention when terminated by a signal (no exit code
 /// available). Falls back to 1 on non-Unix platforms.
 pub fn exit_code_from_output(output: &std::process::Output, label: &str) -> i32 {
-    match output.status.code() {
-        Some(code) => code,
-        None => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::ExitStatusExt;
-                if let Some(sig) = output.status.signal() {
-                    eprintln!("[rtk] {}: process terminated by signal {}", label, sig);
-                    return 128 + sig;
-                }
-            }
-            eprintln!("[rtk] {}: process terminated by signal", label);
-            1
-        }
-    }
+    exit_code_from_status(&output.status, label)
+}
+
+/// The signal behind an exit `code` that an MSYS/Cygwin program reports to a native
+/// Windows parent when a signal killed it: `signal << 8`, e.g. 1536 for SIGABRT from
+/// Git for Windows' grep (#5073). A POSIX shell keeps only the low byte of an exit
+/// code, so passed through as is it reads as 0, success. `None` off Windows, where
+/// a signal never arrives as an exit code.
+pub(crate) fn msys_signal(code: i32) -> Option<i32> {
+    let sig = code >> 8;
+    (cfg!(windows) && code & 0xFF == 0 && (1..=64).contains(&sig)).then_some(sig)
 }
 
 /// Extract exit code from an ExitStatus (for `.status()` calls, not `.output()`).
@@ -255,7 +216,13 @@ pub fn exit_code_from_output(output: &std::process::Output, label: &str) -> i32 
 /// terminated by a signal. Falls back to 1 on non-Unix platforms.
 pub fn exit_code_from_status(status: &std::process::ExitStatus, label: &str) -> i32 {
     match status.code() {
-        Some(code) => code,
+        Some(code) => match msys_signal(code) {
+            Some(sig) => {
+                eprintln!("[rtk] {}: process terminated by signal {}", label, sig);
+                128 + sig
+            }
+            None => code,
+        },
         None => {
             #[cfg(unix)]
             {
@@ -290,9 +257,26 @@ pub fn create_private_dir(path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Restrict an existing file to owner-only access (0600 on Unix).
+/// Restrict an existing file to owner-only access (0600 on Unix). A path that
+/// is not a regular file (RTK_DB_PATH pointed at a directory) is left alone —
+/// 0600 on a directory makes it untraversable, bricking it for its owner.
 pub fn restrict_file(path: &std::path::Path) {
+    if std::fs::metadata(path).is_ok_and(|m| !m.is_file()) {
+        return;
+    }
     set_owner_only(path, 0o600);
+}
+
+/// Create `path` if needed and set its modification time to now, for
+/// once-per-interval marker files. Writing empty content to an existing empty
+/// file does not update its modification time on Windows, so set it explicitly.
+pub fn touch_file(path: &std::path::Path) -> std::io::Result<()> {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    file.set_modified(std::time::SystemTime::now())
 }
 
 /// Open a file owner-only (0600 on Unix), applied at creation so content is
@@ -352,6 +336,28 @@ fn set_owner_only(path: &std::path::Path, mode: u32) {
 
 #[cfg(not(unix))]
 fn set_owner_only(_path: &std::path::Path, _mode: u32) {}
+
+#[cfg(all(test, unix))]
+mod owner_only_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn restrict_file_never_chmods_a_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let before = std::fs::metadata(dir.path())
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        super::restrict_file(dir.path());
+        let after = std::fs::metadata(dir.path())
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(before, after, "directory permissions must be untouched");
+    }
+}
 
 /// Build a Command for Ruby tools, auto-detecting bundle exec.
 /// Uses `bundle exec <tool>` when a Gemfile exists (transitive deps like rake
@@ -914,6 +920,40 @@ fn output_codepage() -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_touch_file_refreshes_existing_empty_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".marker");
+        touch_file(&path).expect("create marker");
+
+        let two_days_ago =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 60 * 60);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|f| f.set_modified(two_days_ago))
+            .expect("backdate marker");
+
+        touch_file(&path).expect("touch marker");
+        let meta = fs::metadata(&path).expect("metadata");
+        let age = meta
+            .modified()
+            .expect("mtime")
+            .elapsed()
+            .unwrap_or_default();
+        assert!(age.as_secs() < 60, "marker not refreshed, age {age:?}");
+        assert_eq!(meta.len(), 0);
+    }
+
+    #[test]
+    fn sanitize_for_terminal_strips_escape_bytes_but_keeps_layout() {
+        let hostile = "error at line 3:\n  message = \"\u{1b}[31mred\u{1b}[0m\"\tend";
+        let clean = sanitize_for_terminal(hostile);
+        assert!(!clean.contains('\u{1b}'), "{clean:?}");
+        assert!(clean.contains("red"));
+        assert!(clean.contains('\n') && clean.contains('\t'));
+    }
 
     #[test]
     fn test_strip_leading_bom_helper() {
@@ -1746,8 +1786,8 @@ mod tests {
     }
 
     // rtk-ai/rtk#3206 review: set_owner_only now skips the chmod syscall once
-    // permissions already match, since Tracker::new() (which calls this via
-    // create_private_dir/open_private/restrict_db_files) is on the PreToolUse
+    // permissions already match, since Tracker::new() (which calls this through
+    // db::open_and_migrate: create_private_dir/open_private/restrict_file) is on the PreToolUse
     // hook's hot path for every Bash tool call. These don't observe the skipped
     // syscall directly, but confirm the already-correct case stays correct
     // (idempotent) across repeated calls, on both a directory and a file.

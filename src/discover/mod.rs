@@ -1,10 +1,12 @@
 //! Scans AI coding sessions to find commands that could benefit from RTK filtering.
 
+pub mod fish_script;
 pub mod lexer;
 pub mod provider;
 pub mod registry;
 mod report;
 pub mod rules;
+pub(crate) mod shell_wrapper;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -116,7 +118,7 @@ struct CoverageContext {
 /// imprecision is unavoidable without per-segment hook logging and isn't worth
 /// chasing further. `Estimated` is the fallback for history that predates
 /// `hook_decisions` logging — but note it does NOT simply fade out over time:
-/// `hook_decisions` rows are pruned by the same `DEFAULT_HISTORY_DAYS` retention
+/// `hook_decisions` rows are pruned by the same `tracking.history_days` retention
 /// window as the rest of the tracking DB (see `Tracker::cleanup_hook_decisions`),
 /// so any `--since` reaching further back than that window permanently needs
 /// `Estimated`, indefinitely, not just during an initial backfill period.
@@ -163,11 +165,12 @@ fn estimate_hook_coverage(permission_cmd: &str, rewrite_cmd: &str, ctx: &Coverag
     if !ctx.hook_installed {
         return false;
     }
-    let verdict = permissions::check_command_with_rules(
+    let verdict = permissions::check_command_with_rules_and_prefixes(
         permission_cmd,
         &ctx.rules.deny,
         &ctx.rules.ask,
         &ctx.rules.allow,
+        &ctx.normalized_transparent_prefixes,
     );
     estimate_hook_coverage_with_verdict(permission_cmd, rewrite_cmd, verdict, ctx)
 }
@@ -185,7 +188,7 @@ fn estimate_hook_coverage_with_verdict(
     ctx: &CoverageContext,
 ) -> bool {
     ctx.hook_installed
-        && verdict != PermissionVerdict::Deny
+        && !matches!(verdict, PermissionVerdict::Deny | PermissionVerdict::Defer)
         && !lexer::contains_unattestable_construct(permission_cmd)
         && registry::rewrite_command_precompiled(
             rewrite_cmd,
@@ -229,13 +232,10 @@ fn would_be_covered_without_bypass(
 /// The segment `strip_disabled_prefix_for_analytics` split into `env_prefix` and
 /// `actual_cmd`, with its `RTK_DISABLED=` words removed and every other word kept
 /// verbatim, wrapper included. Words are split the way the rest of discover splits
-/// them (`lexer::tokenize` + `coalesce_words`), so a quoted or expanded value
+/// them (`lexer::words_and_spans`), so a quoted or expanded value
 /// (`RTK_DISABLED='1 2'`, `RTK_DISABLED=$CI`) goes as a whole.
 fn without_rtk_disabled(env_prefix: &str, actual_cmd: &str) -> String {
-    let starts: Vec<usize> = lexer::coalesce_words(env_prefix, &lexer::tokenize(env_prefix))
-        .iter()
-        .map(|&(_, start)| start)
-        .collect();
+    let (_, starts) = lexer::words_and_spans(env_prefix);
     let mut line = String::with_capacity(env_prefix.len() + actual_cmd.len() + 1);
     for (i, &start) in starts.iter().enumerate() {
         let end = starts.get(i + 1).copied().unwrap_or(env_prefix.len());
@@ -285,14 +285,22 @@ fn judge_disabled_segment(
     }
 }
 
-/// Whether an already-`rtk`-prefixed command counts as coverage. `rtk proxy <cmd>`
+/// Whether an already-`rtk`-prefixed command counts as coverage. `rtk bypass <cmd>`
 /// deliberately runs the raw command unfiltered, so it must not count — that would
 /// let the audit flatter itself via its own escape hatch. This is ground truth read
 /// directly from the transcript (the model really did invoke `rtk`), not a guess.
 pub(crate) fn is_already_rtk(cmd: &str) -> bool {
     let trimmed = cmd.trim();
-    trimmed.starts_with("rtk ") && !trimmed.starts_with("rtk proxy")
+    trimmed.starts_with("rtk ")
+        && !UNFILTERED_ESCAPE_HATCHES
+            .iter()
+            .any(|hatch| trimmed.starts_with(hatch))
 }
+
+/// Spellings of the unfiltered escape hatch. `rtk proxy` is the deprecated
+/// alias of `rtk bypass` and runs exactly as unfiltered, so a transcript
+/// written before the rename must not read as covered either.
+const UNFILTERED_ESCAPE_HATCHES: &[&str] = &["rtk bypass", "rtk proxy"];
 
 /// Aggregation bucket for supported commands.
 struct SupportedBucket {
@@ -381,15 +389,24 @@ pub fn run(
         match Tracker::new() {
             Ok(t) => {
                 let log = t.hook_decisions_since(cutoff).unwrap_or_else(|e| {
-                    eprintln!(
-                        "rtk: warning: failed to read hook_decisions log ({e}). \
-                         Coverage will fall back to the current-state estimate. \
-                         Run `rtk init` if the tracking database looks corrupted."
-                    );
+                    // `rtk init` would fail the same step, and `rtk gain` reports it.
+                    if !crate::core::db::lacks_what_was_not_upgraded(&e) {
+                        eprintln!(
+                            "rtk: warning: failed to read hook_decisions log ({e}). \
+                             Coverage will fall back to the current-state estimate. \
+                             Run `rtk init` if the tracking database looks corrupted."
+                        );
+                    } else if verbose > 0 {
+                        eprintln!("rtk: warning: failed to read hook_decisions log ({e}).");
+                    }
                     HashMap::new()
                 });
                 let measured_since = t.earliest_hook_decision_timestamp().unwrap_or_else(|e| {
-                    eprintln!("rtk: warning: failed to read hook_decisions log timestamp ({e}).");
+                    if !crate::core::db::lacks_what_was_not_upgraded(&e) || verbose > 0 {
+                        eprintln!(
+                            "rtk: warning: failed to read hook_decisions log timestamp ({e})."
+                        );
+                    }
                     None
                 });
                 (log, measured_since)
@@ -400,7 +417,7 @@ pub fn run(
                 // `rtk discover` run doesn't alarm a first-time user.
                 if verbose > 0 {
                     eprintln!(
-                        "rtk: warning: failed to open tracking database ({e}). \
+                        "rtk: warning: failed to open tracking database ({e:#}). \
                          Coverage will fall back to the current-state estimate."
                     );
                 }
@@ -553,7 +570,7 @@ pub fn run(
                     Classification::Ignored => {
                         // Ground truth from the transcript itself — the model really
                         // did invoke `rtk` directly (excluding the deliberate
-                        // unfiltered `rtk proxy` escape hatch).
+                        // unfiltered `rtk bypass` escape hatch).
                         if is_already_rtk(part) {
                             already_rtk += 1;
                         }
@@ -726,6 +743,22 @@ mod tests {
             "grep -n foo bar.py",
             PermissionVerdict::Default,
             &test_ctx(false),
+        ));
+    }
+
+    #[test]
+    fn test_estimate_hook_coverage_false_for_deferred_wrapper() {
+        assert!(!estimate_hook_coverage_with_verdict(
+            "env bash -c 'git push'",
+            "env bash -c 'git push'",
+            PermissionVerdict::Defer,
+            &test_ctx(true),
+        ));
+        assert!(estimate_hook_coverage_with_verdict(
+            "env bash -c 'git push'",
+            "env bash -c 'git push'",
+            PermissionVerdict::Ask,
+            &test_ctx(true),
         ));
     }
 
@@ -922,10 +955,10 @@ mod tests {
     }
 
     #[test]
-    fn test_is_already_rtk_excludes_proxy_escape_hatch() {
-        // rtk#3148 secondary finding: `rtk proxy` deliberately bypasses filtering,
+    fn test_is_already_rtk_excludes_bypass_escape_hatch() {
+        // rtk#3148 secondary finding: `rtk bypass` deliberately bypasses filtering,
         // so it must not count as coverage.
-        assert!(!is_already_rtk("rtk proxy grep -n foo bar.py"));
+        assert!(!is_already_rtk("rtk bypass grep -n foo bar.py"));
     }
 
     #[test]

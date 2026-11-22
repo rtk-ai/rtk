@@ -192,7 +192,7 @@ fn bulky_rg_yields_token_savings() {
     }
     let (_dir, path) = write_temp(&content);
 
-    let raw = Command::new("rg")
+    let raw = common::native_command("rg")
         .env("LC_ALL", "C")
         .args(["-nH", "MATCH", path.to_str().unwrap()])
         .output()

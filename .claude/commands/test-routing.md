@@ -127,13 +127,13 @@ if [[ " ${RTK_COMMANDS[@]} " =~ " ${COMMAND} " ]]; then
             ;;
         *)
             echo "Filter: Available for $COMMAND"
-            echo "Token savings: 60-90% (typical)"
+            echo "Token savings: >=20% (floor)"
             ;;
     esac
 else
     echo "⚠️  No RTK filter available, would execute raw: $COMMAND $ARGS"
     echo ""
-    echo "Note: You can still use 'rtk proxy $COMMAND $ARGS' to:"
+    echo "Note: You can still use 'rtk bypass $COMMAND $ARGS' to:"
     echo "  - Execute command without filtering"
     echo "  - Track usage in 'rtk gain --history'"
     echo "  - Measure potential for new filter development"
@@ -191,7 +191,7 @@ if rtk --help | grep -E "^  $COMMAND" >/dev/null 2>&1; then
             echo "Startup Time: <10ms"
             ;;
         *)
-            echo "Expected Token Savings: 60-90%"
+            echo "Expected Token Savings: >=20% (floor)"
             echo "Startup Time: <10ms"
             ;;
     esac
@@ -204,7 +204,7 @@ else
     echo "  Filter: None"
     echo ""
     echo "Alternatives:"
-    echo "  - Use 'rtk proxy $COMMAND $ARGS' to track usage"
+    echo "  - Use 'rtk bypass $COMMAND $ARGS' to track usage"
     echo "  - Consider contributing a filter for this command"
 fi
 
@@ -261,7 +261,7 @@ Routing:
   Filter: None
 
 Alternatives:
-  - Use 'rtk proxy npm install express' to track usage
+  - Use 'rtk bypass npm install express' to track usage
   - Consider contributing a filter for this command
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
