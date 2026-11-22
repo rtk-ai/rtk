@@ -9,6 +9,7 @@ pub mod json_cmd;
 pub mod local_llm;
 pub mod log_cmd;
 pub mod ls;
+pub mod make_cmd;
 pub mod pipe_cmd;
 pub mod read;
 pub mod search;
