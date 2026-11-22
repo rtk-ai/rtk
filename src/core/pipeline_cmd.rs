@@ -1,5 +1,6 @@
 //! `rtk pipeline` and `rtk methods` command surface over the engine.
 
+use crate::core::http;
 use crate::core::pipeline_config::{self, LoadedPipeline};
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -219,11 +220,8 @@ fn read_source(source: &str) -> Result<String> {
     if source.starts_with("http://") || source.starts_with("https://") {
         let url = gist_raw_url(source);
         // GET of a URL the user typed on the CLI; inbound content only.
-        // nosemgrep: ureq-outside-telemetry
-        return ureq::get(&url)
-            .call()
-            .context("fetch pipeline")?
-            .into_string()
+        let mut response = http::get(&url).context("fetch pipeline")?;
+        return http::read_text_lossy(&mut response, http::MAX_BODY)
             .context("read fetched pipeline");
     }
     std::fs::read_to_string(source).with_context(|| format!("read {source}"))
@@ -2196,6 +2194,7 @@ mod tests {
             saved_normalize: 350,
             saved_ingest_filter: 0,
             saved_pixel_compress: 0,
+            saved_rules: 0,
             cache_read: 4000,
             cache_created: 1000,
         };

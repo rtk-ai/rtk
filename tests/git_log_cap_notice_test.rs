@@ -35,12 +35,34 @@ fn isolate(cmd: &mut Command, home: &Path) {
 }
 
 fn git_ok(repo: &Path, home: &Path, args: &[&str]) {
+    git_ok_with_stdin(repo, home, args, "");
+}
+
+/// [`git_ok`] with `input` on git's stdin.
+fn git_ok_with_stdin(repo: &Path, home: &Path, args: &[&str], input: &str) {
+    use std::io::Write;
+    use std::process::Stdio;
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(repo);
     cmd.args(["-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"]);
+    // Every commit otherwise spawns `git maintenance run --auto`, a third process per
+    // commit for histories too small to need it.
+    cmd.args(["-c", "maintenance.auto=false"]);
     cmd.args(args);
     isolate(&mut cmd, home);
-    let out = cmd.output().expect("run git");
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn git");
+    // A write error means git exited early; its stderr below says why.
+    let _ = child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(input.as_bytes());
+    let out = child.wait_with_output().expect("wait for git");
     assert!(
         out.status.success(),
         "git {args:?} failed: {}",
@@ -75,8 +97,10 @@ fn repo_with_messages(commits: usize, message: impl Fn(usize) -> Vec<String>) ->
     repo_committing(commits, |_| vec!["f.txt".to_string()], message)
 }
 
-/// A history whose commit `i` writes the files `files(i)` and carries the message paragraphs
-/// `message(i)`, one `-m` each.
+/// A history whose commit `i` writes `content {i}` to the files `files(i)` and carries the
+/// message paragraphs `message(i)`, recorded as `git commit -m` records them, then checked
+/// out. One `git fast-import` writes every commit, since each process costs tens of
+/// milliseconds on Windows.
 fn repo_committing(
     commits: usize,
     files: impl Fn(usize) -> Vec<String>,
@@ -88,25 +112,71 @@ fn repo_committing(
     std::fs::create_dir_all(&path).expect("mkdir repo");
     std::fs::create_dir_all(&home).expect("mkdir home");
     git_ok(&path, &home, &["init", "-q", "-b", "main"]);
+
+    // Stamped now, as `git commit` would: the default format prints relative dates.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after 1970")
+        .as_secs();
+    let mut stream = String::new();
     for i in 0..commits {
-        for file in files(i) {
-            let target = path.join(&file);
-            std::fs::create_dir_all(target.parent().expect("parent")).expect("mkdir");
-            std::fs::write(target, format!("content {i}\n")).expect("write");
+        let message = commit_message(&message(i));
+        assert!(
+            !message.is_empty(),
+            "commit {i}: git commit refuses an empty message"
+        );
+        stream.push_str(&format!(
+            "commit refs/heads/main\n\
+             author t <t@example.com> {now} +0000\n\
+             committer t <t@example.com> {now} +0000\n\
+             data {}\n{message}\n",
+            message.len()
+        ));
+        let content = format!("content {i}\n");
+        let files = files(i);
+        assert!(
+            !files.is_empty(),
+            "commit {i}: git commit refuses an empty change"
+        );
+        for file in files {
+            stream.push_str(&format!(
+                "M 100644 inline {file}\ndata {}\n{content}\n",
+                content.len()
+            ));
         }
-        git_ok(&path, &home, &["add", "-A"]);
-        let paragraphs = message(i);
-        let mut args = vec!["commit", "-q"];
-        for paragraph in &paragraphs {
-            args.extend(["-m", paragraph.as_str()]);
-        }
-        git_ok(&path, &home, &args);
+    }
+    if commits > 0 {
+        stream.push_str("done\n");
+        git_ok_with_stdin(&path, &home, &["fast-import", "--quiet", "--done"], &stream);
+        git_ok(&path, &home, &["reset", "-q", "--hard"]);
     }
     Repo {
         _dir: dir,
         path,
         home,
     }
+}
+
+/// The message `git commit -m p1 -m p2 …` records: the paragraphs a blank line apart, then
+/// git's default cleanup for a message it does not edit -- trailing whitespace dropped, runs
+/// of blank lines collapsed, none at either end.
+fn commit_message(paragraphs: &[String]) -> String {
+    let mut message = String::new();
+    let mut blank_pending = false;
+    for line in paragraphs.join("\n\n").split('\n') {
+        let line = line.trim_end_matches([' ', '\t', '\r']);
+        if line.is_empty() {
+            blank_pending = !message.is_empty();
+            continue;
+        }
+        if blank_pending {
+            message.push('\n');
+            blank_pending = false;
+        }
+        message.push_str(line);
+        message.push('\n');
+    }
+    message
 }
 
 /// Every output shape that once swallowed the notice.
@@ -1662,13 +1732,20 @@ fn a_stored_multi_line_cut_asks_git_whether_the_history_goes_on() {
 fn a_oneline_run_a_flag_adds_lines_to_keeps_out_the_commit_past_the_cap() {
     // A run with lines that are not a commit's cannot be cut at its commits, so nothing of a
     // commit past the fifty may reach what recall stores, and the stored cut asks git whether
-    // the history goes on. `--stat-count` puts a stat under each commit and is known from the
+    // the history goes on. `--notes` puts a commit's notes under it and is known from the
     // arguments, so git is asked for fifty straight away. A flag RTK does not know of, played
     // here by a `git` that prints a line of its own under each one, shows only in the run,
     // so the fifty-one asked for are set aside and git is asked again for fifty. Newest
     // first, so at `--skip=9` the fifty fetched are 50 down to 1 and commit 0 is the one past
-    // them.
+    // them. Every commit has a note, which `--oneline` prints only when asked.
     let repo = repo_with(60);
+    for back in 0..60 {
+        git_ok(
+            &repo.path,
+            &repo.home,
+            &["notes", "add", "-m", "noted", &format!("HEAD~{back}")],
+        );
+    }
     let real = real_git();
     let adds_lines = format!(
         "case \" $* \" in\n  *\" --oneline \"*) {real} \"$@\" | awk '{{ print; print \"    added\" }}' ;;\n  *) exec {real} \"$@\" ;;\nesac",
@@ -1676,7 +1753,7 @@ fn a_oneline_run_a_flag_adds_lines_to_keeps_out_the_commit_past_the_cap() {
     );
     let plain = format!("exec {} \"$@\"", real.display());
     for (flags, git, owed_walks) in [
-        (&["--stat-count=1"][..], plain.as_str(), 2),
+        (&["--notes"][..], plain.as_str(), 2),
         (&[][..], adds_lines.as_str(), 3),
     ] {
         for (skip, owed) in [("--skip=9", true), ("--skip=10", false)] {
@@ -2372,42 +2449,19 @@ fn the_raw_fallback_shows_the_walk_the_notice_describes() {
 }
 
 #[test]
-fn the_raw_fallback_keeps_what_git_printed_after_the_last_commit_shown() {
-    // The summary of `-X` follows the marker of the commit it belongs to, and the fallback
-    // prints the raw walk: the last commit shown keeps its summary, as it does when git is
-    // asked for ten commits and nothing more.
+fn a_dirstat_walk_is_gits_own_capped_at_ten() {
+    // `-X` is `--dirstat`, a summary RTK's compact format cannot carry: the walk is git's own,
+    // ten commits of it, with the notice for the rest.
     let repo = repo_committing(
         15,
         |i| vec![format!("d{}/f.txt", i % 3)],
         |i| vec![format!("commit {i}"), "one\ntwo\nthree\nfour".to_string()],
     );
     let flag = "-X";
-    let direct = git_stdout(
-        &repo,
-        &[
-            "log",
-            "-10",
-            "--no-merges",
-            "--pretty=format:%h %s (%ar) <%an>%n%b%n---END---",
-            flag,
-        ],
-    );
+    let direct = git_stdout(&repo, &["log", "-10", flag]);
     let out = rtk_log(&repo.path, &repo.home, &[flag]);
     assert!(out.status.success(), "rtk git log {flag} failed");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(stdout.matches("---END---").count(), 10, "{stdout:?}");
-    let after_last = |walk: &str| {
-        walk.rsplit("---END---")
-            .next()
-            .unwrap_or_default()
-            .to_string()
-    };
-    assert!(!after_last(&direct).trim().is_empty(), "{direct:?}");
-    assert_eq!(
-        after_last(&stdout),
-        format!("{}\n", after_last(&direct)),
-        "{stdout:?}"
-    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), direct);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains(NOTICE), "{stderr:?}");
 }
@@ -2595,14 +2649,13 @@ fn repo_rewriting_f_txt(commits: usize, content: impl Fn(usize) -> String) -> Re
 }
 
 #[test]
-fn the_character_that_opens_a_commit_in_a_files_content_is_not_a_commit() {
-    // `-L` prints the lines of the file after every commit, and a line may hold anything. Ten
-    // commits are the cap exactly and eleven are more, whatever those lines contain and
-    // wherever in a line the control character stands. `-L` puts a space ahead of a context
-    // line and a minus ahead of a removed one, which are also what `--graph` draws, so a line
-    // that starts with it is the case a bare character could not tell from a commit. The
-    // history is longer than the range, so the last commit of the range is a change with a
-    // patch of its own, printed after its marker.
+fn a_line_log_is_gits_own_whatever_its_lines_hold() {
+    // `-L` prints the lines of the file after every commit with the patch of the range, which
+    // RTK's compact format cannot carry, so the walk is git's own byte for byte, whatever those
+    // lines contain and wherever in a line the character RTK opens a commit with stands. `-L`
+    // puts a space ahead of a context line and a minus ahead of a removed one, which are also
+    // what `--graph` draws. A range is printed whole, as git prints it; a walk without one is
+    // ten commits, with the notice.
     type Content = fn(usize) -> String;
     let shapes: [(&str, Content); 3] = [
         // Mid-line, in the lines that change.
@@ -2614,9 +2667,26 @@ fn the_character_that_opens_a_commit_in_a_files_content_is_not_a_commit() {
     ];
     for (shape, content) in shapes {
         let repo = repo_rewriting_f_txt(13, content);
-        for (range, owed) in [("HEAD~10..HEAD", false), ("HEAD~11..HEAD", true)] {
-            let out = rtk_log(&repo.path, &repo.home, &["-L1,2:f.txt", range]);
+        for (range, owed) in [
+            ("HEAD~10..HEAD", false),
+            ("HEAD~11..HEAD", false),
+            ("", true),
+        ] {
+            let mut args = vec!["-L1,2:f.txt"];
+            let mut git_args = vec!["log", "-L1,2:f.txt"];
+            if range.is_empty() {
+                git_args.push("-10");
+            } else {
+                args.push(range);
+                git_args.push(range);
+            }
+            let out = rtk_log(&repo.path, &repo.home, &args);
             assert!(out.status.success(), "{shape}: rtk git log -L failed");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                git_stdout(&repo, &git_args),
+                "{shape}, {range}"
+            );
             let stderr = String::from_utf8_lossy(&out.stderr);
             assert_eq!(
                 stderr.contains(NOTICE),

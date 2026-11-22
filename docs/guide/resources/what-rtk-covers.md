@@ -94,7 +94,7 @@ listing into `head`, `tail`, or `cat`.
 |---------|--------------|
 | `rspec` | Failures only |
 | `rubocop` | Offenses grouped by file |
-| `rake` | Task output, build errors highlighted |
+| `rake test` | Test task output, failures highlighted |
 
 ## .NET
 
@@ -110,8 +110,17 @@ listing into `head`, `tail`, or `cat`.
 | `docker ps` | Essential columns (name, image, status, port) |
 | `docker images` | Name + tag + size only |
 | `docker logs` | Deduplicated, last N lines |
+| `docker compose ps` | Container status and ports |
+| `docker compose logs` | Deduplicated logs |
+| `docker compose build` | Build output, warnings and errors highlighted |
 | `kubectl get pods` | Name + status + restarts only |
 | `kubectl logs` | Deduplicated entries |
+
+## Build Tools
+
+| Command | What changes |
+|---------|--------------|
+| `make` | Errors and warnings highlighted, noise stripped |
 
 ## Files and Search
 
@@ -123,16 +132,19 @@ listing into `head`, `tail`, or `cat`.
 | `ast-grep` | Grouped by file, capped overflow; `--json` passes through |
 | `diff` | Context reduced |
 | `wc` | Compact counts |
-| `cat` / `head` / `tail <file>` | Smart file reading via `rtk read` |
-| `rtk smart <file>` | 2-line heuristic code summary (signatures only) |
+| `cat <file>` | Smart file reading via `rtk read` |
+| `head <file>` | First 10 lines via `rtk read --head-lines 10` |
+| `tail -n <N> <file>` | Last N lines via `rtk read --tail-lines <N>` |
 
-## Cloud and Data
+## Cloud and Infrastructure
 
 | Command | What changes |
 |---------|--------------|
 | `aws` | JSON condensed, relevant fields only |
 | `psql` | Query results without decoration |
 | `curl` | Response body only, headers stripped |
+| `helm list` | Release name, namespace, status, and chart columns |
+| `terraform plan` | Planned changes summary, resource diffs condensed |
 
 ## Global flags
 
@@ -149,10 +161,16 @@ rtk -vvv git status
 
 ## Commands that are not rewritten
 
-If a command isn't in the list above, RTK runs it through passthrough — the output reaches the LLM unchanged. You can explicitly track unsupported commands:
+If a command isn't intercepted by the hook rules, RTK runs it through passthrough — the output reaches the LLM unchanged. You can explicitly track unsupported commands:
 
 ```bash
-rtk bypass make install    # runs make install, tracks usage, no filtering
+rtk bypass cargo run      # runs cargo run, tracks usage, no filtering
+```
+
+To check whether any command will be rewritten before running it:
+
+```bash
+rtk rewrite "<command>"   # prints the rewritten command, or exits 1 if left alone
 ```
 
 To check which commands were missed opportunities: `rtk discover`.

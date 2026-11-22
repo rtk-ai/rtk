@@ -265,6 +265,18 @@ pub fn restrict_file(path: &std::path::Path) {
     set_owner_only(path, 0o600);
 }
 
+/// Create `path` if needed and set its modification time to now, for
+/// once-per-interval marker files. Writing empty content to an existing empty
+/// file does not update its modification time on Windows, so set it explicitly.
+pub fn touch_file(path: &std::path::Path) -> std::io::Result<()> {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    file.set_modified(std::time::SystemTime::now())
+}
+
 /// Open a file owner-only (0600 on Unix), applied at creation so content is
 /// never briefly readable under a permissive umask. `mode` is ignored for a
 /// file that already exists, so an older one is still tightened afterwards.
@@ -897,6 +909,31 @@ fn output_codepage() -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_touch_file_refreshes_existing_empty_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".marker");
+        touch_file(&path).expect("create marker");
+
+        let two_days_ago =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 60 * 60);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|f| f.set_modified(two_days_ago))
+            .expect("backdate marker");
+
+        touch_file(&path).expect("touch marker");
+        let meta = fs::metadata(&path).expect("metadata");
+        let age = meta
+            .modified()
+            .expect("mtime")
+            .elapsed()
+            .unwrap_or_default();
+        assert!(age.as_secs() < 60, "marker not refreshed, age {age:?}");
+        assert_eq!(meta.len(), 0);
+    }
 
     #[test]
     fn sanitize_for_terminal_strips_escape_bytes_but_keeps_layout() {
@@ -1738,8 +1775,8 @@ mod tests {
     }
 
     // rtk-ai/rtk#3206 review: set_owner_only now skips the chmod syscall once
-    // permissions already match, since Tracker::new() (which calls this via
-    // create_private_dir/open_private/restrict_db_files) is on the PreToolUse
+    // permissions already match, since Tracker::new() (which calls this through
+    // db::open_and_migrate: create_private_dir/open_private/restrict_file) is on the PreToolUse
     // hook's hot path for every Bash tool call. These don't observe the skipped
     // syscall directly, but confirm the already-correct case stays correct
     // (idempotent) across repeated calls, on both a directory and a file.
