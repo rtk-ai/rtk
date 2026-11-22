@@ -5,8 +5,10 @@
 
 use std::process::Command;
 
+mod common;
+
 fn rtk(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_rtk"))
+    common::rtk_command()
         .env("LC_ALL", "C")
         .args(args)
         .output()
@@ -14,7 +16,8 @@ fn rtk(args: &[&str]) -> std::process::Output {
 }
 
 fn grep_exit(args: &[&str]) -> Option<i32> {
-    Command::new("grep")
+    common::native_command("grep")
+        .env("LC_ALL", "C")
         .args(args)
         .output()
         .expect("grep")

@@ -1,1 +1,11 @@
-automod::dir!(pub "src/cmds/php");
+pub mod artisan_cmd;
+pub mod ecs_cmd;
+pub mod paratest_cmd;
+pub mod pest_cmd;
+pub mod php_cmd;
+pub mod phpstan_cmd;
+pub mod phpt_cmd;
+pub mod phpunit_cmd;
+pub mod pint_cmd;
+pub mod test_output;
+pub mod utils;

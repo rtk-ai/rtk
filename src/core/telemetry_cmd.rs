@@ -1,7 +1,9 @@
+use crate::core::http;
+use crate::core::user_env;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 
-const TELEMETRY_DISABLED_ENV: &str = "RTK_TELEMETRY_DISABLED";
+pub(crate) const TELEMETRY_DISABLED_ENV: &str = "RTK_TELEMETRY_DISABLED";
 const TELEMETRY_DISABLED_VALUE: &str = "1";
 
 /// Label for the `device hash` row when no salt file exists.
@@ -29,9 +31,9 @@ fn salt_missing_label(
         Some(false) | None => "(telemetry not enabled; run `rtk telemetry enable` to opt in)",
         Some(true) if !enabled => "(telemetry disabled in config.toml)",
         // Every gate is clear, so the salt is simply not there yet. This is true
-        // both when no ping has landed (the 23 h interval, or a run that touched
-        // the marker before the detached thread wrote the salt) and when a write
-        // genuinely failed — as far as the available state lets us go.
+        // both when no ping has been prepared yet (the 23 h interval, or every
+        // run so far exited before the detached thread wrote the salt) and when
+        // a write genuinely failed — as far as the available state lets us go.
         Some(true) => "(no salt file yet; written on the first ping)",
     }
 }
@@ -94,7 +96,7 @@ pub fn run(command: &TelemetrySubcommand) -> Result<()> {
 /// `telemetry::maybe_ping` never diverge — if the accepted values ever grow
 /// (e.g. `"true"`, `"y"`), they change here once.
 pub fn telemetry_disabled_by_env() -> bool {
-    std::env::var(TELEMETRY_DISABLED_ENV).unwrap_or_default() == TELEMETRY_DISABLED_VALUE
+    user_env::var(TELEMETRY_DISABLED_ENV).unwrap_or_default() == TELEMETRY_DISABLED_VALUE
 }
 
 fn run_status() -> Result<()> {
@@ -217,10 +219,7 @@ fn run_forget() -> Result<()> {
     }
 
     // Purge local tracking database (GDPR Art. 17 — right to erasure applies to local data too)
-    let db_path = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(super::constants::RTK_DATA_DIR)
-        .join(super::constants::HISTORY_DB);
+    let db_path = super::user_dirs::data_under(".").join(super::constants::HISTORY_DB);
     if db_path.exists() {
         match std::fs::remove_file(&db_path) {
             Ok(()) => println!("Local tracking database deleted: {}", db_path.display()),
@@ -257,14 +256,13 @@ fn send_erasure_request(device_hash: &str) -> Result<()> {
         "action": "erasure",
     });
 
-    let mut req = ureq::post(&url).set("Content-Type", "application/json");
+    let mut req = ureq::post(&url);
 
     if let Some(token) = option_env!("RTK_TELEMETRY_TOKEN") {
-        req = req.set("X-RTK-Token", token);
+        req = req.header("X-RTK-Token", token);
     }
 
-    req.timeout(std::time::Duration::from_secs(5))
-        .send_string(&payload.to_string())?;
+    http::global_timeout(req, std::time::Duration::from_secs(5)).send_json(&payload)?;
 
     Ok(())
 }
@@ -275,34 +273,34 @@ mod tests {
 
     /// Regression for #1307: the env opt-out must short-circuit telemetry
     /// consent paths so `rtk init` cannot hang in non-interactive environments.
-    /// All cases are bundled in one test to serialize env-var mutations.
+    /// All cases live in one test so the opt-out states cannot interleave.
     #[test]
     fn test_telemetry_disabled_by_env_honors_opt_out() {
-        #[allow(deprecated)]
-        std::env::remove_var(TELEMETRY_DISABLED_ENV);
-        assert!(
-            !telemetry_disabled_by_env(),
-            "unset env must not count as disabled"
-        );
+        user_env::with_vars(&[(TELEMETRY_DISABLED_ENV, None)], || {
+            assert!(
+                !telemetry_disabled_by_env(),
+                "unset env must not count as disabled"
+            );
+        });
 
-        #[allow(deprecated)]
-        std::env::set_var(TELEMETRY_DISABLED_ENV, TELEMETRY_DISABLED_VALUE);
-        assert!(
-            telemetry_disabled_by_env(),
-            "RTK_TELEMETRY_DISABLED=1 must disable telemetry prompts (issue #1307)"
+        user_env::with_vars(
+            &[(TELEMETRY_DISABLED_ENV, Some(TELEMETRY_DISABLED_VALUE))],
+            || {
+                assert!(
+                    telemetry_disabled_by_env(),
+                    "RTK_TELEMETRY_DISABLED=1 must disable telemetry prompts (issue #1307)"
+                );
+            },
         );
 
         for other in ["0", "true", "false", "yes", "no", ""] {
-            #[allow(deprecated)]
-            std::env::set_var(TELEMETRY_DISABLED_ENV, other);
-            assert!(
-                !telemetry_disabled_by_env(),
-                "value {other:?} must not be treated as disabled"
-            );
+            user_env::with_vars(&[(TELEMETRY_DISABLED_ENV, Some(other))], || {
+                assert!(
+                    !telemetry_disabled_by_env(),
+                    "value {other:?} must not be treated as disabled"
+                );
+            });
         }
-
-        #[allow(deprecated)]
-        std::env::remove_var(TELEMETRY_DISABLED_ENV);
     }
 
     // A canned 64-hex-char hash for deterministic `device_hash_line` assertions.

@@ -41,7 +41,11 @@ fi
 # Delegate all rewrite logic to the Rust binary.
 # Exit codes: 0 = allow rewrite, 1 = no rewrite (passthrough),
 #             2 = deny, 3 = ask.
-REWRITTEN=$(rtk rewrite "$CMD" 2>/dev/null)
+# Scrub RTK_REWRITE_HOST: that channel relaxes RTK's approval gate, and this
+# hook turns exit 0 into an explicit allow, so an inherited value (a shell rc,
+# .envrc, or CI env) must not reach it. Only the delegate that sets it may
+# rely on it.
+REWRITTEN=$(env -u RTK_REWRITE_HOST rtk rewrite "$CMD" 2>/dev/null)
 RC=$?
 if [ "$RC" -ne 0 ] && [ "$RC" -ne 3 ]; then
   echo '{}'

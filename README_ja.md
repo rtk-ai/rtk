@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
   <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk" alt="Release"></a>
-  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
+  <a href="#ライセンス"><img src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20BUSL--1.1-blue.svg" alt="License: Apache-2.0 and BUSL-1.1"></a>
   <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1478373640461488159?label=Discord&logo=discord" alt="Discord"></a>
   <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk" alt="Homebrew"></a>
 </p>
@@ -89,7 +89,17 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 ### Cargo
 
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk
+cargo install --git https://github.com/rtk-ai/rtk rtk
+```
+
+### Apache-2.0 エディション（オープンソースのみ、商用利用可）
+
+BUSL-1.1 圧縮エンジンを含めずにビルドした同じ `rtk` バイナリです。フック書き換えシステムとすべてのコマンドフィルタを Apache-2.0 のみで提供します。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | RTK_EDITION=oss sh
+brew install rtk-ai/tap/rtk-oss
+cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
 ```
 
 ### 確認
@@ -102,10 +112,12 @@ rtk gain        # トークン節約統計が表示されるはず
 ## クイックスタート
 
 ```bash
-# 1. Claude Code 用フックをインストール（推奨）
-rtk init --global
+# 1. 対応する AI ツール用のフックをインストール
+rtk init --global               # Claude Code（デフォルト）
+rtk init --agent trae           # Trae（プロジェクト）
+rtk init --global --agent trae  # Trae（グローバル）
 
-# 2. Claude Code を再起動してテスト
+# 2. 対応する AI ツールを再起動してテスト
 git status  # 自動的に rtk git status に書き換え
 ```
 
@@ -153,7 +165,7 @@ rtk jest                        # Jest コンパクト
 rtk vitest                      # Vitest コンパクト
 rtk pytest                      # Python テスト（-90%）
 rtk go test                     # Go テスト（-90%）
-rtk test <cmd>                  # 失敗のみ表示（-90%）
+rtk test <cmd> [args...]        # 失敗のみ表示（-90%）、argv を直接実行
 ```
 
 ### ビルド & リント
@@ -173,7 +185,7 @@ rtk discover                    # 見逃した節約機会を発見
 
 ## ドキュメント
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - よくある問題の解決
+- **[TROUBLESHOOTING.md](docs/guide/resources/troubleshooting.md)** - よくある問題の解決
 - **[INSTALL.md](INSTALL.md)** - 詳細インストールガイド
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - 技術アーキテクチャ
 
@@ -186,6 +198,8 @@ rtk discover                    # 見逃した節約機会を発見
 ## ライセンス
 
 Apache 2.0 ライセンス - 詳細は [LICENSE](LICENSE) を参照。
+
+> `engine/` and `proxy/` are licensed BUSL-1.1 — see their LICENSE files.
 
 ## 免責事項
 

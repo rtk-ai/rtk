@@ -2,8 +2,9 @@
 //! sqlite recall store (`[retriever] mode = "sqlite"`); see retriever.rs.
 
 use crate::core::config::Config;
-use crate::core::constants::RTK_DATA_DIR;
 use crate::core::retriever::RetrieverConfig;
+use crate::core::user_dirs;
+use crate::core::user_env;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -37,8 +38,9 @@ pub(crate) fn sanitize_slug(slug: &str) -> String {
 /// because a clash also requires the identical readable prefix *and* the same
 /// epoch second, which together scope tee writes exactly as before.
 fn short_hash(s: &str) -> String {
+    use base16ct::HexDisplay;
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(s.as_bytes()))[..6].to_string()
+    format!("{:x}", HexDisplay(&Sha256::digest(s.as_bytes())[..3]))
 }
 
 const LEGACY_ACTIVITY_WINDOW_SECS: u64 = 30 * 86_400;
@@ -95,14 +97,19 @@ pub(crate) fn resolved_tee_dir() -> Option<PathBuf> {
     get_tee_dir(&cfg)
 }
 
-fn get_tee_dir(cfg: &RetrieverConfig) -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("RTK_TEE_DIR") {
+/// In a test build `RTK_TEE_DIR` is only what the test itself set, never an
+/// exported one — that names the developer's own spool — and `tee_directory`
+/// comes from the test's own configuration. `cleanup_old_files` deletes from
+/// whatever this returns, so a test that sets either points it at a directory
+/// of its own.
+pub(crate) fn get_tee_dir(cfg: &RetrieverConfig) -> Option<PathBuf> {
+    if let Some(dir) = user_env::var("RTK_TEE_DIR") {
         return Some(PathBuf::from(dir));
     }
     if let Some(ref dir) = cfg.tee_directory {
         return Some(dir.clone());
     }
-    dirs::data_local_dir().map(|d| d.join(RTK_DATA_DIR).join("tee"))
+    super::user_dirs::data().map(|d| d.join("tee"))
 }
 
 fn cleanup_old_files(dir: &Path, max_files: usize) {
@@ -138,10 +145,21 @@ fn write_tee_file(
     max_file_size: usize,
     max_files: usize,
 ) -> Option<PathBuf> {
-    create_tee_dir(dir)?;
     let slug = sanitize_slug(slug);
     let epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    let filepath = dir.join(format!("{}_{}.log", epoch, slug));
+    let filename = format!("{}_{}.log", epoch, slug);
+    write_named_tee_file(raw, &filename, dir, max_file_size, max_files)
+}
+
+pub(crate) fn write_named_tee_file(
+    raw: &str,
+    filename: &str,
+    dir: &Path,
+    max_file_size: usize,
+    max_files: usize,
+) -> Option<PathBuf> {
+    create_tee_dir(dir)?;
+    let filepath = dir.join(filename);
     let content = if raw.len() > max_file_size {
         let boundary = raw
             .char_indices()
@@ -172,10 +190,10 @@ fn write_tee_file(
 }
 
 fn display_path(path: &Path) -> String {
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(relative) = path.strip_prefix(&home) {
-            return format!("~/{}", relative.display());
-        }
+    if let Some(home) = user_dirs::home()
+        && let Ok(relative) = path.strip_prefix(&home)
+    {
+        return format!("~/{}", relative.display());
     }
     path.display().to_string()
 }
@@ -244,9 +262,13 @@ fn write(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<PathBuf> {
     )
 }
 
+pub(crate) fn format_hint(path: &Path) -> String {
+    format!("[full output: {}]", display_shell_path(path))
+}
+
 pub fn tee_and_hint(cfg: &RetrieverConfig, raw: &str, slug: &str) -> Option<String> {
     let path = write(cfg, raw, slug)?;
-    Some(format!("[full output: {}]", display_shell_path(&path)))
+    Some(format_hint(&path))
 }
 
 pub fn force_tee_hint(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<String> {
@@ -321,17 +343,14 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    #[allow(unsafe_code)]
     fn test_write_tee_file_owner_only_under_permissive_umask() {
         use std::os::unix::fs::PermissionsExt;
 
-        // nosemgrep: unsafe-block
-        let previous = unsafe { libc::umask(0o000) };
         let tmpdir = tempfile::tempdir().unwrap();
         let tee_dir = tmpdir.path().join("tee");
-        let written = write_tee_file("secret\n", "grep", &tee_dir, MAX_FILE_SIZE, 20);
-        // nosemgrep: unsafe-block
-        unsafe { libc::umask(previous) };
+        let written = crate::core::test_isolation::with_umask(0o000, || {
+            write_tee_file("secret\n", "grep", &tee_dir, MAX_FILE_SIZE, 20)
+        });
 
         let path = written.expect("tee file written");
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -430,7 +449,7 @@ mod tests {
 
     #[test]
     fn test_display_shell_path_uses_home_var_for_home_paths_with_spaces() {
-        let Some(home) = dirs::home_dir() else {
+        let Some(home) = user_dirs::home() else {
             return;
         };
         let path = home

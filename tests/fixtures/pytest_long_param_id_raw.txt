@@ -1,0 +1,19 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+__________________________________ test_first __________________________________
+test_lm.py:5: in test_first
+    assert {"a": 1, "b": 2} == {"a": 1, "b": 3}, "first test message"
+E   AssertionError: first test message
+E   assert {'a': 1, 'b': 2} == {'a': 1, 'b': 3}
+E     
+E     Omitting 1 identical items, use -vv to show
+E     Differing items:
+E     {'b': 2} != {'b': 3}
+E     Use -v to get more diff
+_ test_second_with_a_long_parametrized_id[xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx] _
+test_lm.py:10: in test_second_with_a_long_parametrized_id
+    raise RuntimeError("second test message\nsecond detail one\nsecond detail two")
+E   RuntimeError: second test message
+E   second detail one
+E   second detail two
+2 failed in 0.01s

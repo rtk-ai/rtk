@@ -4,6 +4,8 @@ All rewrite logic lives in RTK's Rust ``rtk rewrite`` command; this module
 only bridges Hermes ``pre_tool_call`` payloads to that command and fails open.
 """
 
+import math
+import os
 import shutil
 import subprocess
 import sys
@@ -11,6 +13,7 @@ import sys
 
 ACCEPTED_REWRITE_RETURN_CODES = {0, 3}
 EXPECTED_PASSTHROUGH_RETURN_CODES = {1, 2}
+DEFAULT_REWRITE_TIMEOUT = 5
 _rtk_available = None
 _rtk_missing_warned = False
 
@@ -37,8 +40,16 @@ def _check_rtk():
     return _rtk_available
 
 
+def _rewrite_timeout():
+    try:
+        timeout = float(os.environ.get("RTK_HERMES_TIMEOUT", DEFAULT_REWRITE_TIMEOUT))
+    except ValueError:
+        return DEFAULT_REWRITE_TIMEOUT
+    return timeout if math.isfinite(timeout) and timeout > 0 else DEFAULT_REWRITE_TIMEOUT
+
+
 def _pre_tool_call(tool_name=None, args=None, **_kwargs):
-    """Rewrite mutable Hermes terminal command args when RTK provides a change."""
+    """Update the shared payload without overriding other hooks' directives."""
     try:
         if tool_name != "terminal" or not isinstance(args, dict):
             return
@@ -51,7 +62,8 @@ def _pre_tool_call(tool_name=None, args=None, **_kwargs):
             result = subprocess.run(
                 ["rtk", "rewrite", command],
                 shell=False,
-                timeout=2,
+                stdin=subprocess.DEVNULL,
+                timeout=_rewrite_timeout(),
                 capture_output=True,
                 text=True,
             )
@@ -70,6 +82,10 @@ def _pre_tool_call(tool_name=None, args=None, **_kwargs):
 
         rewritten = result.stdout.strip()
         if rewritten and rewritten != command:
+            # Hermes executes this shared payload, including on releases before
+            # modify directives were supported. Newer releases then apply queued
+            # directives in hook order. Returning a command directive here would
+            # overwrite an earlier plugin's command that this hook cannot see.
             args["command"] = rewritten
     except Exception as e:
         _warn(str(e))

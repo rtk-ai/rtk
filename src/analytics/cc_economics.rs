@@ -112,26 +112,26 @@ impl PeriodEconomics {
 
     fn compute_weighted_metrics(&mut self) {
         // Weighted input CPT derivation using API price ratios
-        if let (Some(cost), Some(saved)) = (self.cc_cost, self.rtk_saved_tokens) {
-            if let (Some(input), Some(output), Some(cache_create), Some(cache_read)) = (
+        if let (Some(cost), Some(saved)) = (self.cc_cost, self.rtk_saved_tokens)
+            && let (Some(input), Some(output), Some(cache_create), Some(cache_read)) = (
                 self.cc_input_tokens,
                 self.cc_output_tokens,
                 self.cc_cache_create_tokens,
                 self.cc_cache_read_tokens,
-            ) {
-                // Weighted units = input + 5*output + 1.25*cache_create + 0.1*cache_read
-                let weighted_units = input as f64
-                    + WEIGHT_OUTPUT * output as f64
-                    + WEIGHT_CACHE_CREATE * cache_create as f64
-                    + WEIGHT_CACHE_READ * cache_read as f64;
+            )
+        {
+            // Weighted units = input + 5*output + 1.25*cache_create + 0.1*cache_read
+            let weighted_units = input as f64
+                + WEIGHT_OUTPUT * output as f64
+                + WEIGHT_CACHE_CREATE * cache_create as f64
+                + WEIGHT_CACHE_READ * cache_read as f64;
 
-                if weighted_units > 0.0 {
-                    let input_cpt = cost / weighted_units;
-                    let savings = saved as f64 * input_cpt;
+            if weighted_units > 0.0 {
+                let input_cpt = cost / weighted_units;
+                let savings = saved as f64 * input_cpt;
 
-                    self.weighted_input_cpt = Some(input_cpt);
-                    self.savings_weighted = Some(savings);
-                }
+                self.weighted_input_cpt = Some(input_cpt);
+                self.savings_weighted = Some(savings);
             }
         }
     }
@@ -139,19 +139,19 @@ impl PeriodEconomics {
     fn compute_dual_metrics(&mut self) {
         if let (Some(cost), Some(saved)) = (self.cc_cost, self.rtk_saved_tokens) {
             // Blended CPT (cost / total_tokens including cache)
-            if let Some(total) = self.cc_total_tokens {
-                if total > 0 {
-                    self.blended_cpt = Some(cost / total as f64);
-                    self.savings_blended = Some(saved as f64 * (cost / total as f64));
-                }
+            if let Some(total) = self.cc_total_tokens
+                && total > 0
+            {
+                self.blended_cpt = Some(cost / total as f64);
+                self.savings_blended = Some(saved as f64 * (cost / total as f64));
             }
 
             // Active CPT (cost / active_tokens = input+output only)
-            if let Some(active) = self.cc_active_tokens {
-                if active > 0 {
-                    self.active_cpt = Some(cost / active as f64);
-                    self.savings_active = Some(saved as f64 * (cost / active as f64));
-                }
+            if let Some(active) = self.cc_active_tokens
+                && active > 0
+            {
+                self.active_cpt = Some(cost / active as f64);
+                self.savings_active = Some(saved as f64 * (cost / active as f64));
             }
         }
     }
@@ -231,7 +231,7 @@ fn merge_daily(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<DayStats>) -> Vec<Period
 fn merge_weekly(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<WeekStats>) -> Vec<PeriodEconomics> {
     let mut map: HashMap<String, PeriodEconomics> = HashMap::new();
 
-    // Insert ccusage data (key = ISO Monday "2026-01-20")
+    // ccusage::fetch and Tracker::get_by_week both return Monday week starts.
     if let Some(cc_data) = cc {
         for entry in cc_data {
             let super::ccusage::CcusagePeriod { key, metrics } = entry;
@@ -241,12 +241,10 @@ fn merge_weekly(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<WeekStats>) -> Vec<Peri
         }
     }
 
-    // Merge rtk data (week_start = legacy Saturday "2026-01-18")
-    // Convert Saturday to Monday for alignment
     for entry in rtk {
-        let monday_key = match convert_saturday_to_monday(&entry.week_start) {
-            Some(m) => m,
-            None => {
+        let monday_key = match NaiveDate::parse_from_str(&entry.week_start, "%Y-%m-%d") {
+            Ok(date) => date.format("%Y-%m-%d").to_string(),
+            Err(_) => {
                 eprintln!("[warn] Invalid week_start format: {}", entry.week_start);
                 continue;
             }
@@ -296,18 +294,6 @@ fn merge_monthly(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<MonthStats>) -> Vec<Pe
 }
 
 // ── Helpers ──
-
-/// Convert Saturday week_start (legacy rtk) to ISO Monday
-/// Example: "2026-01-18" (Sat) -> "2026-01-20" (Mon)
-fn convert_saturday_to_monday(saturday: &str) -> Option<String> {
-    let sat_date = NaiveDate::parse_from_str(saturday, "%Y-%m-%d").ok()?;
-
-    // rtk uses Saturday as week start, ISO uses Monday
-    // Saturday + 2 days = Monday
-    let monday = sat_date + chrono::TimeDelta::try_days(2)?;
-
-    Some(monday.format("%Y-%m-%d").to_string())
-}
 
 fn compute_totals(periods: &[PeriodEconomics]) -> Totals {
     let mut totals = Totals {
@@ -727,7 +713,9 @@ fn export_csv(
     all: bool,
 ) -> Result<()> {
     // Header (new columns: input_tokens, output_tokens, cache_create, cache_read, weighted_savings)
-    println!("period,spent,input_tokens,output_tokens,cache_create,cache_read,active_tokens,total_tokens,saved_tokens,weighted_savings,active_savings,blended_savings,rtk_commands");
+    println!(
+        "period,spent,input_tokens,output_tokens,cache_create,cache_read,active_tokens,total_tokens,saved_tokens,weighted_savings,active_savings,blended_savings,rtk_commands"
+    );
 
     if all || daily {
         let cc = ccusage::fetch(Granularity::Daily)
@@ -828,16 +816,168 @@ fn print_csv_row(p: &PeriodEconomics) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_convert_saturday_to_monday() {
-        // Saturday Jan 18 -> Monday Jan 20
-        assert_eq!(
-            convert_saturday_to_monday("2026-01-18"),
-            Some("2026-01-20".to_string())
-        );
+    fn weekly_stats(start: &str, end: &str) -> WeekStats {
+        WeekStats {
+            week_start: start.to_string(),
+            week_end: end.to_string(),
+            commands: 3,
+            input_tokens: 1000,
+            output_tokens: 400,
+            saved_tokens: 600,
+            savings_pct: 60.0,
+            total_time_ms: 30,
+            avg_time_ms: 10,
+            timed_commands: 3,
+        }
+    }
 
-        // Invalid format
-        assert_eq!(convert_saturday_to_monday("invalid"), None);
+    fn weekly_usage(start: &str) -> CcusagePeriod {
+        CcusagePeriod {
+            key: start.to_string(),
+            metrics: ccusage::CcusageMetrics {
+                input_tokens: 1000,
+                output_tokens: 500,
+                cache_creation_tokens: 200,
+                cache_read_tokens: 5000,
+                total_tokens: 6700,
+                total_cost: 42.5,
+            },
+        }
+    }
+
+    #[test]
+    fn test_merge_weekly_same_monday_joins_all_metrics() {
+        let merged = merge_weekly(
+            Some(vec![weekly_usage("2026-09-28")]),
+            vec![weekly_stats("2026-09-28", "2026-10-04")],
+        );
+        assert_eq!(merged.len(), 1, "same Monday must join into one row");
+        let p = &merged[0];
+        assert_eq!(p.label, "2026-09-28");
+        assert_eq!(p.cc_cost, Some(42.5));
+        assert_eq!(p.cc_input_tokens, Some(1000));
+        assert_eq!(p.cc_output_tokens, Some(500));
+        assert_eq!(p.cc_cache_create_tokens, Some(200));
+        assert_eq!(p.cc_cache_read_tokens, Some(5000));
+        assert_eq!(p.cc_total_tokens, Some(6700));
+        assert_eq!(p.cc_active_tokens, Some(1500));
+        assert_eq!(p.rtk_commands, Some(3));
+        assert_eq!(p.rtk_saved_tokens, Some(600));
+        assert_eq!(p.rtk_savings_pct, Some(60.0));
+        assert_eq!(p.weighted_input_cpt, Some(0.01));
+        assert_eq!(p.savings_weighted, Some(6.0));
+        assert_eq!(p.blended_cpt, Some(42.5 / 6700.0));
+        assert_eq!(p.active_cpt, Some(42.5 / 1500.0));
+        assert_eq!(p.savings_blended, Some(600.0 * (42.5 / 6700.0)));
+        assert_eq!(p.savings_active, Some(600.0 * (42.5 / 1500.0)));
+    }
+
+    #[test]
+    fn test_merge_weekly_calendar_boundaries() {
+        for (start, end) in [
+            ("2020-12-28", "2021-01-03"),
+            ("2024-02-26", "2024-03-03"),
+            ("2025-12-29", "2026-01-04"),
+            ("2026-09-28", "2026-10-04"),
+        ] {
+            let merged = merge_weekly(
+                Some(vec![weekly_usage(start)]),
+                vec![weekly_stats(start, end)],
+            );
+            assert_eq!(merged.len(), 1, "{start}");
+            assert_eq!(merged[0].label, start);
+            assert_eq!(merged[0].savings_weighted, Some(6.0));
+        }
+    }
+
+    #[test]
+    fn test_merge_weekly_preserves_missing_sides_and_empty_reports() {
+        let only_cc = merge_weekly(Some(vec![weekly_usage("2026-09-28")]), vec![]);
+        assert_eq!(only_cc.len(), 1);
+        assert_eq!(only_cc[0].label, "2026-09-28");
+        assert_eq!(only_cc[0].cc_cost, Some(42.5));
+        assert_eq!(only_cc[0].rtk_commands, None);
+        assert_eq!(only_cc[0].weighted_input_cpt, None);
+        assert_eq!(only_cc[0].savings_weighted, None);
+        for cc in [None, Some(vec![])] {
+            let only_rtk = merge_weekly(cc, vec![weekly_stats("2026-09-28", "2026-10-04")]);
+            assert_eq!(only_rtk.len(), 1);
+            assert_eq!(only_rtk[0].label, "2026-09-28");
+            assert_eq!(only_rtk[0].rtk_commands, Some(3));
+            assert_eq!(only_rtk[0].rtk_saved_tokens, Some(600));
+            assert_eq!(only_rtk[0].rtk_savings_pct, Some(60.0));
+            assert_eq!(only_rtk[0].cc_cost, None);
+            assert_eq!(only_rtk[0].weighted_input_cpt, None);
+            assert_eq!(only_rtk[0].savings_weighted, None);
+            assert_eq!(only_rtk[0].blended_cpt, None);
+            assert_eq!(only_rtk[0].active_cpt, None);
+        }
+        assert!(merge_weekly(None, vec![]).is_empty());
+        assert!(merge_weekly(Some(vec![]), vec![]).is_empty());
+    }
+
+    #[test]
+    fn test_merge_weekly_sorts_union_and_preserves_totals() {
+        let merged = merge_weekly(
+            Some(vec![weekly_usage("2026-10-05"), weekly_usage("2026-09-28")]),
+            vec![
+                weekly_stats("2026-09-28", "2026-10-04"),
+                weekly_stats("2026-09-21", "2026-09-27"),
+            ],
+        );
+        assert_eq!(
+            merged.iter().map(|p| p.label.as_str()).collect::<Vec<_>>(),
+            ["2026-09-21", "2026-09-28", "2026-10-05"]
+        );
+        assert_eq!(merged[0].cc_cost, None);
+        assert_eq!(merged[0].rtk_saved_tokens, Some(600));
+        assert_eq!(merged[1].savings_weighted, Some(6.0));
+        assert_eq!(merged[2].cc_cost, Some(42.5));
+        assert_eq!(merged[2].rtk_saved_tokens, None);
+        let totals = compute_totals(&merged);
+        assert_eq!(totals.cc_cost, 85.0);
+        assert_eq!(totals.cc_total_tokens, 13400);
+        assert_eq!(totals.rtk_commands, 6);
+        assert_eq!(totals.rtk_saved_tokens, 1200);
+    }
+
+    #[test]
+    fn test_merge_weekly_zero_tokens_preserves_absent_cpt() {
+        let cc = CcusagePeriod {
+            key: "2026-09-28".to_string(),
+            metrics: ccusage::CcusageMetrics {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                total_tokens: 0,
+                total_cost: 0.0,
+            },
+        };
+        let merged = merge_weekly(
+            Some(vec![cc]),
+            vec![weekly_stats("2026-09-28", "2026-10-04")],
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].cc_cost, Some(0.0));
+        assert_eq!(merged[0].rtk_saved_tokens, Some(600));
+        assert_eq!(merged[0].weighted_input_cpt, None);
+        assert_eq!(merged[0].savings_weighted, None);
+        assert_eq!(merged[0].blended_cpt, None);
+        assert_eq!(merged[0].active_cpt, None);
+    }
+
+    #[test]
+    fn test_merge_weekly_canonicalizes_dates_and_skips_invalid_rtk() {
+        let mut rtk = vec![weekly_stats("2026-9-28", "2026-10-04")];
+        for invalid in ["invalid", "", "2026-02-29", "2026-13-01"] {
+            rtk.push(weekly_stats(invalid, "2026-10-04"));
+        }
+        let merged = merge_weekly(Some(vec![weekly_usage("2026-09-28")]), rtk);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].label, "2026-09-28");
+        assert_eq!(merged[0].rtk_commands, Some(3));
+        assert_eq!(merged[0].savings_weighted, Some(6.0));
     }
 
     #[test]
@@ -927,6 +1067,7 @@ mod tests {
             savings_pct: 50.0,
             total_time_ms: 0,
             avg_time_ms: 0,
+            timed_commands: 10,
         }];
 
         let merged = merge_monthly(Some(cc), rtk);
@@ -967,6 +1108,7 @@ mod tests {
             savings_pct: 50.0,
             total_time_ms: 0,
             avg_time_ms: 0,
+            timed_commands: 10,
         }];
 
         let merged = merge_monthly(None, rtk);
@@ -987,6 +1129,7 @@ mod tests {
                 savings_pct: 40.0,
                 total_time_ms: 0,
                 avg_time_ms: 0,
+                timed_commands: 5,
             },
             MonthStats {
                 month: "2026-01".to_string(),
@@ -997,6 +1140,7 @@ mod tests {
                 savings_pct: 60.0,
                 total_time_ms: 0,
                 avg_time_ms: 0,
+                timed_commands: 10,
             },
         ];
 

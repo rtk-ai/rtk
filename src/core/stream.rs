@@ -287,11 +287,17 @@ mod signal_relay {
     unsafe extern "C" fn relay(sig: libc::c_int) {
         let pid = CHILD_PID.load(Ordering::SeqCst);
         if pid == 0 || RELAYED.swap(sig, Ordering::SeqCst) != 0 {
-            libc::signal(sig, libc::SIG_DFL);
-            libc::raise(sig);
+            // nosemgrep: unsafe-block
+            unsafe {
+                libc::signal(sig, libc::SIG_DFL);
+                libc::raise(sig);
+            }
             return;
         }
-        libc::kill(pid as libc::pid_t, sig);
+        // nosemgrep: unsafe-block
+        unsafe {
+            libc::kill(pid as libc::pid_t, sig);
+        }
     }
 
     fn escalate(pid: u32) {
@@ -401,7 +407,8 @@ pub fn die_by_relayed_signal() {}
 
 pub fn status_to_exit_code(status: std::process::ExitStatus) -> i32 {
     if let Some(code) = status.code() {
-        return code;
+        // An MSYS/Cygwin child killed by a signal reports `signal << 8` (#5073).
+        return super::utils::msys_signal(code).map_or(code, |sig| 128 + sig);
     }
     #[cfg(unix)]
     {
@@ -472,10 +479,10 @@ pub fn run_streaming(
                 let mut writer = BufWriter::new(child_stdin);
                 let stdin_handle = io::stdin();
                 for line in read_lines_lossy(stdin_handle.lock()) {
-                    if let Some(out) = filter.feed_line(&line) {
-                        if writeln!(writer, "{}", out).is_err() {
-                            break;
-                        }
+                    if let Some(out) = filter.feed_line(&line)
+                        && writeln!(writer, "{}", out).is_err()
+                    {
+                        break;
                     }
                 }
                 let tail = filter.flush();
@@ -660,19 +667,19 @@ pub fn run_streaming(
     let exit_code = status_to_exit_code(status);
     let raw = format!("{}{}", raw_stdout, raw_stderr);
 
-    if let Some(mut f) = saved_filter {
-        if let Some(post) = f.on_exit(exit_code, &raw) {
-            filtered.push_str(&post);
-            let mut dest: Box<dyn Write> = if filter_fd_is_stderr {
-                Box::new(io::stderr().lock())
-            } else {
-                Box::new(io::stdout().lock())
-            };
-            match write!(dest, "{}", post) {
-                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
-                Err(e) => return Err(e.into()),
-                Ok(_) => {}
-            }
+    if let Some(mut f) = saved_filter
+        && let Some(post) = f.on_exit(exit_code, &raw)
+    {
+        filtered.push_str(&post);
+        let mut dest: Box<dyn Write> = if filter_fd_is_stderr {
+            Box::new(io::stderr().lock())
+        } else {
+            Box::new(io::stdout().lock())
+        };
+        match write!(dest, "{}", post) {
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
+            Err(e) => return Err(e.into()),
+            Ok(_) => {}
         }
     }
 
@@ -703,13 +710,64 @@ impl CaptureResult {
 
 pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::null());
+    show_usage_if_asked(cmd)?;
     capture(cmd)
 }
 
-/// Like [`exec_capture`] but inherits stdin so a wrapped engine can read a piped stdin.
+/// Like [`exec_capture`] but inherits stdin so a wrapped engine can read a piped stdin, and
+/// without the usage guard: its callers pass the caller's argv through verbatim or decide on
+/// it first.
 pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::inherit());
     capture(cmd)
+}
+
+/// Buffered capture with verbatim decoded streams, stdin and cancellation relay.
+///
+/// Unlike the line-oriented streaming runner, this preserves CRLF and a missing
+/// final newline and does not cap either stream. The caller must emit the result,
+/// flush its output, then call [`die_by_relayed_signal`], as the shared runner does.
+pub fn exec_capture_stdin_with_relay(cmd: &mut Command) -> Result<CaptureResult> {
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = cmd.spawn().context("Failed to spawn process")?;
+    let _relay = signal_relay::Relay::install(child.id());
+    let output = child
+        .wait_with_output()
+        .context("Failed to capture process output")?;
+    Ok(CaptureResult {
+        stdout: super::utils::decode_process_output(&output.stdout),
+        stderr: super::utils::decode_process_output(&output.stderr),
+        exit_code: status_to_exit_code(output.status),
+    })
+}
+
+/// Like [`exec_capture`] without the usage guard, for an argv whose `--help`, `--version` or
+/// `-h` is not the caller asking the tool for its usage: a probe RTK runs for itself, or a
+/// command whose flags RTK does not read. A caller that has already answered the usage
+/// question on the caller's own argv uses it too.
+pub fn exec_capture_unguarded(cmd: &mut Command) -> Result<CaptureResult> {
+    cmd.stdin(Stdio::null());
+    capture(cmd)
+}
+
+/// A usage page is not the output a filter reads: handed one, a filter built for the tool's
+/// normal output reports an empty run, which is how `pnpm outdated --help` became
+/// "48 outdated packages" and `jest --help` lost 24 KB of its 26 (#4198). Show it as the
+/// tool printed it and end with the tool's own code: there is no captured output to hand
+/// back, and an empty capture would get a summary written under it.
+fn show_usage_if_asked(cmd: &mut Command) -> Result<()> {
+    if !crate::core::runner::requests_help(cmd) {
+        return Ok(());
+    }
+    let program = cmd.get_program().to_string_lossy().into_owned();
+    let status = cmd
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| format!("Failed to execute {program}"))?;
+    std::process::exit(crate::core::utils::exit_code_from_status(&status, &program));
 }
 
 /// Run `cmd` to completion, decode what it wrote, and report the exit code.

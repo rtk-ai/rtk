@@ -1,12 +1,16 @@
 //! Filters npm output and auto-injects the "run" subcommand when appropriate.
 
-use std::io::IsTerminal;
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
+use std::io::IsTerminal;
 
 /// Known npm subcommands that should NOT get "run" injected.
 /// Shared between production code and tests to avoid drift.
+///
+/// A tool with a list like this also belongs in `core::tracking::SUBCOMMAND_ROUTERS`,
+/// which keeps the subcommand in its telemetry label.
 const NPM_SUBCOMMANDS: &[&str] = &[
     "install",
     "i",
@@ -72,6 +76,21 @@ const NPM_SUBCOMMANDS: &[&str] = &[
     "start",
     "stop",
     "restart",
+    "completion",
+    "edit",
+    "explore",
+    "find-dupes",
+    "help-search",
+    "hook",
+    "install-ci-test",
+    "install-test",
+    "ll",
+    "org",
+    "query",
+    "run-script",
+    "sbom",
+    "shrinkwrap",
+    "unstar",
 ];
 
 pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
@@ -142,7 +161,7 @@ fn run_filtered(
         cmd.env("SKIP_ENV_VALIDATION", "1");
     }
 
-    let args_display = args.join(" ");
+    let args_display = display_args(args);
     if verbose > 0 {
         eprintln!("Running: {} {}", name, args_display);
     }
@@ -152,13 +171,7 @@ fn run_filtered(
         opts = opts.inherit_stdin();
     }
 
-    runner::run_filtered(
-        cmd,
-        name,
-        &args_display,
-        filter_npm_output,
-        opts,
-    )
+    runner::run_filtered(cmd, name, &args_display, filter_npm_output, opts)
 }
 
 /// Filter npm run output - strip boilerplate, progress bars, npm WARN
@@ -255,6 +268,34 @@ npm notice
 
         // Explicit "run" should NOT inject another "run"
         assert!(!needs_run_injection(&["run", "build"]));
+    }
+
+    #[test]
+    fn test_extended_official_subcommands_do_not_inject_run() {
+        let subcommands = [
+            "completion",
+            "edit",
+            "explore",
+            "find-dupes",
+            "help-search",
+            "hook",
+            "install-ci-test",
+            "install-test",
+            "ll",
+            "org",
+            "query",
+            "run-script",
+            "sbom",
+            "shrinkwrap",
+            "unstar",
+        ];
+
+        for subcommand in subcommands {
+            assert!(
+                NPM_SUBCOMMANDS.contains(&subcommand),
+                "npm {subcommand} must be routed as a native subcommand"
+            );
+        }
     }
 
     #[test]

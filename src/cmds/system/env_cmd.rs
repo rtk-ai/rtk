@@ -27,10 +27,10 @@ pub fn run(filter: Option<&str>, verbose: u8) -> Result<()> {
 
     for (key, value) in &vars {
         // Apply filter if provided
-        if let Some(f) = filter {
-            if !key.to_lowercase().contains(&f.to_lowercase()) {
-                continue;
-            }
+        if let Some(f) = filter
+            && !key.to_lowercase().contains(&f.to_lowercase())
+        {
+            continue;
         }
 
         let display_value = if value.len() > 100 {

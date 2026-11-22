@@ -1,14 +1,15 @@
 //! Optional usage ping so we know which commands people run most.
 
-use super::constants::RTK_DATA_DIR;
 use crate::core::config;
+use crate::core::http;
 use crate::core::tracking;
+use crate::core::user_dirs;
 use crate::hooks::constants::CLAUDE_DIR;
 use crate::hooks::init::resolve_claude_dir;
+use base16ct::HexDisplay;
 use sha2::{Digest, Sha256};
-use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 static CACHED_SALT: OnceLock<String> = OnceLock::new();
@@ -58,29 +59,57 @@ pub fn maybe_ping() {
         return;
     }
 
-    // Check last ping time
-    let marker = telemetry_marker_path();
-    if let Ok(metadata) = std::fs::metadata(&marker) {
-        if let Ok(modified) = metadata.modified() {
-            if let Ok(elapsed) = modified.elapsed() {
-                if elapsed.as_secs() < PING_INTERVAL_SECS {
-                    return;
-                }
-            }
-        }
-    }
-
-    // Touch marker file immediately (before sending) to avoid double-ping
-    touch_marker(&marker);
-
-    // Spawn thread so we never block the CLI
-    std::thread::spawn(|| {
-        let _ = send_ping();
+    let _ = start_ping_if_due(telemetry_marker_path(), |marker| {
+        let _ = send_ping(marker);
     });
 }
 
-fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
+/// The main-thread half of the ping: checks the marker and hands the work to a
+/// thread so the CLI never blocks. It never writes the marker. Process exit
+/// kills the thread, often before it connects, and a marker written here would
+/// then skip the day's ping without sending it; `run_ping` claims it instead.
+fn start_ping_if_due<W>(marker: PathBuf, work: W) -> Option<std::thread::JoinHandle<()>>
+where
+    W: FnOnce(&Path) + Send + 'static,
+{
+    if !ping_due(&marker) {
+        return None;
+    }
+    Some(std::thread::spawn(move || work(&marker)))
+}
+
+/// The send-thread half: prepares the payload, then claims the marker, then
+/// sends. Claiming last means a command that exits during preparation leaves
+/// the ping for the next one, and re-checking at the claim means a process
+/// that claimed in the meantime wins. Returns whether a request went out.
+fn run_ping<P, E>(
+    marker: &Path,
+    prepare: impl FnOnce() -> P,
+    send: impl FnOnce(P) -> Result<(), E>,
+) -> Result<bool, E> {
+    let payload = prepare();
+    if !claim_ping(marker) {
+        return Ok(false);
+    }
+    send(payload)?;
+    Ok(true)
+}
+
+fn send_ping(marker: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let url = endpoint_url().ok_or("no telemetry URL")?;
+    run_ping(marker, build_payload, |payload| {
+        let mut req = ureq::post(url);
+        if let Some(token) = TELEMETRY_TOKEN {
+            req = req.header("X-RTK-Token", token);
+        }
+        // 2 second timeout — if server is down, we move on
+        http::global_timeout(req, std::time::Duration::from_secs(2)).send_json(&payload)?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    Ok(())
+}
+
+fn build_payload() -> serde_json::Value {
     let device_hash = generate_device_hash();
     let version = env!("CARGO_PKG_VERSION").to_string();
     let os = std::env::consts::OS.to_string();
@@ -116,7 +145,7 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
         },
     };
 
-    let payload = serde_json::json!({
+    serde_json::json!({
         "device_hash": device_hash,
         "version": version,
         "os": os,
@@ -155,26 +184,14 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
         "recall_stats": build_recall_stats(
             &crate::core::retriever::stats_snapshot().unwrap_or_default()
         ),
-    });
-
-    let mut req = ureq::post(url).set("Content-Type", "application/json");
-
-    if let Some(token) = TELEMETRY_TOKEN {
-        req = req.set("X-RTK-Token", token);
-    }
-
-    // 2 second timeout — if server is down, we move on
-    req.timeout(std::time::Duration::from_secs(2))
-        .send_string(&payload.to_string())?;
-
-    Ok(())
+    })
 }
 
 pub fn generate_device_hash() -> String {
     let salt = get_or_create_salt();
     let mut hasher = Sha256::new();
     hasher.update(salt.as_bytes());
-    format!("{:x}", hasher.finalize())
+    format!("{:x}", HexDisplay(&hasher.finalize()))
 }
 
 fn get_or_create_salt() -> String {
@@ -213,19 +230,13 @@ fn random_salt() -> String {
         let fallback = format!("{:?}:{}", std::time::SystemTime::now(), std::process::id());
         let mut hasher = Sha256::new();
         hasher.update(fallback.as_bytes());
-        return format!("{:x}", hasher.finalize());
+        return format!("{:x}", HexDisplay(&hasher.finalize()));
     }
-    buf.iter().fold(String::new(), |mut output, b| {
-        let _ = write!(output, "{b:02x}");
-        output
-    })
+    format!("{:x}", HexDisplay(&buf))
 }
 
 pub fn salt_file_path() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("rtk")
-        .join(".device_salt")
+    user_dirs::data_under("/tmp").join(".device_salt")
 }
 
 fn get_stats(tracker: &tracking::Tracker) -> (i64, Vec<String>, Option<f64>, i64, i64) {
@@ -335,7 +346,7 @@ fn get_enriched_stats(tracker: &tracking::Tracker) -> EnrichedStats {
     }
 }
 
-/// Build meta-command usage counts (gain, discover, proxy, verify, learn, init).
+/// Build meta-command usage counts (gain, discover, bypass, verify, learn, init).
 fn recall_mode_label() -> &'static str {
     use crate::core::retriever::RecoveryMode;
     match crate::core::config::Config::load()
@@ -438,7 +449,7 @@ fn build_recall_stats(stats: &[crate::core::retriever::RecallStat]) -> serde_jso
 }
 
 fn build_meta_usage(tracker: &tracking::Tracker) -> serde_json::Value {
-    let meta_cmds = ["gain", "discover", "proxy", "verify", "learn", "init"];
+    let meta_cmds = ["gain", "discover", "bypass", "verify", "learn", "init"];
     let mut usage = serde_json::Map::new();
     for meta in &meta_cmds {
         let count = tracker.count_meta_command(meta).unwrap_or(0);
@@ -451,8 +462,8 @@ fn build_meta_usage(tracker: &tracking::Tracker) -> serde_json::Value {
 
 /// Check if user has a config.toml file.
 fn detect_has_config() -> bool {
-    dirs::config_dir()
-        .map(|d| d.join("rtk/config.toml").exists())
+    user_dirs::config()
+        .map(|d| d.join(crate::core::constants::CONFIG_TOML).exists())
         .unwrap_or(false)
 }
 
@@ -465,7 +476,7 @@ fn count_exclude_commands() -> usize {
 
 /// Detect which AI agent hook is installed.
 fn detect_hook_type() -> String {
-    let home = match dirs::home_dir() {
+    let home = match user_dirs::home() {
         Some(h) => h,
         None => return "unknown".to_string(),
     };
@@ -489,7 +500,7 @@ fn detect_hook_type() -> String {
     }
 
     // Check project-level hooks (Claude script + project-scoped Copilot config)
-    if let Ok(cwd) = std::env::current_dir() {
+    if let Some(cwd) = user_dirs::working_dir() {
         if cwd.join(".claude/hooks/rtk-rewrite.sh").exists() {
             return "claude".to_string();
         }
@@ -506,23 +517,23 @@ fn count_custom_toml_filters() -> usize {
     let mut count = 0;
 
     // Project-local: .rtk/filters/*.toml
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Ok(entries) = std::fs::read_dir(cwd.join(".rtk/filters")) {
-            count += entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
-                .count();
-        }
+    if let Some(cwd) = user_dirs::working_dir()
+        && let Ok(entries) = std::fs::read_dir(cwd.join(".rtk/filters"))
+    {
+        count += entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
+            .count();
     }
 
     // Global: ~/.config/rtk/filters/*.toml
-    if let Some(config_dir) = dirs::config_dir() {
-        if let Ok(entries) = std::fs::read_dir(config_dir.join("rtk/filters")) {
-            count += entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
-                .count();
-        }
+    if let Some(rtk_dir) = user_dirs::config()
+        && let Ok(entries) = std::fs::read_dir(rtk_dir.join("filters"))
+    {
+        count += entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
+            .count();
     }
 
     count
@@ -555,15 +566,33 @@ fn install_method_from_path(path: &str) -> &'static str {
 }
 
 pub fn telemetry_marker_path() -> PathBuf {
-    let data_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(RTK_DATA_DIR);
+    let data_dir = user_dirs::data_under("/tmp");
     let _ = crate::core::utils::create_private_dir(&data_dir);
     data_dir.join(".telemetry_last_ping")
 }
 
-fn touch_marker(path: &PathBuf) {
-    let _ = std::fs::write(path, b"");
+fn ping_due(marker: &Path) -> bool {
+    let fresh = std::fs::metadata(marker)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|elapsed| elapsed.as_secs() < PING_INTERVAL_SECS);
+    !fresh
+}
+
+/// Marks today's ping as sent, unless another process already did so after
+/// `maybe_ping` checked. Called right before the request goes out, so the
+/// marker only records a send that was actually attempted.
+fn claim_ping(marker: &Path) -> bool {
+    if !ping_due(marker) {
+        return false;
+    }
+    touch_marker(marker);
+    true
+}
+
+fn touch_marker(path: &Path) {
+    let _ = crate::core::utils::touch_file(path);
 }
 
 #[cfg(test)]
@@ -674,6 +703,124 @@ mod tests {
     }
 
     #[test]
+    fn checking_whether_a_ping_is_due_does_not_spend_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(".telemetry_last_ping");
+
+        assert!(ping_due(&marker));
+        assert!(
+            !marker.exists(),
+            "a command that exits before the send thread runs must leave the day's ping for the next one"
+        );
+    }
+
+    #[test]
+    fn claiming_a_ping_writes_the_marker_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(".telemetry_last_ping");
+
+        assert!(claim_ping(&marker));
+        assert!(marker.exists());
+        assert!(!ping_due(&marker));
+        assert!(
+            !claim_ping(&marker),
+            "a second process must not send the same day's ping"
+        );
+    }
+
+    #[test]
+    fn a_marker_older_than_the_interval_is_due_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(".telemetry_last_ping");
+        let file = std::fs::File::create(&marker).expect("create marker");
+        let stale =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(PING_INTERVAL_SECS + 60);
+        file.set_modified(stale).expect("backdate marker");
+        drop(file);
+
+        assert!(ping_due(&marker));
+        assert!(claim_ping(&marker));
+        assert!(!ping_due(&marker));
+    }
+
+    #[test]
+    fn the_marker_is_claimed_after_the_payload_and_before_the_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(".telemetry_last_ping");
+        let mut posted = None;
+
+        let sent = run_ping(
+            &marker,
+            || {
+                assert!(
+                    !marker.exists(),
+                    "the marker must not be written before the payload is ready"
+                );
+                "payload"
+            },
+            |payload| {
+                assert!(
+                    marker.exists(),
+                    "the marker must be written before the request goes out"
+                );
+                posted = Some(payload);
+                Ok::<(), ()>(())
+            },
+        );
+
+        assert_eq!(sent, Ok(true));
+        assert_eq!(posted, Some("payload"), "the claimed ping must be sent");
+        assert!(!ping_due(&marker));
+    }
+
+    #[test]
+    fn a_marker_claimed_by_another_process_during_preparation_means_no_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(".telemetry_last_ping");
+
+        let sent = run_ping(
+            &marker,
+            || touch_marker(&marker),
+            |()| -> Result<(), ()> { panic!("a ping claimed elsewhere must not be sent again") },
+        );
+
+        assert_eq!(sent, Ok(false));
+    }
+
+    #[test]
+    fn the_main_thread_starts_the_ping_without_writing_the_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(".telemetry_last_ping");
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let handle = start_ping_if_due(marker.clone(), move |m| {
+            tx.send(m.exists()).expect("send");
+        })
+        .expect("a missing marker means a ping is due");
+        handle.join().expect("ping thread");
+
+        assert_eq!(
+            rx.recv().ok(),
+            Some(false),
+            "the marker must still be absent when the send thread starts"
+        );
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn a_fresh_marker_means_no_preparation_at_all() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(".telemetry_last_ping");
+        touch_marker(&marker);
+
+        let started = start_ping_if_due(marker, |_| {
+            panic!("a fresh marker must not start the send thread")
+        });
+
+        assert!(started.is_none());
+    }
+
+    #[test]
     fn test_install_method_unix_paths() {
         assert_eq!(
             install_method_from_path("/opt/homebrew/Cellar/rtk/0.28.0/bin/rtk"),
@@ -766,9 +913,11 @@ mod tests {
             stats.avg_savings_per_command
         );
         assert!(
-            ["claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"]
-                .iter()
-                .any(|&h| stats.hook_type.starts_with(h)),
+            [
+                "claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"
+            ]
+            .iter()
+            .any(|&h| stats.hook_type.starts_with(h)),
             "Unexpected hook type: {}",
             stats.hook_type
         );
@@ -778,8 +927,10 @@ mod tests {
     fn test_detect_hook_type_returns_known() {
         let ht = detect_hook_type();
         assert!(
-            ["claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"]
-                .contains(&ht.as_str()),
+            [
+                "claude", "gemini", "codex", "cursor", "copilot", "vibe", "none", "unknown"
+            ]
+            .contains(&ht.as_str()),
             "Unexpected hook type: {}",
             ht
         );

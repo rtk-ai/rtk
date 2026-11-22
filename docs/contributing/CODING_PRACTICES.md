@@ -13,7 +13,7 @@ Our goal is to keep the codebase consistent and easy to extend. PRs that deviate
 New to RTK? The fastest path to a mergeable first PR:
 
 1. **Read the flow once.** Start at [`CONTRIBUTING.md`](../../CONTRIBUTING.md), then skim [`docs/contributing/TECHNICAL.md`](TECHNICAL.md) to see how a command flows from `main.rs` → a `*_cmd.rs` filter → tracking → stdout.
-2. **Look at a good example.** [`src/cmds/git/git.rs`](../../src/cmds/git/git.rs) is a representative filter — it shows the `run()` entry point, `LazyLock` regex setup, filter helpers, and embedded tests all in one file.
+2. **Look at a good example.** [`src/cmds/git/git_cmd.rs`](../../src/cmds/git/git_cmd.rs) is a representative filter — it shows the `run()` entry point, `LazyLock` regex setup, filter helpers, and embedded tests all in one file.
 3. **Know the shared helpers before reimplementing.** Two files cover most of what you need:
    - [`src/core/runner.rs`](../../src/core/runner.rs) — command execution wrappers: `run_filtered()` (run a command, then apply your filter function), `run_passthrough()` (run unfiltered but tracked), `run_streamed()` (streaming filter).
    - [`src/core/utils.rs`](../../src/core/utils.rs) — shared utilities: `resolved_command()`, `strip_ansi()`, `truncate()`, `count_tokens()`, and more.
@@ -51,7 +51,7 @@ When you add an edge-case branch or a non-obvious exception, leave a short comme
 Referencing an issue is often the clearest form:
 
 ```rust
-// ISSUE #463: some `git log` output contains NUL bytes when --format=%x00 is used;
+// ISSUE #123: some `git log` output contains NUL bytes when --format=%x00 is used;
 // skip the line rather than panicking on invalid UTF-8.
 if line.contains('\0') {
     continue;
@@ -68,7 +68,7 @@ Comments are welcome when they add information the code cannot carry on its own.
 
 - **File header (`//!`)** — purpose and scope of the current file.
 - **Edge case** — a non-obvious branch or exception, as described above.
-- **Issue reference** — e.g. `// ISSUE #463: the fix for this`.
+- **Issue reference** — e.g. `// ISSUE #123: the fix for this`.
 - **"Why, not what"** — when the intent or tradeoff behind a decision isn't obvious from the code.
 
 In short: avoid noise comments; keep the ones that would save a future reader a trip to `git blame`.
@@ -81,7 +81,7 @@ Use explicit, descriptive names for variables, just like for functions.
 
 Do not hardcode repetitive patterns or values that control behavior — extract them into named constants at the top of the file. For anything a user might want to tune (thresholds, limits, display cutoffs), use `config::limits()` so it flows through `~/.config/rtk/config.toml`.
 
-Example from `src/cmds/git/git.rs`:
+Example from `src/cmds/git/git_cmd.rs`:
 
 ```rust
 let limits = config::limits();
@@ -177,10 +177,10 @@ RTK executes shell commands on behalf of the user, so security is a first-class 
 
 **Command execution.** All commands go through argument arrays via `Command::new().args()` — never through shell string concatenation. This prevents injection. Always use `resolved_command()` from `src/core/utils.rs` instead of a raw `Command::new()`.
 
-**Hook integrity.** RTK verifies hook files via SHA-256 hashes before operational commands. If a hook has been tampered with, RTK exits with code 1. See [`src/hooks/integrity.rs`](../../src/hooks/integrity.rs).
+**Hook integrity.** RTK verifies hook files via SHA-256 hashes before typed operational commands and fallback tool dispatch. If a hook has been tampered with, RTK exits with code 1. See [`src/hooks/integrity.rs`](../../src/hooks/integrity.rs).
 
 **Project filter trust.** `.rtk/filters.toml` files are not loaded until the user explicitly trusts them, and content changes require re-trust. See [`src/hooks/trust.rs`](../../src/hooks/trust.rs).
 
-**Permission whitelist.** `is_operational_command()` in `main.rs` uses a whitelist pattern — new commands are *not* integrity-checked until explicitly added. This is an intentional security posture: fail-open with an audit trail is preferred over false confidence.
+**Permission whitelist.** `is_operational_command()` in `lib.rs` selects typed commands for the integrity check. New typed commands must be explicitly included when appropriate. Commands rejected by Clap pass through a separate fallback gate before tool dispatch; root/meta diagnostics remain outside that gate. When neither a Claude directory nor a home directory can be resolved, runtime checks continue because there is no legacy hook to locate. Explicitly configured hooks and malformed or unreadable baselines remain checked.
 
 **`unsafe` code.** Not allowed except for Unix signal handling in proxy mode, which is correctly scoped to `#[cfg(unix)]`.

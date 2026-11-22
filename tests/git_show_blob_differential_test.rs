@@ -7,7 +7,8 @@
 //!
 //! This test is the standing guarantee that no misroute class is hiding. It builds a
 //! hermetic git repo with objects of every relevant type, then — with a FIXED seed so CI
-//! is deterministic — generates hundreds of `git show <random flags> <arg>` invocations
+//! is deterministic — generates hundreds of `git show <random flags> <arg>` invocations,
+//! runs each distinct one once (rtk's answer depends only on its argv in this fixed repo),
 //! and checks rtk's CLASSIFICATION (did it window? pass through? render a commit-diff?)
 //! against ground truth from `git cat-file -t`. It asserts:
 //! - 0 misroutes: rtk never windows anything git does not call a `blob`;
@@ -21,12 +22,14 @@
 //! It shells out to the real `git` and the built `rtk` binary, matching the repo's other
 //! integration tests (e.g. `diff_byte_accuracy_test.rs`).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const RTK_BIN: &str = env!("CARGO_BIN_EXE_rtk");
+mod common;
 
-/// Number of fuzz iterations. Seeded, so this is deterministic across runs/CI.
+/// Number of invocations drawn; the repeats among them are run once. Seeded, so this is
+/// deterministic across runs/CI.
 const ITERATIONS: usize = 600;
 /// Fixed seed — change only intentionally.
 const SEED: u64 = 0x5DEE_CE66_D3A1_2B4F;
@@ -58,16 +61,13 @@ impl Rng {
 
 /// Env that isolates git and rtk from the developer's real config/identity/home.
 fn isolate(cmd: &mut Command, home: &Path) {
+    common::isolate_git(cmd);
     cmd.env("HOME", home)
-        .env("GIT_CONFIG_GLOBAL", home.join("nonexistent-global"))
-        .env("GIT_CONFIG_SYSTEM", home.join("nonexistent-system"))
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@example.com")
         .env("GIT_COMMITTER_NAME", "t")
         .env("GIT_COMMITTER_EMAIL", "t@example.com")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE");
+        .env("GIT_TERMINAL_PROMPT", "0");
 }
 
 fn git(repo: &Path, home: &Path, args: &[&str]) -> Output {
@@ -101,7 +101,7 @@ fn cat_file_type(repo: &Path, home: &Path, arg: &str) -> Option<String> {
 }
 
 fn rtk_show(repo: &Path, home: &Path, args: &[&str]) -> Output {
-    let mut cmd = Command::new(RTK_BIN);
+    let mut cmd = common::rtk_command();
     cmd.arg("git").arg("show").args(args).current_dir(repo);
     isolate(&mut cmd, home);
     cmd.output().expect("run rtk git show")
@@ -184,11 +184,11 @@ fn setup_repo() -> Repo {
 
 /// rtk windowed the blob iff its recovery hint is present (unique to blob windowing).
 fn was_windowed(out: &Output) -> bool {
-    String::from_utf8_lossy(&out.stdout).contains("[see remaining: git ")
+    String::from_utf8_lossy(&out.stdout).contains("[see remaining: rtk proxy git ")
 }
 
 /// The object categories the fuzzer draws from, with their expected classification.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
     /// Large valid-UTF-8 blob → MUST window.
     LargeUtf8,
@@ -339,18 +339,6 @@ fn git_show_blob_classification_differential() {
     let repo = setup_repo();
     let (path, home) = (repo.path.as_path(), repo.home.as_path());
 
-    // Sanity-check the fixtures against ground truth before fuzzing.
-    assert_eq!(
-        cat_file_type(path, home, "HEAD:large.txt").as_deref(),
-        Some("blob")
-    );
-    assert_eq!(
-        cat_file_type(path, home, "HEAD:dir").as_deref(),
-        Some("tree")
-    );
-    assert_eq!(cat_file_type(path, home, "HEAD").as_deref(), Some("commit"));
-    assert_eq!(cat_file_type(path, home, "HEAD:does-not-exist.txt"), None);
-
     let kinds = [
         Kind::LargeUtf8,
         Kind::Small,
@@ -365,20 +353,46 @@ fn git_show_blob_classification_differential() {
         Kind::PathspecLargeUtf8,
     ];
 
+    // The draws repeat (the flag pools are small) and every process costs tens of
+    // milliseconds on Windows, so each distinct invocation runs once.
     let mut rng = Rng(SEED);
+    let mut invocations: Vec<(Kind, Vec<String>)> = Vec::new();
+    for _ in 0..ITERATIONS {
+        let kind = *rng.pick(&kinds);
+        let invocation = (kind, build_invocation(&mut rng, kind));
+        if !invocations.contains(&invocation) {
+            invocations.push(invocation);
+        }
+    }
+
+    // Ground truth per object, from `git cat-file -t`.
+    let mut truths: HashMap<&str, Option<String>> = HashMap::new();
+    for &kind in &kinds {
+        let object = kind_object(kind);
+        truths
+            .entry(object)
+            .or_insert_with(|| cat_file_type(path, home, object));
+    }
+
+    // Sanity-check the fixtures against ground truth before fuzzing.
+    assert_eq!(truths["HEAD:large.txt"].as_deref(), Some("blob"));
+    assert_eq!(truths["HEAD:dir"].as_deref(), Some("tree"));
+    assert_eq!(truths["HEAD"].as_deref(), Some("commit"));
+    assert_eq!(truths["HEAD:does-not-exist.txt"], None);
+    let mut plain_shows: HashMap<&str, Vec<u8>> = HashMap::new();
+
     // Collect failures instead of panicking mid-loop, so the incidence is measured
     // across ALL invocations (KuSh: a measured incidence is what proves no class hides).
     let mut misroutes: Vec<String> = Vec::new();
     let mut silent_losses: Vec<String> = Vec::new();
     let mut fidelity_breaks: Vec<String> = Vec::new();
 
-    for _ in 0..ITERATIONS {
-        let kind = *rng.pick(&kinds);
-        let args = build_invocation(&mut rng, kind);
+    for (kind, args) in &invocations {
+        let kind = *kind;
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let object = kind_object(kind);
-        let truth = cat_file_type(path, home, object); // ground truth for the object
+        let truth = &truths[object];
         let out = rtk_show(path, home, &arg_refs);
         let windowed = was_windowed(&out);
 
@@ -410,13 +424,15 @@ fn git_show_blob_classification_differential() {
                     !windowed,
                     "small/latin1/utf16 blobs must not window: {args:?}"
                 );
-                let plain = git(path, home, &["show", object]);
-                if out.stdout != plain.stdout {
+                let plain = plain_shows
+                    .entry(object)
+                    .or_insert_with(|| git(path, home, &["show", object]).stdout);
+                if out.stdout != *plain {
                     fidelity_breaks.push(format!(
                         "`git show {}` differs from git (rtk {} vs git {} bytes)",
                         args.join(" "),
                         out.stdout.len(),
-                        plain.stdout.len()
+                        plain.len()
                     ));
                 }
             }
@@ -481,7 +497,8 @@ fn git_show_blob_classification_differential() {
 
     // Report incidence (KuSh: the fuzzer establishes there are no other classes hiding).
     eprintln!(
-        "differential fuzzer: {ITERATIONS} invocations — misroutes={}, silent_losses={}, fidelity_breaks={}",
+        "differential fuzzer: {} distinct of {ITERATIONS} drawn invocations — misroutes={}, silent_losses={}, fidelity_breaks={}",
+        invocations.len(),
         misroutes.len(),
         silent_losses.len(),
         fidelity_breaks.len()
@@ -497,6 +514,100 @@ fn git_show_blob_classification_differential() {
     );
 }
 
+/// Split a hint's shell words, undoing the POSIX single-quoting `compact_blob_show` applies.
+/// Only the quoting rtk itself emits is handled -- enough to run the hint as it is printed.
+fn split_hint_words(cmd: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut started = false;
+    let mut quoted = false;
+    for c in cmd.chars() {
+        match c {
+            '\'' => {
+                quoted = !quoted;
+                started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    words.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            c => {
+                current.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(current);
+    }
+    words
+}
+
+/// The hint must be *runnable*, not merely well-formed: run the command it names and check it
+/// returns exactly the lines the window held back.
+///
+/// Parsing `N` out of the hint and slicing git's own output (as the byte-exactness check below
+/// does) cannot see the failure this guards -- a hint naming a command that re-windows the blob
+/// and hands `tail` nothing but the hint itself.
+///
+/// One half of that guarantee. This runs the hint's argv directly and applies the `tail` in
+/// process, so it establishes that the named command returns the rest of the blob -- not that
+/// the hook leaves the hint alone, since no hook runs here. The other half is the unit test
+/// `test_compact_blob_show_hint_survives_rtks_own_hook`, which puts the emitted hint through
+/// the real `rewrite_command`. Neither test is sufficient on its own: a hint the hook rewrites
+/// would still pass this one, and a hint the hook ignores but that returns nothing would still
+/// pass that one.
+#[test]
+fn windowed_blob_hint_command_returns_the_rest() {
+    let repo = setup_repo();
+    let (path, home) = (repo.path.as_path(), repo.home.as_path());
+
+    let out = rtk_show(path, home, &["HEAD:large.txt"]);
+    assert!(out.status.success());
+    let shown = String::from_utf8(out.stdout).expect("windowed head is UTF-8");
+    let hint = shown
+        .rsplit_once("[see remaining: ")
+        .map(|(_, rest)| rest.trim_end().trim_end_matches(']'))
+        .expect("a windowed head carries a hint");
+    let (recall, tail_part) = hint.split_once(" | tail -n +").expect("tail hint");
+    let n: usize = tail_part.trim().parse().expect("N parses");
+
+    let words = split_hint_words(recall);
+    assert_eq!(words.first().map(String::as_str), Some("rtk"), "{hint}");
+    let mut cmd = common::rtk_command();
+    cmd.args(&words[1..]).current_dir(path);
+    isolate(&mut cmd, home);
+    let recalled = cmd.output().expect("run the hint's own command");
+    assert!(
+        recalled.status.success(),
+        "the hint's command failed: {}",
+        String::from_utf8_lossy(&recalled.stderr)
+    );
+    let recalled = String::from_utf8(recalled.stdout).expect("recalled blob is UTF-8");
+
+    let head = &shown[..shown.find("... (+").expect("truncation marker")];
+    let tail: String = recalled
+        .lines()
+        .skip(n - 1)
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let full = String::from_utf8(git(path, home, &["show", "HEAD:large.txt"]).stdout)
+        .expect("blob is UTF-8");
+
+    assert!(
+        tail.lines().count() > 1,
+        "the hint returned {} line(s) -- it must return the rest of the blob, not just itself",
+        tail.lines().count()
+    );
+    assert_eq!(
+        format!("{head}{tail}"),
+        full,
+        "running the hint must reconstruct the blob byte-for-byte"
+    );
+}
+
 /// A companion check that the recovery hint reconstructs a windowed blob BYTE-for-byte:
 /// `head_shown` ++ `git show <rev:path> | tail -n +N` == full `git show <rev:path>`.
 #[test]
@@ -508,7 +619,7 @@ fn windowed_blob_recovery_is_byte_exact() {
     assert!(out.status.success());
     let shown = String::from_utf8(out.stdout).expect("windowed head is UTF-8");
     assert!(
-        shown.contains("[see remaining: git "),
+        shown.contains("[see remaining: rtk proxy git "),
         "expected a windowed head"
     );
 
@@ -555,13 +666,13 @@ fn cluster_flag_before_blob_windows_and_recovers_byte_exact() {
     assert!(out.status.success());
     let shown = String::from_utf8(out.stdout).expect("windowed head is UTF-8");
     assert!(
-        shown.contains("[see remaining: git "),
+        shown.contains("[see remaining: rtk proxy git "),
         "cluster + blob must still window (blocker regression)"
     );
     // The hint points at the blob arg alone — verify it names `HEAD:large.txt`, not the
     // `x:y` pickaxe value that the old walker mistook for the object.
     assert!(
-        shown.contains("'HEAD:large.txt'"),
+        shown.contains("show HEAD:large.txt | tail"),
         "hint must target the real blob arg, not the flag value"
     );
 
