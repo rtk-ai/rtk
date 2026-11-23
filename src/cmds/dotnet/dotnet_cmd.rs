@@ -1,7 +1,7 @@
 //! Filters dotnet CLI output — build, test, and format results.
 
 use crate::binlog;
-use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec};
+use crate::core::arg_tokenizer::{self, Dialect, Flag, Grammar, Token, TokenKind, ValueSpec};
 use crate::core::args_utils;
 use crate::core::guard::never_worse;
 use crate::core::shell::{display_args, quote_word, with_args};
@@ -13,7 +13,6 @@ use crate::core::utils::{resolved_command, truncate};
 use crate::dotnet_format_report;
 use crate::dotnet_trx;
 use anyhow::{Context, Result};
-use quick_xml::Reader;
 use quick_xml::events::Event;
 use serde_json::Value;
 use std::ffi::OsString;
@@ -662,7 +661,7 @@ fn build_effective_dotnet_args(
 fn has_binlog_arg(tokens: &[Token<'_>]) -> bool {
     // Unscoped: wherever the user put `-bl`, that is the binlog that gets written, and RTK
     // adding its own would give MSBuild two binary loggers and parse the wrong one.
-    arg_tokenizer::has_flag(tokens, Dialect::Msbuild, "bl")
+    arg_tokenizer::has_flag(tokens, &DOTNET_GRAMMAR, "bl")
 }
 
 fn has_verbosity_arg(tokens: &[Token<'_>]) -> bool {
@@ -711,40 +710,55 @@ fn scan_mtp_kind_in_file(path: &Path) -> MtpProjectKind {
         Err(_) => return MtpProjectKind::None,
     };
 
-    let mut reader = Reader::from_str(&content);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut inside_mtp_element = false;
+    let mut reader = dotnet_trx::xml_reader(&content);
+    // The text of the MTP property being read, if inside one.
+    let mut value: Option<String> = None;
+    let is_true = |value: &Option<String>| {
+        value
+            .as_deref()
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
+    };
 
+    // Decided after the loop: a malformed end tag or a truncated file still ends a
+    // value read in full.
     loop {
-        match reader.read_event_into(&mut buf) {
+        match reader.read_event() {
             Ok(Event::Start(e)) => {
                 let name_lower = e.local_name().as_ref().to_ascii_lowercase();
                 // All project-file MTP properties run in VSTest bridge mode and require
                 // MTP-specific args to come after `--`. Only global.json MTP mode is native.
-                inside_mtp_element = matches!(
-                    name_lower.as_slice(),
-                    b"usemicrosofttestingplatformrunner"
-                        | b"usetestingplatformrunner"
-                        | b"testingplatformdotnettestsupport"
+                let is_mtp_element = matches!(
+                    name_lower.as_str(),
+                    "usemicrosofttestingplatformrunner"
+                        | "usetestingplatformrunner"
+                        | "testingplatformdotnettestsupport"
                 );
+                value = is_mtp_element.then(String::new);
             }
-            Ok(Event::Text(e)) if inside_mtp_element => {
-                if let Ok(text) = e.unescape()
-                    && text.trim().eq_ignore_ascii_case("true")
-                {
-                    return MtpProjectKind::VsTestBridge;
+            Ok(event @ (Event::Text(_) | Event::CData(_) | Event::GeneralRef(_))) => {
+                if let Some(value) = value.as_mut() {
+                    dotnet_trx::push_content(&event, value);
                 }
             }
-            Ok(Event::End(_)) => inside_mtp_element = false,
-            Ok(Event::Eof) => break,
-            Err(_) => break,
+            // MSBuild reads a property as its inner XML, which a child element makes
+            // something other than `true`.
+            Ok(Event::Empty(_)) => value = None,
+            Ok(Event::End(_)) => {
+                if is_true(&value) {
+                    break;
+                }
+                value = None;
+            }
+            Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
-        buf.clear();
     }
 
-    MtpProjectKind::None
+    if is_true(&value) {
+        MtpProjectKind::VsTestBridge
+    } else {
+        MtpProjectKind::None
+    }
 }
 
 fn parse_global_json_mtp_mode(path: &Path) -> bool {
@@ -777,7 +791,7 @@ fn is_global_json_mtp_mode(start_dir: &Path) -> bool {
 /// overrides project-level properties) > project-file/Directory.Build.props (MtpVsTestBridge) >
 /// Classic.
 ///
-/// `explicit_projects` below relies on `dotnet_takes_value`'s allowlist being exhaustive; a
+/// `explicit_projects` below relies on [`DOTNET_GRAMMAR`]'s allowlist being exhaustive; a
 /// missing value-taking flag whose value ends in `.csproj`/`.fsproj`/`.vbproj` would be misread
 /// as an explicit project path.
 fn detect_test_runner_mode(tokens: &[Token<'_>]) -> TestRunnerMode {
@@ -869,30 +883,26 @@ fn detect_test_runner_mode_in_dir(tokens: &[Token<'_>], scan_dir: &Path) -> Test
 
 /// The value-taking flags that matter for RTK's own decisions, not every flag dotnet accepts:
 /// a missing entry leaves the value as a free positional, which `detect_test_runner_mode`'s
-/// project-path scan then has to filter by extension for exactly that reason.
-fn dotnet_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    (kind == TokenKind::Long
-        && matches!(
-            name.to_ascii_lowercase().as_str(),
-            "a" | "arch"
-                | "c"
-                | "configuration"
-                | "f"
-                | "filter"
-                | "framework"
-                | "l"
-                | "logger"
-                | "os"
-                | "r"
-                | "report"
-                | "results-directory"
-                | "runtime"
-        ))
-    .then(ValueSpec::value)
-}
+/// project-path scan then has to filter by extension for exactly that reason. Under the MSBuild
+/// dialect `-c`, `--c` and `/c` are all the `Long` flag `c`, so every row is an atomic flag
+/// listing each name dotnet gives the option (`-c` and `--configuration` are one flag).
+const DOTNET_GRAMMAR: Grammar = Grammar::new(
+    Dialect::Msbuild,
+    &[&[
+        Flag::atomic(&["a", "arch"]).takes(ValueSpec::value()),
+        Flag::atomic(&["c", "configuration"]).takes(ValueSpec::value()),
+        Flag::atomic(&["filter"]).takes(ValueSpec::value()),
+        Flag::atomic(&["f", "framework"]).takes(ValueSpec::value()),
+        Flag::atomic(&["l", "logger"]).takes(ValueSpec::value()),
+        Flag::atomic(&["os"]).takes(ValueSpec::value()),
+        Flag::atomic(&["report"]).takes(ValueSpec::value()),
+        Flag::atomic(&["results-directory"]).takes(ValueSpec::value()),
+        Flag::atomic(&["r", "runtime"]).takes(ValueSpec::value()),
+    ]],
+);
 
 fn tokenize_dotnet_args(args: &[String]) -> Vec<Token<'_>> {
-    arg_tokenizer::tokenize_grammar(args, &dotnet_takes_value, Dialect::Msbuild)
+    arg_tokenizer::tokenize_grammar(args, &DOTNET_GRAMMAR)
 }
 
 /// The tokens dotnet itself parses: everything the user put after `--` is forwarded to the
@@ -906,17 +916,17 @@ fn dotnet_own_tokens<'t, 'a>(tokens: &'t [Token<'a>]) -> &'t [Token<'a>] {
 /// of a modern option doesn't get rejected, it gets silently misparsed as an unrelated MSBuild
 /// switch (`MSB100x` errors) -- except the legacy passthrough switches in `dotnet_has_loose_flag`.
 fn dotnet_double_dash_flag_value<'a>(tokens: &[Token<'a>], name: &str) -> Option<&'a str> {
-    arg_tokenizer::double_dash_flag_value(dotnet_own_tokens(tokens), Dialect::Msbuild, name)
+    arg_tokenizer::double_dash_flag_value(dotnet_own_tokens(tokens), &DOTNET_GRAMMAR, name)
 }
 
 fn dotnet_has_flag(tokens: &[Token<'_>], name: &str) -> bool {
-    arg_tokenizer::has_double_dash_flag(dotnet_own_tokens(tokens), Dialect::Msbuild, name)
+    arg_tokenizer::has_double_dash_flag(dotnet_own_tokens(tokens), &DOTNET_GRAMMAR, name)
 }
 
 /// Loose lookup: `-flag`/`--flag`/`/flag` all match. Only correct for genuine legacy MSBuild.exe
 /// passthrough switches (`nologo`, `bl`, `v`/`verbosity`) -- see [`dotnet_double_dash_flag_value`].
 fn dotnet_has_loose_flag(tokens: &[Token<'_>], name: &str) -> bool {
-    arg_tokenizer::has_flag(dotnet_own_tokens(tokens), Dialect::Msbuild, name)
+    arg_tokenizer::has_flag(dotnet_own_tokens(tokens), &DOTNET_GRAMMAR, name)
 }
 
 /// Loose match, but only when the flag is bare (no attached value) -- a boolean switch's broken
@@ -951,7 +961,7 @@ fn has_trx_logger_arg(tokens: &[Token<'_>]) -> bool {
     // --help` says the arguments after `--` go "to the application that is being run", so a
     // `--logger` there is the test app's, not VSTest's, and RTK still owes it a trx logger.
     let own = dotnet_own_tokens(tokens);
-    arg_tokenizer::double_dash_flag_values(own, Dialect::Msbuild, "logger")
+    arg_tokenizer::double_dash_flag_values(own, &DOTNET_GRAMMAR, "logger")
         .chain(
             own.iter()
                 .filter(|t| {
@@ -990,7 +1000,7 @@ fn results_directory_scope<'t, 'a>(
 fn has_results_directory_arg(tokens: &[Token<'_>], runner_mode: TestRunnerMode) -> bool {
     arg_tokenizer::has_double_dash_flag(
         results_directory_scope(tokens, runner_mode),
-        Dialect::Msbuild,
+        &DOTNET_GRAMMAR,
         "results-directory",
     )
 }
@@ -1060,7 +1070,7 @@ fn extract_results_directory_arg(
 ) -> Option<PathBuf> {
     arg_tokenizer::double_dash_flag_value(
         results_directory_scope(tokens, runner_mode),
-        Dialect::Msbuild,
+        &DOTNET_GRAMMAR,
         "results-directory",
     )
     .map(PathBuf::from)
@@ -1578,6 +1588,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::core::arg_tokenizer::assert_takes_value_table;
 
     /// dotnet is not installed on every runner, so the argv the help guard forwards is
     /// pinned here rather than only through the integration test, which skips absent tools.
@@ -2716,6 +2727,74 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_mtp_kind_resolves_character_references() {
+        let temp_dir = test_isolation::tempdir();
+        let csproj = temp_dir.path().join("MTP.Tests.csproj");
+        fs::write(
+            &csproj,
+            "<Project><PropertyGroup><UseMicrosoftTestingPlatformRunner>tru&#101;</UseMicrosoftTestingPlatformRunner></PropertyGroup></Project>",
+        )
+        .expect("write csproj");
+
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
+    }
+
+    #[test]
+    fn test_scan_mtp_kind_reads_the_value_around_markup() {
+        let temp_dir = test_isolation::tempdir();
+        let csproj = temp_dir.path().join("MTP.Tests.csproj");
+        for (property, expected) in [
+            (
+                "<UseTestingPlatformRunner>true<!-- opt in --></UseTestingPlatformRunner>",
+                MtpProjectKind::VsTestBridge,
+            ),
+            (
+                "<UseTestingPlatformRunner><![CDATA[true]]></UseTestingPlatformRunner>",
+                MtpProjectKind::VsTestBridge,
+            ),
+            (
+                "<UseTestingPlatformRunner>true</UseTestingplatformRunner>",
+                MtpProjectKind::VsTestBridge,
+            ),
+            (
+                "<Description>Tom & Jerry</Description><UseTestingPlatformRunner>true</UseTestingPlatformRunner>",
+                MtpProjectKind::VsTestBridge,
+            ),
+            (
+                "<UseTestingPlatformRunner>tr<!-- x -->ue-ish</UseTestingPlatformRunner>",
+                MtpProjectKind::None,
+            ),
+            (
+                "<UseTestingPlatformRunner>false</UseTestingPlatformRunner>",
+                MtpProjectKind::None,
+            ),
+            (
+                "<UseTestingPlatformRunner>tr<X/>ue</UseTestingPlatformRunner>",
+                MtpProjectKind::None,
+            ),
+            (
+                "<UseTestingPlatformRunner>true<X></X></UseTestingPlatformRunner>",
+                MtpProjectKind::None,
+            ),
+        ] {
+            fs::write(
+                &csproj,
+                format!("<Project><PropertyGroup>{property}</PropertyGroup></Project>"),
+            )
+            .expect("write csproj");
+            assert_eq!(scan_mtp_kind_in_file(&csproj), expected, "{property}");
+        }
+
+        // A file cut off right after the value ends at EOF, not on an end tag.
+        fs::write(
+            &csproj,
+            "<Project><PropertyGroup><UseTestingPlatformRunner>true",
+        )
+        .expect("write csproj");
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
+    }
+
+    #[test]
     fn test_detect_mode_mtp_csproj_is_vstest_bridge_injects_report_trx() {
         let temp_dir = test_isolation::tempdir();
         let csproj = temp_dir.path().join("MTP.Tests.csproj");
@@ -3621,5 +3700,37 @@ mod tests {
         cleanup_temp_file(&missing_file);
 
         assert!(!missing_file.exists());
+    }
+
+    #[test]
+    fn test_dotnet_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &DOTNET_GRAMMAR,
+            &[(
+                TokenKind::Long,
+                &[
+                    "a",
+                    "arch",
+                    "c",
+                    "configuration",
+                    "f",
+                    "filter",
+                    "framework",
+                    "l",
+                    "logger",
+                    "os",
+                    "r",
+                    "report",
+                    "results-directory",
+                    "runtime",
+                    // The MSBuild dialect folds ASCII case.
+                    "A",
+                    "Configuration",
+                    "Logger",
+                    "RESULTS-DIRECTORY",
+                ],
+                Some(ValueSpec::value()),
+            )],
+        );
     }
 }
