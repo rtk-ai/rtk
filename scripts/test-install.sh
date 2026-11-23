@@ -451,6 +451,15 @@ PY
             sh "$INSTALL_SH" </dev/null 2>&1); then RC=0; else RC=$?; fi
     }
 
+    run_e2e missing-checksums "$HOST_UNAME_S" "$E2E/rel-missing"
+    if [ "$RC" -ne 0 ] \
+        && printf '%s' "$OUT" | grep -qF 'Failed to download checksums.txt' \
+        && [ -z "$(find "$E2E/missing-checksums/tmp" -mindepth 1 -print)" ]; then
+        pass "failed checksum download removes its temporary directory"
+    else
+        fail "checksum download failure did not clean up (rc=$RC out='$OUT')"
+    fi
+
     if [ -n "$E2E_WINDOWS_HOST" ]; then
         skip "tar.gz install on a Windows host (covered by the Linux and macOS runs)"
     else
