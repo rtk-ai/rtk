@@ -1661,8 +1661,15 @@ fn share_card(
 pub fn run_status() -> Result<i32> {
     match pipeline_config::read_status() {
         None => {
-            println!("pipeline: ok — no recorded load problems");
             let loaded = load_for_cli();
+            let load_failed =
+                loaded.fell_back || !loaded.dropped.is_empty() || has_errors(&loaded.diagnostics);
+            if load_failed {
+                println!("pipeline: problems loading the current configuration");
+                print_diagnostics(&loaded);
+            } else {
+                println!("pipeline: ok — no recorded load problems");
+            }
             println!("active: {}", loaded.resolved.name);
             print_auth_guidance(&loaded.resolved);
             let has_proxy_rules = loaded
@@ -1678,7 +1685,7 @@ pub fn run_status() -> Result<i32> {
             if !has_proxy_rules {
                 println!("note: no proxy.request rules — a running daemon forwards unchanged");
             }
-            Ok(0)
+            Ok(i32::from(load_failed))
         }
         Some(status) => {
             println!("pipeline: problems recorded at the last hook invocation");
@@ -2164,6 +2171,28 @@ mod tests {
         BUILTIN_NAMES, Scope, SourceFile, ValidateCtx, builtin_text, has_errors, parse, resolve,
         validate,
     };
+
+    #[test]
+    fn status_reports_a_rejected_pipeline_without_hook_history() {
+        let root = tempfile::tempdir().expect("temporary pipeline directory");
+        let config = root.path().join("pipeline.toml");
+        let directory = root.path().to_str().expect("UTF-8 test path");
+        let valid = "[pipeline]\nname = \"mine\"\nextends = \"rtk:default\"\n";
+
+        crate::core::test_isolation::with_root(root.path(), || {
+            crate::core::user_env::with_vars(&[("RTK_CONFIG_DIR", Some(directory))], || {
+                std::fs::write(
+                    &config,
+                    format!("{valid}\n[task.claude]\nkind = \"summarize\"\n"),
+                )
+                .expect("write rejected pipeline");
+                assert_eq!(super::run_status().expect("status"), 1);
+
+                std::fs::write(&config, valid).expect("write valid pipeline");
+                assert_eq!(super::run_status().expect("status"), 0);
+            });
+        });
+    }
 
     #[test]
     fn extract_toml_pulls_the_fenced_block_from_a_share_card() {
