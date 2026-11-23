@@ -742,39 +742,94 @@ fn load_cursor_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
     (deny, Vec::new(), allow)
 }
 
-// Gemini honors project `.gemini/settings.json` when the folder is trusted.
-// folderTrust is off by default (folder trusted); when on, a folder is trusted
-// only via GEMINI_CLI_TRUST_WORKSPACE here (dialog-only trust is treated as
-// untrusted → global, which is safe: never more permissive than the host).
-// A file RTK cannot read or parse is an error: it may hold a confirmation the
-// other file's allow would skip. An unreadable global one also leaves whether
-// folder trust is on unknown, so only GEMINI_CLI_TRUST_WORKSPACE can trust the
-// folder then.
-fn gemini_settings() -> JsonRead {
-    let global = global_config(GEMINI_DIR, SETTINGS_JSON);
-    let trusted = user_env::var("GEMINI_CLI_TRUST_WORKSPACE").as_deref() == Some("true")
-        || match &global {
-            JsonRead::Parsed(settings) => !settings
-                .pointer("/security/folderTrust/enabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            JsonRead::Missing => true,
-            JsonRead::Error => false,
-        };
-    if trusted && let Some(root) = find_project_root() {
-        match read_json(&root.join(GEMINI_DIR).join(SETTINGS_JSON)) {
-            JsonRead::Missing => {}
-            project => return project,
-        }
-    }
-    global
+/// Whether Gemini applies a project's `.gemini/settings.json`, as far as RTK
+/// can tell.
+enum GeminiTrust {
+    Trusted,
+    Untrusted,
+    /// Folder trust is on, or RTK cannot read whether it is: the folder is
+    /// trusted only if the user said so in Gemini's dialog, which RTK does not
+    /// read.
+    Undecided,
 }
 
+// Gemini applies a project `.gemini/settings.json` only in a trusted folder,
+// and folder trust is on unless the global file turns it off. The environment
+// decides first: GEMINI_RESTRICTED_MODE=true or GEMINI_CLI_TRUST_WORKSPACE=false
+// distrust the folder, GEMINI_CLI_TRUST_WORKSPACE=true trusts it.
+fn gemini_trust(global: &JsonRead) -> GeminiTrust {
+    let workspace = user_env::var("GEMINI_CLI_TRUST_WORKSPACE");
+    if user_env::var("GEMINI_RESTRICTED_MODE").as_deref() == Some("true")
+        || workspace.as_deref() == Some("false")
+    {
+        return GeminiTrust::Untrusted;
+    }
+    if workspace.as_deref() == Some("true") {
+        return GeminiTrust::Trusted;
+    }
+    match global {
+        JsonRead::Parsed(settings)
+            if settings
+                .pointer("/security/folderTrust/enabled")
+                .and_then(Value::as_bool)
+                == Some(false) =>
+        {
+            GeminiTrust::Trusted
+        }
+        _ => GeminiTrust::Undecided,
+    }
+}
+
+// In a trusted folder Gemini merges the project file over the global one: RTK
+// takes the project file's rules, and the global file's confirmations, which
+// still apply. An untrusted folder's project file is ignored. Where trust is
+// undecided, RTK allows no more than either file would: it asks wherever one
+// file asks, and allows only what both allow. A file RTK cannot read or parse
+// is an error: it may hold a confirmation the other file's allow would skip.
 fn load_gemini_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
+    let global = global_config(GEMINI_DIR, SETTINGS_JSON);
+    let read_project = || {
+        find_project_root().map_or(JsonRead::Missing, |root| {
+            read_json(&root.join(GEMINI_DIR).join(SETTINGS_JSON))
+        })
+    };
+    let (ask, allow) = match gemini_trust(&global) {
+        GeminiTrust::Untrusted => gemini_rules(global),
+        GeminiTrust::Trusted => match read_project() {
+            JsonRead::Missing => gemini_rules(global),
+            project => {
+                let (mut ask, allow) = gemini_rules(project);
+                // A global file RTK cannot parse, such as a commented one,
+                // leaves the trusted project file to decide alone.
+                if matches!(global, JsonRead::Parsed(_)) {
+                    ask.extend(gemini_rules(global).0);
+                }
+                (ask, allow)
+            }
+        },
+        GeminiTrust::Undecided => match read_project() {
+            JsonRead::Missing => gemini_rules(global),
+            project => {
+                let (mut ask, global_allow) = gemini_rules(global);
+                let (project_ask, project_allow) = gemini_rules(project);
+                ask.extend(project_ask);
+                let allow = global_allow
+                    .into_iter()
+                    .filter(|rule| project_allow.contains(rule))
+                    .collect();
+                (ask, allow)
+            }
+        },
+    };
+    (Vec::new(), ask, allow)
+}
+
+/// The ask and allow rules of one Gemini settings file.
+fn gemini_rules(settings: JsonRead) -> (Vec<String>, Vec<String>) {
     let mut ask = Vec::new();
     let mut allow = Vec::new();
     let shells = ["run_shell_command(", "ShellTool("];
-    match gemini_settings() {
+    match settings {
         JsonRead::Parsed(settings) => {
             if let Some(tools) = settings.get("tools") {
                 append_wrapped_rules(tools.get("allowed"), &shells, &mut allow);
@@ -784,7 +839,7 @@ fn load_gemini_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
         JsonRead::Missing => {}
         JsonRead::Error => ask.push("*".to_string()),
     }
-    (Vec::new(), ask, allow)
+    (ask, allow)
 }
 
 // All four Droid settings scopes: user (honoring $FACTORY_HOME_OVERRIDE) and
@@ -1229,9 +1284,9 @@ mod tests {
         }
     }
 
-    /// A trusted project's Gemini settings RTK cannot parse may hold a
-    /// confirmation the global allow would skip: every command asks rather
-    /// than falling back to the global file.
+    /// Project Gemini settings RTK cannot parse may hold a confirmation the
+    /// global allow would skip: every command asks rather than falling back to
+    /// the global file.
     #[test]
     fn gemini_asks_for_every_command_under_a_project_file_it_cannot_parse() {
         use crate::core::test_isolation;
@@ -1247,24 +1302,34 @@ mod tests {
         // The marker the project lookup stops at.
         std::fs::create_dir_all(project.join(".claude")).expect("create .claude");
         std::fs::create_dir_all(project.join(".gemini")).expect("create project .gemini");
-        let verdict = |project_settings: &str| {
+        // The verdict of `git status` under a project file and
+        // GEMINI_CLI_TRUST_WORKSPACE.
+        let verdict = |project_settings: &str, workspace: Option<&str>| {
             std::fs::write(
                 project.join(".gemini").join("settings.json"),
                 project_settings,
             )
             .expect("write project settings");
-            test_isolation::with_root(&home, || {
-                let _entered = test_isolation::enter(&project);
-                HostRules::load(Host::Gemini, None).verdict("git status")
-            })
+            crate::core::user_env::with_vars(
+                &[
+                    ("GEMINI_CLI_TRUST_WORKSPACE", workspace),
+                    ("GEMINI_RESTRICTED_MODE", None),
+                ],
+                || {
+                    test_isolation::with_root(&home, || {
+                        let _entered = test_isolation::enter(&project);
+                        HostRules::load(Host::Gemini, None).verdict("git status")
+                    })
+                },
+            )
         };
         assert_eq!(
-            verdict("{}"),
+            verdict("{}", None),
             PermissionVerdict::Default,
-            "control: a project file replaces the global one"
+            "control: the global allow alone does not apply"
         );
         assert_eq!(
-            verdict("{\n  // confirm git\n  \"tools\": {}\n}"),
+            verdict("{\n  // confirm git\n  \"tools\": {}\n}", None),
             PermissionVerdict::Ask
         );
 
@@ -1274,12 +1339,161 @@ mod tests {
         std::fs::write(home.join(".gemini").join("settings.json"), "{")
             .expect("break global settings");
         let project_allows = r#"{"tools":{"allowed":["run_shell_command(git)"]}}"#;
-        assert_eq!(verdict(project_allows), PermissionVerdict::Ask);
-        let trusted = crate::core::user_env::with_vars(
-            &[("GEMINI_CLI_TRUST_WORKSPACE", Some("true"))],
-            || verdict(project_allows),
+        assert_eq!(verdict(project_allows, None), PermissionVerdict::Ask);
+        assert_eq!(
+            verdict(project_allows, Some("true")),
+            PermissionVerdict::Allow
         );
-        assert_eq!(trusted, PermissionVerdict::Allow);
+    }
+
+    /// Gemini applies a project's settings only in a folder it trusts, and
+    /// folder trust is on unless the global file turns it off. Where RTK
+    /// cannot tell whether the folder is trusted, it allows no more than
+    /// either file would.
+    #[test]
+    fn gemini_reads_a_project_file_only_where_gemini_trusts_the_folder() {
+        use crate::core::test_isolation;
+
+        let allows = r#"{"tools":{"allowed":["run_shell_command(git push)"]}}"#;
+        let trust_off = r#"{"security":{"folderTrust":{"enabled":false}}}"#;
+        let confirms_every_command = r#"{"tools":{"confirmationRequired":["run_shell_command"]}}"#;
+        let trust_off_confirms = r#"{"security":{"folderTrust":{"enabled":false}},"tools":{"confirmationRequired":["run_shell_command"]}}"#;
+        // The verdict of `git push` under a global file (`None`: no file), a
+        // project file, GEMINI_CLI_TRUST_WORKSPACE and GEMINI_RESTRICTED_MODE.
+        let verdict = |global: Option<&str>,
+                       project: &str,
+                       workspace: Option<&str>,
+                       restricted: Option<&str>| {
+            let tmp = test_isolation::tempdir();
+            let (home, root) = (tmp.path().join("home"), tmp.path().join("project"));
+            std::fs::create_dir_all(home.join(".gemini")).expect("create .gemini");
+            if let Some(global) = global {
+                std::fs::write(home.join(".gemini").join("settings.json"), global)
+                    .expect("write global settings");
+            }
+            // The marker the project lookup stops at.
+            std::fs::create_dir_all(root.join(".claude")).expect("create .claude");
+            std::fs::create_dir_all(root.join(".gemini")).expect("create project .gemini");
+            std::fs::write(root.join(".gemini").join("settings.json"), project)
+                .expect("write project settings");
+            crate::core::user_env::with_vars(
+                &[
+                    ("GEMINI_CLI_TRUST_WORKSPACE", workspace),
+                    ("GEMINI_RESTRICTED_MODE", restricted),
+                ],
+                || {
+                    test_isolation::with_root(&home, || {
+                        let _entered = test_isolation::enter(&root);
+                        HostRules::load(Host::Gemini, None).verdict("git push")
+                    })
+                },
+            )
+        };
+        use PermissionVerdict::{Allow, Ask, Default};
+        for (case, global, project, workspace, restricted, expected) in [
+            (
+                "distrusted, the project file is ignored",
+                Some(allows),
+                confirms_every_command,
+                Some("false"),
+                None,
+                Allow,
+            ),
+            (
+                "folder trust left on",
+                Some("{}"),
+                allows,
+                None,
+                None,
+                Default,
+            ),
+            (
+                "folder trust off",
+                Some(trust_off),
+                allows,
+                None,
+                None,
+                Allow,
+            ),
+            (
+                "folder trust off, the global file confirms",
+                Some(trust_off_confirms),
+                allows,
+                None,
+                None,
+                Ask,
+            ),
+            (
+                "no global file: folder trust is on",
+                None,
+                allows,
+                None,
+                None,
+                Default,
+            ),
+            (
+                "restricted mode",
+                Some(trust_off),
+                allows,
+                None,
+                Some("true"),
+                Default,
+            ),
+            (
+                "the environment distrusts",
+                Some(trust_off),
+                allows,
+                Some("false"),
+                None,
+                Default,
+            ),
+            (
+                "the environment trusts",
+                None,
+                allows,
+                Some("true"),
+                None,
+                Allow,
+            ),
+            (
+                "the environment trusts, the global file confirms",
+                Some(confirms_every_command),
+                allows,
+                Some("true"),
+                None,
+                Ask,
+            ),
+            (
+                "undecided, both files allow",
+                Some(allows),
+                allows,
+                None,
+                None,
+                Allow,
+            ),
+            (
+                "undecided, only the global file allows",
+                Some(allows),
+                "{}",
+                None,
+                None,
+                Default,
+            ),
+            (
+                "undecided, the project file confirms",
+                Some(allows),
+                confirms_every_command,
+                None,
+                None,
+                Ask,
+            ),
+        ] {
+            assert_eq!(
+                verdict(global, project, workspace, restricted),
+                expected,
+                "{case}"
+            );
+        }
     }
 
     #[test]
