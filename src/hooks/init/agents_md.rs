@@ -83,15 +83,32 @@ pub(super) fn write_rtk_block(
     recovery_cmd: &str,
     ctx: InitContext,
 ) -> Result<RtkBlockUpsert> {
-    let InitContext { dry_run, .. } = ctx;
-
     let existing = if path.exists() {
         fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?
     } else {
         String::new()
     };
+    write_rtk_block_into(path, &existing, false, block, label, recovery_cmd, ctx)
+}
 
-    let (new_content, action) = upsert_rtk_block(&existing, block);
+/// [`write_rtk_block`] for a caller that already read `path` and prepared `existing`.
+/// `rewrote_existing` says `existing` differs from what is on disk, so an `Unchanged`
+/// upsert still has to be written and an `Added` one is reported as an update.
+pub(super) fn write_rtk_block_into(
+    path: &Path,
+    existing: &str,
+    rewrote_existing: bool,
+    block: &str,
+    label: &str,
+    recovery_cmd: &str,
+    ctx: InitContext,
+) -> Result<RtkBlockUpsert> {
+    let InitContext { dry_run, .. } = ctx;
+
+    let (new_content, mut action) = upsert_rtk_block(existing, block);
+    if rewrote_existing && matches!(action, RtkBlockUpsert::Added | RtkBlockUpsert::Unchanged) {
+        action = RtkBlockUpsert::Updated;
+    }
 
     match action {
         RtkBlockUpsert::Added => {
