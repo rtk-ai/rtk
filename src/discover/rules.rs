@@ -1076,6 +1076,15 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^nix(?:\s+--?\S+)*\s+search(?:\s|$|[;|&()<>])",
+        rtk_cmd: "rtk nix",
+        rewrite_prefixes: &["nix"],
+        category: "Infra",
+        savings_pct: 70.0,
+        subcmd_savings: &[("search", 90.0)],
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^tofu\s+(fmt|init|plan|validate)(\s|$)",
         rtk_cmd: "rtk tofu",
         pipeline_safety: PipelineSafety::ProducerOnly,
