@@ -3,6 +3,7 @@ pub mod ecs_cmd;
 pub mod paratest_cmd;
 pub mod pest_cmd;
 pub mod php_cmd;
+pub mod phpcs_cmd;
 pub mod phpstan_cmd;
 pub mod phpt_cmd;
 pub mod phpunit_cmd;

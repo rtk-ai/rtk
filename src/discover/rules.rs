@@ -717,6 +717,24 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^(?:\./)?(?:vendor/bin/)?phpcs(?:\s|$)",
+        rtk_cmd: "rtk phpcs",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["phpcs"],
+        category: "Build",
+        savings_pct: 30.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^(?:\./)?(?:vendor/bin/)?phpcbf(?:\s|$)",
+        rtk_cmd: "rtk phpcbf",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["phpcbf"],
+        category: "Build",
+        savings_pct: 45.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^aws\s+",
         rtk_cmd: "rtk aws",
         rewrite_prefixes: &["aws"],

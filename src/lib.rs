@@ -20,7 +20,8 @@ use cmds::js::{
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{
-    ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpt_cmd, phpunit_cmd, pint_cmd,
+    ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpcs_cmd, phpstan_cmd, phpt_cmd, phpunit_cmd,
+    pint_cmd,
 };
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, sqlfluff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
@@ -948,6 +949,20 @@ enum Commands {
     /// EasyCodingStandard (ECS) code style fixer with compact output
     Ecs {
         /// ECS arguments (e.g., check src/, --fix)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PHP_CodeSniffer with compact output
+    Phpcs {
+        /// phpcs arguments (e.g., --standard=PSR12 src/)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PHP Code Beautifier and Fixer with compact output
+    Phpcbf {
+        /// phpcbf arguments (e.g., --standard=PSR12 src/)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -3588,6 +3603,10 @@ fn run_cli() -> Result<i32> {
 
         Commands::Ecs { args } => ecs_cmd::run(&args, cli.verbose)?,
 
+        Commands::Phpcs { args } => phpcs_cmd::run_phpcs(&args, cli.verbose)?,
+
+        Commands::Phpcbf { args } => phpcs_cmd::run_phpcbf(&args, cli.verbose)?,
+
         Commands::Pint { args } => pint_cmd::run(&args, cli.verbose)?,
 
         Commands::Phpt { args } => phpt_cmd::run(&args, cli.verbose)?,
@@ -4078,6 +4097,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Pest { .. }
             | Commands::Paratest { .. }
             | Commands::Ecs { .. }
+            | Commands::Phpcs { .. }
+            | Commands::Phpcbf { .. }
             | Commands::Pint { .. }
             | Commands::Phpt { .. }
             | Commands::Rake { .. }
@@ -4721,6 +4742,8 @@ mod tests {
             "paratest",
             "ecs",
             "pint",
+            "phpcs",
+            "phpcbf",
             "phpt",
             "uv",
             "bun",
