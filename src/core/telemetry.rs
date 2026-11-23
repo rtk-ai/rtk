@@ -819,28 +819,47 @@ mod tests {
     #[test]
     fn consent_withdrawn_during_preparation_aborts_ping_and_does_not_recreate_marker() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let marker = dir.path().join(".telemetry_last_ping");
+        let cfg_dir = dir
+            .path()
+            .join(".config")
+            .join(crate::core::constants::RTK_DATA_DIR);
+        std::fs::create_dir_all(&cfg_dir).expect("config dir");
+        let config_path = cfg_dir.join(crate::core::constants::CONFIG_TOML);
+        std::fs::write(
+            &config_path,
+            "[telemetry]\nenabled = true\nconsent_given = true\n",
+        )
+        .expect("config");
 
-        let mut sent = false;
+        crate::core::test_isolation::with_root(dir.path(), || {
+            let marker = dir.path().join(".telemetry_last_ping");
+            let mut sent = false;
 
-        let result = run_ping(
-            &marker,
-            || {
-                // simulate concurrent `rtk telemetry forget` revoking consent and deleting marker
-                "payload"
-            },
-            |_| {
-                sent = true;
-                Ok::<(), ()>(())
-            },
-        );
+            let result = run_ping(
+                &marker,
+                || {
+                    // Concurrent `rtk telemetry forget` revokes consent and deletes the marker.
+                    std::fs::write(
+                        &config_path,
+                        "[telemetry]\nenabled = true\nconsent_given = false\n",
+                    )
+                    .expect("revoke consent");
+                    let _ = std::fs::remove_file(&marker);
+                    "payload"
+                },
+                |_| {
+                    sent = true;
+                    Ok::<(), ()>(())
+                },
+            );
 
-        assert_eq!(result, Ok(false), "revoked consent must abort the ping");
-        assert!(!sent, "revoked consent must not send the ping");
-        assert!(
-            !marker.exists(),
-            "the marker must not be recreated after forget deleted it"
-        );
+            assert_eq!(result, Ok(false), "revoked consent must abort the ping");
+            assert!(!sent, "revoked consent must not send the ping");
+            assert!(
+                !marker.exists(),
+                "the marker must not be recreated after forget deleted it"
+            );
+        });
     }
 
     #[test]
