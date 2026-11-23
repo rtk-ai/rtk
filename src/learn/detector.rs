@@ -81,14 +81,19 @@ static USER_REJECTION_RE: LazyLock<Regex> = LazyLock::new(|| {
     ).unwrap()
 });
 
+// Hook denials - the command never ran, so there is no CLI mistake to learn.
+// Claude Code: "PreToolUse:Bash hook error: <hook>: <reason>".
+static HOOK_DENIAL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(PreToolUse:|hook error:)").unwrap());
+
 /// Filters out user rejections - requires actual error-indicating content
 pub fn is_command_error(is_error: bool, output: &str) -> bool {
     if !is_error {
         return false;
     }
 
-    // Reject if it's a user rejection
-    if USER_REJECTION_RE.is_match(output) {
+    // Reject if it's a user rejection or a hook that blocked execution.
+    if USER_REJECTION_RE.is_match(output) || HOOK_DENIAL_RE.is_match(output) {
         return false;
     }
 
@@ -374,6 +379,22 @@ mod tests {
     }
 
     #[test]
+    fn test_is_command_error_filters_hook_denial() {
+        // Claude Code: a PreToolUse hook blocked the call; the command never ran.
+        assert!(!is_command_error(
+            true,
+            "PreToolUse:Bash hook error: deny-rm: blocked by policy"
+        ));
+        assert!(!is_command_error(
+            true,
+            "hook error: policy denied this call"
+        ));
+        // A real CLI failure that merely mentions a hook stays eligible.
+        assert!(is_command_error(true, "error: the hook failed to start"));
+        assert!(is_command_error(true, "error: unexpected argument '--foo'"));
+    }
+
+    #[test]
     fn test_is_command_error_requires_error_content() {
         assert!(!is_command_error(true, "All good, success!"));
         assert!(is_command_error(true, "error: something failed"));
@@ -474,6 +495,25 @@ mod tests {
         assert_eq!(corrections[0].wrong_command, "git commit --ammend");
         assert_eq!(corrections[0].right_command, "git commit --amend");
         assert!(corrections[0].confidence >= 0.6);
+    }
+
+    #[test]
+    fn test_find_corrections_skips_hook_denial() {
+        let commands = vec![
+            CommandExecution {
+                command: "git commit --ammend".to_string(),
+                is_error: true,
+                output: "PreToolUse:Bash hook error: block-commit: denied".to_string(),
+            },
+            CommandExecution {
+                command: "git commit --amend".to_string(),
+                is_error: false,
+                output: "[main abc123] Fix bug".to_string(),
+            },
+        ];
+
+        let corrections = find_corrections(&commands);
+        assert_eq!(corrections.len(), 0);
     }
 
     #[test]

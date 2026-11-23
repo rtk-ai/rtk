@@ -2,9 +2,36 @@
 
 use crate::learn::detector::CorrectionRule;
 use anyhow::Result;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+
+/// First useful line of a tool error. Claude Code prefixes Bash failures with
+/// a bare `Exit code N` line and puts the real diagnostic on the next line.
+fn console_error_line(example_error: &str) -> String {
+    let mut lines = example_error
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let Some(first) = lines.next() else {
+        return String::new();
+    };
+    if is_exit_code_only_line(first) {
+        lines.next().unwrap_or(first).to_string()
+    } else {
+        first.to_string()
+    }
+}
+
+fn is_exit_code_only_line(line: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("exit code") else {
+        return false;
+    };
+    let rest = rest.trim_start_matches([':', ' ']);
+    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+}
 
 pub fn format_console_report(
     rules: &[CorrectionRule],
@@ -41,14 +68,32 @@ pub fn format_console_report(
             count_marker, rule.wrong_pattern, rule.right_pattern
         ));
 
-        // Show error snippet (first line only)
-        let error_line = rule.example_error.lines().next().unwrap_or("").trim();
+        let error_line = console_error_line(&rule.example_error);
         if !error_line.is_empty() {
             output.push_str(&format!("     Error: {}\n", error_line));
         }
     }
 
     output
+}
+
+pub fn format_json_report(
+    rules: &[CorrectionRule],
+    total_corrections: usize,
+    sessions: usize,
+) -> Value {
+    json!({
+        "sessions_scanned": sessions,
+        "total_corrections": total_corrections,
+        "rules": rules.iter().map(|r| json!({
+            "wrong": r.wrong_pattern,
+            "right": r.right_pattern,
+            "error_type": r.error_type.as_str(),
+            "occurrences": r.occurrences,
+            "base_command": r.base_command,
+            "error": r.example_error,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 pub fn write_rules_file(rules: &[CorrectionRule], path: &str) -> Result<()> {
@@ -158,6 +203,65 @@ mod tests {
         assert!(report.contains("--ammend"));
         assert!(report.contains("--amend"));
         assert!(report.contains("Error: error: unexpected argument"));
+    }
+
+    #[test]
+    fn test_format_console_report_skips_leading_exit_code() {
+        let rules = vec![CorrectionRule {
+            wrong_pattern: "ls */file".to_string(),
+            right_pattern: "ls -- ./*/file".to_string(),
+            error_type: ErrorType::Other("General Error".to_string()),
+            occurrences: 1,
+            base_command: "ls".to_string(),
+            example_error:
+                "Exit code 2\nls: invalid option -- 'x'\nTry 'ls --help' for more information."
+                    .to_string(),
+        }];
+
+        let report = format_console_report(&rules, 1, 1, 30);
+        assert!(
+            report.contains("Error: ls: invalid option -- 'x'"),
+            "{report}"
+        );
+        assert!(!report.contains("Error: Exit code 2"), "{report}");
+    }
+
+    #[test]
+    fn test_format_console_report_keeps_exit_code_when_alone() {
+        let rules = vec![CorrectionRule {
+            wrong_pattern: "ls */file".to_string(),
+            right_pattern: "ls -- ./*/file".to_string(),
+            error_type: ErrorType::Other("General Error".to_string()),
+            occurrences: 1,
+            base_command: "ls".to_string(),
+            example_error: "Exit code 2".to_string(),
+        }];
+
+        let report = format_console_report(&rules, 1, 1, 30);
+        assert!(report.contains("Error: Exit code 2"), "{report}");
+    }
+
+    #[test]
+    fn test_format_json_report_includes_error() {
+        let rules = vec![CorrectionRule {
+            wrong_pattern: "git commit --ammend".to_string(),
+            right_pattern: "git commit --amend".to_string(),
+            error_type: ErrorType::UnknownFlag,
+            occurrences: 2,
+            base_command: "git commit".to_string(),
+            example_error: "Exit code 2\nerror: unexpected argument '--ammend'".to_string(),
+        }];
+
+        let json = format_json_report(&rules, 2, 4);
+        assert_eq!(json["sessions_scanned"], 4);
+        assert_eq!(json["total_corrections"], 2);
+        assert_eq!(json["rules"][0]["wrong"], "git commit --ammend");
+        assert_eq!(json["rules"][0]["error_type"], "Unknown Flag");
+        assert_eq!(json["rules"][0]["occurrences"], 2);
+        assert_eq!(
+            json["rules"][0]["error"],
+            "Exit code 2\nerror: unexpected argument '--ammend'"
+        );
     }
 
     #[test]
