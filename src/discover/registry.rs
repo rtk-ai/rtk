@@ -18,7 +18,9 @@ use super::lexer::{
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 use super::shell_wrapper::parse_shell_wrapper;
 
-const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
+const PHP_TOOL_NAMES: [&str; 7] = [
+    "phpunit", "phpstan", "ecs", "pest", "paratest", "pint", "sail",
+];
 
 /// Result of classifying a command.
 #[derive(Debug, PartialEq)]
@@ -8859,6 +8861,39 @@ mod tests {
             None
         );
         assert_eq!(rewrite_command_no_prefixes("bin/pint", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_sail_artisan_test() {
+        for (cmd, expected) in [
+            ("vendor/bin/sail artisan test", "rtk sail artisan test"),
+            (
+                "./vendor/bin/sail artisan test --filter=Foo",
+                "rtk sail artisan test --filter=Foo",
+            ),
+            ("sail test --parallel", "rtk sail test --parallel"),
+            ("sail php artisan test", "rtk sail php artisan test"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "cmd: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_other_sail_commands_are_not_rewritten() {
+        for cmd in [
+            "sail up",
+            "sail artisan serve",
+            "sail artisan migrate",
+            "sail exec pgsql psql",
+            "sail artisan",
+            "sail",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "cmd: {cmd}");
+        }
     }
 
     #[test]
