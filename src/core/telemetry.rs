@@ -68,6 +68,19 @@ pub fn maybe_ping() {
 /// thread so the CLI never blocks. It never writes the marker. Process exit
 /// kills the thread, often before it connects, and a marker written here would
 /// then skip the day's ping without sending it; `run_ping` claims it instead.
+/// Re-check the user's consent on the send thread. `maybe_ping` checked on the
+/// main thread, but `rtk telemetry forget` may run between that check and the
+/// marker claim, deleting the marker and salt and writing `consent_given=false`.
+fn telemetry_consent_active() -> bool {
+    if super::telemetry_cmd::telemetry_disabled_by_env() {
+        return false;
+    }
+    match config::Config::load() {
+        Ok(cfg) => cfg.telemetry.consent_given == Some(true) && cfg.telemetry.enabled,
+        Err(_) => false,
+    }
+}
+
 fn start_ping_if_due<W>(marker: PathBuf, work: W) -> Option<std::thread::JoinHandle<()>>
 where
     W: FnOnce(&Path) + Send + 'static,
@@ -88,6 +101,9 @@ fn run_ping<P, E>(
     send: impl FnOnce(P) -> Result<(), E>,
 ) -> Result<bool, E> {
     let payload = prepare();
+    if !telemetry_consent_active() {
+        return Ok(false);
+    }
     if !claim_ping(marker) {
         return Ok(false);
     }
@@ -746,31 +762,44 @@ mod tests {
     #[test]
     fn the_marker_is_claimed_after_the_payload_and_before_the_request() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let marker = dir.path().join(".telemetry_last_ping");
-        let mut posted = None;
+        let cfg_dir = dir
+            .path()
+            .join(".config")
+            .join(crate::core::constants::RTK_DATA_DIR);
+        std::fs::create_dir_all(&cfg_dir).expect("config dir");
+        std::fs::write(
+            cfg_dir.join(crate::core::constants::CONFIG_TOML),
+            "[telemetry]\nenabled = true\nconsent_given = true\n",
+        )
+        .expect("config");
 
-        let sent = run_ping(
-            &marker,
-            || {
-                assert!(
-                    !marker.exists(),
-                    "the marker must not be written before the payload is ready"
-                );
-                "payload"
-            },
-            |payload| {
-                assert!(
-                    marker.exists(),
-                    "the marker must be written before the request goes out"
-                );
-                posted = Some(payload);
-                Ok::<(), ()>(())
-            },
-        );
+        crate::core::test_isolation::with_root(dir.path(), || {
+            let marker = dir.path().join(".telemetry_last_ping");
+            let mut posted = None;
 
-        assert_eq!(sent, Ok(true));
-        assert_eq!(posted, Some("payload"), "the claimed ping must be sent");
-        assert!(!ping_due(&marker));
+            let sent = run_ping(
+                &marker,
+                || {
+                    assert!(
+                        !marker.exists(),
+                        "the marker must not be written before the payload is ready"
+                    );
+                    "payload"
+                },
+                |payload| {
+                    assert!(
+                        marker.exists(),
+                        "the marker must be written before the request goes out"
+                    );
+                    posted = Some(payload);
+                    Ok::<(), ()>(())
+                },
+            );
+
+            assert_eq!(sent, Ok(true));
+            assert_eq!(posted, Some("payload"), "the claimed ping must be sent");
+            assert!(!ping_due(&marker));
+        });
     }
 
     #[test]
@@ -785,6 +814,33 @@ mod tests {
         );
 
         assert_eq!(sent, Ok(false));
+    }
+
+    #[test]
+    fn consent_withdrawn_during_preparation_aborts_ping_and_does_not_recreate_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(".telemetry_last_ping");
+
+        let mut sent = false;
+
+        let result = run_ping(
+            &marker,
+            || {
+                // simulate concurrent `rtk telemetry forget` revoking consent and deleting marker
+                "payload"
+            },
+            |_| {
+                sent = true;
+                Ok::<(), ()>(())
+            },
+        );
+
+        assert_eq!(result, Ok(false), "revoked consent must abort the ping");
+        assert!(!sent, "revoked consent must not send the ping");
+        assert!(
+            !marker.exists(),
+            "the marker must not be recreated after forget deleted it"
+        );
     }
 
     #[test]
