@@ -66,6 +66,8 @@ pub enum AgentTarget {
     Vibe,
     /// Oh My Pi (OMP)
     Omp,
+    /// WorkBuddy (CodeBuddy-derived, Claude Code-style hooks)
+    Workbuddy,
 }
 
 #[cfg(feature = "engine")]
@@ -1292,6 +1294,8 @@ enum HookCommands {
     Antigravity,
     /// Process Mistral Vibe CLI pre_tool hook (reads JSON from stdin)
     Vibe,
+    /// Process WorkBuddy PreToolUse hook (reads JSON from stdin, Claude-shape I/O)
+    Workbuddy,
     /// Answer for OpenCode's plugin: the rewrite as JSON, or `{}` when
     /// rewriting would change what OpenCode's own permission rules decide
     Opencode {
@@ -2381,6 +2385,9 @@ where
     } else if agent == Some(AgentTarget::Vibe) {
         hooks::init::uninstall_vibe(ctx)?;
         Ok(0)
+    } else if agent == Some(AgentTarget::Workbuddy) {
+        hooks::init::uninstall_workbuddy(global, ctx)?;
+        Ok(0)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -3090,6 +3097,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_droid_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Vibe) {
                 hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
+            } else if agent == Some(AgentTarget::Workbuddy) {
+                hooks::init::run_workbuddy_mode(global, hook_only, patch_mode, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_cursor = agent == Some(AgentTarget::Cursor);
@@ -3674,6 +3683,12 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Vibe => {
                 hooks::hook_cmd::run_vibe()?;
+                0
+            }
+            HookCommands::Workbuddy => {
+                // WorkBuddy uses the same Claude Code PreToolUse payload and
+                // `hookSpecificOutput.updatedInput` contract.
+                hooks::hook_cmd::run_claude()?;
                 0
             }
             HookCommands::Opencode { agent, args } => {
@@ -4472,6 +4487,29 @@ mod tests {
         assert!(result.is_ok());
         assert!(hermes_called.get());
         assert!(!standard_called.get());
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_workbuddy() {
+        let cli = try_parse_cli_from(["rtk", "init", "-g", "--agent", "workbuddy"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, global, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Workbuddy));
+                assert!(global);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_hook_workbuddy() {
+        let cli = try_parse_cli_from(["rtk", "hook", "workbuddy"]).unwrap();
+        match cli.command {
+            Commands::Hook { command } => {
+                assert!(matches!(command, HookCommands::Workbuddy));
+            }
+            _ => panic!("Expected Hook command"),
+        }
     }
 
     #[test]

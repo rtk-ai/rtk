@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, and Trae
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, Antigravity, Factory Droid, Mistral Vibe, Trae, and WorkBuddy
 sidebar:
   order: 3
 ---
@@ -46,6 +46,7 @@ Agent runs "cargo test"
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rust binary (`PreToolUse` plugin) | Yes |
 | Mistral Vibe | Rust binary (`pre_tool`) | Yes |
+| WorkBuddy | Rust binary (`PreToolUse`, matcher `Bash`, `rtk hook workbuddy`) | Yes |
 
 Agents that rewrite transparently receive the awareness file selected by `awareness.level` in
 `config.toml` (`default` says nothing about RTK). Rules-file agents cannot rewrite, so the agent
@@ -70,6 +71,20 @@ Restart Claude Code. Verify:
 
 ```bash
 rtk init --show    # shows hook status
+```
+
+### WorkBuddy
+
+```bash
+rtk init -g --agent workbuddy    # global (~/.workbuddy/settings.json)
+```
+
+WorkBuddy is a CodeBuddy-derived agent that uses the same `PreToolUse` / `Bash` hook contract as Claude Code. `rtk init -g --agent workbuddy` registers `rtk hook workbuddy` in `~/.workbuddy/settings.json` and appends the RTK awareness block to `~/.workbuddy/CODEBUDDY.md`. Set `$WORKBUDDY_CONFIG_DIR` to install into a different config directory. Restart WorkBuddy after installing.
+
+The hook returns `hookSpecificOutput.updatedInput` with the rewritten `command`, preserving the other tool-input fields. Uninstall with:
+
+```bash
+rtk init -g --agent workbuddy --uninstall
 ```
 
 ### Trae

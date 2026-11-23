@@ -71,6 +71,10 @@ pub fn is_claude_hook_command(command: &str) -> bool {
     is_rtk_hook_command(command, "claude")
 }
 
+pub fn is_workbuddy_hook_command(command: &str) -> bool {
+    is_rtk_hook_command(command, "workbuddy")
+}
+
 pub fn is_legacy_rewrite_hook(command: &str) -> bool {
     let parts = crate::discover::lexer::shell_split(command);
     let [word] = parts.as_slice() else {

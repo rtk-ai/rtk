@@ -36,6 +36,7 @@ pub(crate) mod opencode;
 pub(crate) mod pi;
 pub(crate) mod trae;
 pub(crate) mod vibe;
+pub(crate) mod workbuddy;
 
 // `agents_md` and `pi` hold helpers that several submodules share, so they are
 // glob-imported and reach siblings through `use super::*`; the remaining submodules are
@@ -68,6 +69,7 @@ pub use instructions_agents::{run_kilocode_mode, run_kimi_mode};
 pub use pi::{run_omp_mode_with_patch_mode, run_pi_mode_with_patch_mode};
 pub use trae::{run_trae_mode, uninstall_trae_mode};
 pub use vibe::{run_vibe_mode, uninstall_vibe};
+pub use workbuddy::{run_workbuddy_mode, uninstall_workbuddy};
 
 // Embedded agent-neutral RTK awareness instructions, one file per `awareness.level`.
 pub(super) const RTK_AWARENESS_DEFAULT: &str = include_str!("../../../hooks/rtk-awareness.md");

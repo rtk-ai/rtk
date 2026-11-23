@@ -94,6 +94,14 @@ pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";
 pub const DROID_HOOK_COMMAND: &str = "rtk hook droid";
 /// Native Rust hook command for Mistral Vibe.
 pub const VIBE_HOOK_COMMAND: &str = "rtk hook vibe";
+/// Native Rust hook command for WorkBuddy (CodeBuddy-derived, Claude-shape I/O).
+pub const WORKBUDDY_HOOK_COMMAND: &str = "rtk hook workbuddy";
+/// Config directory for WorkBuddy (overridable via `$WORKBUDDY_CONFIG_DIR`).
+pub const WORKBUDDY_DIR: &str = ".workbuddy";
+/// WorkBuddy's config directory environment variable.
+pub const WORKBUDDY_CONFIG_DIR_ENV: &str = "WORKBUDDY_CONFIG_DIR";
+/// WorkBuddy's global instruction file, used for the RTK awareness block.
+pub const WORKBUDDY_MD: &str = "CODEBUDDY.md";
 
 pub const CONFIG_DIR: &str = ".config";
 pub const OPENCODE_SUBDIR: &str = "opencode";

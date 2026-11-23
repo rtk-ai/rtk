@@ -195,6 +195,11 @@ fn test_init_and_uninstall_cycle_for_all_global_agents() {
             &["-g", "--agent", "antigravity"],
             &["-g", "--agent", "antigravity", "--uninstall"],
         ),
+        (
+            "workbuddy-global",
+            &["-g", "--agent", "workbuddy", "--auto-patch"],
+            &["-g", "--agent", "workbuddy", "--uninstall"],
+        ),
     ];
 
     for (label, install_args, uninstall_args) in cases {

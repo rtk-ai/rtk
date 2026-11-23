@@ -30,6 +30,7 @@ const AGENT_PROBES: &[fn() -> bool] = &[
     super::init::hermes::is_configured,
     super::init::pi::is_configured,
     super::init::vibe::is_configured,
+    super::init::workbuddy::is_configured,
 ];
 
 /// Returns true if at least one supported non-Claude agent has an active hook/plugin configured.
@@ -510,6 +511,21 @@ mod tests {
             assert!(is_any_agent_configured(), "vibe global");
             super::super::init::vibe::uninstall_vibe(InitContext::default()).unwrap();
             assert!(!is_any_agent_configured(), "vibe uninstalled");
+        });
+
+        // 10. WorkBuddy
+        run_isolated(&|_home, _ws| {
+            super::super::init::workbuddy::run_workbuddy_mode(
+                true,
+                false,
+                PatchMode::Auto,
+                InitContext::default(),
+            )
+            .unwrap();
+            assert!(is_any_agent_configured(), "workbuddy global");
+            super::super::init::workbuddy::uninstall_workbuddy(true, InitContext::default())
+                .unwrap();
+            assert!(!is_any_agent_configured(), "workbuddy uninstalled");
         });
     }
 }
