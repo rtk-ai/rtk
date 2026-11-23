@@ -32,6 +32,7 @@ pub(crate) fn configure_console_color() {
     let mut mode = 0;
     // SAFETY: stdout owns the handle for this call and mode is writable.
     #[allow(unsafe_code)]
+    // nosemgrep: unsafe-block
     let has_mode = unsafe { GetConsoleMode(stdout.as_raw_handle(), &mut mode) } != 0;
     if requires_plain_console_output(has_mode.then_some(mode))
         && crate::core::user_env::var("CLICOLOR_FORCE").is_none_or(|value| value == "0")
