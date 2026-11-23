@@ -81,14 +81,19 @@ static USER_REJECTION_RE: LazyLock<Regex> = LazyLock::new(|| {
     ).unwrap()
 });
 
-/// Filters out user rejections - requires actual error-indicating content
+fn is_pre_tool_hook_denial(output: &str) -> bool {
+    output
+        .trim_start()
+        .starts_with("PreToolUse:Bash hook error:")
+}
+
+/// Filters out results where the command did not run.
 pub fn is_command_error(is_error: bool, output: &str) -> bool {
     if !is_error {
         return false;
     }
 
-    // Reject if it's a user rejection
-    if USER_REJECTION_RE.is_match(output) {
+    if USER_REJECTION_RE.is_match(output) || is_pre_tool_hook_denial(output) {
         return false;
     }
 
@@ -239,6 +244,9 @@ pub fn find_corrections(commands: &[CommandExecution]) -> Vec<CorrectionPair> {
 
         // Look ahead for correction within CORRECTION_WINDOW
         for candidate in commands.iter().skip(i + 1).take(CORRECTION_WINDOW) {
+            if candidate.is_error && is_pre_tool_hook_denial(&candidate.output) {
+                continue;
+            }
             let similarity = command_similarity(&cmd.command, &candidate.command);
 
             // Must meet minimum similarity
@@ -371,6 +379,30 @@ mod tests {
         assert!(!is_command_error(true, "The user doesn't want to proceed"));
         assert!(!is_command_error(true, "Operation cancelled by user"));
         assert!(is_command_error(true, "error: permission denied"));
+    }
+
+    #[test]
+    fn test_pre_tool_hook_denial_does_not_participate_in_corrections() {
+        let error = CommandExecution {
+            command: "git status --unknown".to_string(),
+            is_error: true,
+            output: "error: unknown option".to_string(),
+        };
+        let denied = CommandExecution {
+            command: "git status --short".to_string(),
+            is_error: true,
+            output: "PreToolUse:Bash hook error: deny-command: permission denied".to_string(),
+        };
+        let success = CommandExecution {
+            command: "git status --porcelain".to_string(),
+            is_error: false,
+            output: String::new(),
+        };
+
+        assert!(!is_command_error(denied.is_error, &denied.output));
+        let corrections = find_corrections(&[error, denied, success]);
+        assert_eq!(corrections.len(), 1);
+        assert_eq!(corrections[0].right_command, "git status --porcelain");
     }
 
     #[test]
