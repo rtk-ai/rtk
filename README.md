@@ -80,7 +80,7 @@ brew install rtk
 winget install rtk-ai.rtk
 ```
 
-**Linux, macOS or WSL, with the install script**
+**Linux, macOS, WSL, or Git Bash on Windows, with the install script**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh

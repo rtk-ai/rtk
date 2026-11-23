@@ -4205,6 +4205,36 @@ mod tests {
         }
     }
 
+    /// Only `nix search` is filtered: build, shell and eval output (builder logs,
+    /// inner commands, error locations) must reach the agent as nix printed it.
+    #[test]
+    fn test_rewrite_nix_search_only() {
+        for command in [
+            "nix --offline search nixpkgs jq",
+            "nix -L search nixpkgs jq",
+            "nix search nixpkgs jq",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(format!("rtk {command}")),
+                "{command}"
+            );
+        }
+        for command in [
+            "nix build nixpkgs#hello",
+            "nix eval --expr 1",
+            "nix flake show",
+            "nix searchx",
+            "nix shell nixpkgs#cargo -c cargo build",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "{command} must not be rewritten"
+            );
+        }
+    }
+
     #[test]
     fn test_rewrite_playwright() {
         let commands = vec![

@@ -412,6 +412,61 @@ mod tests {
         assert_eq!(read_decisions(&bound), vec!["r".to_string()]);
     }
 
+    /// The `rtk:delegate-reads` shunt rule, bound to an upstream so it can fire.
+    fn delegate_read_decisions(extension: &str, file_lines: f64) -> Vec<String> {
+        let user = "[pipeline]\nextends = \"rtk:delegate-reads\"\n\n[upstream.u]\nprovider = \"anthropic\"\nmodel = \"m\"\n\n[task.bulk-read]\nupstream = \"u\"\n";
+        let (resolved, _) = resolve(&[load(Scope::User, "t", user)]);
+        let mut facts = str_facts(&[("tool", "read"), ("extension", extension)]);
+        facts.insert("whole_file".into(), Fact::Bool(true));
+        facts.insert("file_lines".into(), Fact::Num(file_lines));
+        evaluate(
+            &resolved,
+            Position::hook(Event::BeforeTool, Subject::Read),
+            &facts,
+        )
+        .iter()
+        .map(|d| d.rule.name.clone())
+        .collect()
+    }
+
+    #[test]
+    fn delegate_reads_still_shunts_a_long_text_file() {
+        assert_eq!(
+            delegate_read_decisions("rs", 1083.0),
+            vec!["shunt-large-read".to_string()]
+        );
+        assert!(delegate_read_decisions("rs", 100.0).is_empty());
+    }
+
+    #[test]
+    fn delegate_reads_leaves_natively_rendered_files_to_the_read_tool() {
+        for ext in ["png", "jpg", "jpeg", "gif", "webp", "pdf"] {
+            assert!(
+                delegate_read_decisions(ext, 1083.0).is_empty(),
+                "a .{ext} read must not be shunted by its newline-byte count"
+            );
+        }
+        // A notebook is text `bulk-read` can read, and verbose: it stays shunted.
+        assert_eq!(
+            delegate_read_decisions("ipynb", 1083.0),
+            vec!["shunt-large-read".to_string()]
+        );
+    }
+
+    #[test]
+    fn delegate_reads_exempts_the_listed_upper_case_extensions() {
+        for ext in ["PNG", "JPG", "PDF"] {
+            assert!(
+                delegate_read_decisions(ext, 1083.0).is_empty(),
+                "a .{ext} read must not be shunted"
+            );
+        }
+        assert_eq!(
+            delegate_read_decisions("RS", 1083.0),
+            vec!["shunt-large-read".to_string()]
+        );
+    }
+
     fn str_facts(pairs: &[(&str, &str)]) -> Facts {
         pairs
             .iter()
@@ -613,7 +668,7 @@ action = "passthrough"
             "[pipeline]\nextends = \"rtk:delegate-reads\"\n\n[upstream.u]\nprovider = \"anthropic\"\nmodel = \"m\"\n\n[task.bulk-read]\nkind = \"summarize\"\nupstream = \"u\"\n",
         );
         let (resolved, _) = resolve(&[user]);
-        let mut facts = str_facts(&[("file_path", "src/Service.java")]);
+        let mut facts = str_facts(&[("file_path", "src/Service.java"), ("extension", "java")]);
         facts.insert("file_lines".into(), Fact::Num(4120.0));
         facts.insert("whole_file".into(), Fact::Bool(true));
         let decisions = evaluate(
