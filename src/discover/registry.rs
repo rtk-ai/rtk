@@ -5789,19 +5789,69 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_docker_compose_up_skipped() {
+    fn test_rewrite_docker_compose_up_detached() {
+        for (cmd, expected) in [
+            ("docker compose up -d", "rtk docker compose up -d"),
+            (
+                "docker compose up canvas -d",
+                "rtk docker compose up canvas -d",
+            ),
+            (
+                "docker compose up --detach --build",
+                "rtk docker compose up --detach --build",
+            ),
+            ("docker compose up --wait", "rtk docker compose up --wait"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_up_attached_skipped() {
+        // Attached `up` streams logs until interrupted.
+        for cmd in [
+            "docker compose up",
+            "docker compose up web",
+            "docker compose up --build",
+            "docker compose up --abort-on-container-exit",
+            "docker compose up --detached-thing",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_lifecycle() {
+        for sub in ["down", "stop", "start", "restart", "create"] {
+            let cmd = format!("docker compose {sub} web");
+            assert_eq!(
+                rewrite_command_no_prefixes(&cmd, &[]),
+                Some(format!("rtk docker compose {sub} web")),
+                "{cmd}"
+            );
+        }
         assert_eq!(
-            rewrite_command_no_prefixes("docker compose up -d", &[]),
-            None
+            rewrite_command_no_prefixes("docker compose down -v", &[]),
+            Some("rtk docker compose down -v".into())
         );
     }
 
     #[test]
-    fn test_rewrite_docker_compose_down_skipped() {
-        assert_eq!(
-            rewrite_command_no_prefixes("docker compose down", &[]),
-            None
-        );
+    fn test_rewrite_docker_compose_other_subcommands_skipped() {
+        for cmd in [
+            "docker compose pull",
+            "docker compose rm -f",
+            "docker compose run --rm web sh",
+            "docker compose exec web sh",
+            "docker compose downgrade",
+            "docker compose stopped",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
     }
 
     #[test]

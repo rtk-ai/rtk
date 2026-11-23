@@ -458,6 +458,24 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 85.0,
         ..RtkRule::DEFAULT
     },
+    // `up` only when detached: attached `up` streams container logs until
+    // interrupted, and a captured stream shows nothing until it exits.
+    RtkRule {
+        pattern: r"^docker\s+compose\s+up\s(?:.*\s)?(?:-d|--detach|--wait)(?:\s|$|[;|&()<>])",
+        rtk_cmd: "rtk docker",
+        rewrite_prefixes: &["docker"],
+        category: "Infra",
+        savings_pct: 45.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^docker\s+compose\s+(down|stop|start|restart|create)(?:\s|$|[;|&()<>])",
+        rtk_cmd: "rtk docker",
+        rewrite_prefixes: &["docker"],
+        category: "Infra",
+        savings_pct: 40.0,
+        ..RtkRule::DEFAULT
+    },
     RtkRule {
         pattern: r"^kubectl\s+(get|logs|describe|apply)(?:\s|$|[;|&()<>])",
         rtk_cmd: "rtk kubectl",
