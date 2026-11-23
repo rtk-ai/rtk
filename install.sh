@@ -41,7 +41,7 @@ detect_os() {
     case "$(uname -s)" in
         Linux*)               OS="linux";;
         Darwin*)              OS="darwin";;
-        MINGW*|MSYS*|CYGWIN*) OS="windows";;
+        CYGWIN*|MINGW*|MSYS*) OS="windows";;
         *)                    error "Unsupported operating system: $(uname -s)";;
     esac
 }

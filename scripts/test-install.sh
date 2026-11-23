@@ -8,6 +8,12 @@
 # Section 2 — CWE-22 path traversal checks (issue #1250):
 #   Archive-content verification rejects absolute paths and ".." components,
 #   for both the tar.gz (default) and zip (Windows) archive-listing paths.
+#
+# Section 3 — install.sh end to end against a fake release:
+#   the real script with offline curl and uname stubs: a Linux tar.gz install,
+#   a Git Bash zip install of rtk.exe, and a zip with a "../" entry refused
+#   before extraction. On a Windows host the zip cases install the real
+#   rtk.exe named by RTK_TEST_EXE, and are skipped when it is unset.
 
 set -eu
 
@@ -39,7 +45,8 @@ extract_fn() {
 ERROR_FN=$(extract_fn error)
 DETECT_OS_FN=$(extract_fn detect_os)
 GET_TARGET_FN=$(extract_fn get_target)
-UNZIP_GUARD_LINE=$(grep -F 'command -v unzip' "$INSTALL_SH")
+# `|| true`: a missing guard must reach the checks below as a FAIL, not stop the script.
+UNZIP_GUARD_LINE=$(grep -F 'command -v unzip' "$INSTALL_SH" || true)
 
 # Prefer python3, but some environments (e.g. python.org's Windows installer) only
 # expose "python", so fall back to it once python3 installation is confirmed.
@@ -244,7 +251,7 @@ PY
         fail "safe tar archive rejected (false positive)"
     fi
 
-    for bad in traversal absolute middle end_dotdot; do
+    for bad in absolute end_dotdot middle traversal; do
         if check_archive "$TMPDIR/$bad.tgz"; then
             fail "$bad tar archive accepted (should be rejected)"
         else
@@ -280,7 +287,7 @@ PY
             fail "safe zip archive rejected (false positive)"
         fi
 
-        for bad in traversal absolute middle end_dotdot; do
+        for bad in absolute end_dotdot middle traversal; do
             if check_archive "$TMPDIR/$bad.zip"; then
                 fail "$bad zip archive accepted (should be rejected)"
             else
@@ -317,9 +324,176 @@ check_marker() {
     fi
 }
 
-check_marker 'MINGW*|MSYS*|CYGWIN*'
-check_marker 'x86_64-pc-windows-msvc'
 check_marker 'command -v unzip'
+check_marker 'CYGWIN*|MINGW*|MSYS*'
+check_marker 'x86_64-pc-windows-msvc'
+
+echo ""
+echo "==> Section 3: install.sh end to end against a fake release"
+
+# Runs the real install.sh, not extracted pieces of it: an offline curl stub
+# serves release assets from a local directory and a uname stub reports the
+# platform. Elsewhere the fake binary is a shell script so verify() can run it.
+# On a Windows host (Git Bash, MSYS2, Cygwin) a script named rtk.exe does not
+# run, so the zip cases install the real rtk.exe named by RTK_TEST_EXE (CI
+# passes the one it just built), report the host's own `uname -s`, and the
+# tar.gz case is left to the Linux and macOS runs.
+E2E_SKIP=""
+E2E_WINDOWS_HOST=""
+HOST_UNAME_S=$(uname -s)
+case "$HOST_UNAME_S" in
+    CYGWIN*|MINGW*|MSYS*)
+        E2E_WINDOWS_HOST=1
+        if [ -z "${RTK_TEST_EXE:-}" ]; then
+            E2E_SKIP="end-to-end install (on Windows, set RTK_TEST_EXE to a built rtk.exe)"
+        elif [ ! -f "$RTK_TEST_EXE" ] || ! "$RTK_TEST_EXE" --version >/dev/null 2>&1; then
+            fail "RTK_TEST_EXE does not name a runnable rtk.exe: $RTK_TEST_EXE"
+            E2E_SKIP="end-to-end install (RTK_TEST_EXE unusable)"
+        fi
+        ;;
+esac
+if [ -z "$E2E_SKIP" ] && ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+    E2E_SKIP="end-to-end install (requires sha256sum or shasum)"
+fi
+if [ -n "$E2E_SKIP" ]; then
+    skip "$E2E_SKIP"
+else
+    E2E="$TMPDIR/e2e"
+    mkdir -p "$E2E/stub" "$E2E/payload"
+
+    cat > "$E2E/stub/curl" <<'EOF'
+#!/bin/sh
+# Offline stand-in for `curl -fsSL <url> -o <file>`: serves the URL's basename
+# from $FAKE_RELEASE when the URL is the pinned release's download URL, and
+# fails like `curl -f` on a 404 otherwise.
+out="" url=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) out="$2"; shift ;;
+        -*) ;;
+        *)  url="$1" ;;
+    esac
+    shift
+done
+[ -n "$out" ] || { echo "curl stub: only '-o <file>' downloads are served: $url" >&2; exit 2; }
+case "$url" in
+    "https://github.com/rtk-ai/rtk/releases/download/$RTK_VERSION/"*) ;;
+    *) echo "curl stub: unexpected URL: $url" >&2; exit 22 ;;
+esac
+asset="$FAKE_RELEASE/${url##*/}"
+[ -f "$asset" ] || exit 22
+cp "$asset" "$out"
+EOF
+    cat > "$E2E/stub/uname" <<'EOF'
+#!/bin/sh
+case "$1" in
+    -s) printf '%s\n' "$FAKE_UNAME_S" ;;
+    -m) printf '%s\n' x86_64 ;;
+    *)  echo "uname stub: unexpected arguments: $*" >&2; exit 2 ;;
+esac
+EOF
+    chmod +x "$E2E/stub/curl" "$E2E/stub/uname"
+    printf '#!/bin/sh\necho "rtk 0.0.0-test"\n' > "$E2E/payload/rtk"
+    if [ -n "$E2E_WINDOWS_HOST" ]; then
+        ZIP_PAYLOAD="$RTK_TEST_EXE"
+        ZIP_VERSION=$("$RTK_TEST_EXE" --version)
+        ZIP_UNAME_S="$HOST_UNAME_S"
+    else
+        ZIP_PAYLOAD="$E2E/payload/rtk"
+        ZIP_VERSION="rtk 0.0.0-test"
+        ZIP_UNAME_S="MINGW64_NT-10.0-26300"
+    fi
+
+    sha256_of() {
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$1" | awk '{print $1}'
+        else
+            shasum -a 256 "$1" | awk '{print $1}'
+        fi
+    }
+
+    # make_release <dir> <asset> [extra zip entry]: one asset plus checksums.txt.
+    # A zip holds rtk.exe; the extra entry, when given, is added after it.
+    make_release() {
+        mkdir -p "$1"
+        case "$2" in
+            *.zip)
+                "$PY3" - "$ZIP_PAYLOAD" "$1/$2" "${3:-}" <<'PY'
+import sys, zipfile
+payload, archive, extra = sys.argv[1:4]
+with zipfile.ZipFile(archive, "w") as z:
+    info = zipfile.ZipInfo("rtk.exe")
+    info.create_system = 3  # Unix, so unzip applies the mode below
+    info.external_attr = 0o644 << 16  # not executable: install.sh must chmod it
+    with open(payload, "rb") as f:
+        z.writestr(info, f.read())
+    if extra:
+        z.writestr(extra, "pwned")
+PY
+                ;;
+            *) (cd "$E2E/payload" && tar -czf "$1/$2" rtk) ;;
+        esac
+        printf '%s  %s\n' "$(sha256_of "$1/$2")" "$2" > "$1/checksums.txt"
+    }
+
+    # run_e2e <name> <uname -s> <release dir>: sets RC, OUT and BIN_DIR.
+    # install.sh starts from an empty environment, so installer settings the
+    # caller exported (RTK_EDITION, RTK_SKIP_CHECKSUM) cannot change the
+    # result, and its mktemp lands under this test's cleaned-up TMPDIR. The
+    # Windows system-root variables pass through for a native rtk.exe.
+    run_e2e() {
+        BIN_DIR="$E2E/$1/bin"
+        mkdir -p "$E2E/$1/home" "$E2E/$1/tmp"
+        if OUT=$(env -i FAKE_RELEASE="$3" FAKE_UNAME_S="$2" HOME="$E2E/$1/home" \
+            PATH="$E2E/stub:$PATH" RTK_INSTALL_DIR="$BIN_DIR" RTK_VERSION=v0.0.0-test \
+            ${SYSTEMROOT+"SYSTEMROOT=$SYSTEMROOT"} TMPDIR="$E2E/$1/tmp" \
+            ${WINDIR+"WINDIR=$WINDIR"} \
+            sh "$INSTALL_SH" </dev/null 2>&1); then RC=0; else RC=$?; fi
+    }
+
+    if [ -n "$E2E_WINDOWS_HOST" ]; then
+        skip "tar.gz install on a Windows host (covered by the Linux and macOS runs)"
+    else
+        make_release "$E2E/rel-linux" rtk-x86_64-unknown-linux-musl.tar.gz
+        run_e2e linux Linux "$E2E/rel-linux"
+        if [ "$RC" -eq 0 ] && [ -x "$BIN_DIR/rtk" ] \
+            && printf '%s' "$OUT" | grep -qF 'Verification: rtk 0.0.0-test'; then
+            pass "linux: installs and verifies rtk from the tar.gz asset"
+        else
+            fail "linux: tar.gz install (rc=$RC out='$OUT')"
+        fi
+    fi
+
+    if ! command -v unzip >/dev/null 2>&1 || [ -z "$PY3" ]; then
+        skip "end-to-end zip install (requires unzip and a python3-compatible interpreter)"
+    else
+        # Git Bash resolves a bare `rtk` to rtk.exe and reports every .exe as
+        # executable, so the "no plain rtk" and chmod checks only mean
+        # something off Windows; the Linux and macOS runs hold them.
+        make_release "$E2E/rel-win" rtk-x86_64-pc-windows-msvc.zip
+        run_e2e win "$ZIP_UNAME_S" "$E2E/rel-win"
+        if [ "$RC" -eq 0 ] && [ -x "$BIN_DIR/rtk.exe" ] \
+            && { [ -n "$E2E_WINDOWS_HOST" ] || [ ! -e "$BIN_DIR/rtk" ]; } \
+            && printf '%s' "$OUT" | grep -qF "Verification: $ZIP_VERSION"; then
+            pass "windows: installs and verifies rtk.exe from the zip asset"
+        else
+            fail "windows: zip install (rc=$RC out='$OUT')"
+        fi
+
+        # Refused before extraction: no "Extracting..." step, and no entry of
+        # the archive written anywhere under this case's TMPDIR.
+        make_release "$E2E/rel-win-bad" rtk-x86_64-pc-windows-msvc.zip "../evil"
+        run_e2e winbad "$ZIP_UNAME_S" "$E2E/rel-win-bad"
+        if [ "$RC" -ne 0 ] && [ ! -e "$BIN_DIR/rtk.exe" ] \
+            && printf '%s' "$OUT" | grep -qF 'Archive contains unsafe paths' \
+            && ! printf '%s' "$OUT" | grep -qF 'Extracting...' \
+            && [ -z "$(find "$E2E/winbad/tmp" \( -name evil -o -name rtk.exe \) -print)" ]; then
+            pass "windows: zip with a '../' entry is refused before extraction"
+        else
+            fail "windows: traversal zip not refused before extraction (rc=$RC out='$OUT')"
+        fi
+    fi
+fi
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then
