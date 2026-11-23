@@ -1,0 +1,161 @@
+[1m[90m[TAILING] Tailing last 20 lines for [all] processes (change the value with --lines option)[39m[22m
+[90m/tmp/pm2work/home/pm2.log last 20 lines:[39m
+[34mPM2        | [39m2026-11-18T08:11:44: PM2 log: App [api:0] starting in -cluster mode-
+[34mPM2        | [39m2026-11-18T08:11:44: PM2 log: App [api:0] online
+[34mPM2        | [39m2026-11-18T08:11:44: PM2 log: Stopping app:api id:1
+[34mPM2        | [39m2026-11-18T08:11:44: PM2 log: App name:api id:1 disconnected
+[34mPM2        | [39m2026-11-18T08:11:44: PM2 log: App [api:1] exited with code [0] via signal [SIGINT]
+[34mPM2        | [39m2026-11-18T08:11:44: PM2 log: pid=780293 msg=process tree killed (1 pids)
+[34mPM2        | [39m2026-11-18T08:11:44: PM2 log: App [api:1] starting in -cluster mode-
+[34mPM2        | [39m2026-11-18T08:11:44: PM2 log: App [api:1] online
+[34mPM2        | [39m2026-11-18T08:11:44: PM2 log: App [api:0] starting in -cluster mode-
+[34mPM2        | [39m2026-11-18T08:11:44: PM2 log: App [api:0] online
+[34mPM2        | [39m2026-11-18T08:11:47: PM2 log: Stopping app:api id:_old_0
+[34mPM2        | [39m2026-11-18T08:11:47: PM2 log: App name:api id:_old_0 disconnected
+[34mPM2        | [39m2026-11-18T08:11:47: PM2 log: App [api:_old_0] exited with code [0] via signal [SIGINT]
+[34mPM2        | [39m2026-11-18T08:11:47: PM2 log: pid=780902 msg=process tree killed (1 pids)
+[34mPM2        | [39m2026-11-18T08:11:47: PM2 log: App [api:1] starting in -cluster mode-
+[34mPM2        | [39m2026-11-18T08:11:47: PM2 log: App [api:1] online
+[34mPM2        | [39m2026-11-18T08:11:50: PM2 log: Stopping app:api id:_old_1
+[34mPM2        | [39m2026-11-18T08:11:50: PM2 log: App name:api id:_old_1 disconnected
+[34mPM2        | [39m2026-11-18T08:11:50: PM2 log: App [api:_old_1] exited with code [0] via signal [SIGINT]
+[34mPM2        | [39m2026-11-18T08:11:50: PM2 log: pid=780926 msg=process tree killed (1 pids)
+
+[90m/tmp/pm2work/home/logs/worker-error.log last 20 lines:[39m
+[90m/tmp/pm2work/home/logs/billing-out.log last 20 lines:[39m
+[32m3|billing  | [39mbooting
+[32m3|billing  | [39mbooting
+[32m3|billing  | [39mbooting
+
+[90m/tmp/pm2work/home/logs/billing-error.log last 20 lines:[39m
+[31m3|billing  | [39m    at Module._compile (node:internal/modules/cjs/loader:1356:14)
+[31m3|billing  | [39m    at Module._extensions..js (node:internal/modules/cjs/loader:1414:10)
+[31m3|billing  | [39m    at Module.load (node:internal/modules/cjs/loader:1197:32)
+[31m3|billing  | [39m    at Module._load (node:internal/modules/cjs/loader:1013:12)
+[31m3|billing  | [39m    at Object.<anonymous> (/tmp/pm2work/node_modules/pm2/lib/ProcessContainerFork.js:33:23)
+[31m3|billing  | [39m    at Module._compile (node:internal/modules/cjs/loader:1356:14)
+[31m3|billing  | [39m    at Module._extensions..js (node:internal/modules/cjs/loader:1414:10)
+[31m3|billing  | [39m    at Module.load (node:internal/modules/cjs/loader:1197:32)
+[31m3|billing  | [39m    at Module._load (node:internal/modules/cjs/loader:1013:12)
+[31m3|billing  | [39mError: Cannot find module ./config
+[31m3|billing  | [39m    at Object.<anonymous> (/tmp/pm2work/crash.js:1:30)
+[31m3|billing  | [39m    at Module._compile (node:internal/modules/cjs/loader:1356:14)
+[31m3|billing  | [39m    at Module._extensions..js (node:internal/modules/cjs/loader:1414:10)
+[31m3|billing  | [39m    at Module.load (node:internal/modules/cjs/loader:1197:32)
+[31m3|billing  | [39m    at Module._load (node:internal/modules/cjs/loader:1013:12)
+[31m3|billing  | [39m    at Object.<anonymous> (/tmp/pm2work/node_modules/pm2/lib/ProcessContainerFork.js:33:23)
+[31m3|billing  | [39m    at Module._compile (node:internal/modules/cjs/loader:1356:14)
+[31m3|billing  | [39m    at Module._extensions..js (node:internal/modules/cjs/loader:1414:10)
+[31m3|billing  | [39m    at Module.load (node:internal/modules/cjs/loader:1197:32)
+[31m3|billing  | [39m    at Module._load (node:internal/modules/cjs/loader:1013:12)
+
+[90m/tmp/pm2work/home/logs/api-error-1.log last 20 lines:[39m
+[31m1|api      | [39m2026-11-18T02:41:39.383Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:40.283Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:41.186Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:42.086Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:42.987Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:43.888Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:45.410Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:46.312Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:47.212Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:48.113Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:48.876Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:49.014Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:49.780Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:49.915Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:50.682Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:50.817Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:51.583Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:52.484Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:53.385Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m1|api      | [39m2026-11-18T02:41:54.286Z Error: connect ECONNREFUSED 127.0.0.1:5432
+
+[90m/tmp/pm2work/home/logs/api-error-0.log last 20 lines:[39m
+[31m0|api      | [39m2026-11-18T02:41:39.291Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:40.192Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:41.093Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:41.996Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:42.899Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:43.800Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:45.190Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:45.739Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:46.090Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:46.639Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:46.991Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:47.540Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:48.441Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:49.342Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:50.244Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:51.146Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:52.047Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:52.949Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:53.849Z Error: connect ECONNREFUSED 127.0.0.1:5432
+[31m0|api      | [39m2026-11-18T02:41:54.750Z Error: connect ECONNREFUSED 127.0.0.1:5432
+
+[90m/tmp/pm2work/home/logs/worker-out.log last 20 lines:[39m
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+[32m2|worker   | [39mworker tick
+
+[90m/tmp/pm2work/home/logs/api-out-1.log last 20 lines:[39m
+[32m1|api      | [39m2026-11-18T02:41:52.334Z GET /api/users 200 14ms
+[32m1|api      | [39m2026-11-18T02:41:52.484Z GET /api/users 200 10ms
+[32m1|api      | [39m2026-11-18T02:41:52.634Z GET /api/users 200 11ms
+[32m1|api      | [39m2026-11-18T02:41:52.784Z GET /api/users 200 12ms
+[32m1|api      | [39m2026-11-18T02:41:52.934Z GET /api/users 200 13ms
+[32m1|api      | [39m2026-11-18T02:41:53.085Z GET /api/users 200 14ms
+[32m1|api      | [39m2026-11-18T02:41:53.235Z GET /api/users 200 10ms
+[32m1|api      | [39m2026-11-18T02:41:53.385Z GET /api/users 200 11ms
+[32m1|api      | [39m2026-11-18T02:41:53.535Z GET /api/users 200 12ms
+[32m1|api      | [39m2026-11-18T02:41:53.686Z GET /api/users 200 13ms
+[32m1|api      | [39m2026-11-18T02:41:53.836Z GET /api/users 200 14ms
+[32m1|api      | [39m2026-11-18T02:41:53.986Z GET /api/users 200 10ms
+[32m1|api      | [39m2026-11-18T02:41:54.135Z GET /api/users 200 11ms
+[32m1|api      | [39m2026-11-18T02:41:54.286Z GET /api/users 200 12ms
+[32m1|api      | [39m2026-11-18T02:41:54.436Z GET /api/users 200 13ms
+[32m1|api      | [39m2026-11-18T02:41:54.586Z GET /api/users 200 14ms
+[32m1|api      | [39m2026-11-18T02:41:54.737Z GET /api/users 200 10ms
+[32m1|api      | [39m2026-11-18T02:41:54.887Z GET /api/users 200 11ms
+[32m1|api      | [39m2026-11-18T02:41:55.036Z GET /api/users 200 12ms
+[32m1|api      | [39m2026-11-18T02:41:55.187Z GET /api/users 200 13ms
+
+[90m/tmp/pm2work/home/logs/api-out-0.log last 20 lines:[39m
+[32m0|api      | [39m2026-11-18T02:41:52.197Z GET /api/users 200 14ms
+[32m0|api      | [39m2026-11-18T02:41:52.348Z GET /api/users 200 10ms
+[32m0|api      | [39m2026-11-18T02:41:52.498Z GET /api/users 200 11ms
+[32m0|api      | [39m2026-11-18T02:41:52.649Z GET /api/users 200 12ms
+[32m0|api      | [39m2026-11-18T02:41:52.799Z GET /api/users 200 13ms
+[32m0|api      | [39m2026-11-18T02:41:52.948Z GET /api/users 200 14ms
+[32m0|api      | [39m2026-11-18T02:41:53.099Z GET /api/users 200 10ms
+[32m0|api      | [39m2026-11-18T02:41:53.249Z GET /api/users 200 11ms
+[32m0|api      | [39m2026-11-18T02:41:53.399Z GET /api/users 200 12ms
+[32m0|api      | [39m2026-11-18T02:41:53.549Z GET /api/users 200 13ms
+[32m0|api      | [39m2026-11-18T02:41:53.699Z GET /api/users 200 14ms
+[32m0|api      | [39m2026-11-18T02:41:53.849Z GET /api/users 200 10ms
+[32m0|api      | [39m2026-11-18T02:41:53.999Z GET /api/users 200 11ms
+[32m0|api      | [39m2026-11-18T02:41:54.149Z GET /api/users 200 12ms
+[32m0|api      | [39m2026-11-18T02:41:54.300Z GET /api/users 200 13ms
+[32m0|api      | [39m2026-11-18T02:41:54.450Z GET /api/users 200 14ms
+[32m0|api      | [39m2026-11-18T02:41:54.600Z GET /api/users 200 10ms
+[32m0|api      | [39m2026-11-18T02:41:54.750Z GET /api/users 200 11ms
+[32m0|api      | [39m2026-11-18T02:41:54.900Z GET /api/users 200 12ms
+[32m0|api      | [39m2026-11-18T02:41:55.050Z GET /api/users 200 13ms
+

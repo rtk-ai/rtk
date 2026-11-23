@@ -1,0 +1,78 @@
+[filters.pm2]
+description = "Compact pm2 list/status/restart/reload/env/logs --nostream — strip ANSI, table borders, host metrics and hints"
+# `pm2 logs` without --nostream tails forever, so only the bounded form matches.
+match_command = "^pm2(?:\\s+--?\\S+)*\\s+(?:(?:list|ls|l|ps|status|restart|reload|env)\\b|logs\\b.*--nostream)"
+strip_ansi = true
+# Collapse the column padding of the "0|api      | " log prefix; the message text is untouched.
+replace = [
+  { pattern = "^(\\d+\\|[^\\s|]+|PM2)\\s{2,}\\| ", replacement = "${1} | " },
+]
+strip_lines_matching = [
+  "^\\s*$",
+  "^[┌└][─┬┴]+[┐┘]$",
+  "^host metrics \\|",
+  "^Use --update-env to update environment variables$",
+  "^\\[TAILING\\]",
+]
+max_lines = 300
+
+[[tests.pm2]]
+name = "list strips ANSI, outer borders and host metrics but keeps every process row"
+input = """
+┌────┬──────┬─────────┬──────────┐
+│ id │ name │ mode    │ status   │
+├────┼──────┼─────────┼──────────┤
+│ \u001b[1m\u001b[36m0\u001b[39m\u001b[22m  │ api  │ \u001b[34m\u001b[1mcluster\u001b[22m\u001b[39m │ \u001b[32m\u001b[1monline\u001b[22m\u001b[39m   │
+│ \u001b[1m\u001b[36m1\u001b[39m\u001b[22m  │ cron │ \u001b[7m\u001b[1mfork\u001b[22m\u001b[27m    │ \u001b[31m\u001b[1merrored\u001b[22m\u001b[39m  │
+└────┴──────┴─────────┴──────────┘
+\u001b[1m\u001b[36mhost metrics\u001b[39m\u001b[22m | \u001b[1mcpu\u001b[22m: 0% | \u001b[1mram usage\u001b[22m: \u001b[32m47.5%\u001b[39m
+"""
+expected = """
+│ id │ name │ mode    │ status   │
+├────┼──────┼─────────┼──────────┤
+│ 0  │ api  │ cluster │ online   │
+│ 1  │ cron │ fork    │ errored  │
+"""
+
+[[tests.pm2]]
+name = "restart keeps action lines and errors, drops the update-env hint"
+input = """
+\u001b[1m\u001b[34mUse --update-env to update environment variables\u001b[39m\u001b[22m
+\u001b[32m[PM2] \u001b[39mApplying action restartProcessId on app [api](ids: [ 0, 1 ])
+\u001b[32m[PM2] \u001b[39m[api](0) ✓
+\u001b[31m[PM2][ERROR] \u001b[39mProcess or Namespace nosuch not found
+"""
+expected = """
+[PM2] Applying action restartProcessId on app [api](ids: [ 0, 1 ])
+[PM2] [api](0) ✓
+[PM2][ERROR] Process or Namespace nosuch not found
+"""
+
+[[tests.pm2]]
+name = "env values are preserved verbatim"
+input = "NODE_ENV: \u001b[32mproduction\u001b[39m\nDATABASE_URL: \u001b[32mpostgres://app:pw@db:5432/app\u001b[39m"
+expected = "NODE_ENV: production\nDATABASE_URL: postgres://app:pw@db:5432/app"
+
+[[tests.pm2]]
+name = "logs --nostream drops the tailing banner and blank separators"
+input = """
+\u001b[1m\u001b[90m[TAILING] Tailing last 2 lines for [all] processes (change the value with --lines option)\u001b[39m\u001b[22m
+\u001b[90m/home/dev/.pm2/logs/api-out-0.log last 2 lines:\u001b[39m
+\u001b[32m0|api      | \u001b[39mGET /api/users 200 12ms
+\u001b[32m0|api      | \u001b[39mGET /api/users 200 13ms
+
+\u001b[90m/home/dev/.pm2/logs/api-error-0.log last 2 lines:\u001b[39m
+\u001b[31m0|api      | \u001b[39mError: connect ECONNREFUSED 127.0.0.1:5432
+"""
+expected = """
+/home/dev/.pm2/logs/api-out-0.log last 2 lines:
+0|api | GET /api/users 200 12ms
+0|api | GET /api/users 200 13ms
+/home/dev/.pm2/logs/api-error-0.log last 2 lines:
+0|api | Error: connect ECONNREFUSED 127.0.0.1:5432
+"""
+
+[[tests.pm2]]
+name = "empty input passes through"
+input = ""
+expected = ""
