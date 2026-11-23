@@ -1590,7 +1590,7 @@ pub fn uninstall_with_patch_mode(
         if has_rtk_reference(&working_content, &[RTK_MD_REF]) {
             let new_content = working_content
                 .lines()
-                .filter(|line| line.trim() != RTK_MD_REF)
+                .filter(|line| normalize_reference_line(line) != RTK_MD_REF)
                 .collect::<Vec<_>>()
                 .join("\n");
 
@@ -3154,6 +3154,34 @@ level = "high"
                 let cleaned = fs::read_to_string(&claude_md).expect("read retained instructions");
                 assert_eq!(cleaned, format!("# Config\n\n{prose}\n\nMore stuff"));
             }
+        });
+    }
+
+    #[test]
+    fn test_uninstall_removes_bom_prefixed_rtk_reference() {
+        // #5206: has_rtk_reference is BOM-aware, so the uninstall filter must be too.
+        let temp = TempDir::new().expect("create isolated home");
+        with_claude_dir_override(&temp, |claude_dir| {
+            let claude_md = claude_dir.join(CLAUDE_MD);
+            let content =
+                format!("# Config\n\n\u{feff}@RTK.md\n\n{RTK_INSTRUCTIONS}\n\nMore stuff\n");
+            fs::write(&claude_md, &content).expect("write instructions");
+
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                InitContext::default(),
+            )
+            .expect("uninstall RTK");
+
+            assert_eq!(
+                fs::read_to_string(&claude_md).expect("read retained instructions"),
+                "# Config\n\nMore stuff"
+            );
         });
     }
 

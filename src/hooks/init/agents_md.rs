@@ -168,7 +168,7 @@ pub(super) fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -
     }
 
     // ISSUE #892: Check for both relative and absolute @RTK.md references
-    if content.contains(RTK_MD_REF) || content.contains(rtk_md_ref) {
+    if has_rtk_reference(&content, &[RTK_MD_REF, rtk_md_ref]) {
         if verbose > 0 {
             eprintln!("{} reference already present in AGENTS.md", rtk_md_ref);
         }
@@ -248,7 +248,7 @@ pub(super) fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -
 /// A reference must occupy a whole trimmed line (#4650). A BOM-prefixed
 /// first line is still a reference -- editors on Windows prepend U+FEFF.
 pub(super) fn normalize_reference_line(line: &str) -> &str {
-    line.trim().trim_start_matches('\u{FEFF}')
+    line.trim_start_matches('\u{FEFF}').trim()
 }
 
 pub(super) fn has_rtk_reference(content: &str, refs: &[&str]) -> bool {
@@ -495,6 +495,26 @@ mod tests {
     #[test]
     fn test_bom_prefixed_reference_is_still_a_reference() {
         assert!(has_rtk_reference("\u{feff}@RTK.md\n", &[RTK_MD_REF]));
+        // BOM can precede indentation; normalize the BOM before trimming (#5206).
+        assert!(has_rtk_reference("\u{feff}  @RTK.md  \n", &[RTK_MD_REF]));
+    }
+
+    #[test]
+    fn test_prose_only_mention_still_gets_a_reference_line() {
+        // A prose mention is not a reference: init must still add a whole line.
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        fs::write(&agents_md, "Read @RTK.md for details.\n").unwrap();
+
+        let added = patch_agents_md(&agents_md, RTK_MD_REF, InitContext::default()).unwrap();
+
+        assert!(added);
+        let content = fs::read_to_string(&agents_md).unwrap();
+        assert!(content.lines().any(|line| line == RTK_MD_REF), "{content}");
+        assert!(
+            content.starts_with("Read @RTK.md for details."),
+            "{content}"
+        );
     }
 
     #[test]
@@ -503,11 +523,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
         let absolute = "/home/user/.config/rtk/RTK.md";
-        fs::write(
-            &agents_md,
-            format!("Read @RTK.md for details.\n\n@RTK.md\n"),
-        )
-        .unwrap();
+        fs::write(&agents_md, "Read @RTK.md for details.\n\n@RTK.md\n").unwrap();
 
         let migrated = patch_agents_md(&agents_md, absolute, InitContext::default()).unwrap();
 

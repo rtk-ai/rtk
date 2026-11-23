@@ -1035,6 +1035,28 @@ mod tests {
     use crate::core::test_isolation;
 
     #[test]
+    fn test_patch_claude_md_adds_reference_when_only_prose_mentions_it() {
+        // #5206: a mention in prose must not be mistaken for a whole-line ref.
+        let temp = TempDir::new().unwrap();
+        let claude_md = temp.path().join(CLAUDE_MD);
+        fs::write(&claude_md, "Read @RTK.md for details.\n").unwrap();
+
+        // Return value signals old-block migration only; the assertion below
+        // is what fails if the whole-line gate is reverted.
+        patch_claude_md(&claude_md, InitContext::default()).unwrap();
+
+        let content = fs::read_to_string(&claude_md).unwrap();
+        assert!(
+            content.lines().any(|line| line == RTK_MD_REF),
+            "no standalone reference line: {content}"
+        );
+        assert!(
+            content.starts_with("Read @RTK.md for details."),
+            "prose was rewritten: {content}"
+        );
+    }
+
+    #[test]
     fn test_hook_already_present_exact_match() {
         let json_content = serde_json::json!({
             "hooks": {
