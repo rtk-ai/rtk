@@ -2231,11 +2231,17 @@ error: aborting due to 2 previous errors
         let output = "\x1b[1;32m  Installing\x1b[0m rtk v0.11.0\n\
                       \x1b[1;32m   Compiling\x1b[0m rtk v0.11.0\n\
                       \x1b[1;32m    Finished\x1b[0m `release` profile [optimized] target(s) in 10.0s\n\
-                      \x1b[1;32m   Installed\x1b[0m package `rtk v0.11.0`\n";
+                      \x1b[1;32m   Installed\x1b[0m package `rtk v0.11.0`\n\
+                      \x1b[1m\x1b[33mwarning\x1b[0m\x1b[1m:\x1b[0m be sure to add `/x/bin` to your PATH\n";
         let result = filter_cargo_install(output);
         assert!(
             result.contains("rtk v0.11.0"),
             "package name must survive forced color: {}",
+            result
+        );
+        assert!(
+            result.contains("be sure to add `/x/bin` to your PATH"),
+            "actionable colored PATH warning must survive as plain text: {}",
             result
         );
         assert!(
