@@ -80,7 +80,7 @@ La manière la plus simple d'installer sur Windows — une seule commande, aucun
 winget install rtk-ai.rtk
 ```
 
-### Installation rapide (Linux/macOS)
+### Installation rapide (Linux/macOS/Git for Windows)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh

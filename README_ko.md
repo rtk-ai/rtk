@@ -80,7 +80,7 @@ Windows에서 가장 쉬운 설치 방법 — 명령어 하나로 끝, PATH 설�
 winget install rtk-ai.rtk
 ```
 
-### 빠른 설치 (Linux/macOS)
+### 빠른 설치 (Linux/macOS/Git for Windows)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
