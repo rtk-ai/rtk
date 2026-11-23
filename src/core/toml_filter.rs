@@ -1574,6 +1574,146 @@ make[1]: Leaving directory '/home/user/project/docs'
         );
     }
 
+    fn savings_pct(input: &str, output: &str) -> f64 {
+        let before = crate::core::utils::count_tokens(input) as f64;
+        let after = crate::core::utils::count_tokens(output) as f64;
+        100.0 - after / before * 100.0
+    }
+
+    #[test]
+    fn test_yarn_install_matches_only_package_management_subcommands() {
+        let filters = make_filters(BUILTIN_TOML);
+        for cmd in [
+            "yarn",
+            "yarn install",
+            "yarn install --frozen-lockfile",
+            "yarn add express",
+            "yarn remove left-pad",
+            "yarn upgrade",
+            "yarn up react",
+            "yarn dedupe",
+        ] {
+            assert!(
+                find_filter_in(cmd, &filters).is_some_and(|f| f.name == "yarn-install"),
+                "{cmd} should use yarn-install"
+            );
+        }
+        // Scripts and other subcommands run user code; their output is not ours to filter.
+        for cmd in [
+            "yarn dev",
+            "yarn build",
+            "yarn test",
+            "yarn run build",
+            "yarn start",
+            "yarn add-peer",
+            "yarn list",
+            "yarn why ms",
+        ] {
+            assert!(
+                find_filter_in(cmd, &filters).is_none_or(|f| f.name != "yarn-install"),
+                "{cmd} must not use yarn-install"
+            );
+        }
+    }
+
+    #[test]
+    fn test_yarn_install_real_fixtures_savings_and_preserved_signal() {
+        let filters = make_filters(BUILTIN_TOML);
+        let filter = find_filter_in("yarn add express", &filters).expect("yarn-install built-in");
+
+        let classic = include_str!("../../tests/fixtures/yarn_classic_add_raw.txt");
+        let out = apply_filter(filter, classic);
+        assert!(out.contains("warning left-pad@1.3.0: use String.prototype.padStart()"));
+        assert!(out.contains("success Saved 42 new dependencies."));
+        assert!(out.contains("Done in "));
+        assert!(!out.contains("├─") && !out.contains("[2/4]"));
+        let pct = savings_pct(classic, &out);
+        assert!(pct >= 60.0, "yarn classic add: got {pct:.1}%");
+
+        let berry = include_str!("../../tests/fixtures/yarn_berry_add_raw.txt");
+        let out = apply_filter(filter, berry);
+        assert!(out.contains("YN0085") && out.contains("YN0013") && out.contains("Done in"));
+        assert!(!out.contains("Resolution step") && !out.contains("· Yarn 4.5.3"));
+        let pct = savings_pct(berry, &out);
+        assert!(pct >= 20.0, "yarn berry add: got {pct:.1}%");
+
+        let peer = include_str!("../../tests/fixtures/yarn_berry_add_peer_warn_raw.txt");
+        let out = apply_filter(filter, peer);
+        assert!(out.contains("YN0002") && out.contains("YN0086"));
+        assert!(out.contains("Done with warnings"));
+        let pct = savings_pct(peer, &out);
+        assert!(pct >= 20.0, "yarn berry peer warnings: got {pct:.1}%");
+    }
+
+    #[test]
+    fn test_yarn_install_never_drops_failure_output() {
+        let filters = make_filters(BUILTIN_TOML);
+        let filter = find_filter_in("yarn add nope", &filters).expect("yarn-install built-in");
+
+        let classic = include_str!("../../tests/fixtures/yarn_classic_add_fail_raw.txt");
+        let out = apply_filter(filter, classic);
+        for line in classic.lines().filter(|l| {
+            l.starts_with("error ") || l.starts_with("    at ") || l.starts_with("info Visit")
+        }) {
+            assert!(out.contains(line), "lost failure line: {line}");
+        }
+
+        let berry = include_str!("../../tests/fixtures/yarn_berry_add_fail_raw.txt");
+        let out = apply_filter(filter, berry);
+        for line in berry.lines().filter(|l| !l.trim().is_empty()) {
+            assert!(out.contains(line), "lost failure line: {line}");
+        }
+    }
+
+    #[test]
+    fn test_sequelize_matches_both_binary_names() {
+        let filters = make_filters(BUILTIN_TOML);
+        for cmd in ["sequelize db:migrate", "sequelize-cli db:migrate:undo"] {
+            assert!(
+                find_filter_in(cmd, &filters).is_some_and(|f| f.name == "sequelize"),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sequelize_real_fixtures_savings_and_preserved_signal() {
+        let filters = make_filters(BUILTIN_TOML);
+        let filter = find_filter_in("sequelize db:migrate", &filters).expect("sequelize built-in");
+
+        let migrate = include_str!("../../tests/fixtures/sequelize_db_migrate_raw.txt");
+        let out = apply_filter(filter, migrate);
+        assert!(out.contains("create-user: migrated (") && out.contains("add-age: migrated ("));
+        assert!(!out.contains("Sequelize CLI [") && !out.contains("Using environment"));
+        let pct = savings_pct(migrate, &out);
+        assert!(pct >= 20.0, "sequelize migrate: got {pct:.1}%");
+
+        let noop = include_str!("../../tests/fixtures/sequelize_db_migrate_noop_raw.txt");
+        let out = apply_filter(filter, noop);
+        assert_eq!(
+            out,
+            "No migrations were executed, database schema was already up to date."
+        );
+        let pct = savings_pct(noop, &out);
+        assert!(pct >= 50.0, "sequelize no-op migrate: got {pct:.1}%");
+
+        let status = include_str!("../../tests/fixtures/sequelize_db_migrate_status_raw.txt");
+        let out = apply_filter(filter, status);
+        assert_eq!(out.lines().count(), 3);
+        let pct = savings_pct(status, &out);
+        assert!(pct >= 20.0, "sequelize status: got {pct:.1}%");
+    }
+
+    #[test]
+    fn test_sequelize_failure_keeps_failing_migration_name_and_error() {
+        let filters = make_filters(BUILTIN_TOML);
+        let filter = find_filter_in("sequelize db:migrate", &filters).expect("sequelize built-in");
+        let raw = include_str!("../../tests/fixtures/sequelize_db_migrate_fail_raw.txt");
+        let out = apply_filter(filter, raw);
+        assert!(out.contains("20261118024106-bad: migrating"));
+        assert!(out.contains("ERROR: SQLITE_ERROR: no such table: NoSuchTable"));
+    }
+
     #[test]
     fn test_spring_boot_match_command_requires_spring_named_jar() {
         let filters = make_filters(BUILTIN_TOML);
@@ -2161,6 +2301,7 @@ match_command = "^make\\b"
             "pulumi-up",
             "quarto-render",
             "rsync",
+            "sequelize",
             "shellcheck",
             "shopify-theme",
             "sops",
@@ -2174,6 +2315,7 @@ match_command = "^make\\b"
             "trunk-build",
             "uv-sync",
             "yamllint",
+            "yarn-install",
         ];
 
         for name in &expected {
@@ -2192,8 +2334,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            62,
-            "Expected exactly 62 built-in filters, got {}. \
+            64,
+            "Expected exactly 64 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -2301,11 +2443,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 62 existing filters still present + 1 new = 63
+        // All 64 existing filters still present + 1 new = 65
         assert_eq!(
             filters.len(),
-            63,
-            "Expected 63 filters after concat (62 built-in + 1 new)"
+            65,
+            "Expected 65 filters after concat (64 built-in + 1 new)"
         );
 
         // New filter is discoverable
