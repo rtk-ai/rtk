@@ -699,6 +699,7 @@ fn select_go_test_failure_lines(outputs: &[String]) -> Vec<String> {
             || trimmed.starts_with("=== RUN")
             || trimmed.starts_with("--- FAIL")
             || trimmed.starts_with("--- PASS")
+            || is_go_benchmark_header(trimmed)
         {
             keep_next_context_line = false;
             continue;
@@ -725,12 +726,20 @@ fn select_go_test_failure_lines(outputs: &[String]) -> Vec<String> {
                 && !line.starts_with("=== RUN")
                 && !line.starts_with("--- FAIL")
                 && !line.starts_with("--- PASS")
+                && !is_go_benchmark_header(line)
         })
     {
         relevant.push(line.to_string());
     }
 
     relevant
+}
+
+fn is_go_benchmark_header(line: &str) -> bool {
+    line.starts_with("goos:")
+        || line.starts_with("goarch:")
+        || line.starts_with("pkg:")
+        || line.starts_with("cpu:")
 }
 
 fn is_go_test_location_line(line: &str) -> bool {
@@ -1447,5 +1456,26 @@ utils.go:15:5: unreachable code"#;
         assert!(result.contains("foo [FAIL]"), "got: {}", result);
         assert!(result.contains("teardown failed"), "got: {}", result);
         assert!(!result.contains("fuzz in"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_go_test_failing_benchmark_quiet_omits_benchmark_headers() {
+        let output = r#"{"Action":"run","Package":"failb","Test":"BenchmarkFail"}
+{"Action":"output","Package":"failb","Test":"BenchmarkFail","Output":"f_test.go:7: benchmark intentionally failed\n"}
+{"Action":"output","Package":"failb","Test":"BenchmarkFail","Output":"goos: linux\n"}
+{"Action":"output","Package":"failb","Test":"BenchmarkFail","Output":"goarch: amd64\n"}
+{"Action":"output","Package":"failb","Test":"BenchmarkFail","Output":"pkg: failb\n"}
+{"Action":"output","Package":"failb","Test":"BenchmarkFail","Output":"cpu: Intel(R) Core(TM)\n"}
+{"Action":"output","Package":"failb","Test":"BenchmarkFail","Output":"BenchmarkFail\n"}
+{"Action":"output","Package":"failb","Test":"BenchmarkFail","Output":"--- FAIL: BenchmarkFail\n"}
+{"Action":"fail","Package":"failb","Test":"BenchmarkFail","Elapsed":0.001}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(result.contains("f_test.go:7: benchmark intentionally failed"));
+        assert!(
+            !result.contains("goos:"),
+            "benchmark header 'goos:' must not appear in failure context, got:\n{}",
+            result
+        );
     }
 }
