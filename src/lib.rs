@@ -27,8 +27,8 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
-    ast_grep_cmd, ctest_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls,
-    pipe_cmd, read, search, summary, tree, wc_cmd,
+    ast_grep_cmd, ctest_cmd, deps, ego_browser_cmd, env_cmd, find_cmd, format_cmd, json_cmd,
+    local_llm, log_cmd, ls, pipe_cmd, read, search, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -631,6 +631,12 @@ enum Commands {
     /// Vitest commands with compact output
     Vitest {
         /// Additional vitest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Ego Lite browser snapshots with compact output
+    EgoBrowser {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -3353,6 +3359,7 @@ fn run_cli() -> Result<i32> {
         Commands::Jest { ref args } => vitest_cmd::run_jest(args, cli.verbose)?,
 
         Commands::Ctest { args } => ctest_cmd::run(&args, cli.verbose)?,
+        Commands::EgoBrowser { args } => ego_browser_cmd::run(&args, cli.verbose)?,
 
         Commands::Prisma { command } => match command {
             PrismaCommands::Generate { args } => {
@@ -4057,6 +4064,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Jest { .. }
             | Commands::Vitest { .. }
             | Commands::Ctest { .. }
+            | Commands::EgoBrowser { .. }
             | Commands::Prisma { .. }
             | Commands::Tsc { .. }
             | Commands::Next { .. }
@@ -4688,6 +4696,7 @@ mod tests {
             "jest",
             "vitest",
             "ctest",
+            "ego-browser",
             "prisma",
             "tsc",
             "next",

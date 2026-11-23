@@ -3759,6 +3759,19 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_ego_browser_nodejs_preserves_script() {
+        let command = "ego-browser nodejs -e 'console.log(1)'";
+        assert_eq!(
+            rewrite_command_no_prefixes(command, &[]),
+            Some(format!("rtk {command}"))
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("ego-browser --version", &[]),
+            None
+        );
+    }
+
+    #[test]
     fn test_rewrite_dotnet_subcommands() {
         for sub in ["build", "restore"] {
             assert_eq!(
