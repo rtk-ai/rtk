@@ -155,7 +155,7 @@ impl BlockHandler for TscHandler {
         line.starts_with("  ") || line.starts_with('\t')
     }
 
-    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String> {
+    fn format_summary(&self, exit_code: i32, raw: &str, raw_truncated: bool) -> Option<String> {
         if self.error_count == 0 {
             if exit_code == 0 {
                 return Some("TypeScript: No errors found\n".to_string());
@@ -167,6 +167,9 @@ impl BlockHandler for TscHandler {
             let mut summary = format!(
                 "TypeScript: compiler exited with code {exit_code}, but RTK parsed no diagnostics\n"
             );
+            if raw_truncated {
+                crate::core::stream::append_capture_notice(&mut summary);
+            }
 
             if raw.len() < crate::core::tee::MIN_TEE_SIZE {
                 for line in raw.lines() {

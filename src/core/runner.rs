@@ -819,7 +819,7 @@ impl StreamFilter for ErrorStreamFilter {
         String::new()
     }
 
-    fn on_exit(&mut self, exit_code: i32, raw: &str) -> Option<String> {
+    fn on_exit(&mut self, exit_code: i32, raw: &str, raw_truncated: bool) -> Option<String> {
         if self.emitted_any {
             return None;
         }
@@ -827,6 +827,9 @@ impl StreamFilter for ErrorStreamFilter {
             Some("[ok] Command completed successfully (no errors)".to_string())
         } else {
             let mut msg = format!("[FAIL] Command failed (exit code: {})\n", exit_code);
+            if raw_truncated {
+                stream::append_capture_notice(&mut msg);
+            }
             let lines: Vec<&str> = raw.lines().collect();
             for line in lines.iter().rev().take(10).rev() {
                 msg.push_str(&format!("  {}\n", line));
@@ -876,7 +879,7 @@ pub fn run_err_unrunnable(
 ) -> i32 {
     report_unrunnable(tool, display, outcome, verbose, |raw, code| {
         ErrorStreamFilter::new()
-            .on_exit(code, raw)
+            .on_exit(code, raw, false)
             .unwrap_or_default()
     })
 }

@@ -9,6 +9,8 @@ tracking before calling `stream::die_by_relayed_signal`.
 separately for stdout and stderr. Captured filters qualify their output when
 their input was cut: the summary and recall then cover only the captured part.
 Streaming filters still receive every line; their raw recovery copy can be cut.
+Their `on_exit`/`format_summary` callbacks receive `raw_truncated` so raw-based
+fallbacks can be qualified without marking full observed-line counters partial.
 
 > See also [docs/contributing/TECHNICAL.md](../../docs/contributing/TECHNICAL.md) for the full architecture overview
 

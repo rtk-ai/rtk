@@ -107,3 +107,96 @@ fn uv_run_qualifies_its_separate_capture_path() {
     assert!(stdout.contains(NOTICE), "{stdout}");
     assert!(!stdout.contains("ok"), "{stdout}");
 }
+
+#[test]
+fn streaming_cargo_test_qualifies_a_summary_reparsed_from_partial_raw() {
+    let stderr = format!(
+        "{}error: compile failure before capture cap\nCompiling {}\nerror: compile failure after capture cap\n",
+        "   Compiling placeholder-package-with-a-long-name v0.0.0\n".repeat(20),
+        "x".repeat(RAW_CAP + 1)
+    );
+    let output = run_fixture("cargo", &["cargo", "test"], "", &stderr, 1);
+    let shown = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(shown.contains("cargo test: 1 errors"), "{shown}");
+    assert!(shown.contains(NOTICE), "{shown}");
+}
+
+#[test]
+fn streaming_tsc_qualifies_its_unparsed_failure_fallback() {
+    let stderr = format!(
+        "opaque first line\n{}\nopaque last line\n",
+        "x".repeat(RAW_CAP + 1)
+    );
+    let output = run_fixture("tsc", &["tsc"], "", &stderr, 2);
+    let shown = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(shown.contains("RTK parsed no diagnostics"), "{shown}");
+    assert!(shown.contains(NOTICE), "{shown}");
+}
+
+#[test]
+fn streaming_error_filter_qualifies_its_raw_tail_fallback() {
+    let stderr = format!(
+        "opaque first line\n{}\nopaque last line\n",
+        "x".repeat(RAW_CAP + 1)
+    );
+    let output = run_fixture("fixture", &["err", "fixture"], "", &stderr, 9);
+    let shown = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(output.status.code(), Some(9));
+    assert!(shown.contains("Command failed (exit code: 9)"), "{shown}");
+    assert!(shown.contains(NOTICE), "{shown}");
+}
+
+#[test]
+fn streaming_tsc_counts_from_all_lines_remain_complete() {
+    let stderr = format!(
+        "error TS1234: first diagnostic\nFound {}\nerror TS5678: last diagnostic\n",
+        "x".repeat(RAW_CAP + 1)
+    );
+    let output = run_fixture("tsc", &["tsc"], "", &stderr, 2);
+    let shown = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(shown.contains("TypeScript: 2 errors"), "{shown}");
+    assert!(shown.contains("last diagnostic"), "{shown}");
+    assert!(!shown.contains(NOTICE), "{shown}");
+}
+
+#[test]
+fn streaming_cargo_test_counts_from_all_lines_remain_complete() {
+    let stderr = format!(
+        "{}Compiling {}\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+        "   Compiling placeholder-package-with-a-long-name v0.0.0\n".repeat(20),
+        "x".repeat(RAW_CAP + 1)
+    );
+    let output = run_fixture("cargo", &["cargo", "test"], "", &stderr, 0);
+    let shown = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(shown.contains("1 passed"), "{shown}");
+    assert!(!shown.contains(NOTICE), "{shown}");
+}

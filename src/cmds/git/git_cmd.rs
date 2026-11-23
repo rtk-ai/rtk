@@ -3925,7 +3925,7 @@ impl LineHandler for GitPushLineHandler {
         }
     }
 
-    fn format_summary(&self, exit_code: i32, _raw: &str) -> Option<String> {
+    fn format_summary(&self, exit_code: i32, _raw: &str, _raw_truncated: bool) -> Option<String> {
         if exit_code != 0 {
             return None;
         }
@@ -8966,7 +8966,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
             }
         }
         out.push_str(&f.flush());
-        if let Some(s) = f.on_exit(exit_code, input) {
+        if let Some(s) = f.on_exit(exit_code, input, false) {
             out.push_str(&s);
         }
         out

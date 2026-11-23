@@ -198,7 +198,7 @@ impl BlockHandler for CargoBuildHandler {
         !(line.trim().is_empty() && block.len() > 3)
     }
 
-    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String> {
+    fn format_summary(&self, exit_code: i32, raw: &str, _raw_truncated: bool) -> Option<String> {
         if self.error_count == 0 && self.warnings == 0 && exit_code == 0 {
             let summary =
                 cargo_build_success_line(self.compiled, self.finished_line.as_deref(), self.label);
@@ -352,13 +352,19 @@ impl BlockHandler for CargoTestHandler {
         self.in_failure_section && !line.starts_with("---- ")
     }
 
-    fn format_summary(&self, _exit_code: i32, raw: &str) -> Option<String> {
+    fn format_summary(&self, _exit_code: i32, raw: &str, raw_truncated: bool) -> Option<String> {
         // Same never-worse guard as CargoBuildHandler (#3430 review): if the
         // compacted summary ends up larger than the raw output (e.g. a tiny
         // `cargo test` run), keep the raw output instead of "compacting" it
         // into something bigger.
-        let summary = self.compute_test_summary(raw)?;
-        Some(crate::core::guard::never_worse(raw, &summary).to_string())
+        let mut shown = self
+            .compute_test_summary(raw)
+            .map(|summary| crate::core::guard::never_worse(raw, &summary).to_string())
+            .unwrap_or_default();
+        if raw_truncated && self.summary_lines.is_empty() {
+            crate::core::stream::append_capture_notice(&mut shown);
+        }
+        (!shown.is_empty()).then_some(shown)
     }
 }
 
@@ -1804,7 +1810,7 @@ mod tests {
         );
         assert_eq!(
             handler
-                .format_summary(CARGO_COMPILE_FAILURE_EXIT_CODE, raw)
+                .format_summary(CARGO_COMPILE_FAILURE_EXIT_CODE, raw, false)
                 .as_deref(),
             Some(raw)
         );
