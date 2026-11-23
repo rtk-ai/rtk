@@ -82,9 +82,11 @@ static USER_REJECTION_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 // Hook denials - the command never ran, so there is no CLI mistake to learn.
-// Claude Code: "PreToolUse:Bash hook error: <hook>: <reason>".
+// Claude Code puts this at the start of a line: "PreToolUse:Bash hook error:
+// <hook>: <reason>", or a line that starts with "hook error:". Anchored so a
+// real failure that only mentions the phrase later stays an error.
 static HOOK_DENIAL_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)(PreToolUse:|hook error:)").unwrap());
+    LazyLock::new(|| Regex::new(r"(?im)^\s*(?:PreToolUse:\S* hook error:|hook error:)").unwrap());
 
 /// Filters out user rejections - requires actual error-indicating content
 pub fn is_command_error(is_error: bool, output: &str) -> bool {
@@ -261,6 +263,12 @@ pub fn find_corrections(commands: &[CommandExecution]) -> Vec<CorrectionPair> {
                 continue;
             }
 
+            // A hook denial never ran. Do not pair it or give it the success
+            // boost (that would recommend the blocked command).
+            if candidate.is_error && HOOK_DENIAL_RE.is_match(&candidate.output) {
+                continue;
+            }
+
             // Calculate confidence
             let mut confidence = similarity;
 
@@ -392,6 +400,11 @@ mod tests {
         // A real CLI failure that merely mentions a hook stays eligible.
         assert!(is_command_error(true, "error: the hook failed to start"));
         assert!(is_command_error(true, "error: unexpected argument '--foo'"));
+        // "hook error:" mid-line is a real failure, not a Claude Code denial.
+        assert!(is_command_error(
+            true,
+            "error: failed to push some refs\nremote: hook error: pre-receive hook declined"
+        ));
     }
 
     #[test]
@@ -514,6 +527,35 @@ mod tests {
 
         let corrections = find_corrections(&commands);
         assert_eq!(corrections.len(), 0);
+    }
+
+    #[test]
+    fn test_find_corrections_skips_hook_denied_candidate() {
+        // Real failure, then a similar command the hook blocked, then the
+        // command that actually worked. The denial must not be the correction.
+        let commands = vec![
+            CommandExecution {
+                command: "git push --force".to_string(),
+                is_error: true,
+                output: "error: failed to push some refs to origin".to_string(),
+            },
+            CommandExecution {
+                command: "git push --force origin".to_string(),
+                is_error: true,
+                output: "PreToolUse:Bash hook error: deny-force-push: blocked by policy"
+                    .to_string(),
+            },
+            CommandExecution {
+                command: "git push --force-with-lease".to_string(),
+                is_error: false,
+                output: "Everything up-to-date".to_string(),
+            },
+        ];
+
+        let corrections = find_corrections(&commands);
+        assert_eq!(corrections.len(), 1);
+        assert_eq!(corrections[0].wrong_command, "git push --force");
+        assert_eq!(corrections[0].right_command, "git push --force-with-lease");
     }
 
     #[test]
