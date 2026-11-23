@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -592,17 +593,28 @@ pub fn run_streaming(
         stderr_thread.join().ok();
     } else {
         let stderr_thread = std::thread::spawn(move || -> String {
-            let mut raw_err = String::new();
+            let mut raw_err = VecDeque::new();
             let mut capped = false;
             for line in read_lines_lossy(stderr) {
-                if raw_err.len() + line.len() < RAW_CAP {
-                    raw_err.push_str(&line);
-                    raw_err.push('\n');
-                } else if !capped {
+                if !capped && line.len() >= RAW_CAP - raw_err.len() {
                     capped = true;
+                    eprintln!(
+                        "[rtk] warning: stderr exceeds 10 MiB — keeping only the captured tail"
+                    );
                 }
+                // Make room before appending, including when a single line exceeds the cap.
+                let start = line.len().saturating_sub(RAW_CAP - 1);
+                let suffix = &line.as_bytes()[start..];
+                let discard = (raw_err.len() + suffix.len() + 1).saturating_sub(RAW_CAP);
+                raw_err.drain(..discard);
+                raw_err.extend(suffix);
+                raw_err.push_back(b'\n');
             }
-            raw_err
+            // A byte cap can split the first UTF-8 character of the retained suffix.
+            while raw_err.front().is_some_and(|byte| byte & 0xc0 == 0x80) {
+                raw_err.pop_front();
+            }
+            String::from_utf8_lossy(raw_err.make_contiguous()).into_owned()
         });
 
         {
@@ -1124,7 +1136,7 @@ pub(crate) mod tests {
         // ~11 MiB on stderr, nothing on stdout
         cmd.args([
             "-c",
-            "dd if=/dev/zero bs=1024 count=11264 2>/dev/null | tr '\\0' 'a' | fold -w 80 1>&2",
+            "dd if=/dev/zero bs=1024 count=11264 2>/dev/null | tr '\\0' 'a' | fold -w 80 1>&2; printf '\\nerror: final diagnostic must survive even when the capture budget is full and cannot fit the complete error message\\n' >&2; exit 7",
         ]);
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
         // raw = raw_stdout + raw_stderr; stdout is empty so raw ≈ stderr size
@@ -1133,6 +1145,46 @@ pub(crate) mod tests {
             "stderr in raw should be capped at ~10 MiB, got {} bytes",
             result.raw.len()
         );
+        assert_eq!(result.exit_code, 7);
+        let final_error = "error: final diagnostic must survive even when the capture budget is full and cannot fit the complete error message\n";
+        assert!(result.raw_stderr.ends_with(final_error));
+        assert!(result.raw.ends_with(final_error));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_streaming_stderr_tail_keeps_utf8_after_oversized_line() {
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "awk 'BEGIN { for (i = 0; i < 5300000; i++) printf \"é\"; printf \"\\n\" }' >&2",
+        ]);
+        let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly)
+            .expect("capture oversized Unicode line");
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.raw_stderr,
+            format!("{}\n", "é".repeat((RAW_CAP - 2) / 2))
+        );
+        assert_eq!(result.raw, result.raw_stderr);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_streaming_stderr_below_cap_preserves_decoded_lines() {
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "printf 'stdout\\n'; printf 'first\\r\\n日本語\\r\\nlast' >&2",
+        ]);
+        let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly)
+            .expect("capture ordinary stderr");
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.raw_stdout, "stdout\n");
+        assert_eq!(result.raw_stderr, "first\n日本語\nlast\n");
+        assert_eq!(result.raw, "stdout\nfirst\n日本語\nlast\n");
     }
 
     #[test]
