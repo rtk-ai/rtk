@@ -83,6 +83,15 @@ pub fn print_with_hint(
     emit_guarded(filtered, hint.as_deref(), guard_raw)
 }
 
+/// Qualify partial input after the size guard, even when no captured line fitted.
+pub fn print_capture_notice(shown: &mut String, truncated: bool) {
+    if truncated {
+        let start = shown.len();
+        stream::append_capture_notice(shown);
+        print!("{}", &shown[start..]);
+    }
+}
+
 #[cfg(test)]
 mod guarded_output_tests {
     use super::*;
@@ -318,7 +327,12 @@ where
         if !result.raw_stderr.trim().is_empty() {
             eprint!("{}", result.raw_stderr);
         }
-        timer.track(cmd_label, &format!("rtk {}", cmd_label), raw, raw);
+        let mut shown = raw.clone();
+        print_capture_notice(
+            &mut shown,
+            result.stdout_truncated || result.stderr_truncated,
+        );
+        timer.track(cmd_label, &format!("rtk {}", cmd_label), raw, &shown);
         return Ok(exit_code);
     }
 
@@ -337,7 +351,7 @@ where
 
     // The guard governs the stdout rtk replaces. stderr is forwarded separately below, and
     // only ever shrinks there, so it cannot push the total past what the command emitted.
-    let shown = if let Some(label) = opts.tee_label {
+    let mut shown = if let Some(label) = opts.tee_label {
         print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
     } else if opts.no_trailing_newline {
         // The filters that opt out own their line endings: what they return is already
@@ -348,6 +362,10 @@ where
     } else {
         emit(&filtered, None, raw_for_tracking, opts.clean_outputs)
     };
+    print_capture_notice(
+        &mut shown,
+        result.stdout_truncated || (!opts.filter_stdout_only && result.stderr_truncated),
+    );
 
     // Stdout-only filters parse structured stdout; stderr still carries diagnostics
     // (config errors, missing linters) that the user needs.

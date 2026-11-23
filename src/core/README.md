@@ -5,6 +5,11 @@ that must preserve both decoded streams without line-ending normalization or
 stderr caps. It uses the existing cancellation relay; callers flush output and
 tracking before calling `stream::die_by_relayed_signal`.
 
+`run_streaming` bounds each captured stream at 10 MiB and reports truncation
+separately for stdout and stderr. Captured filters qualify their output when
+their input was cut: the summary and recall then cover only the captured part.
+Streaming filters still receive every line; their raw recovery copy can be cut.
+
 > See also [docs/contributing/TECHNICAL.md](../../docs/contributing/TECHNICAL.md) for the full architecture overview
 
 ## Scope

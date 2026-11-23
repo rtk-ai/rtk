@@ -258,7 +258,18 @@ pub struct StreamResult {
     pub raw: String,
     pub raw_stdout: String,
     pub raw_stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
     pub filtered: String,
+}
+
+pub fn append_capture_notice(output: &mut String) {
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(
+        "[rtk] partial output: capture limit reached; summary and recall are incomplete\n",
+    );
 }
 
 impl StreamResult {
@@ -445,6 +456,8 @@ pub fn run_streaming(
             raw: String::new(),
             raw_stdout: String::new(),
             raw_stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
             filtered: String::new(),
         });
     }
@@ -591,7 +604,7 @@ pub fn run_streaming(
         stdout_thread.join().ok();
         stderr_thread.join().ok();
     } else {
-        let stderr_thread = std::thread::spawn(move || -> String {
+        let stderr_thread = std::thread::spawn(move || {
             let mut raw_err = String::new();
             let mut capped = false;
             for line in read_lines_lossy(stderr) {
@@ -602,7 +615,7 @@ pub fn run_streaming(
                     capped = true;
                 }
             }
-            raw_err
+            (raw_err, capped)
         });
 
         {
@@ -631,6 +644,9 @@ pub fn run_streaming(
                         eprintln!("[rtk] warning: filter panicked — passing through raw output");
                         raw_stdout.clone()
                     });
+                    if capped_out {
+                        append_capture_notice(&mut filtered);
+                    }
                     match write!(out, "{}", filtered) {
                         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
                         Err(e) => return Err(e.into()),
@@ -654,9 +670,9 @@ pub fn run_streaming(
             }
         }
 
-        raw_stderr = stderr_thread.join().unwrap_or_else(|e| {
+        (raw_stderr, capped_err) = stderr_thread.join().unwrap_or_else(|e| {
             eprintln!("[rtk] warning: stderr reader thread panicked: {:?}", e);
-            String::new()
+            (String::new(), false)
         });
     }
     if let Some(t) = stdin_thread {
@@ -688,6 +704,8 @@ pub fn run_streaming(
         raw,
         raw_stdout,
         raw_stderr,
+        stdout_truncated: capped_out,
+        stderr_truncated: capped_err,
         filtered,
     })
 }
@@ -992,6 +1010,8 @@ pub(crate) mod tests {
             raw: String::new(),
             raw_stdout: String::new(),
             raw_stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
             filtered: String::new(),
         };
         assert!(r.success());
@@ -1004,6 +1024,8 @@ pub(crate) mod tests {
             raw: String::new(),
             raw_stdout: String::new(),
             raw_stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
             filtered: String::new(),
         };
         assert!(!r.success());
@@ -1016,6 +1038,8 @@ pub(crate) mod tests {
             raw: String::new(),
             raw_stdout: String::new(),
             raw_stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
             filtered: String::new(),
         };
         assert!(!r.success());
@@ -1115,6 +1139,8 @@ pub(crate) mod tests {
             result.raw.len() > 1_000_000,
             "Should have captured significant data"
         );
+        assert!(result.stdout_truncated);
+        assert!(!result.stderr_truncated);
     }
 
     #[test]
@@ -1132,6 +1158,31 @@ pub(crate) mod tests {
             result.raw.len() <= RAW_CAP + 200,
             "stderr in raw should be capped at ~10 MiB, got {} bytes",
             result.raw.len()
+        );
+        assert!(!result.stdout_truncated);
+        assert!(result.stderr_truncated);
+    }
+
+    #[test]
+    fn test_buffered_capture_qualifies_a_dropped_first_line() {
+        // nosemgrep: interpreter-execution
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "dd if=/dev/zero bs=1024 count=10241 2>/dev/null | tr '\\0' 'a'",
+        ]);
+        let result = run_streaming(
+            &mut cmd,
+            StdinMode::Null,
+            FilterMode::Buffered(Box::new(|_| "summary".to_string())),
+        )
+        .expect("run buffered capture");
+        assert!(result.stdout_truncated);
+        assert!(!result.stderr_truncated);
+        assert!(result.raw.is_empty());
+        assert_eq!(
+            result.filtered,
+            "summary\n[rtk] partial output: capture limit reached; summary and recall are incomplete\n"
         );
     }
 
