@@ -1,0 +1,22 @@
+id          status  
+----------- --------
+          1 paid    
+          2 pending 
+
+(2 rows affected)
+n          
+-----------
+          5
+
+(1 rows affected)
+
+(2 rows affected)
+id         
+-----------
+
+(0 rows affected)
+t   
+----
+tail
+
+(1 rows affected)

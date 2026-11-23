@@ -748,6 +748,15 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 75.0,
         ..RtkRule::DEFAULT
     },
+    RtkRule {
+        pattern: r"^sqlcmd(?:\.exe)?(\s|$)",
+        rtk_cmd: "rtk sqlcmd",
+        rewrite_prefixes: &["sqlcmd.exe", "sqlcmd"],
+        category: "Infra",
+        // Real output, bytes: 14% on a 5-row result, 66% on 60 rows, 89% on 200 rows.
+        savings_pct: 40.0,
+        ..RtkRule::DEFAULT
+    },
     // Bun/Deno
     RtkRule {
         pattern: r"^bun\s+(install|add|remove|test|build|run|pm\s+ls|pm|x)\b",

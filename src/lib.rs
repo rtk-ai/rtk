@@ -10,7 +10,7 @@ mod llm_proxy;
 mod parser;
 
 // Re-export command modules for routing
-use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, sqlcmd_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git_cmd, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -306,6 +306,13 @@ enum Commands {
     /// PostgreSQL client with compact output (strip borders, compress tables)
     Psql {
         /// psql arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// SQL Server client (sqlcmd) with compact output (drop separator rows, cap long result sets)
+    Sqlcmd {
+        /// sqlcmd arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2770,6 +2777,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Psql { args } => psql_cmd::run(&args, cli.verbose)?,
 
+        Commands::Sqlcmd { args } => sqlcmd_cmd::run(&args, cli.verbose)?,
+
         Commands::Pnpm {
             filter,
             recursive,
@@ -4035,6 +4044,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Glab { .. }
             | Commands::Aws { .. }
             | Commands::Psql { .. }
+            | Commands::Sqlcmd { .. }
             | Commands::Pnpm { .. }
             | Commands::Err { .. }
             | Commands::Test { .. }
@@ -4673,6 +4683,7 @@ mod tests {
             "glab",
             "aws",
             "psql",
+            "sqlcmd",
             "pnpm",
             "env",
             "find",
