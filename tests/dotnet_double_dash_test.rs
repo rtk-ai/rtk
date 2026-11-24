@@ -13,6 +13,84 @@
 mod common;
 
 #[cfg(unix)]
+#[test]
+fn requested_test_artifacts_keep_native_arguments_paths_and_output() {
+    for args in [
+        vec!["--collect", "XPlat Code Coverage"],
+        vec!["--collect=XPlat Code Coverage"],
+        vec!["--logger", "html;LogFileName=custom.html"],
+        vec!["--logger=html"],
+        vec!["-l", "html"],
+        vec!["--logger", "trx;LogFileName=custom.trx"],
+        vec!["--report-trx"],
+        vec!["--", "--report-trx"],
+        vec![
+            "--collect",
+            "XPlat Code Coverage",
+            "--results-directory",
+            "my results",
+        ],
+    ] {
+        for exit_code in [0, 7] {
+            let dir = common::tempdir();
+            pin_classic_runner(dir.path());
+            let argv_file = dir.path().join("argv.txt");
+            let path = install_dotnet_stub(
+                dir.path(),
+                r#"
+printf '%s\n' "$@" > "$CAPTURE_ARGS"
+results=TestResults
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --results-directory) shift; results=$1 ;;
+        --results-directory=*) results=${1#*=} ;;
+    esac
+    shift
+done
+mkdir -p "$results"
+printf '%s\n' 'artifact contents' > "$results/result.txt"
+printf 'Passed! - Failed: 0, Passed: 1, Skipped: 0, Total: 1\nAttachments:\n    %s/result.txt\n' "$results"
+printf 'logger diagnostic\n' >&2
+exit "$FIXTURE_EXIT"
+"#,
+            );
+            let out = common::rtk_command()
+                .current_dir(dir.path())
+                .env("PATH", path)
+                .env("CAPTURE_ARGS", &argv_file)
+                .env("FIXTURE_EXIT", exit_code.to_string())
+                .args(["dotnet", "test", "project with spaces.csproj"])
+                .args(&args)
+                .output()
+                .unwrap();
+            assert_eq!(out.status.code(), Some(exit_code), "{args:?}: {out:?}");
+            let expected_args = [vec!["test", "project with spaces.csproj"], args.clone()].concat();
+            assert_eq!(
+                std::fs::read_to_string(&argv_file).unwrap(),
+                format!("{}\n", expected_args.join("\n")),
+                "{args:?}"
+            );
+            let results = if args.contains(&"my results") {
+                "my results"
+            } else {
+                "TestResults"
+            };
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join(results).join("result.txt")).unwrap(),
+                "artifact contents\n"
+            );
+            assert_eq!(
+                String::from_utf8(out.stdout).unwrap(),
+                format!(
+                    "Passed! - Failed: 0, Passed: 1, Skipped: 0, Total: 1\nAttachments:\n    {results}/result.txt\n"
+                )
+            );
+            assert_eq!(out.stderr, b"logger diagnostic\n");
+        }
+    }
+}
+
+#[cfg(unix)]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -491,7 +569,7 @@ fn dotnet_test_solution_root_reads_reported_trx_paths_and_retains_files() {
     let out = common::rtk_command()
         .env("PATH", &path_with_stub)
         .current_dir(dir.path())
-        .args(["dotnet", "test", "--logger", "trx", "-v", "q"])
+        .args(["dotnet", "test", "-v", "q"])
         .output()
         .expect("spawn rtk");
     let stdout = String::from_utf8_lossy(&out.stdout);

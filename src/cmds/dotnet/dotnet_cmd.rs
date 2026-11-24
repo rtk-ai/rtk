@@ -131,7 +131,7 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
         return run_passthrough(&forwarded, verbose);
     }
     let tokens = tokenize_dotnet_args(args);
-    if subcommand == "test" && has_test_discovery_arg(&tokens) {
+    if subcommand == "test" && (has_test_discovery_arg(&tokens) || has_test_artifact_arg(&tokens)) {
         return run_passthrough(&forwarded_dotnet_args(subcommand, args), verbose);
     }
     let timer = tracking::TimedExecution::start();
@@ -891,6 +891,7 @@ const DOTNET_GRAMMAR: Grammar = Grammar::new(
     &[&[
         Flag::atomic(&["a", "arch"]).takes(ValueSpec::value()),
         Flag::atomic(&["c", "configuration"]).takes(ValueSpec::value()),
+        Flag::atomic(&["collect"]).takes(ValueSpec::value()),
         Flag::atomic(&["filter"]).takes(ValueSpec::value()),
         Flag::atomic(&["f", "framework"]).takes(ValueSpec::value()),
         Flag::atomic(&["l", "logger"]).takes(ValueSpec::value()),
@@ -949,6 +950,21 @@ fn dotnet_has_bare_double_dash_flag(tokens: &[Token<'_>], name: &str) -> bool {
 fn has_nologo_arg(tokens: &[Token<'_>]) -> bool {
     // -nologo is a pure boolean switch; an attached-value spelling must not count as present.
     dotnet_has_bare_loose_flag(tokens, "nologo")
+}
+
+fn has_test_artifact_arg(tokens: &[Token<'_>]) -> bool {
+    // A collector or file logger writes to the runner's results directory. RTK's
+    // temporary directory would redirect those artifacts and then delete them;
+    // preserve native output too so attachment paths remain visible.
+    dotnet_has_flag(tokens, "collect")
+        || dotnet_has_flag(tokens, "logger")
+        || dotnet_own_tokens(tokens).iter().any(|t| {
+            t.kind == TokenKind::Long
+                && !t.slash
+                && !t.double_dash
+                && t.text.eq_ignore_ascii_case("l")
+        })
+        || has_report_trx_arg(tokens)
 }
 
 fn has_trx_logger_arg(tokens: &[Token<'_>]) -> bool {
@@ -2443,9 +2459,47 @@ mod tests {
             vec!["--filter=-t".to_string()],
             vec!["--".to_string(), "--list-tests".to_string()],
             vec!["--logger".to_string(), "--list-tests".to_string()],
+            vec!["--collect".to_string(), "--list-tests".to_string()],
         ] {
             assert!(
                 !has_test_discovery_arg(&tokenize_dotnet_args(&args)),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_artifact_detection_respects_flag_values_and_boundaries() {
+        for args in [
+            vec!["--collect", "XPlat Code Coverage"],
+            vec!["--collect=XPlat Code Coverage"],
+            vec!["--logger", "html"],
+            vec!["-l:html"],
+            vec!["--report-trx"],
+            vec!["--", "--report-trx"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(
+                has_test_artifact_arg(&tokenize_dotnet_args(&args)),
+                "{args:?}"
+            );
+        }
+        for args in [
+            vec!["--filter", "--collect"],
+            vec!["--filter=--logger"],
+            vec!["--filter", "--report-trx"],
+            vec!["--filter", "-l"],
+            vec!["--", "--collect", "coverage"],
+            vec!["--", "--logger", "html"],
+            vec!["--", "-l", "html"],
+            vec!["/l:html"],
+            vec!["--l", "html"],
+            vec!["-collect", "coverage"],
+            vec!["--report-trx:true"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(
+                !has_test_artifact_arg(&tokenize_dotnet_args(&args)),
                 "{args:?}"
             );
         }
@@ -3713,6 +3767,7 @@ mod tests {
                     "arch",
                     "c",
                     "configuration",
+                    "collect",
                     "f",
                     "filter",
                     "framework",
