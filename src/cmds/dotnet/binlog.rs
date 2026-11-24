@@ -102,6 +102,8 @@ static RESTORE_DIAGNOSTIC_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("valid regex")
 });
+static XML_COMMENT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->").expect("valid regex"));
 static PROJECT_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^\s*([A-Za-z]:)?[^\r\n]*\.csproj(?:\s|$)").expect("valid regex")
 });
@@ -997,8 +999,19 @@ pub fn parse_restore_issues_from_text(text: &str) -> (Vec<BinlogIssue>, Vec<Binl
     let mut warnings = Vec::new();
     let mut seen_errors: HashSet<(String, String, u32, u32, String)> = HashSet::new();
     let mut seen_warnings: HashSet<(String, String, u32, u32, String)> = HashSet::new();
+    let mut comments = XML_COMMENT_RE.find_iter(&scrubbed).peekable();
 
     for captures in RESTORE_DIAGNOSTIC_RE.captures_iter(&scrubbed) {
+        // Imported targets can contain example diagnostics. Test where the severity starts
+        // instead of deleting comments, which would alter real messages quoting XML syntax.
+        if let Some(kind) = captures.name("kind") {
+            while comments.peek().is_some_and(|c| c.end() <= kind.start()) {
+                comments.next();
+            }
+            if comments.peek().is_some_and(|c| c.start() <= kind.start()) {
+                continue;
+            }
+        }
         let issue = BinlogIssue {
             code: captures
                 .name("code")
@@ -1502,6 +1515,51 @@ Restore failed with 1 error(s) in 1.0s
         let (errors, warnings) = parse_restore_issues_from_text(input);
         assert_eq!(errors.len(), 0);
         assert_eq!(warnings.len(), 0);
+    }
+
+    #[test]
+    fn test_sdk_xml_comment_does_not_become_a_build_diagnostic() {
+        // The diagnostic example in dotnet/sdk v10.0.302's
+        // src/Tasks/Microsoft.NET.Build.Tasks/targets/Microsoft.NET.Sdk.CSharp.targets.
+        let comment = include_str!("../../../tests/fixtures/dotnet_csharp_diagnostic_comment.xml");
+        let input = format!("{comment}\nBuild succeeded.\n    0 Warning(s)\n    0 Error(s)\n");
+        let build = parse_build_from_text(&input);
+        assert!(build.succeeded);
+        assert!(build.errors.is_empty(), "{:?}", build.errors);
+        assert!(build.warnings.is_empty(), "{:?}", build.warnings);
+        let (errors, warnings) = parse_restore_issues_from_text(&input);
+        assert!(errors.is_empty());
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let mut records = Vec::new();
+        write_7bit_i32(&mut records, RECORD_STRING);
+        write_dotnet_string(&mut records, &input);
+        write_7bit_i32(&mut records, RECORD_END_OF_FILE);
+        let dir = crate::core::test_isolation::tempdir();
+        let path = dir.path().join("comment.binlog");
+        std::fs::write(&path, build_minimal_binlog(&records)).expect("write binlog");
+        assert!(
+            parse_build(&path)
+                .expect("parse binlog")
+                .warnings
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_xml_comments_leave_real_diagnostic_text_intact() {
+        let input = "warning NU1902: before comment\n\
+<!--\nerror NU1301: example only\n-->\n\
+warning NU1903: literal <!-- example --> in a real message\n";
+        let (errors, warnings) = parse_restore_issues_from_text(input);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings[0].code, "NU1902");
+        assert_eq!(warnings[1].code, "NU1903");
+        assert_eq!(
+            warnings[1].message,
+            "literal <!-- example --> in a real message"
+        );
     }
 
     #[test]
