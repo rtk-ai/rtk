@@ -1,0 +1,38 @@
+/usr/bin/cmake -S/validation/cmake-2236-928f/source -B/validation/cmake-2236-928f/make-build --check-build-system CMakeFiles/Makefile.cmake 0
+/usr/bin/cmake -E cmake_progress_start /validation/cmake-2236-928f/make-build/CMakeFiles /validation/cmake-2236-928f/make-build//CMakeFiles/progress.marks
+/usr/bin/gmake  -f CMakeFiles/Makefile2 all
+gmake[1]: Entering directory '/validation/cmake-2236-928f/make-build'
+/usr/bin/gmake  -f CMakeFiles/sample.dir/build.make CMakeFiles/sample.dir/depend
+gmake[2]: Entering directory '/validation/cmake-2236-928f/make-build'
+cd /validation/cmake-2236-928f/make-build && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /validation/cmake-2236-928f/source /validation/cmake-2236-928f/source /validation/cmake-2236-928f/make-build /validation/cmake-2236-928f/make-build /validation/cmake-2236-928f/make-build/CMakeFiles/sample.dir/DependInfo.cmake --color=
+Dependencies file "CMakeFiles/sample.dir/part1.cpp.o.d" is newer than depends file "/validation/cmake-2236-928f/make-build/CMakeFiles/sample.dir/compiler_depend.internal".
+Dependencies file "CMakeFiles/sample.dir/part10.cpp.o.d" is newer than depends file "/validation/cmake-2236-928f/make-build/CMakeFiles/sample.dir/compiler_depend.internal".
+Dependencies file "CMakeFiles/sample.dir/part11.cpp.o.d" is newer than depends file "/validation/cmake-2236-928f/make-build/CMakeFiles/sample.dir/compiler_depend.internal".
+Dependencies file "CMakeFiles/sample.dir/part12.cpp.o.d" is newer than depends file "/validation/cmake-2236-928f/make-build/CMakeFiles/sample.dir/compiler_depend.internal".
+Dependencies file "CMakeFiles/sample.dir/part13.cpp.o.d" is newer than depends file "/validation/cmake-2236-928f/make-build/CMakeFiles/sample.dir/compiler_depend.internal".
+Dependencies file "CMakeFiles/sample.dir/part14.cpp.o.d" is newer than depends file "/validation/cmake-2236-928f/make-build/CMakeFiles/sample.dir/compiler_depend.internal".
+Dependencies file "CMakeFiles/sample.dir/part15.cpp.o.d" is newer than depends file "/validation/cmake-2236-928f/make-build/CMakeFiles/sample.dir/compiler_depend.internal".
+Dependencies file "CMakeFiles/sample.dir/part16.cpp.o.d" is newer than depends file "/validation/cmake-2236-928f/make-build/CMakeFiles/sample.dir/compiler_depend.internal".
+Dependencies file "CMakeFiles/sample.dir/part2.cpp.o.d" is newer than depends file "/validation/cmake-2236-928f/make-build/CMakeFiles/sample.dir/compiler_depend.internal".
+Dependencies file "CMakeFiles/sample.dir/part3.cpp.o.d" is newer than depends file "/validation/cmake-2236-928f/make-build/CMakeFiles/sample.dir/compiler_depend.internal".
+Dependencies file "CMakeFiles/sample.dir/part4.cpp.o.d" is newer than depends file "/validation/cmake-2236-928f/make-build/CMakeFiles/sample.dir/compiler_depend.internal".
+Dependencies file "CMakeFiles/sample.dir/part5.cpp.o.d" is newer than depends file "/validation/cmake-2236-928f/make-build/CMakeFiles/sample.dir/compiler_depend.internal".
+Dependencies file "CMakeFiles/sample.dir/part6.cpp.o.d" is newer than depends file "/validation/cmake-2236-928f/make-build/CMakeFiles/sample.dir/compiler_depend.internal".
+Dependencies file "CMakeFiles/sample.dir/part7.cpp.o.d" is newer than depends file "/validation/cmake-2236-928f/make-build/CMakeFiles/sample.dir/compiler_depend.internal".
+Dependencies file "CMakeFiles/sample.dir/part8.cpp.o.d" is newer than depends file "/validation/cmake-2236-928f/make-build/CMakeFiles/sample.dir/compiler_depend.internal".
+Dependencies file "CMakeFiles/sample.dir/part9.cpp.o.d" is newer than depends file "/validation/cmake-2236-928f/make-build/CMakeFiles/sample.dir/compiler_depend.internal".
+Consolidate compiler generated dependencies of target sample
+gmake[2]: Leaving directory '/validation/cmake-2236-928f/make-build'
+/usr/bin/gmake  -f CMakeFiles/sample.dir/build.make CMakeFiles/sample.dir/build
+gmake[2]: Entering directory '/validation/cmake-2236-928f/make-build'
+[  5%] Building CXX object CMakeFiles/sample.dir/part8.cpp.o
+/usr/bin/c++   -Wall -Wextra -MD -MT CMakeFiles/sample.dir/part8.cpp.o -MF CMakeFiles/sample.dir/part8.cpp.o.d -o CMakeFiles/sample.dir/part8.cpp.o -c /validation/cmake-2236-928f/source/part8.cpp
+/validation/cmake-2236-928f/source/part8.cpp: In function 'int part8()':
+/validation/cmake-2236-928f/source/part8.cpp:1:22: error: 'missing_symbol' was not declared in this scope
+    1 | int part8() { return missing_symbol; }
+      |                      ^~~~~~~~~~~~~~
+gmake[2]: *** [CMakeFiles/sample.dir/build.make:174: CMakeFiles/sample.dir/part8.cpp.o] Error 1
+gmake[2]: Leaving directory '/validation/cmake-2236-928f/make-build'
+gmake[1]: *** [CMakeFiles/Makefile2:83: CMakeFiles/sample.dir/all] Error 2
+gmake[1]: Leaving directory '/validation/cmake-2236-928f/make-build'
+gmake: *** [Makefile:91: all] Error 2

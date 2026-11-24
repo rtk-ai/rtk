@@ -1,0 +1,26 @@
+-- The CXX compiler identification is GNU 12.2.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Performing Test HAVE_FEATURE_1
+-- Performing Test HAVE_FEATURE_1 - Success
+-- Performing Test HAVE_FEATURE_2
+-- Performing Test HAVE_FEATURE_2 - Success
+-- Performing Test HAVE_FEATURE_3
+-- Performing Test HAVE_FEATURE_3 - Success
+-- Performing Test HAVE_FEATURE_4
+-- Performing Test HAVE_FEATURE_4 - Success
+-- Performing Test HAVE_FEATURE_5
+-- Performing Test HAVE_FEATURE_5 - Success
+-- Performing Test HAVE_FEATURE_6
+-- Performing Test HAVE_FEATURE_6 - Success
+-- Performing Test HAVE_FEATURE_7
+-- Performing Test HAVE_FEATURE_7 - Success
+-- Performing Test HAVE_FEATURE_8
+-- Performing Test HAVE_FEATURE_8 - Success
+-- Project feature summary: C++ compilation available
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /validation/cmake-2236-928f/make-build

@@ -1,0 +1,29 @@
+gmake: Entering directory '/validation/cmake-2236-928f/make-build'
+gmake[1]: Entering directory '/validation/cmake-2236-928f/make-build'
+gmake[2]: Entering directory '/validation/cmake-2236-928f/make-build'
+gmake[2]: Leaving directory '/validation/cmake-2236-928f/make-build'
+gmake[2]: Entering directory '/validation/cmake-2236-928f/make-build'
+[  5%] Building CXX object CMakeFiles/sample.dir/part1.cpp.o
+/validation/cmake-2236-928f/source/part1.cpp:1:2: warning: #warning CMake fixture warning must remain visible [-Wcpp]
+    1 | #warning CMake fixture warning must remain visible
+      |  ^~~~~~~
+[ 11%] Building CXX object CMakeFiles/sample.dir/part2.cpp.o
+[ 17%] Building CXX object CMakeFiles/sample.dir/part3.cpp.o
+[ 23%] Building CXX object CMakeFiles/sample.dir/part4.cpp.o
+[ 29%] Building CXX object CMakeFiles/sample.dir/part5.cpp.o
+[ 35%] Building CXX object CMakeFiles/sample.dir/part6.cpp.o
+[ 41%] Building CXX object CMakeFiles/sample.dir/part7.cpp.o
+[ 47%] Building CXX object CMakeFiles/sample.dir/part8.cpp.o
+[ 52%] Building CXX object CMakeFiles/sample.dir/part9.cpp.o
+[ 58%] Building CXX object CMakeFiles/sample.dir/part10.cpp.o
+[ 64%] Building CXX object CMakeFiles/sample.dir/part11.cpp.o
+[ 70%] Building CXX object CMakeFiles/sample.dir/part12.cpp.o
+[ 76%] Building CXX object CMakeFiles/sample.dir/part13.cpp.o
+[ 82%] Building CXX object CMakeFiles/sample.dir/part14.cpp.o
+[ 88%] Building CXX object CMakeFiles/sample.dir/part15.cpp.o
+[ 94%] Building CXX object CMakeFiles/sample.dir/part16.cpp.o
+[100%] Linking CXX static library libsample.a
+gmake[2]: Leaving directory '/validation/cmake-2236-928f/make-build'
+[100%] Built target sample
+gmake[1]: Leaving directory '/validation/cmake-2236-928f/make-build'
+gmake: Leaving directory '/validation/cmake-2236-928f/make-build'

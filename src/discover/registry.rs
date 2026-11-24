@@ -9009,6 +9009,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_cmake_rewrites_configure_and_build_commands() {
+        for command in ["cmake --build 'build dir'", "cmake -S . -B build"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(format!("rtk {command}"))
+            );
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("cmake --build build | cat", &[]),
+            None
+        );
+    }
+
     /// `jj` is covered only by a TOML filter, never by the native RULES table,
     /// so the bare case pins the TOML branch of the rewrite path and keeps the
     /// wrapper assertions below from passing vacuously when TOML is disabled.

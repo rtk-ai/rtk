@@ -1,0 +1,20 @@
+[1/17] Building CXX object CMakeFiles/sample.dir/part1.cpp.o
+/validation/cmake-2236-928f/source/part1.cpp:1:2: warning: #warning CMake fixture warning must remain visible [-Wcpp]
+    1 | #warning CMake fixture warning must remain visible
+      |  ^~~~~~~
+[2/17] Building CXX object CMakeFiles/sample.dir/part2.cpp.o
+[3/17] Building CXX object CMakeFiles/sample.dir/part3.cpp.o
+[4/17] Building CXX object CMakeFiles/sample.dir/part4.cpp.o
+[5/17] Building CXX object CMakeFiles/sample.dir/part5.cpp.o
+[6/17] Building CXX object CMakeFiles/sample.dir/part6.cpp.o
+[7/17] Building CXX object CMakeFiles/sample.dir/part7.cpp.o
+[8/17] Building CXX object CMakeFiles/sample.dir/part8.cpp.o
+[9/17] Building CXX object CMakeFiles/sample.dir/part9.cpp.o
+[10/17] Building CXX object CMakeFiles/sample.dir/part10.cpp.o
+[11/17] Building CXX object CMakeFiles/sample.dir/part11.cpp.o
+[12/17] Building CXX object CMakeFiles/sample.dir/part12.cpp.o
+[13/17] Building CXX object CMakeFiles/sample.dir/part13.cpp.o
+[14/17] Building CXX object CMakeFiles/sample.dir/part14.cpp.o
+[15/17] Building CXX object CMakeFiles/sample.dir/part15.cpp.o
+[16/17] Building CXX object CMakeFiles/sample.dir/part16.cpp.o
+[17/17] Linking CXX static library libsample.a
