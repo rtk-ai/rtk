@@ -1,10 +1,39 @@
 //! Filters npm output and auto-injects the "run" subcommand when appropriate.
 
+use crate::core::arg_tokenizer::{self, Dialect, Flag, Grammar, ValueSpec};
 use crate::core::runner;
 use crate::core::shell::display_args;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
 use std::io::IsTerminal;
+
+// `npm run-script --help`: -w/--workspace takes a name; -ws/--workspaces is
+// a whole boolean shorthand, not a short-option cluster or -w's value.
+const RUN_WORKSPACE_FLAGS: &[Flag] = &[
+    Flag::atomic(&["w", "workspace"]).takes(ValueSpec::value()),
+    Flag::atomic(&["ws", "workspaces"]),
+    Flag::atomic(&["no-workspaces"]),
+    Flag::atomic(&["include-workspace-root"]),
+    Flag::atomic(&["no-include-workspace-root"]),
+];
+const RUN_GRAMMAR: Grammar = Grammar::new(
+    Dialect::CommonsCli,
+    &[
+        RUN_WORKSPACE_FLAGS,
+        &[Flag::atomic(&["script-shell"]).takes(ValueSpec::value())],
+    ],
+);
+
+/// Workspace selection belongs to npm, including when it precedes `run`.
+/// Arguments after npm's `--` belong to the script instead.
+pub(crate) fn run_uses_workspace(args: &[String]) -> bool {
+    let tokens = arg_tokenizer::tokenize_grammar(args, &RUN_GRAMMAR);
+    let own = arg_tokenizer::before_dashdash(&tokens);
+    own.iter()
+        .find(|token| token.is_free_positional())
+        .is_some_and(|token| matches!(token.text, "run" | "run-script" | "rum" | "urn"))
+        && own.iter().any(|token| token.is_one_of(RUN_WORKSPACE_FLAGS))
+}
 
 /// Known npm subcommands that should NOT get "run" injected.
 /// Shared between production code and tests to avoid drift.
@@ -212,6 +241,22 @@ fn filter_npm_output(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_run_workspace_option_boundaries() {
+        for (args, expected) in [
+            (vec!["-w", "backend", "run", "tsc"], true),
+            (vec!["run", "tsc", "-ws"], true),
+            (vec!["run", "tsc", "--workspaces=false"], true),
+            (vec!["run", "tsc", "--", "-w", "backend"], false),
+            (vec!["run", "tsc", "--script-shell", "--workspace"], false),
+            (vec!["run", "tsc", "-wbackend"], false),
+            (vec!["exec", "tsc", "-w", "backend"], false),
+        ] {
+            let args = args.into_iter().map(String::from).collect::<Vec<_>>();
+            assert_eq!(run_uses_workspace(&args), expected, "{args:?}");
+        }
+    }
 
     #[test]
     fn test_filter_npm_output() {

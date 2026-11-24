@@ -233,6 +233,12 @@ pub fn classify_command(cmd: &str) -> Classification {
     let cmd_normalized = normalize_cargo_command(&cmd_normalized);
     let cmd_clean = cmd_normalized.as_str();
 
+    if npm_run_uses_workspace(cmd_clean) {
+        return Classification::Unsupported {
+            base_command: extract_base_command(cmd_clean).to_string(),
+        };
+    }
+
     // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
     if cmd_clean.starts_with("cat ")
         || cmd_clean.starts_with("head ")
@@ -451,6 +457,15 @@ fn strip_git_global_opts(cmd: &str) -> String {
     let after_git = &cmd[4..]; // skip "git "
     let stripped = GIT_GLOBAL_OPT.replace(after_git, "");
     format!("git {}", stripped.trim())
+}
+
+fn npm_run_uses_workspace(cmd: &str) -> bool {
+    if !cmd.starts_with("npm") {
+        return false;
+    }
+    let words = shell_split(cmd);
+    words.first().is_some_and(|word| word == "npm")
+        && crate::cmds::js::npm_cmd::run_uses_workspace(&words[1..])
 }
 
 fn normalize_cargo_command(cmd: &str) -> String {
@@ -1911,6 +1926,12 @@ fn rewrite_segment_inner(
             shell_wrapper_depth,
         )?;
         return Some(format!("{}{}", env_prefix, rewritten));
+    }
+
+    // Keep npm's workspace selector with npm before a configured transparent
+    // prefix such as `npm run` can expose it as the script's own argument.
+    if npm_run_uses_workspace(trimmed) {
+        return None;
     }
 
     for (prefix, routable) in builtin_transparent_prefixes() {
@@ -3755,6 +3776,63 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("ctest -R smoke --output-on-failure", &[]),
             Some("rtk ctest -R smoke --output-on-failure".into())
+        );
+    }
+
+    #[test]
+    fn test_npm_run_workspace_options_stay_with_npm() {
+        for script in ["tsc", "vitest", "jest", "lint", "next build", "prisma"] {
+            let command = format!("npm run {script} -w backend");
+            assert_eq!(
+                rewrite_command_no_prefixes(&command, &[]),
+                None,
+                "{command}"
+            );
+            assert!(matches!(
+                classify_command(&command),
+                Classification::Unsupported { .. }
+            ));
+            assert_eq!(
+                rewrite_command(&command, &[], &["npm run".into()]),
+                None,
+                "transparent prefix: {command}"
+            );
+        }
+        for options in [
+            "--workspace backend",
+            "--workspace=backend",
+            "-w 'packages/front end'",
+            "-ws",
+            "--workspaces",
+            "--workspaces=false",
+            "--no-workspaces",
+            "--include-workspace-root",
+            "-w backend -- -w",
+        ] {
+            for runner in ["run", "run-script", "rum", "urn"] {
+                let command = format!("npm {runner} tsc {options}");
+                assert_eq!(
+                    rewrite_command_no_prefixes(&command, &[]),
+                    None,
+                    "{command}"
+                );
+            }
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("CI=1 npm run tsc -w backend 2>&1", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("npm run tsc -- -w", &[]),
+            Some("rtk tsc -- -w".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("npm run tsc", &[]),
+            Some("rtk tsc".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("npm run tsc", &["tsc".into()]),
+            None
         );
     }
 
