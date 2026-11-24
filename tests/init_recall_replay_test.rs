@@ -13,6 +13,7 @@ fn init(project: &Path, store: &Path) -> Output {
     common::rtk_command()
         .env("LC_ALL", "C")
         .env("HOME", project.join("home"))
+        .env("CLAUDE_CONFIG_DIR", project.join("claude-config"))
         .env("RTK_RECALL_DB", store)
         .args(["init", "--global", "--no-patch"])
         .current_dir(project)
@@ -24,19 +25,18 @@ fn init(project: &Path, store: &Path) -> Output {
 fn init_restores_a_dropped_recall_table() {
     let project = common::tempdir();
     let store = project.path().join("recall.db");
-    // A current recall store (0x5254_4B02 is the recall kind, stamp 2) that
-    // lost `tee_reads`.
+    // Initialize the current schema rather than hard-coding its last stamp.
+    Connection::open(&store).expect("create existing empty store");
+    let initialized = init(project.path(), &store);
+    assert!(
+        initialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
     Connection::open(&store)
         .expect("open should succeed")
-        .execute_batch(
-            "PRAGMA application_id = 0x52544B02;
-             PRAGMA user_version = 2;
-             CREATE TABLE recall (hash TEXT PRIMARY KEY, command TEXT NOT NULL, cwd TEXT,
-                exit_code INTEGER, created_at INTEGER NOT NULL, total_lines INTEGER NOT NULL,
-                shown_upto INTEGER NOT NULL, byte_size INTEGER NOT NULL, truncated INTEGER NOT NULL,
-                codec TEXT NOT NULL, blob BLOB NOT NULL, recalled INTEGER NOT NULL DEFAULT 0);",
-        )
-        .expect("store should be seeded");
+        .execute("DROP TABLE tee_reads", [])
+        .expect("drop tee_reads");
 
     let output = init(project.path(), &store);
     assert!(
