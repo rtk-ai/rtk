@@ -3374,10 +3374,60 @@ mod tests {
     }
 
     #[test]
+    fn test_cargo_nextest_run_rewrite() {
+        for cmd in [
+            "cargo nextest run",
+            "cargo nextest run --workspace --no-fail-fast",
+            "cargo +nightly nextest run -E 'test(smoke)'",
+            "cargo --offline nextest run",
+        ] {
+            assert_eq!(
+                classify_command(cmd),
+                Classification::Supported {
+                    rtk_equivalent: "rtk cargo",
+                    category: "Cargo",
+                    estimated_savings_pct: 90.0,
+                    status: RtkStatus::Existing,
+                },
+                "{cmd}"
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(format!("rtk {cmd}"))
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &["cargo nextest".into()]),
+                None
+            );
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("CI=1 cargo nextest run 2>&1", &[]),
+            Some("CI=1 rtk cargo nextest run 2>&1".into())
+        );
+        // Only test runs emit the summary consumed by the existing filter.
+        for cmd in [
+            "cargo nextest list --message-format json",
+            "cargo nextest archive",
+            "cargo nextest --help",
+            "cargo nextest runner",
+            "cargo nextester run",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+    }
+
+    #[test]
     fn test_registry_covers_all_cargo_subcommands() {
-        // Verify that every CargoCommand variant (Build, Test, Clippy, Check, Fmt)
-        // except Other has a matching pattern in the registry
-        for subcmd in ["build", "test", "clippy", "check", "fmt"] {
+        // Verify the invocations handled by each CargoCommand filter are discoverable.
+        for subcmd in [
+            "build",
+            "test",
+            "clippy",
+            "check",
+            "fmt",
+            "install",
+            "nextest run",
+        ] {
             let cmd = format!("cargo {subcmd}");
             match classify_command(&cmd) {
                 Classification::Supported { .. } => {}

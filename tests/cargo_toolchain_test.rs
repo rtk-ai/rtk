@@ -26,12 +26,22 @@ fn assert_rewrite(command: &str, expected: Option<&str>) {
 #[test]
 fn toolchain_rewrites_preserve_the_original_command() {
     for toolchain in ["+stable", "+nightly", "+1.75.0", "+nightly-2026-08-01"] {
-        for command in ["build", "check", "clippy", "test", "install", "fmt"] {
+        for command in [
+            "build",
+            "check",
+            "clippy",
+            "test",
+            "install",
+            "fmt",
+            "nextest run",
+        ] {
             let original = format!("cargo {toolchain} {command} -p demo");
             assert_rewrite(&original, Some(&format!("rtk {original}")));
         }
     }
     for original in [
+        "cargo nextest run",
+        "cargo --locked nextest run --workspace",
         "cargo --locked check",
         "cargo --offline test",
         "cargo --frozen build",
@@ -105,7 +115,6 @@ fn ambiguous_prefixes_and_unsupported_commands_are_not_rewritten() {
         "cargo t",
         "cargo +stable t",
         "cargo --locked c",
-        "cargo nextest run",
         "cargo nextest list",
         "cargo nextest show-config test-groups",
         "cargo +stable nextest list",
