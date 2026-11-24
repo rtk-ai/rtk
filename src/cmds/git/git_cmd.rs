@@ -2609,7 +2609,9 @@ fn run_log(
             crate::core::runner::emit_guarded(&format!("{filtered}\n"), Some(&hint), shown_raw)
         }
         None => {
-            println!("{}", filtered);
+            if !filtered.is_empty() {
+                println!("{}", filtered);
+            }
             filtered
         }
     };
