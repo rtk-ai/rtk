@@ -296,16 +296,7 @@ fn expand_path_operands(
         .skip(usize::from(!no_positional_pattern))
         .map(|t| t.source_index)
         .collect();
-    args.iter()
-        .enumerate()
-        .flat_map(|(index, arg)| {
-            if paths.contains(&index) {
-                expand(arg)
-            } else {
-                vec![arg.clone()]
-            }
-        })
-        .collect()
+    operand_glob::expand_at(args, &paths, expand)
 }
 
 /// Extracts `(patterns, paths, flags, has_format_flag, detected)` from the trailing args' tokens,

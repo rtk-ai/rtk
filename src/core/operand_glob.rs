@@ -20,6 +20,7 @@
 //!
 //! On Unix the caller's shell has already expanded, so operands pass through.
 
+use std::collections::HashSet;
 #[cfg(any(windows, test))]
 use std::path::Path;
 
@@ -51,6 +52,27 @@ where
             .map(|operand| operand.as_ref().to_string())
             .collect()
     }
+}
+
+/// `args` with each argument whose index is in `operands` replaced by what `expand` makes of
+/// it, and every other argument as written, in order. The command's parser picks the indices,
+/// since only it knows which arguments name files; callers pass [`expand_operands`] as
+/// `expand`, and tests a marker.
+pub fn expand_at(
+    args: &[String],
+    operands: &HashSet<usize>,
+    expand: impl Fn(&str) -> Vec<String>,
+) -> Vec<String> {
+    args.iter()
+        .enumerate()
+        .flat_map(|(index, arg)| {
+            if operands.contains(&index) {
+                expand(arg)
+            } else {
+                vec![arg.clone()]
+            }
+        })
+        .collect()
 }
 
 #[cfg(any(windows, test))]
@@ -302,6 +324,17 @@ mod tests {
 
     fn expand_in(root: &Path, operand: &str) -> Vec<String> {
         expand(operand, root, Some(Path::new("/home/u")))
+    }
+
+    #[test]
+    fn expand_at_replaces_only_the_chosen_indices_in_place() {
+        let args: Vec<String> = ["-l", "a*", "-I", "b*", "c*"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        let operands = HashSet::from([1, 4]);
+        let expanded = expand_at(&args, &operands, |a| vec![format!("<{a}>"), "+".into()]);
+        assert_eq!(expanded, ["-l", "<a*>", "+", "-I", "b*", "<c*>", "+"]);
     }
 
     #[test]
