@@ -29,8 +29,12 @@ enum ParseState {
     Summary,
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = if tool_exists("pytest") {
+pub fn run(args: &[String], verbose: u8, python: Option<&str>) -> Result<i32> {
+    let mut cmd = if let Some(python) = python {
+        let mut c = resolved_command(python);
+        c.arg("-m").arg("pytest");
+        c
+    } else if tool_exists("pytest") {
         resolved_command("pytest")
     } else {
         let mut c = resolved_command("python");
@@ -45,7 +49,15 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     if verbose > 0 {
-        eprintln!("Running: pytest {} {}", injected.join(" "), args.join(" "));
+        let invocation = python.map_or_else(
+            || "pytest".to_string(),
+            |python| format!("{python} -m pytest"),
+        );
+        eprintln!(
+            "Running: {invocation} {} {}",
+            injected.join(" "),
+            args.join(" ")
+        );
     }
 
     runner::run_filtered_with_exit(

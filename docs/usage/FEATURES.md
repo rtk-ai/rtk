@@ -694,7 +694,13 @@ rtk playwright [args...]
 
 ```bash
 rtk pytest [args...]
+rtk pytest --python .venv/Scripts/python.exe -- [args...]
 ```
+
+`python -m pytest` invocations, including quoted virtual-environment paths and
+Windows `.exe` names, retain their selected interpreter when the hook rewrites
+them. `--python` executes that interpreter with `-m pytest`; it does not select
+another pytest installation from `PATH`. The test process's exit code is retained.
 
 ---
 

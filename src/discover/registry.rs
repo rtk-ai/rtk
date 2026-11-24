@@ -19,6 +19,43 @@ use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 use super::shell_wrapper::parse_shell_wrapper;
 
 const PHP_TOOL_NAMES: [&str; 6] = ["phpunit", "phpstan", "ecs", "pest", "paratest", "pint"];
+static PYTHON_EXECUTABLE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^python(?:[0-9]+(?:\.[0-9]+)*)?(?:\.exe)?$").unwrap());
+const PYTHON_MODULE_FLAGS: &[arg_tokenizer::Flag] =
+    &[arg_tokenizer::Flag::short("m").takes(arg_tokenizer::ValueSpec::value())];
+const PYTHON_MODULE_GRAMMAR: Grammar = Grammar::new(Dialect::Posix, &[PYTHON_MODULE_FLAGS]);
+
+/// Keep the original interpreter spelling for execution, while recognizing the
+/// same pytest module in discover, the hook, and command exclusions.
+fn python_pytest_parts(cmd: &str) -> Option<(&str, &str)> {
+    let (words, spans) = words_and_spans(cmd);
+    let interpreter = *words.first()?;
+    let resolved = resolve_word_text(interpreter);
+    let basename = resolved.rsplit(['/', '\\']).next()?;
+    // An unquoted Windows path keeps its backslashes in PowerShell. The shell
+    // lexer also serves Bash, where resolving that word would consume them.
+    let raw_basename = interpreter.rsplit(['/', '\\']).next()?;
+    if !PYTHON_EXECUTABLE.is_match(basename) && !PYTHON_EXECUTABLE.is_match(raw_basename) {
+        return None;
+    }
+    let module_words: Vec<_> = words
+        .get(1..3)?
+        .iter()
+        .map(|word| resolve_word_text(word))
+        .collect();
+    let tokens = arg_tokenizer::tokenize_grammar(&module_words, &PYTHON_MODULE_GRAMMAR);
+    let flag = tokens.first()?;
+    if flag.kind != ArgTokenKind::Short
+        || flag.text != "m"
+        || flag.attached.is_some()
+        || flag.linked != Some(1)
+        || flag.value(&tokens) != Some("pytest")
+    {
+        return None;
+    }
+    let end = spans[2] + words[2].len();
+    Some((interpreter, cmd[end..].trim_start()))
+}
 
 /// Result of classifying a command.
 #[derive(Debug, PartialEq)]
@@ -204,8 +241,13 @@ pub fn classify_command(cmd: &str) -> Classification {
         return Classification::Ignored;
     }
 
+    // Recognize quoted and platform-specific Python paths before stripping a
+    // leading executable path. Execution still uses the original interpreter.
+    let cmd_normalized = python_pytest_parts(cmd_clean)
+        .map(|(_, args)| format!("pytest {args}"))
+        .unwrap_or_else(|| cmd_clean.to_string());
     // Normalize absolute binary paths: /usr/bin/grep → grep (#485)
-    let cmd_normalized = strip_absolute_path(cmd_clean);
+    let cmd_normalized = strip_absolute_path(&cmd_normalized);
     // Strip git global options: git -C /tmp status → git status (#163)
     let cmd_normalized = strip_git_global_opts(&cmd_normalized);
     // Normalize PHP tool paths: vendor/bin/phpunit, bin/phpunit, or composer
@@ -2089,6 +2131,15 @@ fn rewrite_segment_inner(
 /// Rewrite the command part of a segment (trailing redirects already split
 /// off) with `rule`, or `None` when this rule does not rewrite it.
 fn rewrite_command_part(rule: &RtkRule, cmd_part: &str) -> Option<String> {
+    if rule.rtk_cmd == "rtk pytest"
+        && let Some((interpreter, args)) = python_pytest_parts(cmd_part)
+    {
+        return Some(if args.is_empty() {
+            format!("rtk pytest --python {interpreter}")
+        } else {
+            format!("rtk pytest --python {interpreter} -- {args}")
+        });
+    }
     if rule.rtk_cmd == "rtk cargo"
         && cmd_part
             .strip_prefix("cargo")
@@ -2190,6 +2241,11 @@ fn php_tool_form(cmd: &str, rtk_cmd: &str) -> Option<String> {
 }
 
 fn tool_form(cmd_clean: &str, rtk_equivalent: &str) -> String {
+    if rtk_equivalent == "rtk pytest"
+        && let Some((_, args)) = python_pytest_parts(cmd_clean)
+    {
+        return format!("pytest {args}").trim_end().to_string();
+    }
     // Same normalization the rewrite path applies, so the exclusion sees the tool
     // whichever way it was spelled — including `php vendor/bin/phpunit`.
     let normalized = strip_absolute_path(
@@ -5970,6 +6026,68 @@ mod tests {
     }
 
     #[test]
+    fn test_pytest_module_interpreter_paths() {
+        for interpreter in [
+            "python.exe",
+            "python3.12",
+            "python3.12.exe",
+            ".venv/Scripts/python.exe",
+            r#"".venv/Scripts/python.exe""#,
+            r".venv\Scripts\python.exe",
+            r#""C:\Program Files\venv\Scripts\python.exe""#,
+            "./.venv/bin/python",
+            "'/opt/test venv/bin/python3'",
+        ] {
+            let command = format!("{interpreter} -m pytest -q 'test suite/'");
+            assert!(
+                matches!(
+                    classify_command(&command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk pytest",
+                        ..
+                    }
+                ),
+                "{command}"
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(&command, &[]),
+                Some(format!(
+                    "rtk pytest --python {interpreter} -- -q 'test suite/'"
+                )),
+                "{command}",
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(&command, &["pytest".to_owned()]),
+                None,
+                "the pytest exclusion must cover {command}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_pytest_module_rejects_other_programs_and_modules() {
+        for command in [
+            "python.exe -m pytest_extra -q",
+            "python.exe pytest -q",
+            "python-script.exe -m pytest -q",
+            "python.exe -c pytest",
+            "python.exe -- -m pytest",
+            "echo python.exe -m pytest",
+        ] {
+            assert!(
+                !matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk pytest",
+                        ..
+                    }
+                ),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
     fn test_classify_pip_list() {
         assert!(matches!(
             classify_command("pip list"),
@@ -6027,7 +6145,7 @@ mod tests {
     fn test_rewrite_python_m_pytest() {
         assert_eq!(
             rewrite_command_no_prefixes("python -m pytest -x tests/", &[]),
-            Some("rtk pytest -x tests/".into())
+            Some("rtk pytest --python python -- -x tests/".into())
         );
     }
 
@@ -6051,7 +6169,7 @@ mod tests {
     fn test_rewrite_uv_run_python_m_pytest() {
         assert_eq!(
             rewrite_command_no_prefixes("uv run python -m pytest -q", &[]),
-            Some("uv run rtk pytest -q".into())
+            Some("uv run rtk pytest --python python -- -q".into())
         );
     }
 
@@ -8591,7 +8709,7 @@ mod tests {
     fn test_python3_m_pytest() {
         assert_eq!(
             rewrite_command_no_prefixes("python3 -m pytest tests/", &[]),
-            Some("rtk pytest tests/".into())
+            Some("rtk pytest --python python3 -- tests/".into())
         );
     }
 
