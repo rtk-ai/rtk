@@ -1140,7 +1140,7 @@ rtk gain --weekly               # Weekly breakdown
 rtk gain --monthly              # Monthly breakdown
 rtk gain --all                  # All breakdowns
 rtk gain --quota -t pro         # Estimate of bash output saved against the monthly quota
-rtk gain --failures             # Parsing failure log (commands that fell back)
+rtk gain --failures             # Fallback commands and their execution outcomes
 rtk gain --format json          # JSON export (for dashboards)
 rtk gain --format csv           # CSV export
 ```
@@ -1159,7 +1159,7 @@ rtk gain --format csv           # CSV export
 | `--monthly` | `-m` | Monthly breakdown |
 | `--all` | `-a` | All breakdowns |
 | `--format` | `-f` | Output format: `text`, `json`, `csv` |
-| `--failures` | `-F` | Show commands that fell back |
+| `--failures` | `-F` | Show fallback commands and their execution outcomes |
 
 **Example output (illustrative values):**
 ```

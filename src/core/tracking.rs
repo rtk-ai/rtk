@@ -480,6 +480,8 @@ enum SchemaVersion {
     /// `Initial` again, with every error reported: releases that stamped 1 or 2
     /// discarded some of its statement errors and stamped the database anyway.
     InitialRecheck = 3,
+    /// The child exit code for fallbacks recorded by this build and later.
+    FallbackExitCode = 4,
     // New schema changes go directly above this line.
     Next,
 }
@@ -509,6 +511,7 @@ const MIGRATIONS: &[(SchemaVersion, Migration)] = &[
     (SchemaVersion::Initial, migrate_initial),
     (SchemaVersion::EngineTables, migrate_engine_tables),
     (SchemaVersion::InitialRecheck, migrate_initial),
+    (SchemaVersion::FallbackExitCode, migrate_fallback_exit_code),
 ];
 
 const _: () = {
@@ -646,6 +649,10 @@ fn migrate_engine_tables(conn: &Connection) -> Result<()> {
     .context("Failed to create the engine_attribution table")?;
 
     Ok(())
+}
+
+fn migrate_fallback_exit_code(conn: &Connection) -> Result<()> {
+    db::add_column_if_missing(conn, "parse_failures", "fallback_exit_code", "INTEGER")
 }
 
 /// Pure core of `Tracker::maybe_cleanup_hook_decisions`'s sampling decision.
@@ -1091,26 +1098,39 @@ impl Tracker {
         Ok(())
     }
 
-    /// Record a parse failure for analytics.
+    /// Record a parse failure and its fallback exit code, if execution returned a status.
     pub fn record_parse_failure(
         &self,
         raw_command: &str,
         error_message: &str,
-        fallback_succeeded: bool,
+        exit_code: Option<i32>,
     ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO parse_failures (timestamp, raw_command, error_message, fallback_succeeded)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                Utc::now().to_rfc3339(),
-                raw_command,
-                error_message,
-                fallback_succeeded as i32,
-            ],
-        )
-        .inspect_err(|e| warn_if_missing_table("record_parse_failure", e))?;
+        let timestamp = Utc::now().to_rfc3339();
+        let has_status = exit_code.is_some();
+        let insert = if self.has_fallback_exit_code()? {
+            self.conn.execute(
+                "INSERT INTO parse_failures
+                    (timestamp, raw_command, error_message, fallback_succeeded, fallback_exit_code)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![timestamp, raw_command, error_message, has_status, exit_code],
+            )
+        } else {
+            self.conn.execute(
+                "INSERT INTO parse_failures
+                    (timestamp, raw_command, error_message, fallback_succeeded)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![timestamp, raw_command, error_message, has_status],
+            )
+        };
+        insert.inspect_err(|e| warn_if_missing_table("record_parse_failure", e))?;
         self.cleanup_old()?;
         Ok(())
+    }
+
+    fn has_fallback_exit_code(&self) -> Result<bool> {
+        // A blocked upgrade may leave the old table usable. Only inspect the schema then.
+        Ok(self.conn.behind.is_none()
+            || db::column_exists(&self.conn.conn, "parse_failures", "fallback_exit_code")?)
     }
 
     /// Record a PreToolUse hook decision at the moment the hook actually ran.
@@ -1251,23 +1271,21 @@ impl Tracker {
         }))
     }
 
-    /// Get parse failure summary for `rtk gain --failures`.
+    /// Summarize fallback events for `rtk gain --failures`.
     pub fn get_parse_failure_summary(&self) -> Result<ParseFailureSummary> {
-        let total: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM parse_failures", [], |row| row.get(0))?;
-
-        let succeeded: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM parse_failures WHERE fallback_succeeded = 1",
-            [],
-            |row| row.get(0),
-        )?;
-
-        let recovery_rate = if total > 0 {
-            (succeeded as f64 / total as f64) * 100.0
+        let exit_code = if self.has_fallback_exit_code()? {
+            "fallback_exit_code"
         } else {
-            0.0
+            "NULL"
         };
+        let execution_failed = format!("(fallback_succeeded = 0 OR COALESCE({exit_code}, 0) <> 0)");
+        let (total, failed): (i64, i64) = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*), COUNT(*) FILTER (WHERE {execution_failed}) FROM parse_failures"
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
 
         // Top commands by frequency
         let mut stmt = self.conn.prepare(
@@ -1283,29 +1301,37 @@ impl Tracker {
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Recent 10
-        let mut stmt = self.conn.prepare(
-            "SELECT timestamp, raw_command, error_message, fallback_succeeded
+        // Keep independent limits so successful fallbacks cannot crowd out failures.
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT timestamp, raw_command, error_message, fallback_succeeded, {exit_code}
              FROM parse_failures
-             ORDER BY timestamp DESC
-             LIMIT 10",
-        )?;
-        let recent = stmt
-            .query_map([], |row| {
+             WHERE {execution_failed} = ?1
+             ORDER BY timestamp DESC, id DESC
+             LIMIT 10"
+        ))?;
+        let mut recent = |failed: bool| -> Result<Vec<ParseFailureRecord>> {
+            let rows = stmt.query_map([failed], |row| {
+                let outcome = match (row.get::<_, bool>(3)?, row.get::<_, Option<i32>>(4)?) {
+                    (false, _) => FallbackOutcome::ExecutionError,
+                    (true, Some(code)) => FallbackOutcome::Exited(code),
+                    (true, None) => FallbackOutcome::UnknownExit,
+                };
                 Ok(ParseFailureRecord {
                     timestamp: row.get(0)?,
                     raw_command: row.get(1)?,
                     error_message: row.get(2)?,
-                    fallback_succeeded: row.get::<_, i32>(3)? != 0,
+                    outcome,
                 })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+            })?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        };
 
         Ok(ParseFailureSummary {
             total: total as usize,
-            recovery_rate,
+            failed: failed as usize,
             top_commands,
-            recent,
+            recent_failures: recent(true)?,
+            recent_other: recent(false)?,
         })
     }
 
@@ -2156,23 +2182,32 @@ pub struct ParseFailureRecord {
     pub raw_command: String,
     #[allow(dead_code)]
     pub error_message: String,
-    pub fallback_succeeded: bool,
+    pub outcome: FallbackOutcome,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum FallbackOutcome {
+    Exited(i32),
+    ExecutionError,
+    /// Older writers only stored whether the fallback returned a child status.
+    UnknownExit,
 }
 
 /// Aggregated parse failure summary.
 #[derive(Debug)]
 pub struct ParseFailureSummary {
     pub total: usize,
-    pub recovery_rate: f64,
+    pub failed: usize,
     pub top_commands: Vec<(String, usize)>,
-    pub recent: Vec<ParseFailureRecord>,
+    pub recent_failures: Vec<ParseFailureRecord>,
+    pub recent_other: Vec<ParseFailureRecord>,
 }
 
 /// Record a parse failure without ever crashing.
 /// Silently ignores all errors — used in the fallback path.
-pub fn record_parse_failure_silent(raw_command: &str, error_message: &str, succeeded: bool) {
+pub fn record_parse_failure_silent(raw_command: &str, error_message: &str, exit_code: Option<i32>) {
     if let Ok(tracker) = Tracker::new() {
-        let _ = tracker.record_parse_failure(raw_command, error_message, succeeded);
+        let _ = tracker.record_parse_failure(raw_command, error_message, exit_code);
     }
 }
 
@@ -3649,6 +3684,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_upgrade_preserves_unknown_fallback_exit() {
+        let tmp = test_isolation::tempdir();
+        let db_path = tmp.path().join("history.db");
+        {
+            let conn = Connection::open(&db_path).expect("open tracking database");
+            seed_schema(&conn, SchemaVersion::InitialRecheck);
+            conn.execute(
+                "INSERT INTO parse_failures (timestamp, raw_command, error_message, fallback_succeeded)
+                 VALUES (?1, 'legacy-tool', 'unrecognized subcommand', 1)",
+                [Utc::now().to_rfc3339()],
+            )
+            .expect("seed old fallback row");
+        }
+
+        user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
+            let tracker = Tracker::new().expect("upgrade tracking database");
+            assert_eq!(user_version(&tracker.conn.conn), SCHEMA_VERSION);
+
+            let summary = tracker.get_parse_failure_summary().expect("read fallbacks");
+            assert_eq!(summary.total, 1);
+            assert_eq!(summary.failed, 0);
+            assert_eq!(summary.recent_other[0].raw_command, "legacy-tool");
+            assert_eq!(
+                summary.recent_other[0].outcome,
+                FallbackOutcome::UnknownExit
+            );
+        });
+    }
+
     /// Creates a table without `IF NOT EXISTS`, so running this step twice on
     /// one database fails, whatever later steps do.
     fn create_replay_probe(conn: &Connection) -> Result<()> {
@@ -4038,37 +4103,36 @@ mod tests {
         let test_cmd = "git -C /path status test";
 
         tracker
-            .record_parse_failure(test_cmd, "unrecognized subcommand", true)
+            .record_parse_failure(test_cmd, "unrecognized subcommand", Some(0))
             .expect("Failed to record parse failure");
 
         let summary = tracker
             .get_parse_failure_summary()
             .expect("Failed to get summary");
 
-        assert!(summary.total >= 1);
-        assert!(summary.recent.iter().any(|r| r.raw_command == test_cmd));
+        assert_eq!(summary.total, 1);
+        assert_eq!(summary.recent_other[0].raw_command, test_cmd);
+        assert_eq!(summary.recent_other[0].outcome, FallbackOutcome::Exited(0));
     }
 
-    // 13. recovery_rate calculation
     #[test]
-    fn test_parse_failure_recovery_rate() {
-        // In-memory: isolated per-test DB, see test_tracker_record_and_recent.
+    fn test_fallback_summary_counts_nonzero_exits_and_execution_errors() {
         let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        for (cmd, code) in [
+            ("success", Some(0)),
+            ("nonzero", Some(7)),
+            ("missing", None),
+        ] {
+            tracker
+                .record_parse_failure(cmd, "err", code)
+                .expect("record fallback");
+        }
 
-        // 2 successes, 1 failure
-        tracker
-            .record_parse_failure("cmd_ok1", "err", true)
-            .unwrap();
-        tracker
-            .record_parse_failure("cmd_ok2", "err", true)
-            .unwrap();
-        tracker
-            .record_parse_failure("cmd_fail", "err", false)
-            .unwrap();
-
-        let summary = tracker.get_parse_failure_summary().unwrap();
-        // Isolated DB, so the rate is now exact: 2/3 successes ≈ 66.7%.
-        assert!((summary.recovery_rate - 66.7).abs() < 0.1);
+        let summary = tracker.get_parse_failure_summary().expect("read fallbacks");
+        assert_eq!(summary.total, 3);
+        assert_eq!(summary.failed, 2);
+        assert_eq!(summary.recent_failures.len(), 2);
+        assert_eq!(summary.recent_other.len(), 1);
     }
 
     /// Backdated tracker: one row per retained history table 10 days old,
@@ -4323,7 +4387,7 @@ mod tests {
 
         // Insert into parse_failures
         tracker
-            .record_parse_failure(&format!("bad_cmd_reset_test_{}", pid), "parse error", false)
+            .record_parse_failure(&format!("bad_cmd_reset_test_{}", pid), "parse error", None)
             .expect("Failed to record parse failure");
 
         // Reset everything
@@ -5299,5 +5363,33 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM commands", [], |row| row.get(0))
             .expect("count should be readable");
         assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn test_a_behind_tracker_still_reads_and_writes_fallbacks() {
+        let conn = Connection::open_in_memory().expect("open tracking database");
+        seed_schema(&conn, SchemaVersion::InitialRecheck);
+        let tracker = behind_tracker(conn);
+
+        tracker
+            .record_parse_failure("old-table", "err", Some(7))
+            .expect("record fallback without the new column");
+        tracker
+            .record_parse_failure("missing", "err", None)
+            .expect("record execution error without the new column");
+
+        let summary = tracker
+            .get_parse_failure_summary()
+            .expect("read old fallback table");
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(
+            summary.recent_failures[0].outcome,
+            FallbackOutcome::ExecutionError
+        );
+        assert_eq!(
+            summary.recent_other[0].outcome,
+            FallbackOutcome::UnknownExit
+        );
     }
 }
