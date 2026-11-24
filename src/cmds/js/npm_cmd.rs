@@ -4,7 +4,17 @@ use crate::core::runner;
 use crate::core::shell::display_args;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
+use regex::Regex;
 use std::io::IsTerminal;
+use std::sync::LazyLock;
+
+static TEST_SUMMARY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*(?:Test Suites:|Test Files\s+|\d+ passing \()").unwrap());
+static PASSING_TEST: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*(?:PASS\s+\S|[✓✔√]\s+\S)").unwrap());
+static TEST_FAILURE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\s*(?:FAIL(?:\s|$)|[×✗❯●]\s|\d+\)\s|(?:AssertionError|Error):)").unwrap()
+});
 
 /// Known npm subcommands that should NOT get "run" injected.
 /// Shared between production code and tests to avoid drift.
@@ -73,6 +83,7 @@ const NPM_SUBCOMMANDS: &[&str] = &[
     "rebuild",
     "test",
     "t",
+    "tst",
     "start",
     "stop",
     "restart",
@@ -171,7 +182,37 @@ fn run_filtered(
         opts = opts.inherit_stdin();
     }
 
-    runner::run_filtered(cmd, name, &args_display, filter_npm_output, opts)
+    // Extra arguments may request verbose output or a custom reporter. Keep
+    // that output under the existing light filter instead of removing passes.
+    let filter =
+        if name == "npm" && args.len() == 1 && matches!(args[0].as_str(), "test" | "t" | "tst") {
+            filter_npm_test_output
+        } else {
+            filter_npm_output
+        };
+    runner::run_filtered(cmd, name, &args_display, filter, opts)
+}
+
+/// Keep the actual npm lifecycle (including pretest/posttest) and all failure
+/// details. A recognizable footer allows dropping only passing test rows;
+/// arbitrary scripts and incomplete/crashed reporters retain their output.
+fn filter_npm_test_output(output: &str) -> String {
+    let clean = crate::core::utils::strip_ansi(output);
+    if !TEST_SUMMARY.is_match(&clean) {
+        return filter_npm_output(output);
+    }
+    let filtered = filter_npm_output(&clean);
+    let mut in_failure = false;
+    filtered
+        .lines()
+        .filter(|line| {
+            // Assertion diffs and captured logs may themselves look like a
+            // passing test. Preserve everything from the first failure on.
+            in_failure |= TEST_FAILURE.is_match(line);
+            in_failure || !PASSING_TEST.is_match(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Filter npm run output - strip boilerplate, progress bars, npm WARN
@@ -288,6 +329,9 @@ npm notice
             "sbom",
             "shrinkwrap",
             "unstar",
+            "test",
+            "t",
+            "tst",
         ];
 
         for subcommand in subcommands {
@@ -303,5 +347,77 @@ npm notice
         let output = "\n\n\n";
         let result = filter_npm_output(output);
         assert_eq!(result, "ok");
+    }
+
+    #[test]
+    fn test_npm_test_preserves_failures_and_summaries() {
+        for (passed, summary) in [
+            (
+                "PASS tests/pass.test.js",
+                "Test Suites: 1 failed, 1 passed, 2 total",
+            ),
+            (
+                " ✓ tests/pass.test.js (2 tests) 3ms",
+                " Test Files  1 failed | 1 passed (2)",
+            ),
+            ("    ✔ passes (2ms)", "  1 passing (12ms)"),
+        ] {
+            let raw = format!(
+                "> app@1.0.0 test\n{passed}\nFAIL tests/fail.test.js\n  expected 1 to equal 2\n  at test.js:3:4\n{summary}\nposttest cleanup\n"
+            );
+            let filtered = filter_npm_test_output(&raw);
+            assert!(!filtered.contains(passed));
+            assert!(!filtered.contains("app@1.0.0"));
+            for evidence in [
+                "FAIL tests/fail.test.js",
+                "expected 1 to equal 2",
+                "at test.js:3:4",
+                summary,
+                "posttest cleanup",
+            ] {
+                assert!(filtered.contains(evidence), "lost {evidence}: {filtered}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_npm_test_keeps_unknown_and_incomplete_reporters() {
+        for raw in [
+            "PASS is application output\nError: test runner crashed",
+            "TAP version 13\nok 1 - passes\nnot ok 2 - fails\n1..2",
+            r#"{"numPassedTests":1,"numFailedTests":0}"#,
+        ] {
+            assert_eq!(filter_npm_test_output(raw), raw);
+        }
+    }
+
+    #[test]
+    fn test_npm_test_keeps_pass_markers_inside_failure_details() {
+        for marker in [
+            "FAIL tests/fail.test.js",
+            " ❯ tests/fail.test.js (1 test | 1 failed)",
+            "  1) fails with captured output:",
+        ] {
+            let raw = format!(
+                "PASS tests/pass.test.js\n{marker}\n  ✔ expected log line\nPASS actual log line\nTest Suites: 1 failed, 1 passed, 2 total"
+            );
+            let filtered = filter_npm_test_output(&raw);
+            assert!(!filtered.contains("PASS tests/pass.test.js"));
+            assert!(filtered.contains("✔ expected log line"));
+            assert!(filtered.contains("PASS actual log line"));
+        }
+    }
+
+    #[test]
+    fn test_npm_test_real_mocha_lifecycle_and_savings() {
+        // Captured from npm test with Mocha's default reporter and lifecycle
+        // scripts; only the machine-specific executable path was normalized.
+        let raw = include_str!("../../../tests/fixtures/npm_test_mocha.txt");
+        let filtered = filter_npm_test_output(raw);
+        assert!(filtered.contains("8 passing"));
+        assert!(filtered.contains("pretest fixture preparation"));
+        assert!(filtered.contains("posttest fixture cleanup"));
+        assert!(!filtered.contains("adds 1 twice"));
+        assert!(filtered.len() * 5 <= raw.len() * 4);
     }
 }

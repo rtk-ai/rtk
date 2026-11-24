@@ -7040,6 +7040,36 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_npm_test_and_aliases() {
+        for command in [
+            "npm test",
+            "npm t",
+            "npm tst",
+            "npm test -- --runInBand",
+            "npm test 2>&1",
+        ] {
+            assert!(matches!(
+                classify_command(command),
+                Classification::Supported {
+                    rtk_equivalent: "rtk npm",
+                    ..
+                }
+            ));
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(format!("rtk {command}"))
+            );
+        }
+        for command in ["npm testing", "npm tst-script"] {
+            assert_eq!(rewrite_command_no_prefixes(command, &[]), None);
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("npm test", &["npm".to_owned()]),
+            None
+        );
+    }
+
+    #[test]
     fn test_rewrite_npx() {
         assert_eq!(
             rewrite_command_no_prefixes("npx svgo", &[]),

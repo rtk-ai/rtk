@@ -1,0 +1,29 @@
+
+> rtk-npm-test-fixture@1.0.0 pretest
+> node -e "console.log('pretest fixture preparation')"
+
+pretest fixture preparation
+
+> rtk-npm-test-fixture@1.0.0 test
+> mocha --no-color test.js
+
+
+
+  arithmetic examples
+    ✔ adds 1 twice
+    ✔ adds 2 twice
+    ✔ adds 3 twice
+    ✔ adds 4 twice
+    ✔ adds 5 twice
+    ✔ adds 6 twice
+    ✔ adds 7 twice
+    ✔ adds 8 twice
+
+
+  8 passing (2ms)
+
+
+> rtk-npm-test-fixture@1.0.0 posttest
+> node -e "console.log('posttest fixture cleanup')"
+
+posttest fixture cleanup
