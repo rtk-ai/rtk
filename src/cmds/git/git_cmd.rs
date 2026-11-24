@@ -4077,12 +4077,14 @@ const BRANCH_ACTIONS: &[Flag] = &[
 /// listing is then theirs: it has none of the `* ` and `remotes/` markers the compact form
 /// reads.
 const BRANCH_FORMAT: Flag = Flag::long("format").takes(VALUE);
+const BRANCH_ALL: Flag = Flag::pair("a", "all");
+const BRANCH_REMOTES: Flag = Flag::pair("r", "remotes");
 
 /// The `git branch` flags that select or format a list. `-l`/`--list` lists the local
 /// branches, matching its patterns when given some, where a bare pattern would create a
 /// branch; `-a`/`--all` and `-r`/`--remotes` add the remote-tracking ones.
 const BRANCH_LIST_MODES: &[Flag] = &[
-    Flag::pair("a", "all"),
+    BRANCH_ALL,
     Flag::long("contains").takes(VALUE),
     BRANCH_FORMAT,
     Flag::pair("l", "list"),
@@ -4090,7 +4092,7 @@ const BRANCH_LIST_MODES: &[Flag] = &[
     Flag::long("no-contains").takes(VALUE),
     Flag::long("no-merged").takes(VALUE),
     Flag::long("points-at").takes(VALUE),
-    Flag::pair("r", "remotes"),
+    BRANCH_REMOTES,
     Flag::long("sort").takes(VALUE),
 ];
 
@@ -4209,7 +4211,12 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     }
 
     let compact;
-    let filtered: &str = if tokens.iter().any(|t| t.is(&BRANCH_FORMAT)) {
+    // Explicit remote listings need the remote names and aliases: compaction deduplicates
+    // them against local branches and against other remotes with the same branch name.
+    let filtered: &str = if tokens
+        .iter()
+        .any(|t| t.is_one_of(&[BRANCH_FORMAT, BRANCH_ALL, BRANCH_REMOTES]))
+    {
         &result.stdout
     } else {
         compact = filter_branch_output(&result.stdout);
