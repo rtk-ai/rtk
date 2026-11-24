@@ -67,3 +67,40 @@ fn each_agent_uninstall_exits_0() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn gemini_uninstall_preserves_artifacts_when_settings_cannot_be_parsed() {
+    for original in ["", "{", "{\"hooks\": {},}"] {
+        for dry_run in [false, true] {
+            let project = common::tempdir();
+            let home = common::tempdir();
+            let install = rtk(project.path(), home.path())
+                .args(["init", "-g", "--gemini", "--auto-patch"])
+                .output()
+                .unwrap();
+            assert!(install.status.success(), "{install:?}");
+
+            let gemini = home.path().join(".gemini");
+            let settings = gemini.join("settings.json");
+            let hook = gemini.join("hooks/rtk-hook-gemini.sh");
+            let awareness = gemini.join("GEMINI.md");
+            let hook_before = std::fs::read(&hook).unwrap();
+            let awareness_before = std::fs::read(&awareness).unwrap();
+            std::fs::write(&settings, original).unwrap();
+
+            let mut command = rtk(project.path(), home.path());
+            command.args(["init", "-g", "--gemini", "--uninstall"]);
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            let uninstall = command.output().unwrap();
+            assert!(!uninstall.status.success(), "{uninstall:?}");
+            let error = String::from_utf8_lossy(&uninstall.stderr);
+            assert!(error.contains("settings.json"), "{error}");
+            assert!(error.contains("parse"), "{error}");
+            assert_eq!(std::fs::read_to_string(&settings).unwrap(), original);
+            assert_eq!(std::fs::read(&hook).unwrap(), hook_before);
+            assert_eq!(std::fs::read(&awareness).unwrap(), awareness_before);
+        }
+    }
+}
