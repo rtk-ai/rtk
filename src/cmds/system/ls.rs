@@ -119,17 +119,18 @@ fn resolve_abbrev(candidates: &[&'static str], name: &str) -> Option<&'static st
     matches.next().is_none().then_some(*first)
 }
 
-/// Which `ls` the child process will be. The two disagree on short-option grammar outright:
-/// GNU's `-I`/`-T`/`-w` take `--ignore`/`--tabsize`/`--width` values, while on BSD all three
-/// are booleans and only `-D` takes one (a strftime format). Reading a BSD operand as a value
-/// moves it ahead of the `--`, which BSD's non-permuting getopt then lists as a file.
+/// Which userland the child process comes from, GNU coreutils or BSD; `wc` reads it too. For
+/// `ls` the two disagree on short-option grammar outright: GNU's `-I`/`-T`/`-w` take
+/// `--ignore`/`--tabsize`/`--width` values, while on BSD all three are booleans and only `-D`
+/// takes one (a strftime format). Reading a BSD operand as a value moves it ahead of the `--`,
+/// which BSD's non-permuting getopt then lists as a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Flavor {
+pub(super) enum Flavor {
     Gnu,
     Bsd,
 }
 
-const HOST_FLAVOR: Flavor = if cfg!(any(
+pub(super) const HOST_FLAVOR: Flavor = if cfg!(any(
     target_os = "macos",
     target_os = "ios",
     target_os = "freebsd",

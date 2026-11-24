@@ -7,24 +7,133 @@
 //! - `wc -c file.py`  → `978`
 //! - `wc -l *.py`     → table with common path prefix stripped
 
+use super::ls::{Flavor, HOST_FLAVOR};
+use crate::core::arg_tokenizer::{self, Abbreviation, Dialect, Flag, Grammar, Token, ValueSpec};
+use crate::core::args_utils;
+use crate::core::operand_glob;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::display_args;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
 
+/// A required value. getopt hands it the next argument whatever that is, `--` included, and
+/// libxo reads `--libxo`'s the same way.
+const MANDATORY: ValueSpec = ValueSpec::value().claiming_dash_dash();
+
+const BYTES: Flag = Flag::pair("c", "bytes");
+const CHARS: Flag = Flag::pair("m", "chars");
+const LINES: Flag = Flag::pair("l", "lines");
+const WORDS: Flag = Flag::pair("w", "words");
+const MAX_LINE_LENGTH: Flag = Flag::pair("L", "max-line-length");
+/// The operands are the NUL-separated names in this file instead, or on stdin when it is `-`.
+const FILES0_FROM: Flag = Flag::long("files0-from").takes(MANDATORY);
+
+/// Every option GNU wc accepts, from its `--help` (coreutils 8.32, Git for Windows', and 9.4,
+/// which adds `--total`). Booleans too: `getopt_long` resolves an unambiguous prefix
+/// (`--t=never`, `--f list`), and a prefix is only unambiguous against the whole set.
+const GNU_FLAGS: &[Flag] = &[
+    BYTES,
+    CHARS,
+    LINES,
+    WORDS,
+    MAX_LINE_LENGTH,
+    FILES0_FROM,
+    Flag::long("total").takes(MANDATORY),
+    Flag::long("help"),
+    Flag::long("version"),
+];
+
+const BSD_BYTES: Flag = Flag::short("c");
+const BSD_CHARS: Flag = Flag::short("m");
+const BSD_LINES: Flag = Flag::short("l");
+const BSD_WORDS: Flag = Flag::short("w");
+const BSD_MAX_LINE_LENGTH: Flag = Flag::short("L");
+
+/// BSD wc (macOS, FreeBSD): `wc [--libxo] [-Lclmw] [file ...]`, short flags only, plus libxo's
+/// `--libxo` taking its options as the next argument or after `=`.
+const BSD_FLAGS: &[Flag] = &[
+    BSD_BYTES,
+    BSD_CHARS,
+    BSD_LINES,
+    BSD_WORDS,
+    BSD_MAX_LINE_LENGTH,
+    Flag::long("libxo").takes(MANDATORY),
+];
+
+/// GNU wc reads its options with `getopt_long`: short flags cluster, options and operands
+/// interleave, and a long option may be abbreviated to any prefix that names it alone.
+const GNU_DIALECT: Dialect = Dialect {
+    abbreviation: Abbreviation::UniquePrefix,
+    ..Dialect::Posix
+};
+
+const GNU_GRAMMAR: Grammar = Grammar::new(GNU_DIALECT, &[GNU_FLAGS]);
+/// BSD's plain `getopt` also stops at the first operand, which the dialect cannot say:
+/// [`detect_mode`] applies it.
+const BSD_GRAMMAR: Grammar = Grammar::new(Dialect::Posix, &[BSD_FLAGS]);
+
+/// The grammar of the `wc` the child process will be.
+fn grammar(flavor: Flavor) -> &'static Grammar {
+    match flavor {
+        Flavor::Gnu => &GNU_GRAMMAR,
+        Flavor::Bsd => &BSD_GRAMMAR,
+    }
+}
+
+/// What one `wc` invocation asks for, read with the child's grammar.
+struct WcPlan {
+    mode: WcMode,
+    reads_stdin: bool,
+    /// `args` with every file operand glob expanded (see `operand_glob`): the free positionals,
+    /// never a flag's value such as `--files0-from`'s.
+    child_args: Vec<String>,
+}
+
+fn plan_for(args: &[String], flavor: Flavor, expand: impl Fn(&str) -> Vec<String>) -> WcPlan {
+    let tokens = arg_tokenizer::tokenize_grammar(args, grammar(flavor));
+    let operands = tokens
+        .iter()
+        .filter(|t| t.is_free_positional())
+        .map(|t| t.source_index)
+        .collect();
+    WcPlan {
+        mode: detect_mode(&tokens, flavor),
+        reads_stdin: reads_stdin(&tokens),
+        child_args: operand_glob::expand_at(args, &operands, expand),
+    }
+}
+
+/// Whether the child reads rtk's stdin, which is then forwarded so `cat file | rtk wc` counts
+/// the piped data instead of reporting zero. It does with no file operand, or with `-` as one;
+/// under `--files0-from` (which GNU wc refuses to combine with operands) only when the last
+/// one given names `-`, the names then coming from stdin.
+fn reads_stdin(tokens: &[Token<'_>]) -> bool {
+    if let Some(list) = tokens.iter().rev().find(|t| t.flag() == Some(&FILES0_FROM)) {
+        return list.value(tokens) == Some("-");
+    }
+    let mut operands = tokens.iter().filter(|t| t.is_free_positional()).peekable();
+    operands.peek().is_none() || operands.any(|t| t.text == "-")
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    // Restored first: the grammar reads it, and clap ate the boundary.
+    let typed = &args_utils::restore_double_dash(args);
+    // The child gets the expanded operands; the tracked command stays what the user typed.
+    let WcPlan {
+        mode,
+        reads_stdin,
+        child_args,
+    } = plan_for(typed, HOST_FLAVOR, |path| {
+        operand_glob::expand_operands([path])
+    });
+
     let mut cmd = resolved_command("wc");
-    cmd.args(args);
+    cmd.args(&child_args);
 
     if verbose > 0 {
-        eprintln!("Running: wc {}", args.join(" "));
+        eprintln!("Running: wc {}", child_args.join(" "));
     }
 
-    let mode = detect_mode(args);
-
-    // No file operands → wc reads from stdin. Forward rtk's stdin to the child
-    // so `cat file | rtk wc` counts the piped data instead of reporting zero.
-    let reads_stdin = !args.iter().any(|a| !a.starts_with('-'));
     let opts = if reads_stdin {
         RunOptions::stdout_only().inherit_stdin()
     } else {
@@ -34,7 +143,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "wc",
-        &display_args(args),
+        &display_args(typed),
         |stdout| filter_wc_output(stdout, &mode),
         opts,
     )
@@ -57,65 +166,55 @@ enum WcMode {
     Mixed,
 }
 
-fn detect_mode(args: &[String]) -> WcMode {
-    let flags: Vec<&str> = args
-        .iter()
-        .filter(|a| a.starts_with('-'))
-        .map(|s| s.as_str())
-        .collect();
+/// One count column a flag asks `wc` for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Column {
+    Lines,
+    Words,
+    Bytes,
+    Chars,
+    MaxLineLength,
+}
 
-    if flags.is_empty() {
-        return WcMode::Full;
+fn column(token: &Token<'_>) -> Option<Column> {
+    match token.flag()? {
+        &LINES | &BSD_LINES => Some(Column::Lines),
+        &WORDS | &BSD_WORDS => Some(Column::Words),
+        &BYTES | &BSD_BYTES => Some(Column::Bytes),
+        &CHARS | &BSD_CHARS => Some(Column::Chars),
+        &MAX_LINE_LENGTH | &BSD_MAX_LINE_LENGTH => Some(Column::MaxLineLength),
+        _ => None,
     }
+}
 
-    // Collect all single-char flags (handles combined flags like -lw)
-    let mut has_l = false;
-    let mut has_w = false;
-    let mut has_c = false;
-    let mut has_m = false;
-    let mut flag_count = 0;
-
-    for flag in &flags {
-        for ch in flag.chars().skip(1) {
-            match ch {
-                'l' => {
-                    has_l = true;
-                    flag_count += 1;
-                }
-                'w' => {
-                    has_w = true;
-                    flag_count += 1;
-                }
-                'c' => {
-                    has_c = true;
-                    flag_count += 1;
-                }
-                'm' => {
-                    has_m = true;
-                    flag_count += 1;
-                }
-                _ => {}
-            }
+/// The columns `tokens` ask for, as `flavor`'s wc reads them. GNU prints every column asked
+/// for, wherever the flag stands. BSD stops reading options at the first operand (a later `-l`
+/// is a file name there), and its `-c` and `-m` cancel each other, the last one winning.
+fn detect_mode(tokens: &[Token<'_>], flavor: Flavor) -> WcMode {
+    let options = match flavor {
+        Flavor::Gnu => tokens,
+        Flavor::Bsd => {
+            let first_operand = tokens.iter().position(|t| t.is_free_positional());
+            &tokens[..first_operand.unwrap_or(tokens.len())]
+        }
+    };
+    let mut columns: Vec<Column> = Vec::new();
+    for column in options.iter().filter_map(column) {
+        if flavor == Flavor::Bsd && matches!(column, Column::Bytes | Column::Chars) {
+            columns.retain(|c| !matches!(c, Column::Bytes | Column::Chars));
+        }
+        if !columns.contains(&column) {
+            columns.push(column);
         }
     }
-
-    if flag_count == 0 {
-        return WcMode::Full;
-    }
-    if flag_count > 1 {
-        return WcMode::Mixed;
-    }
-
-    if has_l {
-        WcMode::Lines
-    } else if has_w {
-        WcMode::Words
-    } else if has_c {
-        WcMode::Bytes
-    } else if has_m {
-        WcMode::Chars
-    } else {
-        WcMode::Full
+    match columns.as_slice() {
+        [] => WcMode::Full,
+        [Column::Lines] => WcMode::Lines,
+        [Column::Words] => WcMode::Words,
+        [Column::Bytes] => WcMode::Bytes,
+        [Column::Chars] => WcMode::Chars,
+        // Several columns, or `-L` alone: numbers with no fixed label.
+        _ => WcMode::Mixed,
     }
 }
 
@@ -337,28 +436,140 @@ mod tests {
         );
     }
 
+    use crate::core::arg_tokenizer::{TakesValueRow, TokenKind, assert_takes_value_table};
+
+    /// Plans `args` for `flavor`'s wc, marking each argument handed to the expander, so the
+    /// expectations describe one wc rather than whichever one the test machine ships.
+    fn plan(args: &[&str], flavor: Flavor) -> WcPlan {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        plan_for(&args, flavor, |path| vec![format!("<{path}>")])
+    }
+
+    fn mode_gnu(args: &[&str]) -> WcMode {
+        plan(args, Flavor::Gnu).mode
+    }
+
+    #[test]
+    fn test_grammars_match_their_tables() {
+        let gnu: [TakesValueRow; 3] = [
+            (TokenKind::Short, &["c", "m", "l", "w", "L"], None),
+            (
+                TokenKind::Long,
+                &[
+                    "bytes",
+                    "chars",
+                    "lines",
+                    "words",
+                    "max-line-length",
+                    "help",
+                    "version",
+                ],
+                None,
+            ),
+            (TokenKind::Long, &["files0-from", "total"], Some(MANDATORY)),
+        ];
+        assert_takes_value_table(&GNU_GRAMMAR, &gnu);
+        let bsd: [TakesValueRow; 2] = [
+            (TokenKind::Short, &["c", "m", "l", "w", "L"], None),
+            (TokenKind::Long, &["libxo"], Some(MANDATORY)),
+        ];
+        assert_takes_value_table(&BSD_GRAMMAR, &bsd);
+    }
+
     #[test]
     fn test_detect_mode_full() {
-        let args: Vec<String> = vec!["file.py".into()];
-        assert_eq!(detect_mode(&args), WcMode::Full);
+        assert_eq!(mode_gnu(&["file.py"]), WcMode::Full);
     }
 
     #[test]
     fn test_detect_mode_lines() {
-        let args: Vec<String> = vec!["-l".into(), "file.py".into()];
-        assert_eq!(detect_mode(&args), WcMode::Lines);
+        assert_eq!(mode_gnu(&["-l", "file.py"]), WcMode::Lines);
     }
 
     #[test]
     fn test_detect_mode_mixed() {
-        let args: Vec<String> = vec!["-lw".into(), "file.py".into()];
-        assert_eq!(detect_mode(&args), WcMode::Mixed);
+        assert_eq!(mode_gnu(&["-lw", "file.py"]), WcMode::Mixed);
     }
 
     #[test]
     fn test_detect_mode_separate_flags() {
-        let args: Vec<String> = vec!["-l".into(), "-w".into(), "file.py".into()];
-        assert_eq!(detect_mode(&args), WcMode::Mixed);
+        assert_eq!(mode_gnu(&["-l", "-w", "file.py"]), WcMode::Mixed);
+    }
+
+    #[test]
+    fn test_detect_mode_reads_long_flags_by_name() {
+        // A first-letter scan read `--chars` as `-c` (bytes) and `--bytes` as no flag at all.
+        assert_eq!(mode_gnu(&["--chars", "f"]), WcMode::Chars);
+        assert_eq!(mode_gnu(&["--bytes", "f"]), WcMode::Bytes);
+        assert_eq!(mode_gnu(&["--lin", "f"]), WcMode::Lines);
+        assert_eq!(mode_gnu(&["--words", "--lines", "f"]), WcMode::Mixed);
+    }
+
+    #[test]
+    fn test_detect_mode_ignores_flag_values_and_operands() {
+        // `--total`'s value and a `--`-protected `-l` are not count flags.
+        assert_eq!(mode_gnu(&["--total", "only", "-w", "f"]), WcMode::Words);
+        assert_eq!(mode_gnu(&["--", "-l"]), WcMode::Full);
+        // A repeated flag is still one column.
+        assert_eq!(mode_gnu(&["-l", "-l", "f"]), WcMode::Lines);
+    }
+
+    #[test]
+    fn test_detect_mode_max_line_length_is_a_column() {
+        assert_eq!(mode_gnu(&["-L", "f"]), WcMode::Mixed);
+        assert_eq!(mode_gnu(&["-lL", "f"]), WcMode::Mixed);
+    }
+
+    #[test]
+    fn test_detect_mode_gnu_permutes_bsd_stops_at_the_first_operand() {
+        assert_eq!(mode_gnu(&["f", "-l"]), WcMode::Lines);
+        assert_eq!(plan(&["f", "-l"], Flavor::Bsd).mode, WcMode::Full);
+        assert_eq!(plan(&["-l", "f"], Flavor::Bsd).mode, WcMode::Lines);
+    }
+
+    #[test]
+    fn test_detect_mode_bsd_bytes_and_chars_cancel() {
+        assert_eq!(plan(&["-cm", "f"], Flavor::Bsd).mode, WcMode::Chars);
+        assert_eq!(plan(&["-m", "-c", "f"], Flavor::Bsd).mode, WcMode::Bytes);
+        assert_eq!(mode_gnu(&["-cm", "f"]), WcMode::Mixed);
+    }
+
+    #[test]
+    fn test_reads_stdin_only_without_a_file_operand() {
+        let reads = |args: &[&str]| plan(args, Flavor::Gnu).reads_stdin;
+        assert!(reads(&[]));
+        assert!(reads(&["-l"]));
+        assert!(reads(&["-l", "-"]));
+        assert!(!reads(&["-l", "f"]));
+        // A dash-led operand after `--` is still a file.
+        assert!(!reads(&["--", "-l"]));
+        // `--total`'s value is not a file operand.
+        assert!(reads(&["--total", "always"]));
+        // `--files0-from` reads names from its file, or from stdin for `-`; the last one wins.
+        assert!(!reads(&["--files0-from", "list"]));
+        assert!(reads(&["--files0-from=-"]));
+        assert!(reads(&["--f", "list", "--files0-from", "-"]));
+        assert!(!reads(&["--files0-from", "-", "--files0-from=list"]));
+    }
+
+    #[test]
+    fn test_only_file_operands_are_expanded() {
+        assert_eq!(
+            plan(&["-l", "*.rs", "-"], Flavor::Gnu).child_args,
+            ["-l", "<*.rs>", "<->"]
+        );
+        assert_eq!(
+            plan(&["--files0-from", "list*", "--total=a*"], Flavor::Gnu).child_args,
+            ["--files0-from", "list*", "--total=a*"]
+        );
+        assert_eq!(
+            plan(&["--f", "l*", "--", "-w*"], Flavor::Gnu).child_args,
+            ["--f", "l*", "--", "<-w*>"]
+        );
+        assert_eq!(
+            plan(&["--libxo", "j*", "a*"], Flavor::Bsd).child_args,
+            ["--libxo", "j*", "<a*>"]
+        );
     }
 
     #[test]
