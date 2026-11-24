@@ -138,11 +138,12 @@ fn uses_compact_status_path(args: &[String]) -> bool {
 
 fn build_status_command(args: &[String], global_args: &[String]) -> Command {
     let mut cmd = git_cmd(global_args);
-    cmd.arg("status");
     if uses_compact_status_path(args) {
-        cmd.args(["--porcelain", "-b"]);
+        // Porcelain v1 forces root-relative paths. Native short status has the
+        // same record shape but respects cwd, -C and status.relativePaths.
+        cmd.args(["-c", "color.status=false", "status", "--short", "--branch"]);
     } else {
-        cmd.args(args);
+        cmd.arg("status").args(args);
     }
     cmd
 }
@@ -5278,7 +5279,10 @@ mod tests {
     fn test_build_status_command_default_compact() {
         let cmd = build_status_command(&[], &[]);
         let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, vec!["status", "--porcelain", "-b"]);
+        assert_eq!(
+            args,
+            vec!["-c", "color.status=false", "status", "--short", "--branch"]
+        );
     }
 
     #[test]
@@ -5305,7 +5309,10 @@ mod tests {
         let args = vec!["--short".to_string(), "--branch".to_string()];
         let cmd = build_status_command(&args, &[]);
         let cmd_args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(cmd_args, vec!["status", "--porcelain", "-b"]);
+        assert_eq!(
+            cmd_args,
+            vec!["-c", "color.status=false", "status", "--short", "--branch"]
+        );
     }
 
     #[test]
