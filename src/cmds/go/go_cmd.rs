@@ -42,8 +42,9 @@ struct PackageResult {
     build_failed: bool,
     build_errors: Vec<String>,
     failed_tests: Vec<(String, Vec<String>)>, // (test_name, output_lines)
-    package_failed: bool,                     // package-level failure (timeout, signal, etc.)
-    package_fail_output: Vec<String>,         // output lines collected before the package fail
+    interrupted_tests: Vec<(String, Vec<String>)>,
+    package_failed: bool, // package-level failure (timeout, signal, etc.)
+    package_fail_output: Vec<String>, // output lines collected before the package fail
     fuzz_summary: Option<String>,
 }
 
@@ -499,6 +500,9 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
         match event.action.as_str() {
             "pass" if event.test.is_some() => {
                 pkg_result.pass += 1;
+                if let Some(test) = &event.test {
+                    current_test_output.remove(&(package.clone(), test.clone()));
+                }
             }
             "fail" => {
                 if let Some(test) = &event.test {
@@ -526,6 +530,9 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
             }
             "skip" if event.test.is_some() => {
                 pkg_result.skip += 1;
+                if let Some(test) = &event.test {
+                    current_test_output.remove(&(package.clone(), test.clone()));
+                }
             }
             "output" => {
                 if let Some(output_text) = &event.output {
@@ -550,6 +557,20 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
                 }
             }
             _ => {} // run, pause, cont, etc.
+        }
+    }
+
+    // A panic can end a package without a terminal event for its running tests.
+    // Their output contains the crash itself, even when the package output only
+    // says FAIL. Completed and skipped tests were removed above.
+    let mut unfinished: Vec<_> = current_test_output.into_iter().collect();
+    unfinished.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for ((package, test), outputs) in unfinished {
+        if let Some(result) = packages.get_mut(&package)
+            && result.package_failed
+            && !result.build_failed
+        {
+            result.interrupted_tests.push((test, outputs));
         }
     }
 
@@ -600,10 +621,13 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
     result.push_str(&format!(" in {} packages\n", total_packages));
 
     // Show package-level failures first (timeouts, signals, panics).
-    // Skip packages that already have individual test-level failures — those are displayed
-    // in the per-package section below and the package-level event is just a cascade.
+    // A package failure after completed failures is normally just a cascade,
+    // unless another test was interrupted and still has diagnostics to show.
     for (package, pkg_result) in packages.iter() {
-        if !pkg_result.package_failed || pkg_result.fail > 0 || pkg_result.build_failed {
+        if !pkg_result.package_failed
+            || (pkg_result.fail > 0 && pkg_result.interrupted_tests.is_empty())
+            || pkg_result.build_failed
+        {
             continue;
         }
 
@@ -613,6 +637,14 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
             let trimmed = line.trim();
             if !trimmed.is_empty() {
                 result.push_str(&format!("  {}\n", truncate(trimmed, 120)));
+            }
+        }
+        for (test, outputs) in &pkg_result.interrupted_tests {
+            result.push_str(&format!("  {} (interrupted)\n", test));
+            for line in outputs {
+                if !line.is_empty() && !line.starts_with("=== RUN") {
+                    result.push_str(&format!("    {}\n", line));
+                }
             }
         }
     }
@@ -949,6 +981,36 @@ fn compact_package_name(package: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn async_panic_keeps_the_unfinished_tests_diagnostics() {
+        // Captured with Go 1.19.8: a goroutine panic ends the package without
+        // emitting a test-level fail event for TestCrash.
+        let raw = include_str!("../../../tests/fixtures/go_test_async_panic_raw.jsonl");
+        let shown = filter_go_test_json(raw);
+        for detail in [
+            "TestCrash",
+            "diagnostic before crash",
+            "panic: async test crash",
+            "example.com/panicfixture.TestCrash.func1()",
+            "panic_test.go:7",
+        ] {
+            assert!(shown.contains(detail), "missing {detail}: {shown}");
+        }
+        assert!(!shown.contains("completed test chatter"), "{shown}");
+        assert!(!shown.contains("skipped test chatter"), "{shown}");
+        assert!(shown.contains("1 passed, 1 failed, 1 skipped"), "{shown}");
+        assert!(shown.len() * 100 <= raw.len() * 80);
+
+        // An earlier ordinary failure must not hide a later package crash.
+        let prior_failure = concat!(
+            "{\"Action\":\"output\",\"Package\":\"example.com/panicfixture\",\"Test\":\"TestEarlier\",\"Output\":\"earlier assertion error\\n\"}\n",
+            "{\"Action\":\"fail\",\"Package\":\"example.com/panicfixture\",\"Test\":\"TestEarlier\"}\n"
+        );
+        let shown = filter_go_test_json(&format!("{prior_failure}{raw}"));
+        assert!(shown.contains("earlier assertion error"), "{shown}");
+        assert!(shown.contains("panic: async test crash"), "{shown}");
+    }
 
     #[test]
     fn auto_detection_requires_leading_stream_evidence() {
