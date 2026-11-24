@@ -444,7 +444,7 @@ pub fn run(
         return Ok(1);
     }
 
-    let (files, filtered) = native_walk(
+    let (files, filtered, unread) = native_walk(
         path,
         effective_pattern,
         max_depth,
@@ -468,7 +468,38 @@ pub fn run(
         &timer,
     );
 
-    Ok(0)
+    // What the walk could not read was not searched. Say so and fail as find
+    // does, or an empty listing reads as "no such file".
+    for line in &unread {
+        eprintln!("{line}");
+    }
+    Ok(if unread.is_empty() { 0 } else { 1 })
+}
+
+/// The path an error of the walk is about, when it carries one.
+fn walk_error_path(err: &ignore::Error) -> Option<&Path> {
+    match err {
+        ignore::Error::WithPath { path, .. } => Some(path),
+        ignore::Error::WithDepth { err, .. } | ignore::Error::WithLineNumber { err, .. } => {
+            walk_error_path(err)
+        }
+        _ => None,
+    }
+}
+
+/// A read failure of the walk in find's own words: `find: 'dir': Permission denied`.
+/// `None` for an error that is not an I/O failure, such as a malformed ignore file.
+fn walk_error_line(err: &ignore::Error) -> Option<String> {
+    let io = err.io_error()?;
+    let reason = match io.kind() {
+        std::io::ErrorKind::PermissionDenied => "Permission denied".to_string(),
+        std::io::ErrorKind::NotFound => "No such file or directory".to_string(),
+        _ => io.to_string(),
+    };
+    Some(match walk_error_path(err) {
+        Some(path) => format!("find: '{}': {}", path.display(), reason),
+        None => format!("find: {reason}"),
+    })
 }
 
 const DISCLOSURE_ENTRY_CAP: usize = 20_000;
@@ -480,7 +511,7 @@ fn native_walk(
     want_dirs: bool,
     case_insensitive: bool,
     ambient_ignores: bool,
-) -> (Vec<String>, Vec<String>) {
+) -> (Vec<String>, Vec<String>, Vec<String>) {
     // When the pattern targets dotfiles (e.g. -name ".claude.json"), we must walk hidden
     // entries; otherwise skip them to keep results tidy (#1101).
     let search_hidden = pattern.starts_with('.');
@@ -500,10 +531,18 @@ fn native_walk(
     }
 
     let mut files = Vec::new();
+    let mut unread = Vec::new();
     let mut visited: HashSet<std::path::PathBuf> = HashSet::new();
     let mut visited_dirs: Vec<(std::path::PathBuf, usize)> = Vec::new();
     let mut disclose = true;
-    for entry in builder.build().flatten() {
+    for result in builder.build() {
+        let entry = match result {
+            Ok(entry) => entry,
+            Err(err) => {
+                unread.extend(walk_error_line(&err));
+                continue;
+            }
+        };
         if disclose {
             if visited.len() >= DISCLOSURE_ENTRY_CAP {
                 disclose = false;
@@ -539,7 +578,7 @@ fn native_walk(
     } else {
         Vec::new()
     };
-    (files, filtered)
+    (files, filtered, unread)
 }
 
 fn entry_display(
@@ -1445,7 +1484,7 @@ mod tests {
                 match dispatch(&given).expect("dispatch") {
                     Dispatch::Native { parsed, .. } => {
                         assert!(*native, "{words:?} went native");
-                        let (files, _) = native_walk(
+                        let (files, _, _) = native_walk(
                             &parsed.path,
                             &parsed.pattern,
                             parsed.max_depth,
@@ -1561,7 +1600,7 @@ mod tests {
         std::fs::write(root.join("build").join("out.txt"), "w").unwrap();
         let root_s = root.to_string_lossy().into_owned();
 
-        let (files, filtered) = native_walk(&root_s, "*.txt", None, false, false, false);
+        let (files, filtered, _) = native_walk(&root_s, "*.txt", None, false, false, false);
         assert_eq!(files, vec!["visible.txt".to_string()]);
         assert_eq!(
             filtered,
@@ -1572,10 +1611,10 @@ mod tests {
             ]
         );
 
-        let (_, filtered) = native_walk(&root_s, "*.txt", Some(0), false, false, false);
+        let (_, filtered, _) = native_walk(&root_s, "*.txt", Some(0), false, false, false);
         assert!(filtered.is_empty(), "{filtered:?}");
 
-        let (files, filtered) = native_walk(&root_s, ".gitignore", None, false, false, false);
+        let (files, filtered, _) = native_walk(&root_s, ".gitignore", None, false, false, false);
         assert_eq!(files, vec![".gitignore".to_string()]);
         assert_eq!(filtered, vec!["build/".to_string()]);
     }
@@ -1618,9 +1657,80 @@ mod tests {
         std::fs::write(root.join("sub").join(".hidden").join("h.txt"), "h").unwrap();
         std::os::unix::fs::symlink(root.join("sub"), root.join("link")).unwrap();
         let link = root.join("link").to_string_lossy().into_owned();
-        let (files, filtered) = native_walk(&link, "*.txt", None, false, false, false);
+        let (files, filtered, _) = native_walk(&link, "*.txt", None, false, false, false);
         assert_eq!(files, vec!["a.txt".to_string()]);
         assert_eq!(filtered, vec![".hidden/".to_string()]);
+    }
+
+    /// A tree with one readable match and one match inside a directory nobody
+    /// may read. `None` when the directory can still be read, as it can by root.
+    #[cfg(unix)]
+    fn tree_with_unreadable_dir(root: &Path) -> Option<std::path::PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::create_dir(root.join("open")).unwrap();
+        std::fs::write(root.join("open").join("a.txt"), "a").unwrap();
+        let locked = root.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("b.txt"), "b").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            unlock(&locked);
+            return None;
+        }
+        Some(locked)
+    }
+
+    /// Lets the temporary directory be removed again.
+    #[cfg(unix)]
+    fn unlock(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_walk_reports_an_unreadable_directory() {
+        let tmp = test_isolation::tempdir();
+        let Some(locked) = tree_with_unreadable_dir(tmp.path()) else {
+            return;
+        };
+        let root = tmp.path().to_string_lossy().into_owned();
+
+        let (files, _, unread) = native_walk(&root, "*.txt", None, false, false, false);
+        unlock(&locked);
+
+        assert_eq!(files, vec!["open/a.txt".to_string()]);
+        assert_eq!(
+            unread,
+            vec![format!("find: '{}': Permission denied", locked.display())]
+        );
+    }
+
+    /// The exit status is the one find itself gives for the same tree.
+    #[cfg(unix)]
+    #[test]
+    fn native_run_fails_like_find_on_an_unreadable_directory() {
+        let tmp = test_isolation::tempdir();
+        let tee = test_isolation::tempdir();
+        let Some(locked) = tree_with_unreadable_dir(tmp.path()) else {
+            return;
+        };
+        let root = tmp.path().to_string_lossy().into_owned();
+        let expected = crate::core::utils::resolved_command("find")
+            .args([root.as_str(), "-name", "*.txt"])
+            .output()
+            .map(|o| o.status.code().unwrap_or(1))
+            .unwrap_or(1);
+
+        let code = user_env::with_path("RTK_TEE_DIR", Some(tee.path()), || {
+            run("find", "*.txt", &root, 10, false, None, "f", false, 0).unwrap()
+        });
+        unlock(&locked);
+
+        assert_eq!(expected, 1, "find itself reports the unreadable directory");
+        assert_eq!(code, expected);
     }
 
     #[test]
