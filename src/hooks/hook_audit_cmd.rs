@@ -1,21 +1,8 @@
 //! Audits hook activity logs to show what commands were rewritten and when.
 
-use crate::core::user_env;
+use crate::core::user_dirs;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::path::PathBuf;
-
-/// Default log file location (aligned with hook's $HOME/.local/share/rtk/).
-fn default_log_path() -> PathBuf {
-    if let Some(dir) = user_env::var("RTK_AUDIT_DIR") {
-        PathBuf::from(dir).join("hook-audit.log")
-    } else {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        PathBuf::from(home)
-            .join(".local/share/rtk")
-            .join("hook-audit.log")
-    }
-}
 
 /// A single parsed audit log entry.
 struct AuditEntry {
@@ -74,7 +61,8 @@ fn filter_since_days(entries: &[AuditEntry], days: u64) -> Vec<&AuditEntry> {
 }
 
 pub fn run(since_days: u64, verbose: u8) -> Result<()> {
-    let log_path = default_log_path();
+    let log_path =
+        user_dirs::hook_audit_log().context("Could not determine the hook audit log location")?;
 
     if !log_path.exists() {
         println!("No audit log found at {}", log_path.display());
