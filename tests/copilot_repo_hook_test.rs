@@ -25,31 +25,38 @@ fn bash_hook() -> String {
         .to_string()
 }
 
-fn run_hook(path: &std::path::Path) -> std::process::Output {
+fn run_hook(path: &std::path::Path, payload: Option<&str>) -> std::process::Output {
     let mut cmd = Command::new("/bin/sh");
     // Isolation first: it clears the environment and picks the working directory.
     common::isolate_rtk(&mut cmd);
     let mut child = cmd
         .args(["-c", &bash_hook()])
         .env("PATH", path)
-        .stdin(Stdio::piped())
+        .stdin(if payload.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn hook");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(PAYLOAD.as_bytes())
-        .expect("write payload");
+    if let Some(payload) = payload {
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(payload.as_bytes())
+            .expect("write payload");
+    }
     child.wait_with_output().expect("hook output")
 }
 
 #[test]
 fn hook_is_silent_and_succeeds_without_rtk() {
     let empty = common::tempdir();
-    let out = run_hook(empty.path());
+    // The missing-RTK branch exits before reading stdin, so writing a payload races it.
+    let out = run_hook(empty.path(), None);
     assert!(out.status.success(), "exit {:?}", out.status.code());
     assert!(out.stdout.is_empty());
     assert!(out.stderr.is_empty());
@@ -61,7 +68,7 @@ fn hook_reaches_rtk_when_present() {
     // Only the path is read; no child is spawned from it.
     std::os::unix::fs::symlink(common::rtk_command().get_program(), bin.path().join("rtk"))
         .expect("link rtk");
-    let out = run_hook(bin.path());
+    let out = run_hook(bin.path(), Some(PAYLOAD));
     assert!(out.status.success(), "exit {:?}", out.status.code());
     let reply: serde_json::Value = serde_json::from_slice(&out.stdout).expect("hook reply is JSON");
     let hook_output = &reply["hookSpecificOutput"];
