@@ -271,13 +271,19 @@ fn run_framework_test(invocation: TestInvocation, verbose: u8) -> Result<i32> {
     let result = exec_capture(&mut cmd).context(format!("Failed to run {}", framework))?;
     let combined = result.combined();
 
-    let filtered = format_test_output(
+    let mut filtered = format_test_output(
         framework,
         &result.stdout,
         &combined,
         invocation.passthrough,
         verbose,
     );
+    if !invocation.passthrough && !result.success() {
+        filtered.text.push_str(&format!(
+            "\n{} exited with code {}",
+            framework, result.exit_code
+        ));
+    }
     let tee_label = format!("{}_run", framework);
 
     let rendered = render_test_output(&filtered, &combined, &tee_label, result.exit_code);
