@@ -1,0 +1,29 @@
+Progress: resolved 1, reused 0, downloaded 0, added 0
+
+   ╭───────────────────────────────────────────────────────────────────╮
+   │                                                                   │
+   │                Update available! 9.15.9 → 12.23.0.                │
+   │   Changelog: https://github.com/pnpm/pnpm/releases/tag/v12.23.0   │
+   │                 Run "pnpm add -g pnpm" to update.                 │
+   │                                                                   │
+   ╰───────────────────────────────────────────────────────────────────╯
+
+Packages: +9
++++++++++
+Progress: resolved 9, reused 0, downloaded 9, added 9, done
+
+dependencies:
++ react 17.0.2 (19.3.1 is available)
++ react-dom 18.2.0 (19.3.1 is available)
++ react-redux 9.1.0 (9.3.1 is available)
+
+ ERR_PNPM_PEER_DEP_ISSUES  Unmet peer dependencies
+
+.
+├─┬ react-dom 18.2.0
+│ └── ✕ unmet peer react@^18.2.0: found 17.0.2
+└─┬ react-redux 9.1.0
+  └── ✕ unmet peer react@^18.0: found 17.0.2
+
+hint: If you don't want pnpm to fail on peer dependency issues, add "strict-peer-dependencies=false" to an .npmrc file at the root of your project.
+

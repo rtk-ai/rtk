@@ -1,0 +1,10 @@
+Already up to date
+
+> boxed-case@1.0.0 postinstall /project
+> node -e "console.log('┌───────────────────────────┐'); console.log('│ Error: Python 3 not found │'); console.log('└───────────────────────────┘'); process.exit(1)"
+
+┌───────────────────────────┐
+│ Error: Python 3 not found │
+└───────────────────────────┘
+ ELIFECYCLE  Command failed with exit code 1.
+ WARN   Local package.json exists, but node_modules missing, did you mean to install?

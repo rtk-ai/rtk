@@ -132,6 +132,28 @@ fn install_failure_with_blank_stderr_shows_stdout_reason() {
 }
 
 #[test]
+fn install_failure_with_only_noise_on_stdout_shows_it_raw() {
+    // Nothing but progress and the `+` bar: the filter keeps nothing, and an
+    // empty output must not hide the failure, so stdout is shown as is.
+    let temp = tempfile::tempdir().expect("tempdir");
+    fake_pnpm(
+        temp.path(),
+        "echo 'Progress: resolved 1, reused 0, downloaded 0, added 0'\n\
+         echo '+'\n\
+         exit 2",
+    );
+
+    let output = run_rtk(temp.path(), &["pnpm", "install"]);
+    let stdout = text(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(2), "exit code must propagate");
+    assert_eq!(
+        stdout, "Progress: resolved 1, reused 0, downloaded 0, added 0\n+\n",
+        "got: {stdout:?}"
+    );
+}
+
+#[test]
 fn list_failure_from_a_wrapper_shows_every_stdout_line() {
     // pnpm reports list errors on stderr; a wrapper may refuse on stdout (#4858).
     // Every line is the reason, including the ones without an error keyword.
