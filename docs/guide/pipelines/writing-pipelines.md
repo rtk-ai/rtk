@@ -34,7 +34,7 @@ Paths use the Linux spelling. The user directory is the platform config dir: `~/
 
 ```text
 schema_version = 1
-[pipeline]                         # name, extends, enabled
+[pipeline]                         # name, extends, enabled, rtk_min
 
 [[hook.before_tool.<subject>]]     # rules — before a tool runs
 [[hook.after_tool.<subject>]]      # rules — after a tool ran
@@ -58,6 +58,7 @@ A minimal file uses one or two of these.
 | `name` | optional for your files; `rtk:*` for built-ins |
 | `extends` | a built-in name or a list of them: `"rtk:default"`, `["rtk:delegate-reads", "rtk:terse"]`. Left to right; a shared ancestor is inherited once; the same rule name from two parents is an error unless the rules are identical. Built-ins only — local files compose by being loaded, not by extending each other. Omit for a standalone file. |
 | `enabled` | `false` turns the whole file off without moving it. Default `true`. |
+| `rtk_min` | the oldest rtk version this file is written for, like `"1.3.0"`. An older rtk still loads the file and warns (W027) that parts of it may not load or work; it never refuses the file for this alone. RTK Pro compares the OSS core version it embeds (`core X.Y.Z` in `rtk --version`). rtk 1.2 and older do not know the key and refuse the file, so set it only on a file that needs a newer rtk anyway, such as one with [dependencies](./tasks.md#dependencies). |
 
 ## The tree — where a rule lives
 

@@ -58,7 +58,8 @@ const DEPENDENCY_KEYS: &[&str] = &[
 ];
 const GUARD_KEYS: &[&str] = &["never_worse", "min_size"];
 const REMOVED_GUARD_KEYS: &[&str] = &["max_recovery_rate"];
-const PIPELINE_KEYS: &[&str] = &["name", "extends", "enabled"];
+const PIPELINE_KEYS: &[&str] = &["name", "extends", "enabled", "rtk_min"];
+const RTK_VERSION: &str = env!("CARGO_PKG_VERSION");
 const TOP_KEYS: &[&str] = &[
     "schema_version",
     "pipeline",
@@ -216,6 +217,7 @@ pub struct GuardsDef {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PipelineFile {
     pub name: Option<String>,
+    pub rtk_min: Option<String>,
     pub extends: Vec<String>,
     pub enabled: bool,
     pub rules: BTreeMap<Position, Vec<RuleDef>>,
@@ -365,6 +367,28 @@ fn parse_pipeline_meta(parser: &mut Parser, value: &toml::Value, file: &mut Pipe
         match key.as_str() {
             "name" => file.name = value.as_str().map(str::to_string),
             "enabled" => file.enabled = value.as_bool().unwrap_or(true),
+            "rtk_min" => match value.as_str().filter(|v| version_triple(v).is_some()) {
+                Some(min) => {
+                    file.rtk_min = Some(min.to_string());
+                    if minimum_unmet(RTK_VERSION, min) {
+                        let diag = parser.diag(
+                            Code::W027,
+                            format!(
+                                "this pipeline needs rtk {min} or newer and this rtk is {RTK_VERSION}: parts of it may not load or work"
+                            ),
+                        );
+                        diag.context = Some("[pipeline]".to_string());
+                        diag.hint = Some("update rtk; the file still loads".to_string());
+                    }
+                }
+                None => {
+                    let diag = parser.diag(
+                        Code::W027,
+                        "`rtk_min` must be a version like \"1.3.0\"; it is ignored".to_string(),
+                    );
+                    diag.context = Some("[pipeline]".to_string());
+                }
+            },
             "extends" => match value {
                 toml::Value::String(one) => file.extends = vec![one.clone()],
                 toml::Value::Array(items) => {
@@ -384,6 +408,30 @@ fn parse_pipeline_meta(parser: &mut Parser, value: &toml::Value, file: &mut Pipe
                 unknown_key(parser, other, PIPELINE_KEYS, "[pipeline]");
             }
         }
+    }
+}
+
+fn version_triple(version: &str) -> Option<[u64; 3]> {
+    let core = version
+        .trim()
+        .trim_start_matches('v')
+        .split(['-', '+'])
+        .next()?;
+    let parts: Vec<&str> = core.split('.').collect();
+    if parts.len() > 3 {
+        return None;
+    }
+    let mut out = [0u64; 3];
+    for (slot, part) in out.iter_mut().zip(&parts) {
+        *slot = part.parse().ok()?;
+    }
+    Some(out)
+}
+
+fn minimum_unmet(current: &str, min: &str) -> bool {
+    match (version_triple(current), version_triple(min)) {
+        (Some(have), Some(need)) => have[0] > 0 && have < need,
+        _ => false,
     }
 }
 
@@ -1725,5 +1773,46 @@ mod dependency_tests {
         );
         assert_eq!(url_authority("http://user@127.0.0.1:41733/"), None);
         assert_eq!(url_authority("ftp://127.0.0.1:41733"), None);
+    }
+}
+
+#[cfg(test)]
+mod rtk_min_tests {
+    use super::*;
+
+    #[test]
+    fn the_minimum_compares_release_numbers_only() {
+        assert!(minimum_unmet("1.2.1", "1.3.0"));
+        assert!(minimum_unmet("1.2.1", "1.3"));
+        assert!(minimum_unmet("v1.2.1", "v1.2.2"));
+        assert!(!minimum_unmet("1.3.0", "1.3.0"));
+        assert!(!minimum_unmet("1.3.0-rc.2", "1.3.0"));
+        assert!(!minimum_unmet("1.4.0", "1.3.9"));
+        assert!(!minimum_unmet("2.0.0", "1.9"));
+    }
+
+    #[test]
+    fn a_development_build_or_an_unreadable_version_never_warns() {
+        assert!(!minimum_unmet("0.49.0", "1.3.0"));
+        assert!(!minimum_unmet("1.2.1", "soon"));
+        assert!(!minimum_unmet("1.2.1", "1.2.3.4"));
+        assert_eq!(version_triple("1.3"), Some([1, 3, 0]));
+        assert_eq!(version_triple("v1.3.0+build.7"), Some([1, 3, 0]));
+        assert_eq!(version_triple(""), None);
+    }
+
+    #[test]
+    fn rtk_min_is_read_and_a_bad_value_only_warns() {
+        let parsed = parse("[pipeline]\nname = \"p\"\nrtk_min = \"0.1.0\"\n", "p.toml");
+        assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+        assert_eq!(
+            parsed.file.expect("parses").rtk_min.as_deref(),
+            Some("0.1.0")
+        );
+
+        let parsed = parse("[pipeline]\nname = \"p\"\nrtk_min = 3\n", "p.toml");
+        let codes: Vec<Code> = parsed.diagnostics.iter().map(|d| d.code).collect();
+        assert_eq!(codes, [Code::W027]);
+        assert!(parsed.file.expect("still loads").rtk_min.is_none());
     }
 }
