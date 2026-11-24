@@ -1943,7 +1943,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     let timer = core::tracking::TimedExecution::start();
 
     // TOML filter lookup — bypass with RTK_NO_TOML=1
-    // Use basename of args[0] so absolute paths (/usr/bin/make) still match "^make\b".
+    // Prefer an explicit path match, then allow basename filters such as "^make\b".
     let lookup_cmd = {
         let base = std::path::Path::new(&args[0])
             .file_name()
@@ -1957,7 +1957,8 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     let toml_match = if core::toml_filter::toml_disabled() {
         None
     } else {
-        core::toml_filter::find_matching_filter(&lookup_cmd)
+        core::toml_filter::find_matching_filter(&raw_command)
+            .or_else(|| core::toml_filter::find_matching_filter(&lookup_cmd))
     };
 
     if let Some(filter) = toml_match {

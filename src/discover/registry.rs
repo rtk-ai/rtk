@@ -2040,8 +2040,9 @@ fn rewrite_segment_inner(
             }
             rtk_equivalent
         }
-        // TOML-only commands: consult the registry so the hook filters them too (#2179).
-        Classification::Unsupported { .. } => {
+        Classification::Ignored if !is_direct_shell_script(cmd_part) => return None,
+        // TOML-only commands and explicitly matched shell scripts (#2179, #4310).
+        Classification::Unsupported { .. } | Classification::Ignored => {
             if context != RewriteContext::Normal {
                 return None;
             }
@@ -2049,19 +2050,23 @@ fn rewrite_segment_inner(
                 return None;
             }
             let normalized = strip_absolute_path(cmd_part.trim());
-            if is_excluded(&normalized, excluded) {
+            if is_excluded(cmd_part, excluded) || is_excluded(&normalized, excluded) {
                 return None;
             }
             let base = normalized.split_whitespace().next().unwrap_or("");
             if crate::core::toml_filter::is_rtk_reserved_command(base) {
                 return None;
             }
-            if crate::core::toml_filter::command_matches_filter(&normalized) {
+            if matches!(base, "bash" | "sh") && !is_direct_shell_script(cmd_part) {
+                return None;
+            }
+            if crate::core::toml_filter::command_matches_filter(cmd_part)
+                || crate::core::toml_filter::command_matches_filter(&normalized)
+            {
                 return Some(format!("rtk {}{}", cmd_part, redirect_suffix));
             }
             return None;
         }
-        Classification::Ignored => return None,
     };
 
     // Find the matching rule (rtk_cmd values are unique across all rules)
@@ -2084,6 +2089,22 @@ fn rewrite_segment_inner(
     // supported command re-attaches it here, once, exactly as typed.
     rewrite_command_part(rule, cmd_part)
         .map(|rewritten| format!("{}{}", rewritten, redirect_suffix))
+}
+
+/// Only a direct script operand opts an ignored shell into TOML filtering.
+/// Command strings and shell options keep the shell-wrapper policy above.
+fn is_direct_shell_script(command: &str) -> bool {
+    let words = shell_split(command);
+    let Some((shell, args)) = words.split_first() else {
+        return false;
+    };
+    if !matches!(command_basename(shell), "bash" | "sh") {
+        return false;
+    }
+    let tokens = arg_tokenizer::tokenize_grammar(args, &Grammar::new(Dialect::Posix, &[]));
+    tokens.first().is_some_and(|token| {
+        token.kind == ArgTokenKind::Positional && token.text != "-" && !token.text.is_empty()
+    })
 }
 
 /// Rewrite the command part of a segment (trailing redirects already split
