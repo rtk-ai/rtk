@@ -35,7 +35,13 @@ impl VersionCache {
 pub fn parse_version(s: &str) -> (u32, u32, u32) {
     let s = s.trim().trim_start_matches('v');
     // Strip prerelease or build metadata if present (e.g. "1.2.3-rc1" -> "1.2.3")
-    let core = s.split('-').next().unwrap_or(s).split('+').next().unwrap_or(s);
+    let core = s
+        .split('-')
+        .next()
+        .unwrap_or(s)
+        .split('+')
+        .next()
+        .unwrap_or(s);
     let mut parts = core.split('.').filter_map(|p| p.parse::<u32>().ok());
     (
         parts.next().unwrap_or(0),
@@ -49,7 +55,10 @@ pub fn is_newer(remote: &str, current: &str) -> bool {
 }
 
 pub fn install_method_from_path(path: &str) -> &'static str {
-    if path.contains("/Cellar/rtk/") || path.contains("/homebrew/") || path.contains("/opt/homebrew/") {
+    if path.contains("/Cellar/rtk/")
+        || path.contains("/homebrew/")
+        || path.contains("/opt/homebrew/")
+    {
         "homebrew"
     } else if path.contains("/.cargo/bin/") || path.contains(r"\.cargo\bin\") {
         "cargo"
@@ -103,7 +112,9 @@ pub fn upgrade_command_for_method(method: &str) -> Option<&'static str> {
     match method {
         "homebrew" => Some("brew upgrade rtk"),
         "cargo" => Some("cargo install --git https://github.com/rtk-ai/rtk rtk"),
-        "script" => Some("curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh"),
+        "script" => {
+            Some("curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh")
+        }
         "nix" => Some("nix profile upgrade rtk"),
         "winget" => Some("winget upgrade rtk-ai.rtk"),
         _ => None,
@@ -151,7 +162,10 @@ pub fn notification_message() -> Option<String> {
         let method = detect_install_method();
         let message = match upgrade_command_for_method(method) {
             Some(cmd) => format!("[rtk] {} available. Run: {}", tag, cmd),
-            None => format!("[rtk] {} available. See https://github.com/rtk-ai/rtk/releases", tag),
+            None => format!(
+                "[rtk] {} available. See https://github.com/rtk-ai/rtk/releases",
+                tag
+            ),
         };
         Some(message)
     } else {
@@ -161,8 +175,7 @@ pub fn notification_message() -> Option<String> {
 
 /// Checks GitHub for updates in a non-blocking background thread if interval has elapsed.
 pub fn maybe_refresh_background() {
-    if user_env::var("RTK_NO_UPDATE_CHECK").as_deref() == Some("1")
-        || user_env::var("CI").is_some()
+    if user_env::var("RTK_NO_UPDATE_CHECK").as_deref() == Some("1") || user_env::var("CI").is_some()
     {
         return;
     }
@@ -176,7 +189,10 @@ pub fn maybe_refresh_background() {
     }
 
     // Touch/claim the timestamp immediately to prevent race stampedes from concurrent commands
-    let existing_version = cache.as_ref().map(|c| c.latest_version.clone()).unwrap_or_default();
+    let existing_version = cache
+        .as_ref()
+        .map(|c| c.latest_version.clone())
+        .unwrap_or_default();
     let claim_cache = VersionCache {
         latest_version: existing_version,
         last_checked_epoch: now,
@@ -292,7 +308,10 @@ mod tests {
 
     #[test]
     fn test_upgrade_command_for_method() {
-        assert_eq!(upgrade_command_for_method("homebrew"), Some("brew upgrade rtk"));
+        assert_eq!(
+            upgrade_command_for_method("homebrew"),
+            Some("brew upgrade rtk")
+        );
         assert_eq!(
             upgrade_command_for_method("cargo"),
             Some("cargo install --git https://github.com/rtk-ai/rtk rtk")
@@ -301,8 +320,14 @@ mod tests {
             upgrade_command_for_method("script"),
             Some("curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh")
         );
-        assert_eq!(upgrade_command_for_method("nix"), Some("nix profile upgrade rtk"));
-        assert_eq!(upgrade_command_for_method("winget"), Some("winget upgrade rtk-ai.rtk"));
+        assert_eq!(
+            upgrade_command_for_method("nix"),
+            Some("nix profile upgrade rtk")
+        );
+        assert_eq!(
+            upgrade_command_for_method("winget"),
+            Some("winget upgrade rtk-ai.rtk")
+        );
         assert_eq!(upgrade_command_for_method("other"), None);
     }
 
@@ -344,6 +369,8 @@ mod tests {
 
         // Test notification_message formatting (falls back to GitHub releases link when in test harness)
         let msg = notification_message().expect("should produce notification for v99.0.0");
-        assert!(msg.contains("[rtk] v99.0.0 available. See https://github.com/rtk-ai/rtk/releases"));
+        assert!(
+            msg.contains("[rtk] v99.0.0 available. See https://github.com/rtk-ai/rtk/releases")
+        );
     }
 }

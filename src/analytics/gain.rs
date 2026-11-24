@@ -1198,6 +1198,12 @@ pub fn run(
             print_pro_hint_if_due(&tracker);
         }
 
+        // Display update notification at bottom of text report if available
+        if let Some(msg) = crate::core::version_check::notification_message() {
+            eprintln!();
+            eprintln!("{}", msg.yellow());
+        }
+
         return Ok(());
     }
 
