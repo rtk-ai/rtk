@@ -3,6 +3,7 @@
 //! Replaces verbose `--output table`/`text` with JSON, then compresses.
 //! Specialized filters for high-frequency commands (STS, S3, EC2, ECS, RDS, CloudFormation).
 
+use crate::core::arg_tokenizer::{TokenKind, tokenize};
 use crate::core::guard::never_worse;
 use crate::core::shell::display_args;
 use crate::core::stream::{CaptureResult, exec_capture};
@@ -47,6 +48,17 @@ impl FilterResult {
 
 /// Run an AWS CLI command with token-optimized output
 pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
+    if subcommand == "lambda"
+        && tokenize(args)
+            .iter()
+            .any(|token| token.kind == TokenKind::Long && token.text == "output")
+    {
+        let native_args = std::iter::once(std::ffi::OsString::from(subcommand))
+            .chain(args.iter().map(std::ffi::OsString::from))
+            .collect::<Vec<_>>();
+        return crate::core::runner::run_passthrough("aws", &native_args, verbose);
+    }
+
     // Build the full sub-path: e.g. "sts" + ["get-caller-identity"] -> "sts get-caller-identity"
     let full_sub = display_args(
         &std::iter::once(subcommand)
