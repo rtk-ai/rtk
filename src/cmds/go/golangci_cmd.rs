@@ -6,7 +6,7 @@ use crate::core::config;
 use crate::core::runner;
 use crate::core::shell::display_args;
 use crate::core::stream::exec_capture_unguarded;
-use crate::core::truncate::CAP_WARNINGS;
+use crate::core::truncate::{CAP_ERRORS, CAP_WARNINGS};
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
 use serde::Deserialize;
@@ -128,10 +128,8 @@ struct Position {
     #[serde(rename = "Filename")]
     filename: String,
     #[serde(rename = "Line")]
-    #[allow(dead_code)]
     line: usize,
     #[serde(rename = "Column")]
-    #[allow(dead_code)]
     column: usize,
     #[serde(rename = "Offset", default)]
     #[allow(dead_code)]
@@ -143,7 +141,6 @@ struct Issue {
     #[serde(rename = "FromLinter")]
     from_linter: String,
     #[serde(rename = "Text")]
-    #[allow(dead_code)]
     text: String,
     #[serde(rename = "Pos")]
     pos: Position,
@@ -393,6 +390,31 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
         total_issues, total_files
     ));
 
+    // Typecheck Text can contain several compiler errors; a source line alone
+    // often only says "package main". Keep these ahead of the capped summaries.
+    let mut typecheck_count = 0;
+    for issue in issues
+        .iter()
+        .filter(|issue| issue.from_linter == "typecheck")
+    {
+        typecheck_count += 1;
+        if typecheck_count <= CAP_ERRORS {
+            result.push_str(&format!(
+                "{}:{}:{}: {} (typecheck)\n",
+                issue.pos.filename, issue.pos.line, issue.pos.column, issue.text
+            ));
+        }
+    }
+    if typecheck_count > CAP_ERRORS {
+        result.push_str(&format!(
+            "… +{} more typecheck issues\n",
+            typecheck_count - CAP_ERRORS
+        ));
+        if let Some(hint) = crate::core::tee::force_tee_hint(output, "golangci-typecheck") {
+            result.push_str(&format!("  {hint}\n"));
+        }
+    }
+
     // Show top linters
     let mut linter_counts: Vec<_> = by_linter.iter().collect();
     linter_counts.sort_by(|a, b| b.1.cmp(a.1));
@@ -474,6 +496,49 @@ mod tests {
     use super::*;
     use crate::core::arg_tokenizer::assert_takes_value_table;
     use crate::core::tracking::estimate_tokens;
+
+    #[test]
+    fn test_golangci_typecheck_retains_multiline_diagnostics() {
+        let diagnostic = "# repro\nmain.go:8:8: not enough arguments in call to doWork\n\thave (string)\n\twant (context.Context, string)\nmain.go:10:2: undefined: undefinedFunc";
+        let input = serde_json::json!({"Issues": [{
+            "FromLinter": "typecheck", "Text": diagnostic,
+            "Pos": {"Filename": "main.go", "Line": 1, "Column": 1},
+            "SourceLines": ["package main"]
+        }, {
+            "FromLinter": "typecheck", "Text": "undefined: anotherFunc",
+            "Pos": {"Filename": "other.go", "Line": 8, "Column": 2}
+        }]})
+        .to_string();
+        for version in [1, 2] {
+            let result = filter_golangci_json(&input, version);
+            assert!(result.contains(diagnostic), "v{version}: {result}");
+            assert!(result.contains("main.go:1:1:"), "v{version}: {result}");
+            assert!(
+                result.contains("other.go:8:2: undefined: anotherFunc"),
+                "v{version}: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_golangci_typecheck_diagnostic_cap() {
+        let issues = (0..CAP_ERRORS + 2)
+            .map(|i| {
+                serde_json::json!({
+                    "FromLinter": "typecheck", "Text": format!("undefined: symbol_{i}"),
+                    "Pos": {"Filename": "main.go", "Line": i + 1, "Column": 2}
+                })
+            })
+            .collect::<Vec<_>>();
+        let input = serde_json::json!({"Issues": issues}).to_string();
+        for version in [1, 2] {
+            let result = filter_golangci_json(&input, version);
+            assert_eq!(result.matches("(typecheck)").count(), CAP_ERRORS);
+            assert!(result.contains("main.go:1:2: undefined: symbol_0 (typecheck)"));
+            assert!(!result.contains(&format!("undefined: symbol_{CAP_ERRORS} (typecheck)")));
+            assert!(result.contains("… +2 more typecheck issues"));
+        }
+    }
 
     #[test]
     fn test_filter_golangci_no_issues() {
