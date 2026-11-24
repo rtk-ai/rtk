@@ -1,7 +1,9 @@
 //! Shows users how many tokens RTK has saved them over time.
 
 use crate::core::display_helpers::{format_duration, print_period_table};
-use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
+use crate::core::tracking::{
+    DayStats, FallbackOutcome, MonthStats, ParseFailureRecord, Tracker, WeekStats,
+};
 use crate::core::user_dirs;
 use crate::core::utils::{format_tokens, truncate};
 use crate::hooks::hook_check;
@@ -1851,24 +1853,28 @@ fn check_rtk_disabled_bypass() -> Option<String> {
 fn show_failures(tracker: &Tracker) -> Result<()> {
     let summary = tracker
         .get_parse_failure_summary()
-        .context("Failed to load parse failure data")?;
+        .context("Failed to load fallback data")?;
 
     if summary.total == 0 {
-        println!("No parse failures recorded.");
-        println!("This means all commands parsed successfully (or fallback hasn't triggered yet).");
+        println!("No fallback events recorded.");
         return Ok(());
     }
 
-    println!("{}", styled("RTK Parse Failures", true));
+    println!("{}", styled("RTK Fallbacks", true));
     println!("{}", "═".repeat(60));
     println!();
 
-    print_kpi("Total failures", summary.total.to_string());
-    print_kpi("Recovery rate", format!("{:.1}%", summary.recovery_rate));
+    print_kpi("Total fallbacks", summary.total.to_string());
+    print_kpi("Known failures", summary.failed.to_string());
     println!();
 
+    show_recent_fallbacks(
+        "Recent execution failures (last 10)",
+        &summary.recent_failures,
+    );
+
     if !summary.top_commands.is_empty() {
-        println!("{}", styled("Top Commands (by frequency)", true));
+        println!("{}", styled("Top fallback commands (by frequency)", true));
         println!("{}", "─".repeat(60));
         for (cmd, count) in &summary.top_commands {
             let cmd_display = truncate(cmd, 50);
@@ -1877,21 +1883,31 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
         println!();
     }
 
-    if !summary.recent.is_empty() {
-        println!("{}", styled("Recent Failures (last 10)", true));
-        println!("{}", "─".repeat(60));
-        for rec in &summary.recent {
-            // ISSUE #2787: floor to the previous char boundary so the prefix
-            // never exceeds 16 bytes and never lands mid-character
-            let ts_short = &rec.timestamp[..rec.timestamp.floor_char_boundary(16)];
-            let status = if rec.fallback_succeeded { "ok" } else { "FAIL" };
-            let cmd_display = truncate(&rec.raw_command, 40);
-            println!("  {} [{}] {}", ts_short, status, cmd_display);
-        }
-        println!();
-    }
+    show_recent_fallbacks("Recent other fallbacks (last 10)", &summary.recent_other);
 
     Ok(())
+}
+
+fn show_recent_fallbacks(title: &str, records: &[ParseFailureRecord]) {
+    if records.is_empty() {
+        return;
+    }
+    println!("{}", styled(title, true));
+    println!("{}", "─".repeat(60));
+    for rec in records {
+        // ISSUE #2787: floor to the previous char boundary so the prefix
+        // never exceeds 16 bytes and never lands mid-character
+        let ts_short = &rec.timestamp[..rec.timestamp.floor_char_boundary(16)];
+        let status = match rec.outcome {
+            FallbackOutcome::Exited(0) => "ok".to_string(),
+            FallbackOutcome::Exited(code) => format!("exit {code}"),
+            FallbackOutcome::ExecutionError => "execution error".to_string(),
+            FallbackOutcome::UnknownExit => "exit unknown".to_string(),
+        };
+        let cmd_display = truncate(&rec.raw_command, 40);
+        println!("  {} [{}] {}", ts_short, status, cmd_display);
+    }
+    println!();
 }
 
 /// Prompt the user to confirm a destructive reset operation.

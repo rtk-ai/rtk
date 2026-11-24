@@ -81,7 +81,8 @@ CREATE TABLE parse_failures (
   timestamp TEXT,
   raw_command TEXT,
   error_message TEXT,
-  fallback_succeeded INTEGER   -- 1=yes, 0=no
+  fallback_succeeded INTEGER,  -- 1=child status returned, 0=execution error
+  fallback_exit_code INTEGER   -- exit code when available, NULL for older records and execution errors
 );
 ```
 

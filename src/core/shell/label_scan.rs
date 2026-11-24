@@ -34,7 +34,7 @@ static LABEL_CALLS: LazyLock<Vec<(Regex, &'static [usize])>> = LazyLock::new(|| 
         (call(r"\bemit_raw_bytes_passthrough\("), &[1, 2]),
         // aws_cmd.rs: `(subcommand, args, verbose, full_sub)`.
         (call(r"\brun_generic\("), &[3]),
-        // tracking.rs: `(command, error, fallback_succeeded)`.
+        // tracking.rs: `(command, error, exit_code)`.
         (call(r"\brecord_parse_failure_silent\("), &[0]),
         // search.rs: `(timer, engine, args, real_cmd, ..)`.
         (call(r"\bpassthrough\("), &[3]),
@@ -414,7 +414,7 @@ mod tests {
             }
             fn h(args: &[String]) {
                 let raw_command = args.join(" ");
-                core::tracking::record_parse_failure_silent(&raw_command, &message, true);
+                core::tracking::record_parse_failure_silent(&raw_command, &message, Some(0));
                 emit_raw_bytes_passthrough(move |a, b| a, &args.join(" "), "rtk x", &t, 0);
                 runner::run(cmd, from_fn::<A, B>(x), &args.join(" "), mode, opts);
                 runner::run_filtered(cmd, "x", &display_args(args), |a, b| a.join(" "), o);

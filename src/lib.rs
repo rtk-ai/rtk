@@ -138,7 +138,7 @@ struct GainArgs {
     /// Output format: text, json, csv
     #[arg(short, long, default_value = "text")]
     format: String,
-    /// Show parse failure log (commands that fell back to raw execution)
+    /// Show fallback commands and their execution outcomes
     #[arg(short = 'F', long)]
     failures: bool,
     /// Show recall efficiency per filter (elisions vs agent recalls)
@@ -2027,17 +2027,17 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                     &combined_raw,
                     &shown,
                 );
-                core::tracking::record_parse_failure_silent(&tracked_command, &error_message, true);
+                core::tracking::record_parse_failure_silent(
+                    &tracked_command,
+                    &error_message,
+                    Some(exit_code),
+                );
 
                 Ok(exit_code)
             }
             Err(e) => {
                 // Command not found — same behaviour as no-TOML path
-                core::tracking::record_parse_failure_silent(
-                    &tracked_command,
-                    &error_message,
-                    false,
-                );
+                core::tracking::record_parse_failure_silent(&tracked_command, &error_message, None);
                 eprintln!("[rtk: {}]", e);
                 Ok(127)
             }
@@ -2058,16 +2058,17 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                     &format!("rtk fallback: {}", tracked_command),
                 );
 
-                core::tracking::record_parse_failure_silent(&tracked_command, &error_message, true);
-
-                Ok(core::utils::exit_code_from_status(&s, &raw_command))
-            }
-            Err(e) => {
+                let exit_code = core::utils::exit_code_from_status(&s, &raw_command);
                 core::tracking::record_parse_failure_silent(
                     &tracked_command,
                     &error_message,
-                    false,
+                    Some(exit_code),
                 );
+
+                Ok(exit_code)
+            }
+            Err(e) => {
+                core::tracking::record_parse_failure_silent(&tracked_command, &error_message, None);
                 // Command not found or other OS error — single message, no duplicate Clap error
                 eprintln!("[rtk: {}]", e);
                 Ok(127)
