@@ -83,6 +83,7 @@ rules:
         - /src/core/classify.rs
         - /src/core/task_cmd.rs
         - /src/llm_proxy.rs
+        - /src/core/version_check.rs
     message: >
       ureq usage outside of src/core/telemetry.rs.
       HTTP calls are restricted to the telemetry module to prevent data exfiltration.
