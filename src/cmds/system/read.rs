@@ -10,15 +10,24 @@ use std::fs;
 use std::io::{self, Read as IoRead, Write};
 use std::path::Path;
 
-pub fn run(
-    file: &Path,
-    level: FilterLevel,
-    max_lines: Option<usize>,
-    head_lines: Option<usize>,
-    tail_lines: Option<usize>,
-    line_numbers: bool,
-    verbose: u8,
-) -> Result<()> {
+pub struct ReadOptions {
+    pub level: FilterLevel,
+    pub max_lines: Option<usize>,
+    pub head_lines: Option<usize>,
+    pub tail_lines: Option<usize>,
+    pub line_numbers: bool,
+    pub strip_ansi: bool,
+}
+
+pub fn run(file: &Path, options: &ReadOptions, verbose: u8) -> Result<()> {
+    let &ReadOptions {
+        level,
+        max_lines,
+        head_lines,
+        tail_lines,
+        line_numbers,
+        strip_ansi,
+    } = options;
     let timer = tracking::TimedExecution::start();
 
     // The one core touch: `rtk read` evaluates the pipeline's
@@ -45,14 +54,20 @@ pub fn run(
         && let Some(head) = head_lines
     {
         let window = read_head_lines(file, head)?;
+        let shown = clean_raw_window(&window, strip_ansi)?;
         io::stdout()
             .lock()
-            .write_all(&window)
+            .write_all(&shown)
             .context("Failed to write line window")?;
         // The user asked for these lines, so the baseline is the window itself
         // (what `head -n N` would have printed), not the rest of the file.
         let window = String::from_utf8_lossy(&window);
-        timer.track(&cat_label(file), "rtk read", &window, &window);
+        timer.track(
+            &cat_label(file),
+            "rtk read",
+            &window,
+            &String::from_utf8_lossy(&shown),
+        );
         return Ok(());
     }
 
@@ -67,13 +82,19 @@ pub fn run(
         tail_lines,
         line_numbers,
     ) {
+        let shown = clean_raw_window(window, strip_ansi)?;
         io::stdout()
             .lock()
-            .write_all(window)
+            .write_all(&shown)
             .context("Failed to write raw bytes")?;
         // A plain or windowed raw read is the baseline too: see `tracking_baseline`.
         let window = String::from_utf8_lossy(window);
-        timer.track(&cat_label(file), "rtk read", &window, &window);
+        timer.track(
+            &cat_label(file),
+            "rtk read",
+            &window,
+            &String::from_utf8_lossy(&shown),
+        );
         return Ok(());
     }
     let content = String::from_utf8(bytes)
@@ -92,16 +113,17 @@ pub fn run(
 
     // Apply filter
     let filter = filter::get_filter(level);
-    let mut filtered = filter.filter(&content, &lang);
+    let input = clean_text(&content, strip_ansi);
+    let mut filtered = filter.filter(&input, &lang);
 
     // Safety: if filter emptied a non-empty file, fall back to raw content
-    if filtered.trim().is_empty() && !content.trim().is_empty() {
+    if filtered.trim().is_empty() && !input.trim().is_empty() {
         eprintln!(
             "rtk: warning: filter produced empty output for {} ({} bytes), showing raw content",
             file.display(),
             content.len()
         );
-        filtered = content.clone();
+        filtered = input.to_string();
     }
 
     if verbose > 0 {
@@ -130,7 +152,8 @@ pub fn run(
     } else {
         (content.clone(), filtered.clone())
     };
-    let shown = never_worse(&raw, &rtk_output);
+    let fallback = clean_text(&raw, strip_ansi);
+    let shown = never_worse(&fallback, &rtk_output);
     print!("{}", shown);
     timer.track(
         &cat_label(file),
@@ -143,14 +166,15 @@ pub fn run(
     Ok(())
 }
 
-pub fn run_stdin(
-    level: FilterLevel,
-    max_lines: Option<usize>,
-    head_lines: Option<usize>,
-    tail_lines: Option<usize>,
-    line_numbers: bool,
-    verbose: u8,
-) -> Result<()> {
+pub fn run_stdin(options: &ReadOptions, verbose: u8) -> Result<()> {
+    let &ReadOptions {
+        level,
+        max_lines,
+        head_lines,
+        tail_lines,
+        line_numbers,
+        strip_ansi,
+    } = options;
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -171,12 +195,18 @@ pub fn run_stdin(
         tail_lines,
         line_numbers,
     ) {
+        let shown = clean_raw_window(window, strip_ansi)?;
         io::stdout()
             .lock()
-            .write_all(window)
+            .write_all(&shown)
             .context("Failed to write raw bytes")?;
         let window = String::from_utf8_lossy(window);
-        timer.track("cat - (stdin)", "rtk read -", &window, &window);
+        timer.track(
+            "cat - (stdin)",
+            "rtk read -",
+            &window,
+            &String::from_utf8_lossy(&shown),
+        );
         return Ok(());
     }
     let content = String::from_utf8(bytes).context("Failed to decode stdin")?;
@@ -190,7 +220,8 @@ pub fn run_stdin(
 
     // Apply filter
     let filter = filter::get_filter(level);
-    let filtered = filter.filter(&content, &lang);
+    let input = clean_text(&content, strip_ansi);
+    let filtered = filter.filter(&input, &lang);
 
     if verbose > 0 {
         let original_lines = content.lines().count();
@@ -218,7 +249,8 @@ pub fn run_stdin(
     } else {
         (content.clone(), filtered.clone())
     };
-    let shown = never_worse(&raw, &rtk_output);
+    let fallback = clean_text(&raw, strip_ansi);
+    let shown = never_worse(&fallback, &rtk_output);
     print!("{}", shown);
 
     timer.track(
@@ -230,6 +262,25 @@ pub fn run_stdin(
         shown,
     );
     Ok(())
+}
+
+fn clean_text(content: &str, strip_ansi: bool) -> Cow<'_, str> {
+    if strip_ansi {
+        Cow::Owned(crate::core::utils::strip_ansi(content))
+    } else {
+        Cow::Borrowed(content)
+    }
+}
+
+fn clean_raw_window(bytes: &[u8], strip_ansi: bool) -> Result<Cow<'_, [u8]>> {
+    if strip_ansi {
+        let content = std::str::from_utf8(bytes).context("Failed to decode ANSI text")?;
+        Ok(Cow::Owned(
+            crate::core::utils::strip_ansi(content).into_bytes(),
+        ))
+    } else {
+        Ok(Cow::Borrowed(bytes))
+    }
 }
 
 /// The tracked command for reading `file`, with the path quoted as one word.
@@ -552,11 +603,14 @@ fn main() {{
         // Just verify it doesn't panic
         run(
             file.path(),
-            FilterLevel::Minimal,
-            None,
-            None,
-            None,
-            false,
+            &ReadOptions {
+                level: FilterLevel::Minimal,
+                max_lines: None,
+                head_lines: None,
+                tail_lines: None,
+                line_numbers: false,
+                strip_ansi: false,
+            },
             0,
         )?;
         Ok(())

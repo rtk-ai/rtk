@@ -121,17 +121,23 @@ Supports all native `tree` flags (`-L`, `-d`, `-a`, etc.).
 ```bash
 rtk read <file> [options]
 rtk read - [options]          # Read from stdin
+rtk read task.output --strip-ansi  # Remove terminal formatting from UTF-8 text
 ```
 
 **Options:**
 
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
-| `--level` | `-l` | `minimal` | Filtering level: `none`, `minimal`, `aggressive` |
+| `--level` | `-l` | `none` | Filtering level: `none`, `minimal`, `aggressive` |
 | `--max-lines` | `-m` | unlimited | Structural preview capped at N lines (signatures and imports, not the first N) |
 | `--head-lines` | | unlimited | Keep only the first N lines, byte-exact |
 | `--tail-lines` | | unlimited | Keep only the last N lines, byte-exact |
 | `--line-numbers` | `-n` | no | Show line numbers |
+| `--strip-ansi` | | no | Remove ANSI colors and cursor controls before filtering |
+
+`--strip-ansi` also applies to stdin and head/tail windows. It preserves repeated
+lines and uses the same ANSI cleanup as command filters. The default read remains
+byte-exact; filtering, line numbers, and ANSI cleanup are explicit transformations.
 
 **Filtering levels:**
 
