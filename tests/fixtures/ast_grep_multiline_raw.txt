@@ -1,0 +1,72 @@
+blocks.rs:3:static VALUE_0: LazyLock<usize> = LazyLock::new(|| {
+blocks.rs:4:    let first = 0;
+blocks.rs:5:    let second = first + 1;
+blocks.rs:6:    let third = second + 1;
+blocks.rs:7:    third
+blocks.rs:8:});
+blocks.rs:10:static VALUE_1: LazyLock<usize> = LazyLock::new(|| {
+blocks.rs:11:    let first = 1;
+blocks.rs:12:    let second = first + 1;
+blocks.rs:13:    let third = second + 1;
+blocks.rs:14:    third
+blocks.rs:15:});
+blocks.rs:17:static VALUE_2: LazyLock<usize> = LazyLock::new(|| {
+blocks.rs:18:    let first = 2;
+blocks.rs:19:    let second = first + 1;
+blocks.rs:20:    let third = second + 1;
+blocks.rs:21:    third
+blocks.rs:22:});
+blocks.rs:24:static VALUE_3: LazyLock<usize> = LazyLock::new(|| {
+blocks.rs:25:    let first = 3;
+blocks.rs:26:    let second = first + 1;
+blocks.rs:27:    let third = second + 1;
+blocks.rs:28:    third
+blocks.rs:29:});
+blocks.rs:31:static VALUE_4: LazyLock<usize> = LazyLock::new(|| {
+blocks.rs:32:    let first = 4;
+blocks.rs:33:    let second = first + 1;
+blocks.rs:34:    let third = second + 1;
+blocks.rs:35:    third
+blocks.rs:36:});
+blocks.rs:38:static VALUE_5: LazyLock<usize> = LazyLock::new(|| {
+blocks.rs:39:    let first = 5;
+blocks.rs:40:    let second = first + 1;
+blocks.rs:41:    let third = second + 1;
+blocks.rs:42:    third
+blocks.rs:43:});
+blocks.rs:45:static VALUE_6: LazyLock<usize> = LazyLock::new(|| {
+blocks.rs:46:    let first = 6;
+blocks.rs:47:    let second = first + 1;
+blocks.rs:48:    let third = second + 1;
+blocks.rs:49:    third
+blocks.rs:50:});
+blocks.rs:52:static VALUE_7: LazyLock<usize> = LazyLock::new(|| {
+blocks.rs:53:    let first = 7;
+blocks.rs:54:    let second = first + 1;
+blocks.rs:55:    let third = second + 1;
+blocks.rs:56:    third
+blocks.rs:57:});
+blocks.rs:59:static VALUE_8: LazyLock<usize> = LazyLock::new(|| {
+blocks.rs:60:    let first = 8;
+blocks.rs:61:    let second = first + 1;
+blocks.rs:62:    let third = second + 1;
+blocks.rs:63:    third
+blocks.rs:64:});
+blocks.rs:66:static VALUE_9: LazyLock<usize> = LazyLock::new(|| {
+blocks.rs:67:    let first = 9;
+blocks.rs:68:    let second = first + 1;
+blocks.rs:69:    let third = second + 1;
+blocks.rs:70:    third
+blocks.rs:71:});
+blocks.rs:73:static VALUE_10: LazyLock<usize> = LazyLock::new(|| {
+blocks.rs:74:    let first = 10;
+blocks.rs:75:    let second = first + 1;
+blocks.rs:76:    let third = second + 1;
+blocks.rs:77:    third
+blocks.rs:78:});
+blocks.rs:80:static VALUE_11: LazyLock<usize> = LazyLock::new(|| {
+blocks.rs:81:    let first = 11;
+blocks.rs:82:    let second = first + 1;
+blocks.rs:83:    let third = second + 1;
+blocks.rs:84:    third
+blocks.rs:85:});
