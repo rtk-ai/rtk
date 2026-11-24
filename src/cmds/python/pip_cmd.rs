@@ -28,7 +28,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let use_uv = !tool_exists("pip") && tool_exists("uv");
     let base_cmd = if use_uv { "uv" } else { "pip" };
 
-    if verbose > 0 && use_uv {
+    if use_uv {
         eprintln!("pip not found — falling back to `uv pip`");
     }
 

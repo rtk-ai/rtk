@@ -10,7 +10,8 @@
 - Ruff and SQLFluff list identical descriptions once beside a visible top rule.
   Locations retain the rule code; differing messages and rules outside the
   summary cap keep their descriptions beside each location.
-- `pip_cmd.rs` auto-detects `uv` as a pip alternative and routes accordingly
+- `pip_cmd.rs` prefers the caller's `pip` environment. It falls back to `uv pip`
+  only when `pip` is absent from PATH and `uv` is available, with a notice on stderr.
 - `uv_cmd.rs` preserves `uv run` environment semantics: the program's own output passes through on success (bounded, with a tee hint), diagnostics are extracted on failure
 - `python -m pytest` and `python3 -m mypy` are rewritten by the hook registry to `rtk pytest` / `rtk mypy`
 
