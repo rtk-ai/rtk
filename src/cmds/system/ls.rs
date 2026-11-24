@@ -192,6 +192,7 @@ fn shows_dotfiles(tokens: &[Token<'_>]) -> bool {
 struct LsPlan {
     show_all: bool,
     show_long: bool,
+    unsupported_depth: bool,
     child_args: Vec<String>,
 }
 
@@ -223,6 +224,7 @@ fn plan_for(args: &[String], flavor: Flavor) -> LsPlan {
     LsPlan {
         show_all,
         show_long,
+        unsupported_depth: arg_tokenizer::has_flag(&tokens, grammar(flavor), "depth"),
         child_args: build_child_args(&tokens),
     }
 }
@@ -306,8 +308,16 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let LsPlan {
         show_all,
         show_long,
+        unsupported_depth,
         child_args,
     } = plan(args);
+
+    if unsupported_depth {
+        eprintln!(
+            "ls does not support --depth; use `rtk tree -L N <path>` for a depth-limited tree"
+        );
+        return Ok(2);
+    }
 
     let mut cmd = resolved_command("ls");
     cmd.env("LC_ALL", "C");
@@ -844,6 +854,18 @@ mod tests {
         assert_eq!(p.child_args, vec!["-l", "--", "-al"]);
         assert!(!p.show_all);
         assert!(!p.show_long);
+    }
+
+    #[test]
+    fn depth_diagnostic_does_not_confuse_values_or_paths_with_flags() {
+        for flavor in [Flavor::Gnu, Flavor::Bsd] {
+            assert!(plan_flavored(&["--depth", "3"], flavor).unsupported_depth);
+            assert!(plan_flavored(&["--depth=3"], flavor).unsupported_depth);
+            assert!(!plan_flavored(&["--", "--depth"], flavor).unsupported_depth);
+            assert!(!plan_flavored(&["--ignore", "--depth"], flavor).unsupported_depth);
+        }
+        assert!(!plan_of(&["-I", "--depth"]).unsupported_depth);
+        assert!(!plan_bsd(&["-D", "--depth"]).unsupported_depth);
     }
 
     #[test]

@@ -101,7 +101,7 @@ section "Ls & Find"
 
 assert_ok       "rtk ls project root"           rtk ls "$ARISTOTE"
 assert_ok       "rtk ls src/"                   rtk ls "$ARISTOTE/src"
-assert_ok       "rtk ls --depth 3"              rtk ls --depth 3 "$ARISTOTE/src"
+assert_output   "rtk ls explains --depth"       "rtk tree -L" rtk ls --depth 3 "$ARISTOTE/src"
 assert_contains "rtk ls shows components/"      "components" rtk ls "$ARISTOTE/src"
 assert_ok       "rtk find *.tsx"                rtk find "*.tsx" "$ARISTOTE/src"
 assert_ok       "rtk find *.ts"                 rtk find "*.ts" "$ARISTOTE/src"
