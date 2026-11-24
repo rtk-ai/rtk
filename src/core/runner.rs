@@ -768,6 +768,10 @@ impl ErrorStreamFilter {
 
 impl StreamFilter for ErrorStreamFilter {
     fn feed_line(&mut self, line: &str) -> Option<String> {
+        // Color can split a severity token, a location, or the indentation that
+        // keeps a diagnostic block open. Classify the same text we emit.
+        let clean = crate::core::utils::strip_ansi(line);
+        let line = clean.as_str();
         let is_error = ERROR_PATTERNS.iter().any(|p| p.is_match(line));
         if is_error {
             self.in_error_block = true;
@@ -809,6 +813,8 @@ impl StreamFilter for ErrorStreamFilter {
             Some("[ok] Command completed successfully (no errors)".to_string())
         } else {
             let mut msg = format!("[FAIL] Command failed (exit code: {})\n", exit_code);
+            let clean = crate::core::utils::strip_ansi(raw);
+            let raw = clean.as_str();
             let lines: Vec<&str> = raw.lines().collect();
             for line in lines.iter().rev().take(10).rev() {
                 msg.push_str(&format!("  {}\n", line));
@@ -1958,6 +1964,41 @@ mod requests_help_tests {
 #[cfg(test)]
 mod err_test_runner_tests {
     use super::*;
+
+    #[test]
+    fn ansi_error_lines_are_classified_before_emission() {
+        let mut filter = ErrorStreamFilter::new();
+        assert_eq!(filter.feed_line("info: working"), None);
+        assert_eq!(
+            filter.feed_line(
+                "    at \x1b[36mfile:///tmp/typ_test.ts\x1b[0m:\x1b[33m1\x1b[0m:\x1b[33m7\x1b[0m"
+            ),
+            Some("    at file:///tmp/typ_test.ts:1:7\n".to_string())
+        );
+        assert_eq!(
+            filter.feed_line("err\x1b[31mor: bad value\x1b[m"),
+            Some("error: bad value\n".to_string())
+        );
+        assert_eq!(
+            filter.feed_line("\x1b[36m  source context\x1b[0m"),
+            Some("  source context\n".to_string())
+        );
+        assert_eq!(filter.feed_line("\x1b[K"), Some("\n".to_string()));
+        assert_eq!(filter.feed_line("\x1b[K"), None);
+        assert_eq!(filter.feed_line("  unrelated"), None);
+        assert_eq!(filter.on_exit(1, "raw"), None);
+    }
+
+    #[test]
+    fn ansi_error_fallback_is_clean_when_no_pattern_matches() {
+        let mut filter = ErrorStreamFilter::new();
+        let raw = "\x1b[31mthe tool stopped\x1b[0m\n";
+        assert_eq!(filter.feed_line(raw.trim_end()), None);
+        assert_eq!(
+            filter.on_exit(9, raw),
+            Some("[FAIL] Command failed (exit code: 9)\n  the tool stopped\n".to_string())
+        );
+    }
 
     #[test]
     fn test_filter_errors() {

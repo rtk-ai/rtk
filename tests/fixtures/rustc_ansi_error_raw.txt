@@ -1,0 +1,11 @@
+[1m[91merror[E0308][0m[1m: mismatched types[0m
+ [1m[94m--> [0mansi_error.rs:2:24
+  [1m[94m|[0m
+[1m[94m2[0m [1m[94m|[0m     let count: usize = "nope";
+  [1m[94m|[0m                [1m[94m-----[0m   [1m[91m^^^^^^[0m [1m[91mexpected `usize`, found `&str`[0m
+  [1m[94m|[0m                [1m[94m|[0m
+  [1m[94m|[0m                [1m[94mexpected due to this[0m
+
+[1m[91merror[0m[1m: aborting due to 1 previous error[0m
+
+[1mFor more information about this error, try `rustc --explain E0308`.[0m
