@@ -1977,36 +1977,6 @@ fn sets_signature_verdict(global_args: &[String], env: &impl Fn(&str) -> Option<
     })
 }
 
-/// True when the user asked for merge commits, so RTK must not add `--no-merges`. Any
-/// `--min-parents=N` with N >= 2 asks for merges, for every such N: `--no-merges` beside
-/// `--min-parents=3` would select nothing at all.
-fn log_wants_merges(tokens: &[Token<'_>]) -> bool {
-    tokens.iter().any(|t| match t.flag() {
-        Some(&MERGES | &NO_MERGES) => true,
-        Some(&MIN_PARENTS) => t
-            .attached
-            .is_some_and(|v| v.parse::<u32>().is_ok_and(|n| n >= 2)),
-        _ => false,
-    })
-}
-
-/// The arguments [`walk_exceeds_limit`] is asked about from the filtered path: the user's own,
-/// behind RTK's `--no-merges` when the filtered path put one on the command it ran.
-///
-/// Without it the probe measures a wider walk than the one that was printed: a history of
-/// merges over a handful of ordinary commits would claim a cap that never cut. It goes *first*
-/// because git refuses an option that follows a positional -- and because behind a bare `--`
-/// in the user's arguments it becomes a second pathspec, where git does not error at all and
-/// the merges quietly stay in.
-fn filtered_probe_args(args: &[String], wants_merges: bool) -> Vec<String> {
-    let mut out = Vec::with_capacity(args.len() + 1);
-    if !wants_merges {
-        out.push("--no-merges".to_string());
-    }
-    out.extend(args.iter().cloned());
-    out
-}
-
 /// An over-fetched run split at its limit: the part RTK shows, and whether a commit lay past
 /// it.
 struct LogWindow {
@@ -2380,9 +2350,7 @@ fn filtered_walk_exceeds(
     tokens: &[Token<'_>],
     limit: usize,
 ) -> bool {
-    let probe_args = filtered_probe_args(args, log_wants_merges(tokens));
-    let probe_tokens = tokenize_log_args(&probe_args);
-    walk_exceeds_limit(global_args, &probe_args, &probe_tokens, limit) == Some(true)
+    walk_exceeds_limit(global_args, args, tokens, limit) == Some(true)
 }
 
 fn run_log(
@@ -2494,10 +2462,6 @@ fn run_log(
         }
         if !has_limit_flag {
             cmd.arg(format!("-{}", limit + usize::from(overfetched)));
-        }
-        // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
-        if !log_wants_merges(&tokens) && !has_limit_flag {
-            cmd.arg("--no-merges");
         }
         cmd.args(args);
         cmd
@@ -7721,51 +7685,6 @@ A  added.rs
             LOG_GRAMMAR.flag(TokenKind::Short, "n"),
             LOG_GRAMMAR.flag(TokenKind::Long, "max-count")
         );
-    }
-
-    #[test]
-    fn filtered_probe_puts_rtks_no_merges_ahead_of_every_user_argument() {
-        // Two failures ride on the position, not on the presence. Behind a bare pathspec git
-        // refuses the whole command -- "option '--no-merges' must come before non-option
-        // arguments" -- and the probe reports nothing. Behind a `--` it does not error at
-        // all: git reads it as a second pathspec, and the probe quietly measures a walk with
-        // the merges still in it.
-        for args in [
-            vec!["f.txt".to_string()],
-            vec!["--".to_string(), "f.txt".to_string()],
-            vec!["--oneline".to_string(), "f.txt".to_string()],
-        ] {
-            let built = filtered_probe_args(&args, false);
-            assert_eq!(
-                built.first().map(String::as_str),
-                Some("--no-merges"),
-                "{args:?} must carry RTK's --no-merges first, got {built:?}"
-            );
-            assert_eq!(&built[1..], &args[..], "{args:?} must be forwarded intact");
-        }
-    }
-
-    #[test]
-    fn filtered_probe_leaves_no_merges_out_when_the_user_asked_for_merges() {
-        let args = vec!["--merges".to_string()];
-        assert_eq!(filtered_probe_args(&args, true), args);
-    }
-
-    #[test]
-    fn log_wants_merges_holds_rtks_no_merges_back_for_every_merge_choice() {
-        let wants = |args: &[&str]| log_wants_merges(&tokenize_log_args(&owned(args)));
-        // The user already chose: merges only, merges never, or at least two parents.
-        for args in [
-            &["--merges"][..],
-            &["--min-parents=2"],
-            &["--min-parents=3"],
-            &["--no-merges"],
-        ] {
-            assert!(wants(args), "{args:?}");
-        }
-        // `--min-parents=1` does not ask for merges, so RTK's `--no-merges` still applies.
-        assert!(!wants(&["--min-parents=1"]));
-        assert!(!wants(&["--oneline"]));
     }
 
     /// What `%m` prints for a commit of a plain walk.
