@@ -207,6 +207,7 @@ mod guarded_output_tests {
 #[derive(Default)]
 pub struct RunOptions<'a> {
     pub tee_label: Option<&'a str>,
+    pub recover_success: bool,
     pub filter_stdout_only: bool,
     pub skip_filter_on_failure: bool,
     pub no_trailing_newline: bool,
@@ -230,6 +231,11 @@ impl<'a> RunOptions<'a> {
 
     pub fn unguarded_help(mut self) -> Self {
         self.unguarded_help = true;
+        self
+    }
+
+    pub fn recover_success(mut self) -> Self {
+        self.recover_success = true;
         self
     }
 
@@ -338,7 +344,12 @@ where
     // The guard governs the stdout rtk replaces. stderr is forwarded separately below, and
     // only ever shrinks there, so it cannot push the total past what the command emitted.
     let shown = if let Some(label) = opts.tee_label {
-        print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
+        if opts.recover_success && exit_code == 0 && filtered.trim() != raw.trim() {
+            let hint = crate::core::tee::force_tee_hint(raw, label);
+            emit_guarded(&filtered, hint.as_deref(), raw_for_tracking)
+        } else {
+            print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
+        }
     } else if opts.no_trailing_newline {
         // The filters that opt out own their line endings: what they return is already
         // exactly what the command would have printed, terminator included.
@@ -968,9 +979,11 @@ pub fn run_test_cmd(
         display,
         move |raw| extract_test_summary(raw, eco),
         if caller_named_command {
-            RunOptions::with_tee(tee_label).unguarded_help()
-        } else {
             RunOptions::with_tee(tee_label)
+                .recover_success()
+                .unguarded_help()
+        } else {
+            RunOptions::with_tee(tee_label).recover_success()
         },
     )
 }
