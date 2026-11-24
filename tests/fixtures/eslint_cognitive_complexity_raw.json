@@ -1,0 +1,50 @@
+[
+  {
+    "filePath": "/project/src/error.js",
+    "messages": [
+      {
+        "ruleId": "sonarjs/cognitive-complexity",
+        "severity": 2,
+        "message": "Refactor this function to reduce its Cognitive Complexity from 6 to the 2 allowed.",
+        "line": 1,
+        "column": 17,
+        "nodeType": null,
+        "messageId": "refactorFunction",
+        "endLine": 1,
+        "endColumn": 23
+      }
+    ],
+    "suppressedMessages": [],
+    "errorCount": 1,
+    "fatalErrorCount": 0,
+    "warningCount": 0,
+    "fixableErrorCount": 0,
+    "fixableWarningCount": 0,
+    "source": "export function nested(value) {\r\n  if (value > 0) {\r\n    if (value > 1) {\r\n      if (value > 2) return 3;\r\n    }\r\n  }\r\n  return 0;\r\n}\r\n",
+    "usedDeprecatedRules": []
+  },
+  {
+    "filePath": "/project/src/warning.js",
+    "messages": [
+      {
+        "ruleId": "sonarjs/cognitive-complexity",
+        "severity": 1,
+        "message": "Refactor this function to reduce its Cognitive Complexity from 6 to the 2 allowed.",
+        "line": 1,
+        "column": 17,
+        "nodeType": null,
+        "messageId": "refactorFunction",
+        "endLine": 1,
+        "endColumn": 23
+      }
+    ],
+    "suppressedMessages": [],
+    "errorCount": 0,
+    "fatalErrorCount": 0,
+    "warningCount": 1,
+    "fixableErrorCount": 0,
+    "fixableWarningCount": 0,
+    "source": "export function nested(value) {\r\n  if (value > 0) {\r\n    if (value > 1) {\r\n      if (value > 2) return 3;\r\n    }\r\n  }\r\n  return 0;\r\n}\r\n",
+    "usedDeprecatedRules": []
+  }
+]

@@ -298,6 +298,38 @@ fn filter_eslint_json(output: &str) -> String {
         total_errors, total_warnings, total_files
     ));
 
+    // For this rule the score, threshold and source position are the finding;
+    // neither a rule count nor a file count can reconstruct them.
+    const MAX_COMPLEXITY_DETAILS: usize = CAP_WARNINGS;
+    let mut complexity_count = 0;
+    for file in &results {
+        for message in &file.messages {
+            if message.rule_id.as_deref() != Some("sonarjs/cognitive-complexity") {
+                continue;
+            }
+            complexity_count += 1;
+            if complexity_count == 1 {
+                result.push_str("Cognitive complexity:\n");
+            }
+            if complexity_count <= MAX_COMPLEXITY_DETAILS {
+                result.push_str(&format!(
+                    "  {}:{}:{}: {}\n",
+                    file.file_path, message.line, message.column, message.message
+                ));
+            }
+        }
+    }
+    if complexity_count > MAX_COMPLEXITY_DETAILS {
+        let Some(hint) = crate::core::tee::force_tee_hint(output, "eslint-complexity") else {
+            return output.to_string();
+        };
+        result.push_str(&format!(
+            "  ... +{} more complexity findings\n  {}\n",
+            complexity_count - MAX_COMPLEXITY_DETAILS,
+            hint
+        ));
+    }
+
     // Show top rules
     let mut rule_counts: Vec<_> = by_rule.iter().collect();
     rule_counts.sort_by(|a, b| b.1.cmp(a.1));
@@ -538,6 +570,50 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cognitive_complexity_keeps_scores_and_source_positions() {
+        // ESLint 9.39.5 / eslint-plugin-sonarjs 4.0.3; only absolute paths normalized.
+        let raw = include_str!("../../../tests/fixtures/eslint_cognitive_complexity_raw.json");
+        let output = filter_eslint_json(raw);
+        assert!(output.contains("1 errors, 1 warnings"), "{output}");
+        for path in ["/project/src/error.js:1:17", "/project/src/warning.js:1:17"] {
+            assert!(output.contains(path), "{output}");
+        }
+        assert_eq!(
+            output
+                .matches("Cognitive Complexity from 6 to the 2 allowed")
+                .count(),
+            2,
+            "{output}"
+        );
+        assert!(output.len() < raw.len() * 8 / 10);
+    }
+
+    #[test]
+    fn cognitive_complexity_overflow_has_a_recovery_hint() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/eslint_cognitive_complexity_raw.json"
+        ))
+        .expect("captured ESLint JSON");
+        let files: Vec<_> = (0..CAP_WARNINGS + 2)
+            .map(|i| {
+                let mut file = fixture[0].clone();
+                file["filePath"] = serde_json::json!(format!("/project/file{i}.js"));
+                file
+            })
+            .collect();
+        let output = filter_eslint_json(&serde_json::to_string(&files).expect("serialize fixture"));
+        assert_eq!(
+            output
+                .matches("Cognitive Complexity from 6 to the 2 allowed")
+                .count(),
+            CAP_WARNINGS,
+            "{output}"
+        );
+        assert!(output.contains("+2 more complexity findings"), "{output}");
+        assert!(output.contains("rtk recall "), "{output}");
+    }
 
     #[test]
     fn test_filter_eslint_json() {
