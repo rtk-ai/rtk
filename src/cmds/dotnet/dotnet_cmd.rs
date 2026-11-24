@@ -36,6 +36,15 @@ pub fn run_restore(args: &[String], verbose: u8) -> Result<i32> {
     run_dotnet_with_binlog("restore", args, verbose)
 }
 
+/// Native `dotnet format` writes by default. Hook rewrites opt into RTK's
+/// write mode while direct invocations retain their check-only default.
+pub(crate) fn format_rewrite_needs_write(args: &[String]) -> bool {
+    let tokens = tokenize_dotnet_args(args);
+    !crate::core::runner::requests_help_args("dotnet", args)
+        && !has_verify_no_changes_arg(&tokens)
+        && !has_write_mode_override(&tokens)
+}
+
 pub fn run_format(args: &[String], verbose: u8) -> Result<i32> {
     let args = &args_utils::restore_double_dash(args);
     if let Some(forwarded) = help_forward("format", args) {
@@ -60,7 +69,7 @@ pub fn run_format(args: &[String], verbose: u8) -> Result<i32> {
     let result = exec_capture(&mut cmd).context("Failed to run dotnet format")?;
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    let check_mode = !has_write_mode_override(&tokens);
+    let check_mode = has_verify_no_changes_arg(&tokens) || !has_write_mode_override(&tokens);
     let filtered =
         format_report_summary_or_raw(report_path.as_deref(), check_mode, &raw, command_started_at);
     let shown = never_worse(&raw, &filtered);

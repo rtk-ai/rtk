@@ -832,7 +832,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^dotnet\s+(build|restore)\b",
+        pattern: r"^dotnet\s+(build|restore|format)\b",
         rtk_cmd: "rtk dotnet",
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &["dotnet"],

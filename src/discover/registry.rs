@@ -2089,6 +2089,26 @@ fn rewrite_segment_inner(
 /// Rewrite the command part of a segment (trailing redirects already split
 /// off) with `rule`, or `None` when this rule does not rewrite it.
 fn rewrite_command_part(rule: &RtkRule, cmd_part: &str) -> Option<String> {
+    if rule.rtk_cmd == "rtk dotnet" {
+        let (words, starts) = words_and_spans(cmd_part);
+        if words.first() == Some(&"dotnet") && words.get(1) == Some(&"format") {
+            let args: Vec<String> = words[2..]
+                .iter()
+                .map(|word| resolve_word_text(word))
+                .collect();
+            let write = if crate::cmds::dotnet::dotnet_cmd::format_rewrite_needs_write(&args) {
+                " --write"
+            } else {
+                ""
+            };
+            let end = starts[1] + words[1].len();
+            return Some(format!(
+                "rtk {}{write}{}",
+                &cmd_part[..end],
+                &cmd_part[end..]
+            ));
+        }
+    }
     if rule.rtk_cmd == "rtk cargo"
         && cmd_part
             .strip_prefix("cargo")
@@ -3759,6 +3779,54 @@ mod tests {
     }
 
     #[test]
+    fn test_dotnet_format_rewrite_preserves_native_mode() {
+        for (command, expected) in [
+            ("dotnet format", "rtk dotnet format --write"),
+            (
+                "dotnet  format  whitespace 'solution file.sln'",
+                "rtk dotnet  format --write  whitespace 'solution file.sln'",
+            ),
+            (
+                "dotnet format --verify-no-changes",
+                "rtk dotnet format --verify-no-changes",
+            ),
+            ("dotnet format --help", "rtk dotnet format --help"),
+            (
+                "dotnet format whitespace --help",
+                "rtk dotnet format whitespace --help",
+            ),
+            (
+                "dotnet format -- --verify-no-changes",
+                "rtk dotnet format --write -- --verify-no-changes",
+            ),
+            (
+                "dotnet format --report '--verify-no-changes'",
+                "rtk dotnet format --write --report '--verify-no-changes'",
+            ),
+            (
+                "dotnet format --report '--write'",
+                "rtk dotnet format --write --report '--write'",
+            ),
+            (
+                "CI=1 dotnet format whitespace 2>&1",
+                "CI=1 rtk dotnet format --write whitespace 2>&1",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(expected.into()),
+                "{command}"
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &["dotnet format".into()]),
+                None,
+                "excluded: {command}"
+            );
+        }
+        assert_eq!(rewrite_command_no_prefixes("dotnet formatter", &[]), None);
+    }
+
+    #[test]
     fn test_rewrite_dotnet_subcommands() {
         for sub in ["build", "restore"] {
             assert_eq!(
@@ -3773,10 +3841,12 @@ mod tests {
             rewrite_command_no_prefixes("dotnet restore --force", &[]),
             Some("rtk dotnet restore --force".into())
         );
-        // `rtk dotnet test` and `rtk dotnet format` change what the native
-        // command does (#4603, #4602), so they are not routed until fixed.
+        // `rtk dotnet test` still changes native behavior (#4603).
         assert_eq!(rewrite_command_no_prefixes("dotnet test", &[]), None);
-        assert_eq!(rewrite_command_no_prefixes("dotnet format", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("dotnet format", &[]),
+            Some("rtk dotnet format --write".into())
+        );
         // Subcommands without a proxy must NOT be rewritten.
         assert_eq!(rewrite_command_no_prefixes("dotnet publish", &[]), None);
         assert_eq!(rewrite_command_no_prefixes("dotnet run", &[]), None);
