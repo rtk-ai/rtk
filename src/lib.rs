@@ -297,6 +297,7 @@ enum Commands {
     /// AWS CLI with compact output (force JSON, compress)
     Aws {
         /// AWS service subcommand (e.g., sts, s3, ec2, ecs, rds, cloudformation)
+        #[arg(allow_hyphen_values = true)]
         subcommand: String,
         /// Additional arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -6060,6 +6061,26 @@ mod tests {
                     },
             } => assert_eq!(args, vec![OsString::from("cache"), OsString::from("rm")]),
             _ => panic!("Expected Bun Pm Other passthrough"),
+        }
+    }
+
+    #[test]
+    fn test_aws_global_flags_parse_without_fallback() {
+        for flags in [
+            vec!["--version"],
+            vec!["--help"],
+            vec!["--profile", "a profile", "--version"],
+            vec!["--region", "us-east-1", "sts", "get-caller-identity"],
+        ] {
+            let cli = try_parse_cli_from([vec!["rtk", "aws"], flags.clone()].concat())
+                .expect("AWS global flags should parse without fallback");
+            match cli.command {
+                Commands::Aws { subcommand, args } => {
+                    assert_eq!(subcommand, flags[0]);
+                    assert_eq!(args, flags[1..]);
+                }
+                _ => panic!("Expected AWS command"),
+            }
         }
     }
 
