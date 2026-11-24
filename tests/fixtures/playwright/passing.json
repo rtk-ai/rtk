@@ -1,0 +1,44 @@
+{
+  "config": {},
+  "stats": {
+    "expected": 1,
+    "unexpected": 0,
+    "skipped": 0,
+    "flaky": 0,
+    "duration": 14
+  },
+  "suites": [
+    {
+      "title": "sample.spec.ts",
+      "file": "tests/sample.spec.ts",
+      "line": 1,
+      "column": 1,
+      "specs": [
+        {
+          "title": "passing scenario",
+          "ok": true,
+          "location": {
+            "file": "tests/sample.spec.ts",
+            "line": 3,
+            "column": 1
+          },
+          "tests": [
+            {
+              "projectId": "chromium",
+              "status": "expected",
+              "results": [
+                {
+                  "status": "passed",
+                  "retry": 0,
+                  "errors": [],
+                  "attachments": []
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "suites": []
+    }
+  ]
+}

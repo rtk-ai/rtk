@@ -1,0 +1,55 @@
+{
+  "config": {},
+  "stats": {
+    "expected": 0,
+    "unexpected": 0,
+    "skipped": 0,
+    "flaky": 1,
+    "duration": 14
+  },
+  "suites": [
+    {
+      "title": "sample.spec.ts",
+      "file": "tests/sample.spec.ts",
+      "line": 1,
+      "column": 1,
+      "specs": [
+        {
+          "title": "flaky scenario",
+          "ok": true,
+          "location": {
+            "file": "tests/sample.spec.ts",
+            "line": 3,
+            "column": 1
+          },
+          "tests": [
+            {
+              "projectId": "chromium",
+              "status": "flaky",
+              "results": [
+                {
+                  "status": "failed",
+                  "retry": 0,
+                  "errors": [
+                    {
+                      "message": "transient failure",
+                      "stack": "at sample.spec.ts:8:3"
+                    }
+                  ],
+                  "attachments": []
+                },
+                {
+                  "status": "passed",
+                  "retry": 1,
+                  "errors": [],
+                  "attachments": []
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "suites": []
+    }
+  ]
+}
