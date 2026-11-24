@@ -1139,6 +1139,12 @@ fn filter_cargo_build_labeled(output: &str, label: &'static str, exit_code: i32)
 
     let mut result =
         cargo_build_failure_summary(handler.compiled, errors, warnings, &json, label, exit_code);
+    // Warnings must not exhaust the display budget before compile errors.
+    blocks.sort_by_key(|block| {
+        block
+            .first()
+            .is_some_and(|line| line.starts_with("warning"))
+    });
     const MAX_CHECK_BLOCKS: usize = CAP_ERRORS;
     for (i, blk) in blocks.iter().enumerate().take(MAX_CHECK_BLOCKS) {
         result.push_str(&blk.join("\n"));
@@ -1808,6 +1814,57 @@ mod tests {
                 .as_deref(),
             Some(raw)
         );
+    }
+
+    #[test]
+    fn test_cargo_build_errors_precede_warning_budget() {
+        let warning_count = CAP_ERRORS + 1;
+        let mut output = String::from("   Compiling demo v0.1.0\n");
+        for i in 0..warning_count {
+            output.push_str(&format!(
+                "warning: unused variable: `value_{i}`\n --> src/lib.rs:{i}:5\n  |\n  |     ^^^^^^^ help: prefix it with an underscore\n\n"
+            ));
+        }
+        output.push_str(
+            "error[E0308]: mismatched types\n --> src/lib.rs:99:5\n  |\n  | expected `i32`, found `&str`\n\nerror: expected expression\n --> src/lib.rs:100:5\n  |\n  | expected an expression here\n\n",
+        );
+
+        let result = filter_cargo_build_labeled(&output, "test", 101);
+        assert!(result.contains("2 errors, 21 warnings (1 crates)"));
+        let first_error = result.find("error[E0308]").expect("retain the first error");
+        let second_error = result
+            .find("error: expected expression")
+            .expect("retain the second error");
+        let first_warning = result
+            .find("warning: unused variable: `value_0`")
+            .expect("retain warning order");
+        assert!(first_error < second_error && second_error < first_warning);
+        assert_eq!(
+            result.matches("warning: unused variable:").count(),
+            CAP_ERRORS - 2
+        );
+        assert!(result.contains("… +3 more issues"));
+    }
+
+    #[test]
+    fn test_cargo_build_diagnostic_order_within_each_kind() {
+        for kind in ["warning", "error"] {
+            let output = (0..CAP_ERRORS + 2)
+                .map(|i| format!("{kind}: diagnostic {i}\n --> src/lib.rs:{i}:5\n  |\n  | diagnostic details\n\n"))
+                .collect::<String>();
+            let result = filter_cargo_build_labeled(&output, "check", 1);
+            let displayed = result
+                .lines()
+                .filter(|line| line.starts_with(&format!("{kind}:")))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                displayed,
+                (0..CAP_ERRORS)
+                    .map(|i| format!("{kind}: diagnostic {i}"))
+                    .collect::<Vec<_>>()
+            );
+            assert!(result.contains("… +2 more issues"));
+        }
     }
 
     #[test]
