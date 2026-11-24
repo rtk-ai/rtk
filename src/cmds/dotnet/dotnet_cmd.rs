@@ -189,7 +189,8 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
             let raw_summary =
                 normalize_build_summary(binlog::parse_build_from_text(&raw), command_success);
             let summary = merge_build_summaries(binlog_summary, raw_summary);
-            (format_build_output(&summary, &binlog_path), true)
+            let needs_raw = build_needs_raw_fallback(&summary);
+            (format_build_output(&summary, &binlog_path), needs_raw)
         }
         "test" => {
             // First try to parse from binlog/console output
@@ -266,6 +267,19 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
         &filtered,
     );
 
+    let output_to_print = if subcommand == "build" && !needs_raw_fallback {
+        // The summary accounts for compiler diagnostics, but SDKs and custom
+        // build tasks can also explain a failure through stderr.
+        format!("{}{}", result.stderr, output_to_print)
+    } else {
+        output_to_print
+    };
+    let hint = if subcommand == "build" && !command_success && !needs_raw_fallback {
+        crate::core::tee::tee_and_hint(&raw, "dotnet-build", result.exit_code)
+    } else {
+        None
+    };
+    let output_to_print = crate::core::runner::with_hint(&output_to_print, hint.as_deref());
     let shown = never_worse(&raw, &output_to_print);
     println!("{}", shown);
 
@@ -1304,6 +1318,15 @@ fn test_needs_raw_fallback(summary: &binlog::TestSummary) -> bool {
     summary.failed_tests.is_empty()
         || summary.failed_tests.len() < summary.failed
         || summary.failed_tests.iter().any(|t| t.details.is_empty())
+}
+
+/// Count-only placeholders cannot explain a failed build. Keep raw diagnostics
+/// unless each parsed error carries a concrete location or diagnostic code.
+fn build_needs_raw_fallback(summary: &binlog::BuildSummary) -> bool {
+    summary.errors.is_empty()
+        || summary.errors.iter().any(|issue| {
+            (issue.file.is_empty() && issue.code.is_empty()) || issue.message.trim().is_empty()
+        })
 }
 
 /// On success, or when `needs_raw_fallback` is false, only the filtered summary is emitted;
