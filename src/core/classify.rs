@@ -127,9 +127,15 @@ fn classify_batch(
     clip: bool,
     questions: &[(&str, &ClassifierDef)],
 ) -> Option<(BTreeMap<String, Answer>, (i64, i64))> {
-    let env = upstream.api_key_env.as_deref()?;
-    let key = std::env::var(env).ok()?;
     let url = upstream.base_url.as_deref()?;
+    let key = match upstream.api_key_env.as_deref() {
+        None => None,
+        Some(env) => match std::env::var(env) {
+            Ok(key) if !key.is_empty() => Some(key),
+            _ if is_local(url) => None,
+            _ => return None,
+        },
+    };
     let head = questions
         .iter()
         .map(|(_, d)| d.input_chars.unwrap_or(DEFAULT_INPUT_CHARS))
@@ -142,12 +148,24 @@ fn classify_batch(
     };
     let body = build_request(upstream, content, questions);
     let timeout = Duration::from_secs(upstream.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
-    let request = ureq::post(url).header("authorization", format!("Bearer {key}"));
-    let mut response = http::global_timeout(request, timeout)
-        .send_json(&body)
-        .ok()?;
+    let request = ureq::post(url);
+    let request = match key {
+        Some(key) => request.header("authorization", format!("Bearer {key}")),
+        None => request,
+    };
+    let mut response = match http::global_timeout(request, timeout).send_json(&body) {
+        Ok(response) => response,
+        Err(_) => {
+            crate::core::deps::wake(upstream);
+            return None;
+        }
+    };
     let json = http::read_json(&mut response).ok()?;
     Some((parse_answers(&json), usage_of(&json)))
+}
+
+fn is_local(url: &str) -> bool {
+    rtk_engine::pipeline::url_authority(url).is_some_and(rtk_engine::pipeline::local_listen)
 }
 
 fn usage_of(response: &serde_json::Value) -> (i64, i64) {

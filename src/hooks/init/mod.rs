@@ -1671,6 +1671,17 @@ pub fn uninstall_with_patch_mode(
     let cursor_removed = remove_cursor_hooks(ctx)?;
     removed.extend(cursor_removed);
 
+    #[cfg(feature = "engine")]
+    match crate::core::deps::remove_all(dry_run) {
+        Ok(dirs) => removed.extend(dirs.into_iter().map(|dir| {
+            format!(
+                "pipeline dependency: stopped and removed {} (data it keeps elsewhere, such as a model cache, is not removed)",
+                dir.display()
+            )
+        })),
+        Err(e) => eprintln!("  [warn] pipeline dependencies were not removed: {e:#}"),
+    }
+
     // Report results
     if removed.is_empty() {
         println!("RTK was not installed (nothing to remove)");

@@ -10,10 +10,14 @@ pub mod classify;
 pub mod config;
 pub mod constants;
 pub mod db;
+#[cfg(feature = "engine")]
+pub mod deps;
 pub mod display_helpers;
 pub mod filter;
 pub mod guard;
 pub mod http;
+#[cfg(feature = "engine")]
+pub mod notice;
 #[cfg(feature = "engine")]
 pub mod pipeline_catalog;
 #[cfg(feature = "engine")]

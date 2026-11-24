@@ -152,7 +152,6 @@ Delegate big reads, heavy commands and documentation fetches only when the judge
 provider     = "laya"
 model        = "laya"
 base_url     = "http://127.0.0.1:41733/v1/systemone"
-api_key_env  = "RTK_LAYA_TOKEN"
 timeout_secs = 4
 
 [upstream.haiku]

@@ -3,7 +3,7 @@ use super::diag::{Code, Diagnostic, did_you_mean};
 use super::eval::Action;
 use super::position::{Position, SiteKind};
 use super::resolve::{Resolved, ResolvedRule, Scope};
-use super::schema::PRO_METHODS;
+use super::schema::{PRO_METHODS, url_authority};
 use crate::block::{Event, Subject};
 use crate::method::CostClass;
 use crate::registry;
@@ -420,6 +420,45 @@ pub fn validate(resolved: &Resolved, ctx: &ValidateCtx) -> Vec<Diagnostic> {
     }
 
     for (name, (upstream, origin)) in &resolved.upstreams {
+        if let Some(dependency) = &upstream.dependency {
+            let context = format!("[upstream.{name}]");
+            match resolved.dependencies.get(dependency) {
+                None => {
+                    let known: Vec<&str> =
+                        resolved.dependencies.keys().map(String::as_str).collect();
+                    let mut diagnostic = Diagnostic::new(
+                        Code::E022,
+                        format!(
+                            "`dependency = \"{dependency}\"` names no `[dependency.{dependency}]`"
+                        ),
+                    )
+                    .at(origin.clone(), upstream.line)
+                    .context(context);
+                    if let Some(near) = did_you_mean(dependency, known.iter().copied()) {
+                        diagnostic = diagnostic.hint(format!("did you mean `{near}`?"));
+                    }
+                    out.push(diagnostic);
+                }
+                Some((def, _)) => {
+                    let authority = upstream.base_url.as_deref().and_then(url_authority);
+                    if let Some(listen) = &def.listen {
+                        if authority != Some(listen.as_str()) {
+                            out.push(
+                                Diagnostic::new(
+                                    Code::E022,
+                                    format!(
+                                        "uses dependency `{dependency}`, which listens on {listen}, but its base_url does not point there"
+                                    ),
+                                )
+                                .at(origin.clone(), upstream.line)
+                                .context(context)
+                                .hint(format!("set base_url to http://{listen}/…")),
+                            );
+                        }
+                    }
+                }
+            }
+        }
         if upstream.api_key_literal {
             out.push(
                 Diagnostic::new(
@@ -1952,5 +1991,59 @@ mod rule_shape_checks {
             "merge semantics: both keys survive: {:?}",
             rule.def.when
         );
+    }
+}
+
+#[cfg(test)]
+mod dependency_link_tests {
+    use super::super::resolve::{Scope, SourceFile, resolve};
+    use super::*;
+
+    fn link_diagnostics(upstream: &str) -> Vec<Diagnostic> {
+        let text = format!(
+            "[dependency.judge]\nnpm = \"@acme/judge-server@1.2.0\"\nintegrity = \"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\"\nrun = [\"node\", \"server.mjs\"]\nlisten = \"127.0.0.1:41800\"\n\n[upstream.judge]\nprovider = \"acme\"\nmodel = \"judge\"\n{upstream}"
+        );
+        let parsed = super::super::schema::parse(&text, "u.toml");
+        let mut all = parsed.diagnostics;
+        let (resolved, resolve_diags) = resolve(&[SourceFile {
+            scope: Scope::User,
+            label: "u.toml".to_string(),
+            file: parsed.file.expect("parses"),
+        }]);
+        all.extend(resolve_diags);
+        all.extend(validate(&resolved, &ValidateCtx::default()));
+        all
+    }
+
+    #[test]
+    fn an_upstream_served_by_its_dependency_validates() {
+        let found = link_diagnostics(
+            "base_url = \"http://127.0.0.1:41800/v1/systemone\"\ndependency = \"judge\"\n",
+        );
+        assert!(found.iter().all(|d| d.code != Code::E022), "{found:#?}");
+    }
+
+    #[test]
+    fn a_link_to_a_missing_or_elsewhere_dependency_is_an_error() {
+        let missing = link_diagnostics(
+            "base_url = \"http://127.0.0.1:41800/v1/systemone\"\ndependency = \"judg\"\n",
+        );
+        let e022: Vec<&Diagnostic> = missing.iter().filter(|d| d.code == Code::E022).collect();
+        assert_eq!(e022.len(), 1, "{missing:#?}");
+        assert_eq!(e022[0].hint.as_deref(), Some("did you mean `judge`?"));
+
+        for base_url in [
+            "https://judge.example.com/v1/systemone",
+            "http://127.0.0.1:41801/v1/systemone",
+            "http://localhost:41800/v1/systemone",
+        ] {
+            let found = link_diagnostics(&format!(
+                "base_url = \"{base_url}\"\ndependency = \"judge\"\n"
+            ));
+            assert!(
+                found.iter().any(|d| d.code == Code::E022),
+                "{base_url}: {found:#?}"
+            );
+        }
     }
 }

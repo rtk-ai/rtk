@@ -64,15 +64,18 @@ Run `rtk init -g` (or `rtk init` for a project) in a terminal without naming an 
 shows a menu of the agents that scope supports, with the ones it finds on this machine already
 ticked (space toggles, enter confirms). With `-g` it then asks which
 [reviewed pipeline](https://www.rtk-ai.app/pipelines/) to run, and sets up each agent you picked.
-Every line below sets up one agent directly, with no menu.
+Every line below sets up one agent directly, with no menu, and leaves your pipeline as it is
+unless you add `--pipeline <name>`.
 
-Without a terminal (CI, pipes, `--auto-patch`, `--no-patch`, `--dry-run`), a bare `rtk init`
-sets up Claude Code, as it always has, and prints one line on stderr saying how to choose
+Without a terminal, or in a CI job (pipes, `CI` set, `--auto-patch`, `--no-patch`, `--dry-run`),
+a bare `rtk init` sets up Claude Code, as it always has, and prints one line on stderr saying how to choose
 another agent. Add `--pipeline <name>` to pick a reviewed pipeline there too:
 
 ```bash
 rtk init -g --agent claude --auto-patch --pipeline laya-delegate
 ```
+
+A pipeline's [dependencies](../pipelines/commands.md#dependencies), such as a local decision model, are installed only after a yes in a terminal; a run without one says to run `rtk init -g` in a terminal.
 
 ### Claude Code
 

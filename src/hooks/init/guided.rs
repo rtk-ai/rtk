@@ -1,7 +1,9 @@
 //! `rtk init` without an agent. In a terminal it shows a checkbox menu of the
 //! agents the chosen scope supports, then (with `-g`) the reviewed-pipeline
-//! menu, then runs each picked agent's own setup. Every other run sets up
-//! Claude Code, as bare `rtk init` always did, and says how to pick another.
+//! menu, then runs each picked agent's own setup. Every other run, CI jobs
+//! included, sets up Claude Code, as bare `rtk init` always did, and says how
+//! to pick another. Runs that name an agent never show the pipeline menu; they
+//! change the pipeline only when `--pipeline` asks for it.
 
 use super::{FilterTrust, InitContext, PatchMode};
 use crate::core::user_dirs;
@@ -124,6 +126,7 @@ pub fn guided_allowed(explicit_agent: bool, patch_mode: PatchMode, dry_run: bool
         && matches!(patch_mode, PatchMode::Ask)
         && !dry_run
         && crate::core::ask::interactive()
+        && !crate::core::ask::in_ci()
 }
 
 pub fn print_default_agent_hint(global: bool) {
@@ -269,6 +272,14 @@ fn onramp_disabled() -> bool {
 }
 
 #[cfg(feature = "engine")]
+fn can_ask(patch_mode: PatchMode, ctx: InitContext) -> bool {
+    matches!(patch_mode, PatchMode::Ask)
+        && !ctx.dry_run
+        && crate::core::ask::interactive()
+        && !crate::core::ask::in_ci()
+}
+
+#[cfg(feature = "engine")]
 pub fn pipeline_step(choice: Option<&str>, patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
     use crate::core::pipeline_catalog::{self, Origin};
     if let Some(name) = choice {
@@ -287,22 +298,61 @@ pub fn pipeline_step(choice: Option<&str>, patch_mode: PatchMode, ctx: InitConte
                 pipeline_catalog::CATALOG_PAGE
             );
         };
-        return switch_pipeline(entry, &catalog.entries, ctx);
+        switch_pipeline(entry, &catalog.entries, ctx)?;
+        if ctx.dry_run {
+            if !entry.is_default() {
+                println!(
+                    "[dry-run] init would then ask before installing any dependency {} declares",
+                    entry.name
+                );
+            }
+            return Ok(());
+        }
+        return dependency_step(&catalog.entries, patch_mode, ctx);
     }
-    if !matches!(patch_mode, PatchMode::Ask)
-        || ctx.dry_run
-        || !crate::core::ask::interactive()
-        || onramp_disabled()
-    {
+    if !can_ask(patch_mode, ctx) || onramp_disabled() {
         return Ok(());
     }
-    pipeline_menu(ctx)
+    let catalog = pipeline_catalog::load();
+    pipeline_menu(&catalog, ctx)?;
+    dependency_step(&catalog.entries, patch_mode, ctx)
 }
 
 #[cfg(feature = "engine")]
-fn pipeline_menu(ctx: InitContext) -> Result<()> {
+fn dependency_step(
+    entries: &[crate::core::pipeline_catalog::Entry],
+    patch_mode: PatchMode,
+    ctx: InitContext,
+) -> Result<()> {
+    use crate::core::deps::{self, Mode};
+    let loaded = crate::core::pipeline_cmd::load_for_cli();
+    if loaded.resolved.dependencies.is_empty() {
+        return Ok(());
+    }
+    let mode = if can_ask(patch_mode, ctx) {
+        Mode::Ask
+    } else {
+        Mode::NoTerminal
+    };
+    for (name, (def, origin)) in &loaded.resolved.dependencies {
+        let pipeline = deps::pipeline_name(origin);
+        deps::offer(
+            &pipeline,
+            name,
+            def,
+            &deps::review_of(origin, entries),
+            mode,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
+fn pipeline_menu(
+    catalog: &crate::core::pipeline_catalog::Catalog,
+    ctx: InitContext,
+) -> Result<Option<crate::core::pipeline_catalog::Entry>> {
     use crate::core::pipeline_catalog::{self, DEFAULT_PIPELINE, Origin};
-    let catalog = pipeline_catalog::load();
     println!();
     if catalog.entries.is_empty() {
         let mine = !custom_pipelines(&[]).is_empty();
@@ -316,7 +366,7 @@ fn pipeline_menu(ctx: InitContext) -> Result<()> {
             pipeline_catalog::CATALOG_PAGE
         );
         println!("  pick another later with `rtk init -g --pipeline <name>`.");
-        return Ok(());
+        return Ok(None);
     }
     let mut entries: Vec<&pipeline_catalog::Entry> = catalog.entries.iter().collect();
     entries.sort_by_key(|e| !e.is_default());
@@ -328,10 +378,10 @@ fn pipeline_menu(ctx: InitContext) -> Result<()> {
     };
 
     let width = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
-    let note = if catalog.origin == Origin::Cached {
-        " (saved copy, the site could not be reached)"
-    } else {
-        ""
+    let note = match catalog.origin {
+        Origin::Cached => " (copy saved on this computer, the site could not be reached)",
+        Origin::Shipped => " (copy shipped with this rtk, the site could not be reached)",
+        Origin::Live | Origin::Missing => "",
     };
     println!(
         "  Reviewed pipelines from {}{note}:",
@@ -388,13 +438,15 @@ fn pipeline_menu(ctx: InitContext) -> Result<()> {
     )?
     else {
         println!("  Pipeline unchanged.");
-        return Ok(());
+        return Ok(None);
     };
     if choice < offset {
         println!("  Pipeline unchanged.");
-        return Ok(());
+        return Ok(None);
     }
-    switch_pipeline(entries[choice - offset], &catalog.entries, ctx)
+    let entry = entries[choice - offset].clone();
+    switch_pipeline(&entry, &catalog.entries, ctx)?;
+    Ok(Some(entry))
 }
 
 #[cfg(feature = "engine")]
@@ -457,7 +509,7 @@ fn switch_pipeline(
     };
     if ctx.dry_run {
         for (name, _) in &others {
-            println!("[dry-run] would remove pipeline {name}");
+            println!("[dry-run] would turn off pipeline {name} (moved to {name}.toml.bak)");
         }
         if !already && !entry.is_default() {
             println!("[dry-run] would install pipeline {} ({source})", entry.name);
@@ -467,13 +519,18 @@ fn switch_pipeline(
     if let Some(dir) = crate::core::pipeline_config::user_pipelines_dir() {
         for (name, id) in &others {
             let path = dir.join(format!("{name}.toml"));
-            std::fs::remove_file(&path)
-                .map_err(|e| anyhow::anyhow!("remove {}: {e}", path.display()))?;
+            let backup = dir.join(format!("{name}.toml.bak"));
+            std::fs::rename(&path, &backup).map_err(|e| {
+                anyhow::anyhow!("move {} to {}: {e}", path.display(), backup.display())
+            })?;
             let readd = entries
                 .iter()
                 .find(|e| e.id == *id)
                 .map_or(id.as_str(), |e| e.name.as_str());
-            println!("  Removed pipeline {name} (re-add: rtk init -g --pipeline {readd})");
+            println!(
+                "  Turned off pipeline {name}: its file is now {} (re-add: rtk init -g --pipeline {readd})",
+                tilde(&backup)
+            );
         }
     }
     if already {

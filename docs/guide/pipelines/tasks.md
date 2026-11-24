@@ -73,13 +73,55 @@ An upstream is a model endpoint, shared by tasks and [judges](./conditions.md#ju
 | `provider` | `anthropic` · `openai` · `google` for a task; a judge upstream is reached through its `base_url`, whatever its `provider` says |
 | `model` | the model name |
 | `base_url` | optional — any compatible endpoint |
-| `api_key_env` | the environment variable holding the key. Omit it for the provider's conventional variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), which `validate` names for you. A literal `api_key = "…"` does not load (E015) |
+| `api_key_env` | the environment variable holding the key. Omit it for the provider's conventional variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), which `validate` names for you, or for a judge that needs no key. A judge on this computer (`127.0.0.1`, `localhost`, `[::1]`) whose variable is unset is called without a key; a hosted one is skipped until it is set. A literal `api_key = "…"` does not load (E015) |
 | `api_key_command` | or run a command and take its stdout (keychain, vault) — the same shape as Claude Code's `apiKeyHelper`. It runs through `sh` on Linux/macOS and `cmd` on Windows, so a command written for Git Bash needs rewriting there, or an explicit `bash -c "…"`. An upstream with one is never reported as needing auth |
 | `timeout_secs` | default 30; set it lower for anything on the hook path |
+| `dependency` | the [`[dependency.<name>]`](#dependencies) that serves this upstream on this computer; its `base_url` must point at the dependency's `listen` address (E022) |
 
 `rtk pipeline validate`, `rtk trust` and `rtk init` print `auth needed: export VAR=...` for any key that is unset.
 
 **Already-authenticated agents need no second key.** When the [RTK Proxy](../proxy/overview.md) is running and the upstream names a provider it speaks (`anthropic`, `openai`), a worker with no credential of its own is routed through the daemon, which lends the credential the agent is already relaying. An agent set up with `rtk init` delegates with nothing further to configure. A request that brings its own key is never substituted; with no daemon up the worker goes direct and a missing key is still an error. To refuse borrowing, set `RTK_PROXY_RELAY_BORROWING=false` on the daemon.
+
+## Dependencies
+
+A dependency is a service the pipeline needs on this computer, with the recipe to install and run it. RTK installs it only after the user says yes in a terminal ([how that works](./commands.md#dependencies)), and starts it when a call to the upstream that names it finds it stopped.
+
+```toml
+[upstream.judge]
+provider   = "laya"
+model      = "laya"
+base_url   = "http://127.0.0.1:41733/v1/systemone"
+dependency = "laya"
+
+[dependency.laya]
+about     = "Laya, an open-source decision model the judge asks"
+needs     = "Node.js 20+, ~1.7 GB of model weights on first start, ~2 GB of RAM"
+npm       = "@receptron/laya@0.2.0"
+integrity = "sha512-C7eBcUUj/S4Mn2ccQoqflZghEi9OPu6RBUbSjcbnuPbQQAWTVFGxDRoLyyP59hm2t4oF8JbE+dP0IaUE58XsJQ=="
+node      = 20
+run       = ["node", "server.mjs"]
+listen    = "127.0.0.1:41733"
+health    = "/health"
+
+[dependency.laya.files]
+"server.mjs" = '''
+// the server, shipped in the pipeline file
+'''
+```
+
+| Key | Meaning |
+|---|---|
+| `npm` + `integrity` | an exact `name@version` and the sha512 npm publishes for it (`npm view <name>@<version> dist.integrity`). Uses the user's Node.js; `node` sets the lowest major version |
+| `pip` | a list of `name==version --hash=sha256:<hex>` lines, installed into the dependency's own environment with `--require-hashes`, so every package, sub-dependencies included, must be listed with its hash. `python` sets the lowest version, like `"3.10"` |
+| `binary` | one table per platform (`macos-arm64`, `macos-x64`, `linux-x64`, `linux-arm64`, `windows-x64`) with an https `url` and the file's `sha256`; a `.tar.gz`, `.tgz`, `.tar` or `.zip` is unpacked |
+| `run` | the command that starts the service, program first. RTK looks for the program in the dependency's directory, its `bin/`, its Python environment, `node_modules/.bin`, then your `PATH` |
+| `listen` | the local address it answers on: `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>` |
+| `health` | optional path RTK asks for status: 2xx is running, 503 is starting (a short plain-text body is shown as its progress) |
+| `files` | small files written next to it before it runs, such as a server script |
+| `env` | variables for installing and running it (not `PATH`) |
+| `about`, `needs` | what it is and what it needs, shown to the user before the question |
+
+Exactly one installer per dependency. A recipe that is not pinned, or not local, does not load (E021). A key this rtk does not know (from a newer recipe format) loads with W026, and this rtk will not install that dependency.
 
 ## Cost
 

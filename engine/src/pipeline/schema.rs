@@ -39,6 +39,22 @@ const UPSTREAM_KEYS: &[&str] = &[
     "api_key_command",
     "api_key",
     "timeout_secs",
+    "dependency",
+];
+const DEPENDENCY_KEYS: &[&str] = &[
+    "about",
+    "needs",
+    "npm",
+    "integrity",
+    "node",
+    "pip",
+    "python",
+    "binary",
+    "files",
+    "env",
+    "run",
+    "listen",
+    "health",
 ];
 const GUARD_KEYS: &[&str] = &["never_worse", "min_size"];
 const REMOVED_GUARD_KEYS: &[&str] = &["max_recovery_rate"];
@@ -55,6 +71,7 @@ const TOP_KEYS: &[&str] = &[
     "override",
     "classifier",
     "guards",
+    "dependency",
 ];
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -117,7 +134,44 @@ pub struct UpstreamDef {
     pub api_key_command: Option<String>,
     pub api_key_literal: bool,
     pub timeout_secs: Option<u64>,
+    pub dependency: Option<String>,
     pub line: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DependencyDef {
+    pub about: Option<String>,
+    pub needs: Option<String>,
+    pub installer: Option<Installer>,
+    pub files: BTreeMap<String, String>,
+    pub env: BTreeMap<String, String>,
+    pub run: Vec<String>,
+    pub listen: Option<String>,
+    pub health: Option<String>,
+    pub unknown: Vec<String>,
+    pub line: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Installer {
+    Npm {
+        package: String,
+        integrity: String,
+        node: Option<u32>,
+    },
+    Pip {
+        requirements: Vec<String>,
+        python: Option<String>,
+    },
+    Binary {
+        platforms: BTreeMap<String, BinaryDef>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BinaryDef {
+    pub url: String,
+    pub sha256: String,
 }
 
 /// `[classifier.<name>]` — a typed question a host adapter asks an inference
@@ -171,6 +225,7 @@ pub struct PipelineFile {
     pub upstreams: BTreeMap<String, UpstreamDef>,
     pub overrides: BTreeMap<String, OverrideDef>,
     pub classifiers: BTreeMap<String, ClassifierDef>,
+    pub dependencies: BTreeMap<String, DependencyDef>,
     pub guards: GuardsDef,
 }
 
@@ -280,6 +335,12 @@ pub fn parse(text: &str, label: &str) -> ParseResult {
                 })
             }
             "guards" => parse_guards(&mut parser, value, &mut file),
+            "dependency" => {
+                parse_named_tables(&mut parser, value, "dependency", |parser, name, t, line| {
+                    file.dependencies
+                        .insert(name.to_string(), parse_dependency(parser, name, t, line));
+                })
+            }
             other => {
                 let hint = did_you_mean(other, TOP_KEYS.iter().copied())
                     .map(|n| format!("did you mean `{n}`?"));
@@ -786,6 +847,7 @@ fn parse_upstream(
             "timeout_secs" => {
                 upstream.timeout_secs = value.as_integer().and_then(|n| u64::try_from(n).ok())
             }
+            "dependency" => upstream.dependency = value.as_str().map(str::to_string),
             other => unknown_key(parser, other, UPSTREAM_KEYS, &format!("[upstream.{name}]")),
         }
     }
@@ -830,6 +892,420 @@ fn override_replaces_when(raw: &str, name: &str) -> bool {
         }
     }
     false
+}
+
+fn parse_dependency(
+    parser: &mut Parser,
+    name: &str,
+    table: &toml::Table,
+    line: Option<usize>,
+) -> DependencyDef {
+    let mut dep = DependencyDef {
+        line,
+        ..DependencyDef::default()
+    };
+    let mut problems: Vec<String> = Vec::new();
+    if !valid_dependency_name(name) {
+        problems.push(format!(
+            "name `{name}` must be lowercase letters, digits, `-` or `_` (at most 64)"
+        ));
+    }
+    dep.unknown = table
+        .keys()
+        .filter(|k| !DEPENDENCY_KEYS.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    dep.about = string_key(table, "about", &mut problems);
+    dep.needs = string_key(table, "needs", &mut problems);
+    dep.health = string_key(table, "health", &mut problems);
+    if let Some(health) = &dep.health {
+        if !health.starts_with('/') || health.chars().any(char::is_whitespace) {
+            problems.push(format!(
+                "`health` must be a path like \"/health\", not `{health}`"
+            ));
+        }
+    }
+    dep.listen = string_key(table, "listen", &mut problems);
+    match &dep.listen {
+        Some(listen) if !local_listen(listen) => problems.push(format!(
+            "`listen` must be a local address with a port (127.0.0.1:<port>, localhost:<port> or [::1]:<port>), not `{listen}`"
+        )),
+        Some(_) => {}
+        None => problems.push(
+            "`listen` is required: the local address the service answers on, like \"127.0.0.1:41800\""
+                .to_string(),
+        ),
+    }
+    match table.get("run") {
+        Some(toml::Value::Array(items)) => {
+            let run: Vec<String> = items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            if run.len() != items.len() || run.first().is_none_or(|p| p.is_empty()) {
+                problems.push("`run` must be a list of strings, the program first".to_string());
+            } else {
+                dep.run = run;
+            }
+        }
+        Some(_) => problems.push("`run` must be a list of strings, the program first".to_string()),
+        None => problems.push(
+            "`run` is required: the command that starts the service, like [\"node\", \"server.mjs\"]"
+                .to_string(),
+        ),
+    }
+    dep.files = string_table(table, "files", &mut problems);
+    for file in dep.files.keys() {
+        if !valid_file_name(file) {
+            problems.push(format!(
+                "file name `{file}` must be a plain name (letters, digits, `.`, `-`, `_`), with no directory"
+            ));
+        }
+    }
+    dep.env = string_table(table, "env", &mut problems);
+    for key in dep.env.keys() {
+        if key.eq_ignore_ascii_case("PATH") {
+            problems.push("`env` cannot set PATH: rtk builds it for the service".to_string());
+        } else if !valid_env_name(key) {
+            problems.push(format!("`env` key `{key}` is not a valid variable name"));
+        }
+    }
+    let installers: Vec<&str> = ["npm", "pip", "binary"]
+        .into_iter()
+        .filter(|k| table.contains_key(*k))
+        .collect();
+    match installers.as_slice() {
+        [] if dep.unknown.is_empty() => {
+            problems.push("needs an installer: `npm`, `pip` or `binary`".to_string())
+        }
+        [] => {}
+        [one] => dep.installer = parse_installer(one, table, &mut problems),
+        _ => problems.push(format!(
+            "declares {}; give exactly one installer",
+            installers.join(" and ")
+        )),
+    }
+    for (key, owner) in [("integrity", "npm"), ("node", "npm"), ("python", "pip")] {
+        if table.contains_key(key) && !table.contains_key(owner) {
+            problems.push(format!("`{key}` belongs to the `{owner}` installer"));
+        }
+    }
+    let context = format!("[dependency.{name}]");
+    for problem in problems {
+        let diag = parser.diag(Code::E021, problem);
+        diag.line = line;
+        diag.context = Some(context.clone());
+    }
+    if !dep.unknown.is_empty() {
+        let keys: Vec<String> = dep.unknown.iter().map(|k| format!("`{k}`")).collect();
+        let diag = parser.diag(
+            Code::W026,
+            format!(
+                "unknown {} {}: this rtk will not install this dependency; the file still loads",
+                if keys.len() == 1 { "key" } else { "keys" },
+                keys.join(", ")
+            ),
+        );
+        diag.line = line;
+        diag.context = Some(context);
+        diag.hint = Some("a newer rtk may know this recipe format".to_string());
+    }
+    dep
+}
+
+fn parse_installer(
+    kind: &str,
+    table: &toml::Table,
+    problems: &mut Vec<String>,
+) -> Option<Installer> {
+    match kind {
+        "npm" => {
+            let package = string_key(table, "npm", problems)?;
+            if !exact_npm_spec(&package) {
+                problems.push(format!(
+                    "`npm` must name one exact version, like \"@scope/name@1.2.3\", not `{package}`"
+                ));
+                return None;
+            }
+            let Some(integrity) = table
+                .get("integrity")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+            else {
+                problems.push(format!(
+                    "`integrity` is required with `npm`: the package's sha512 hash, from `npm view {package} dist.integrity`"
+                ));
+                return None;
+            };
+            if !npm_integrity(&integrity) {
+                problems.push(format!(
+                    "`integrity` must be the sha512 hash npm publishes (sha512-…), from `npm view {package} dist.integrity`"
+                ));
+                return None;
+            }
+            let node = match table.get("node") {
+                None => None,
+                Some(value) => match value.as_integer().and_then(|n| u32::try_from(n).ok()) {
+                    Some(major) if major > 0 => Some(major),
+                    _ => {
+                        problems.push(
+                            "`node` must be the lowest Node.js major version, like 20".to_string(),
+                        );
+                        return None;
+                    }
+                },
+            };
+            Some(Installer::Npm {
+                package,
+                integrity,
+                node,
+            })
+        }
+        "pip" => {
+            let Some(items) = table.get("pip").and_then(|v| v.as_array()) else {
+                problems.push(
+                    "`pip` must be a list of requirements, like [\"name==1.2.3 --hash=sha256:…\"]"
+                        .to_string(),
+                );
+                return None;
+            };
+            let mut requirements = Vec::new();
+            for item in items {
+                match item.as_str() {
+                    Some(line) if pinned_pip_line(line) => requirements.push(line.to_string()),
+                    _ => {
+                        problems.push(format!(
+                            "pip requirement {} must be `name==version` followed by one or more `--hash=sha256:<hex>`",
+                            item
+                        ));
+                        return None;
+                    }
+                }
+            }
+            if requirements.is_empty() {
+                problems.push("`pip` lists no requirement".to_string());
+                return None;
+            }
+            let python = string_key(table, "python", problems);
+            if let Some(version) = &python {
+                if !major_minor(version) {
+                    problems.push(format!(
+                        "`python` must be the lowest Python version, like \"3.10\", not `{version}`"
+                    ));
+                    return None;
+                }
+            }
+            Some(Installer::Pip {
+                requirements,
+                python,
+            })
+        }
+        _ => {
+            let Some(entries) = table.get("binary").and_then(|v| v.as_table()) else {
+                problems.push(
+                    "`binary` must map each platform to { url, sha256 }, like [dependency.<name>.binary.macos-arm64]"
+                        .to_string(),
+                );
+                return None;
+            };
+            let mut platforms = BTreeMap::new();
+            for (platform, entry) in entries {
+                let url = entry.get("url").and_then(|v| v.as_str());
+                let sha256 = entry.get("sha256").and_then(|v| v.as_str());
+                match (url, sha256) {
+                    (Some(url), Some(sha256))
+                        if url.starts_with("https://") && is_hex(sha256, 64) =>
+                    {
+                        platforms.insert(
+                            platform.clone(),
+                            BinaryDef {
+                                url: url.to_string(),
+                                sha256: sha256.to_ascii_lowercase(),
+                            },
+                        );
+                    }
+                    _ => {
+                        problems.push(format!(
+                            "`binary.{platform}` needs an https `url` and the file's `sha256` (64 hex characters)"
+                        ));
+                        return None;
+                    }
+                }
+            }
+            if platforms.is_empty() {
+                problems.push("`binary` lists no platform".to_string());
+                return None;
+            }
+            Some(Installer::Binary { platforms })
+        }
+    }
+}
+
+fn string_key(table: &toml::Table, key: &str, problems: &mut Vec<String>) -> Option<String> {
+    let value = table.get(key)?;
+    match value.as_str() {
+        Some(text) => Some(text.to_string()),
+        None => {
+            problems.push(format!("`{key}` must be a string"));
+            None
+        }
+    }
+}
+
+fn string_table(
+    table: &toml::Table,
+    key: &str,
+    problems: &mut Vec<String>,
+) -> BTreeMap<String, String> {
+    let Some(value) = table.get(key) else {
+        return BTreeMap::new();
+    };
+    let Some(entries) = value.as_table() else {
+        problems.push(format!("`{key}` must be a table of strings"));
+        return BTreeMap::new();
+    };
+    let mut out = BTreeMap::new();
+    for (name, value) in entries {
+        match value.as_str() {
+            Some(text) => {
+                out.insert(name.clone(), text.to_string());
+            }
+            None => problems.push(format!("`{key}.{name}` must be a string")),
+        }
+    }
+    out
+}
+
+fn valid_dependency_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+fn valid_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+fn valid_env_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+pub fn local_listen(listen: &str) -> bool {
+    let port = ["127.0.0.1:", "localhost:", "[::1]:"]
+        .iter()
+        .find_map(|host| listen.strip_prefix(host));
+    port.is_some_and(|p| {
+        !p.is_empty()
+            && p.chars().all(|c| c.is_ascii_digit())
+            && p.parse::<u16>().is_ok_and(|n| n > 0)
+    })
+}
+
+pub fn url_authority(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    (!authority.is_empty() && !authority.contains('@')).then_some(authority)
+}
+
+fn exact_npm_spec(spec: &str) -> bool {
+    let Some((name, version)) = spec.rsplit_once('@') else {
+        return false;
+    };
+    let name_ok = !name.is_empty()
+        && name.chars().all(|c| {
+            c.is_ascii_lowercase()
+                || c.is_ascii_digit()
+                || matches!(c, '-' | '.' | '_' | '~' | '/' | '@')
+        })
+        && (!name.starts_with('@') || name.matches('/').count() == 1);
+    name_ok && exact_semver(version)
+}
+
+fn exact_semver(version: &str) -> bool {
+    let core = version.split(['-', '+']).next().unwrap_or_default();
+    let parts: Vec<&str> = core.split('.').collect();
+    let core_ok = parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+    let rest = &version[core.len()..];
+    core_ok
+        && rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+}
+
+fn npm_integrity(integrity: &str) -> bool {
+    integrity.strip_prefix("sha512-").is_some_and(|b64| {
+        b64.len() == 88
+            && b64.ends_with("==")
+            && b64[..86]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/')
+    })
+}
+
+fn pinned_pip_line(line: &str) -> bool {
+    let mut tokens = line.split_whitespace();
+    let Some(requirement) = tokens.next() else {
+        return false;
+    };
+    let Some((name, version)) = requirement.split_once("==") else {
+        return false;
+    };
+    let bare = name.split('[').next().unwrap_or_default();
+    let name_ok = !bare.is_empty()
+        && bare
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && (bare.len() == name.len() || name.ends_with(']'));
+    let version_ok = !version.is_empty()
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '!' | '+' | '-' | '_'));
+    let hashes: Vec<&str> = tokens.collect();
+    name_ok
+        && version_ok
+        && !hashes.is_empty()
+        && hashes.iter().all(|h| {
+            let Some(hash) = h.strip_prefix("--hash=") else {
+                return false;
+            };
+            match hash.split_once(':') {
+                Some(("sha256", hex)) => is_hex(hex, 64),
+                Some(("sha384", hex)) => is_hex(hex, 96),
+                Some(("sha512", hex)) => is_hex(hex, 128),
+                _ => false,
+            }
+        })
+}
+
+fn major_minor(version: &str) -> bool {
+    let parts: Vec<&str> = version.split('.').collect();
+    parts.len() == 2
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn is_hex(text: &str, len: usize) -> bool {
+    text.len() == len && text.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn parse_guards(parser: &mut Parser, value: &toml::Value, file: &mut PipelineFile) {
@@ -1083,5 +1559,171 @@ action = "deny"
     fn disabled_file_parses_with_enabled_false() {
         let file = ok("[pipeline]\nenabled = false\n");
         assert!(!file.enabled);
+    }
+}
+
+#[cfg(test)]
+mod dependency_tests {
+    use super::*;
+
+    const INTEGRITY: &str = "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
+    const SHA256: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
+    fn npm_recipe(extra: &str) -> String {
+        format!(
+            "[dependency.judge]\nabout = \"a local judge\"\nnpm = \"@acme/judge-server@1.2.0\"\nintegrity = \"{INTEGRITY}\"\nnode = 20\nrun = [\"node\", \"server.mjs\"]\nlisten = \"127.0.0.1:41800\"\nhealth = \"/health\"\n{extra}"
+        )
+    }
+
+    fn codes(text: &str) -> Vec<(Code, String)> {
+        parse(text, "d.toml")
+            .diagnostics
+            .into_iter()
+            .map(|d| (d.code, d.message))
+            .collect()
+    }
+
+    #[test]
+    fn an_npm_recipe_with_files_and_env_parses() {
+        let text = npm_recipe(
+            "env = { JUDGE_PORT = \"41800\" }\n[dependency.judge.files]\n\"server.mjs\" = '''\nconsole.log(1)\n'''\n",
+        );
+        let parsed = parse(&text, "d.toml");
+        assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+        let dep = &parsed.file.expect("parses").dependencies["judge"];
+        assert_eq!(
+            dep.installer,
+            Some(Installer::Npm {
+                package: "@acme/judge-server@1.2.0".to_string(),
+                integrity: INTEGRITY.to_string(),
+                node: Some(20),
+            })
+        );
+        assert_eq!(dep.run, ["node", "server.mjs"]);
+        assert_eq!(dep.listen.as_deref(), Some("127.0.0.1:41800"));
+        assert_eq!(dep.env["JUDGE_PORT"], "41800");
+        assert!(dep.files["server.mjs"].contains("console.log"));
+        assert!(dep.unknown.is_empty());
+    }
+
+    #[test]
+    fn pip_and_binary_recipes_parse() {
+        let text = format!(
+            "[dependency.py]\npip = [\"acme-judge==1.4.0 --hash=sha256:{SHA256}\"]\npython = \"3.10\"\nrun = [\"python\", \"-m\", \"acme_judge\"]\nlisten = \"localhost:41801\"\n\n[dependency.bin]\nrun = [\"acme\"]\nlisten = \"[::1]:41802\"\n[dependency.bin.binary.macos-arm64]\nurl = \"https://example.com/acme.tar.gz\"\nsha256 = \"{SHA256}\"\n"
+        );
+        let parsed = parse(&text, "d.toml");
+        assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+        let file = parsed.file.expect("parses");
+        assert!(matches!(
+            file.dependencies["py"].installer,
+            Some(Installer::Pip { .. })
+        ));
+        let Some(Installer::Binary { platforms }) = &file.dependencies["bin"].installer else {
+            panic!("binary installer");
+        };
+        assert_eq!(platforms["macos-arm64"].sha256, SHA256);
+    }
+
+    #[test]
+    fn a_recipe_that_is_not_pinned_or_local_is_an_error() {
+        for (text, needle) in [
+            (
+                npm_recipe("").replace("@1.2.0", "@^1.2.0"),
+                "one exact version",
+            ),
+            (npm_recipe("").replace("@acme/judge-server@1.2.0", "@acme/judge-server"), "one exact version"),
+            (
+                npm_recipe("").replace(&format!("integrity = \"{INTEGRITY}\"\n"), ""),
+                "`integrity` is required",
+            ),
+            (
+                npm_recipe("").replace(INTEGRITY, "sha1-abc"),
+                "sha512 hash",
+            ),
+            (
+                npm_recipe("").replace("127.0.0.1:41800", "judge.example.com:443"),
+                "local address",
+            ),
+            (npm_recipe("").replace("127.0.0.1:41800", "127.0.0.1:0"), "local address"),
+            (
+                npm_recipe("").replace("listen = \"127.0.0.1:41800\"\n", ""),
+                "`listen` is required",
+            ),
+            (npm_recipe("").replace("run = [\"node\", \"server.mjs\"]\n", ""), "`run` is required"),
+            (npm_recipe("env = { PATH = \"/tmp\" }\n"), "cannot set PATH"),
+            (
+                npm_recipe("[dependency.judge.files]\n\"../x.mjs\" = \"x\"\n"),
+                "plain name",
+            ),
+            (
+                npm_recipe(&format!("pip = [\"a==1 --hash=sha256:{SHA256}\"]\n")),
+                "exactly one installer",
+            ),
+            (
+                "[dependency.py]\npip = [\"acme-judge>=1.4\"]\nrun = [\"x\"]\nlisten = \"127.0.0.1:1\"\n"
+                    .to_string(),
+                "`name==version`",
+            ),
+            (
+                format!("[dependency.py]\npip = [\"acme-judge==1.4 --index-url https://evil --hash=sha256:{SHA256}\"]\nrun = [\"x\"]\nlisten = \"127.0.0.1:1\"\n"),
+                "`name==version`",
+            ),
+            (
+                format!("[dependency.bin]\nrun = [\"x\"]\nlisten = \"127.0.0.1:1\"\n[dependency.bin.binary.linux-x64]\nurl = \"http://example.com/x\"\nsha256 = \"{SHA256}\"\n"),
+                "https `url`",
+            ),
+            (
+                "[dependency.none]\nrun = [\"x\"]\nlisten = \"127.0.0.1:1\"\n".to_string(),
+                "needs an installer",
+            ),
+            (npm_recipe("").replace("[dependency.judge]", "[dependency.Judge]"), "lowercase"),
+        ] {
+            let found = codes(&text);
+            assert!(
+                found
+                    .iter()
+                    .any(|(code, message)| *code == Code::E021 && message.contains(needle)),
+                "expected E021 containing {needle:?} for:\n{text}\ngot {found:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_newer_recipe_format_loads_but_is_not_installable() {
+        let text = "[dependency.future]\ncargo = \"acme@1.0.0\"\nrun = [\"acme\"]\nlisten = \"127.0.0.1:41803\"\n";
+        let parsed = parse(text, "d.toml");
+        let found: Vec<Code> = parsed.diagnostics.iter().map(|d| d.code).collect();
+        assert_eq!(found, [Code::W026], "{:#?}", parsed.diagnostics);
+        let dep = &parsed.file.expect("parses").dependencies["future"];
+        assert_eq!(dep.unknown, ["cargo"]);
+        assert_eq!(dep.installer, None);
+    }
+
+    #[test]
+    fn local_listen_and_url_authority_are_exact() {
+        assert!(local_listen("127.0.0.1:41733"));
+        assert!(local_listen("localhost:8080"));
+        assert!(local_listen("[::1]:9000"));
+        for bad in [
+            "127.0.0.1",
+            "127.0.0.1:",
+            "127.0.0.1:65536",
+            "127.0.0.1:41733/x",
+            "0.0.0.0:41733",
+            "evil.com:41733",
+            "127.0.0.1.evil.com:41733",
+        ] {
+            assert!(!local_listen(bad), "{bad}");
+        }
+        assert_eq!(
+            url_authority("http://127.0.0.1:41733/v1/systemone"),
+            Some("127.0.0.1:41733")
+        );
+        assert_eq!(
+            url_authority("https://api.example.com?x=1"),
+            Some("api.example.com")
+        );
+        assert_eq!(url_authority("http://user@127.0.0.1:41733/"), None);
+        assert_eq!(url_authority("ftp://127.0.0.1:41733"), None);
     }
 }

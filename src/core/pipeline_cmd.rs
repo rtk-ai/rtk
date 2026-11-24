@@ -201,10 +201,22 @@ pub fn print_auth_guidance(resolved: &rtk_engine::pipeline::Resolved) {
         if std::env::var(&env).is_ok_and(|v| !v.is_empty()) {
             continue;
         }
-        println!(
-            "auth needed: export {env}=...   (upstream `{upstream}` — {})",
-            users.join(", ")
-        );
+        let local = resolved
+            .upstreams
+            .get(&upstream)
+            .and_then(|(u, _)| u.base_url.as_deref())
+            .and_then(rtk_engine::pipeline::url_authority)
+            .filter(|a| rtk_engine::pipeline::local_listen(a));
+        match local {
+            Some(address) => println!(
+                "key not set: {env} (upstream `{upstream}` — {}); rtk calls the local service on {address} without one, export it if that service needs one",
+                users.join(", ")
+            ),
+            None => println!(
+                "auth needed: export {env}=...   (upstream `{upstream}` — {})",
+                users.join(", ")
+            ),
+        }
     }
 }
 
@@ -368,6 +380,95 @@ pub(crate) fn scan_for_secrets(sources: &[(String, String)]) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+pub(crate) fn sharing_notice(sources: &[(String, String)]) {
+    let installs = sources.iter().any(|(label, text)| {
+        rtk_engine::pipeline::parse(text, label)
+            .file
+            .is_some_and(|file| !file.dependencies.is_empty())
+    });
+    if !installs {
+        return;
+    }
+    let page = crate::core::pipeline_catalog::CATALOG_PAGE;
+    warning_panel_err(
+        "This pipeline installs software on the computers that add it",
+        &[
+            &format!(
+                "rtk-ai verifies and approves every pipeline before it enters the catalog ({page}), and refuses pipelines from untrusted sources and dependencies it cannot verify."
+            ),
+            "Anyone who adds it from this share installs its dependencies at their own risk, and only after rtk asks them.",
+            &format!("To submit it for review, see {page}"),
+        ],
+    );
+    eprintln!();
+}
+
+pub(crate) fn sign_sources(sources: &mut [(String, String)]) {
+    let Some(login) = gh_login() else {
+        return;
+    };
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    for (_, text) in sources.iter_mut() {
+        *text = with_author(text, &login, &date);
+    }
+}
+
+fn gh_login() -> Option<String> {
+    let out = std::process::Command::new("gh")
+        .args(["api", "user", "--jq", ".login"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let login = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && valid_login(&login)).then_some(login)
+}
+
+fn valid_login(login: &str) -> bool {
+    !login.is_empty()
+        && login.len() <= 39
+        && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+const AUTHOR_PREFIX: &str = "# author: @";
+
+fn with_author(text: &str, login: &str, date: &str) -> String {
+    let rest: String = text
+        .lines()
+        .filter(|line| !line.starts_with(AUTHOR_PREFIX))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    format!("{AUTHOR_PREFIX}{login} · shared with rtk pipeline share · {date}\n{rest}")
+}
+
+fn shared_author(toml: &str) -> Option<String> {
+    toml.lines()
+        .take_while(|line| line.trim_start().starts_with('#') || line.trim().is_empty())
+        .find_map(|line| line.trim_start().strip_prefix(AUTHOR_PREFIX))
+        .map(|rest| {
+            rest.chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect::<String>()
+        })
+        .filter(|login| valid_login(login))
+}
+
+fn source_owner(source: &str) -> Option<String> {
+    if let Some(src) = crate::core::pipeline_remote::parse_github_source(source) {
+        return Some(src.owner);
+    }
+    let rest = [
+        "https://gist.github.com/",
+        "https://gist.githubusercontent.com/",
+        "https://github.com/",
+        "https://raw.githubusercontent.com/",
+    ]
+    .iter()
+    .find_map(|prefix| source.strip_prefix(prefix))?;
+    let mut parts = rest.split('/');
+    let owner = parts.next()?;
+    (parts.next().is_some_and(|p| !p.is_empty()) && valid_login(owner)).then(|| owner.to_string())
 }
 
 pub(crate) fn gh_available() -> bool {
@@ -680,6 +781,24 @@ fn add_pipeline(
         );
         println!("    you alone are responsible for any plugin you build and run.");
     }
+    if let Some(author) = shared_author(&toml) {
+        use colored::Colorize;
+        match source_owner(source) {
+            Some(owner) if owner.eq_ignore_ascii_case(&author) => {
+                println!("    author: @{author}, the owner of its source")
+            }
+            Some(owner) => println!(
+                "    {}",
+                format!(
+                    "[warn] its header says @{author} wrote it, but its source belongs to @{owner}"
+                )
+                .yellow()
+            ),
+            None => println!(
+                "    author: @{author} (from its header; this source has no GitHub owner to check it against)"
+            ),
+        }
+    }
     if let Some((src, sha)) = &pin {
         match sha {
             Some(sha) => println!(
@@ -769,6 +888,24 @@ fn add_pipeline(
 
     println!("installed: {}", dest.display());
     print_auth_guidance(&loaded.resolved);
+    if !from_init && !loaded.resolved.dependencies.is_empty() {
+        use crate::core::deps::{self, Mode};
+        let pinned = pin.as_ref().is_some_and(|(_, sha)| sha.is_some());
+        let entries = if pinned {
+            crate::core::pipeline_catalog::load().entries
+        } else {
+            Vec::new()
+        };
+        let mode = if crate::core::ask::interactive() && !crate::core::ask::in_ci() {
+            Mode::Ask
+        } else {
+            Mode::NoTerminal
+        };
+        let review = deps::review_of(&name, &entries);
+        for (dependency, (def, _)) in &loaded.resolved.dependencies {
+            deps::offer(&name, dependency, def, &review, mode)?;
+        }
+    }
     let wants_proxy = loaded.resolved.extends.iter().any(|e| e == "rtk:proxy")
         || loaded
             .resolved
@@ -1208,7 +1345,10 @@ pub fn run_share(name: Option<&str>, force_md: bool, gist: bool, force: bool) ->
     // A terminal gets the screenshot-able card; a pipe or redirect gets the
     // paste-ready markdown, so `rtk pipeline share > card.md` keeps working
     // and the two renderings never mix on one stream.
+    sharing_notice(&card.sources);
     if gist {
+        let mut card = card;
+        sign_sources(&mut card.sources);
         let card_md = card.card_md();
         return publish_gist(&card.display, &card.sources, &card_md, force);
     }
@@ -1676,6 +1816,9 @@ pub fn run_status() -> Result<i32> {
             let loaded = load_for_cli();
             println!("active: {}", loaded.resolved.name);
             print_auth_guidance(&loaded.resolved);
+            for line in crate::core::deps::status_lines(&loaded.resolved) {
+                println!("{line}");
+            }
             let has_proxy_rules = loaded
                 .resolved
                 .rules
@@ -2171,6 +2314,49 @@ pub fn run_methods_list() -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    use super::{AUTHOR_PREFIX, shared_author, source_owner, with_author};
+
+    #[test]
+    fn a_shared_pipeline_carries_one_author_header() {
+        let signed = with_author(
+            "# old note\n[pipeline]\nname = \"p\"\n",
+            "alice",
+            "2026-11-24",
+        );
+        assert_eq!(
+            signed,
+            "# author: @alice · shared with rtk pipeline share · 2026-11-24\n# old note\n[pipeline]\nname = \"p\"\n"
+        );
+        let resigned = with_author(&signed, "bob", "2026-11-25");
+        assert_eq!(resigned.matches(AUTHOR_PREFIX).count(), 1);
+        assert_eq!(shared_author(&resigned).as_deref(), Some("bob"));
+        assert_eq!(shared_author("[pipeline]\n# author: @late\n"), None);
+        assert_eq!(
+            shared_author("# author: @bad;login\n"),
+            Some("bad".to_string())
+        );
+        assert_eq!(shared_author("# no header\n"), None);
+    }
+
+    #[test]
+    fn the_source_owner_comes_from_where_it_was_fetched() {
+        assert_eq!(source_owner("github:acme/pipes").as_deref(), Some("acme"));
+        assert_eq!(
+            source_owner("https://gist.github.com/alice/0123abcd").as_deref(),
+            Some("alice")
+        );
+        assert_eq!(
+            source_owner("https://gist.githubusercontent.com/alice/0123abcd/raw").as_deref(),
+            Some("alice")
+        );
+        assert_eq!(
+            source_owner("https://raw.githubusercontent.com/acme/pipes/main/p.toml").as_deref(),
+            Some("acme")
+        );
+        assert_eq!(source_owner("https://example.com/alice/p.toml"), None);
+        assert_eq!(source_owner("./p.toml"), None);
+        assert_eq!(source_owner("https://gist.github.com/alice"), None);
+    }
     use rtk_engine::pipeline::{
         BUILTIN_NAMES, Scope, SourceFile, ValidateCtx, builtin_text, has_errors, parse, resolve,
         validate,

@@ -965,6 +965,16 @@ pub fn trust_summary(content: &str) -> Result<Vec<String>, String> {
         }
         lines.push(line);
     }
+    for (name, dependency) in &file.dependencies {
+        let mut line = format!("dependency `{name}` — installed only if you say yes when rtk asks");
+        for detail in crate::core::deps::recipe_lines(name, dependency)
+            .into_iter()
+            .skip(1)
+        {
+            line.push_str(&format!("\n{detail}"));
+        }
+        lines.push(line);
+    }
     for (target, override_) in &file.overrides {
         let patch =
             toml::to_string(&override_.patch).unwrap_or_else(|_| format!("{:?}", override_.patch));

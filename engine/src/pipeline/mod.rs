@@ -20,8 +20,8 @@ pub use eval::{
 pub use position::{Position, SiteKind};
 pub use resolve::{Guards, Resolved, ResolvedDirective, ResolvedRule, Scope, SourceFile, resolve};
 pub use schema::{
-    ClassifierDef, DirectiveDef, MethodDef, OverrideDef, ParseResult, PipelineFile, RuleDef,
-    TaskDef, UpstreamDef, parse,
+    BinaryDef, ClassifierDef, DependencyDef, DirectiveDef, Installer, MethodDef, OverrideDef,
+    ParseResult, PipelineFile, RuleDef, TaskDef, UpstreamDef, local_listen, parse, url_authority,
 };
 pub use validate::{
     DIRECTIVE_CHANNELS, ValidateCtx, after_tool_extractable, proxy_members, task_kind_names,

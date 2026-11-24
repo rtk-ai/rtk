@@ -62,6 +62,16 @@ pub fn get(url: &str) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
 }
 
 #[cfg(feature = "engine")]
+pub fn get_download(url: &str) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
+    use anyhow::Context;
+    // nosemgrep: ureq-outside-telemetry -- inbound GET of a pipeline dependency's file, pinned by its sha256, only after the user said yes to installing it
+    let request = ureq::get(url);
+    connect_timeout(request, CONNECT_TIMEOUT)
+        .call()
+        .with_context(|| format!("GET {url}"))
+}
+
+#[cfg(feature = "engine")]
 pub fn get_within(
     url: &str,
     timeout: Duration,

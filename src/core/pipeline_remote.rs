@@ -465,9 +465,11 @@ pub fn run_publish(name: Option<&str>, force: bool) -> Result<i32> {
              (the non-interactive path is `rtk pipeline share --gist`)"
         );
     }
-    let Some(card) = crate::core::pipeline_cmd::collect_card(name)? else {
+    let Some(mut card) = crate::core::pipeline_cmd::collect_card(name)? else {
         return Ok(1);
     };
+    crate::core::pipeline_cmd::sharing_notice(&card.sources);
+    crate::core::pipeline_cmd::sign_sources(&mut card.sources);
     if card.is_active {
         let loaded = crate::core::pipeline_cmd::load_for_cli();
         if has_errors(&loaded.diagnostics) {

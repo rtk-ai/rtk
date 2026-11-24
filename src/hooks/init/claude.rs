@@ -2688,7 +2688,7 @@ mod tests {
                 remove_settings_entries(InitContext::default()).expect("remove settings"),
                 SettingsRemoval {
                     hook: true,
-                    proxy_base_url: false,
+                    proxy_base_url: false
                 }
             );
 

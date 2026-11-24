@@ -65,7 +65,11 @@ fn deny(message: &str) {
             "permissionDecisionReason": message,
         }
     });
-    let _ = writeln!(io::stdout(), "{response}");
+    let _ = writeln!(
+        io::stdout(),
+        "{}",
+        crate::core::notice::claude_answer(&response.to_string())
+    );
 }
 
 fn read_gate(v: &Value) -> bool {
@@ -170,7 +174,11 @@ fn shell_gate(v: &Value) -> bool {
                 && permissions::ask_rule_applies(cmd, permissions::Host::Claude, &transparent);
             let decision = swap_decision(verdict, ask_rule, unfiltered);
             let output = swap_output(v, &command, &rule, decision);
-            let _ = writeln!(io::stdout(), "{output}");
+            let _ = writeln!(
+                io::stdout(),
+                "{}",
+                crate::core::notice::claude_answer(&output.to_string())
+            );
             audit_log("rewrite", cmd, &command);
             log(v, "shell", cmd, &rule, "swap");
             true

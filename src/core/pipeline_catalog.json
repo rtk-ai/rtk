@@ -1,0 +1,140 @@
+{
+  "generated": "2026-11-21T14:01:07.554Z",
+  "rtk_min": "v1.0.1",
+  "pipelines": [
+    {
+      "id": "aeppling/rtk-pipeline-laya-tiered",
+      "name": "laya-tiered",
+      "summary": "Sends file reads and shell commands to a worker model, compresses shell commands output, and briefs your agent.",
+      "aim": "cost",
+      "result": {
+        "kind": "cost",
+        "evidence": "benchmark",
+        "value": "−20.2%",
+        "unit": "per trial",
+        "quality": "About the same"
+      },
+      "benchmark": {
+        "suite": "SkillsBench",
+        "model": "claude-opus-5-5",
+        "trials_per_arm": 44,
+        "cost": {
+          "baseline": 4.312,
+          "pipeline": 3.44,
+          "per": "trial"
+        },
+        "quality": {
+          "metric": "reward",
+          "baseline": 0.66,
+          "pipeline": 0.64,
+          "higherIsBetter": true
+        }
+      },
+      "self_reported": null,
+      "requires": [
+        {
+          "kind": "local-service",
+          "name": "Laya",
+          "env": "RTK_LAYA_TOKEN"
+        },
+        {
+          "kind": "api-key",
+          "name": "Anthropic API key",
+          "env": "ANTHROPIC_API_KEY"
+        }
+      ],
+      "sha": "26b8683d0eeffde220a8d25a60b9654f752c7eb4",
+      "install": "rtk pipeline add github:aeppling/rtk-pipeline-laya-tiered@26b8683d0eeffde220a8d25a60b9654f752c7eb4",
+      "tier": "text",
+      "stars": 2,
+      "approvedAt": "2026-10-23T14:35:05.005Z",
+      "url": "https://www.rtk-ai.app/pipelines/aeppling/rtk-pipeline-laya-tiered/"
+    },
+    {
+      "id": "aeppling/rtk-pipeline-laya-delegate",
+      "name": "laya-delegate",
+      "summary": "Sends file reads and shell commands to a worker model, and briefs your agent.",
+      "aim": "cost",
+      "result": {
+        "kind": "cost",
+        "evidence": "benchmark",
+        "value": "−13.9%",
+        "unit": "per trial",
+        "quality": "Unchanged"
+      },
+      "benchmark": {
+        "suite": "SkillsBench",
+        "model": "claude-opus-5-5",
+        "trials_per_arm": 48,
+        "cost": {
+          "baseline": 3.587,
+          "pipeline": 3.088,
+          "per": "trial"
+        },
+        "quality": {
+          "metric": "reward",
+          "baseline": 0.81,
+          "pipeline": 0.81,
+          "higherIsBetter": true
+        }
+      },
+      "self_reported": null,
+      "requires": [
+        {
+          "kind": "local-service",
+          "name": "Laya",
+          "env": "RTK_LAYA_TOKEN"
+        },
+        {
+          "kind": "api-key",
+          "name": "Anthropic API key",
+          "env": "ANTHROPIC_API_KEY"
+        }
+      ],
+      "sha": "6452459d550853f14fac8a400fb6704cea983900",
+      "install": "rtk pipeline add github:aeppling/rtk-pipeline-laya-delegate@6452459d550853f14fac8a400fb6704cea983900",
+      "tier": "text",
+      "stars": 7,
+      "approvedAt": "2026-10-23T13:42:12.642Z",
+      "url": "https://www.rtk-ai.app/pipelines/aeppling/rtk-pipeline-laya-delegate/"
+    },
+    {
+      "id": "aeppling/rtk-pipeline-default-bash-compress",
+      "name": "default-bash-compress",
+      "summary": "Turns on RTK's default pipeline with 1 built-in rule changed. Adds nothing else.",
+      "aim": "cost",
+      "result": {
+        "kind": "cost",
+        "evidence": "benchmark",
+        "value": "−6.2%",
+        "unit": "per trial",
+        "quality": "About the same"
+      },
+      "benchmark": {
+        "suite": "SkillsBench",
+        "model": "claude-opus-4-8",
+        "trials_per_arm": 48,
+        "cost": {
+          "baseline": 12.098,
+          "pipeline": 11.349,
+          "per": "trial"
+        },
+        "quality": {
+          "metric": "reward",
+          "baseline": 0.49,
+          "pipeline": 0.46,
+          "higherIsBetter": true
+        }
+      },
+      "self_reported": null,
+      "requires": [],
+      "sha": "ef1b85b59cb670b70a40a7cb0dbb8e699bb6ba9f",
+      "install": "rtk pipeline add github:aeppling/rtk-pipeline-default-bash-compress@ef1b85b59cb670b70a40a7cb0dbb8e699bb6ba9f",
+      "tier": "safe",
+      "stars": 1,
+      "approvedAt": "2026-10-25T15:13:18.466Z",
+      "url": "https://www.rtk-ai.app/pipelines/aeppling/rtk-pipeline-default-bash-compress/"
+    }
+  ],
+  "revoked": []
+}

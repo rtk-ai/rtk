@@ -3,6 +3,10 @@
 //! the yes/no form built on it, and `interactive()`, the check that decides
 //! whether a menu can be shown at all. Callers keep their own non-interactive
 //! behavior and only reach these functions when `interactive()` is true.
+//! `in_ci()` marks a terminal that no one is likely to answer (a CI job with a
+//! pseudo-terminal), where questions that did not exist before must not appear.
+//! Keys typed before a menu opens, or left over after it closes, are dropped,
+//! so a `y` + enter typed by habit cannot answer the next question.
 
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -15,6 +19,24 @@ const YES_NO_KEYS: &[char] = &['y', 'n'];
 pub(crate) fn interactive() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+pub(crate) fn in_ci() -> bool {
+    use crate::core::user_env;
+    user_env::var("CI").is_some()
+        || user_env::var("GITHUB_ACTIONS").is_some()
+        || user_env::var("GITLAB_CI").is_some()
+        || user_env::var("JENKINS_URL").is_some()
+        || user_env::var("BUILDKITE").is_some()
+}
+
+fn drop_pending_keys() {
+    use crossterm::event::{poll, read};
+    while poll(std::time::Duration::ZERO).unwrap_or(false) {
+        if read().is_err() {
+            break;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +143,7 @@ fn run_menu(
     if terminal::enable_raw_mode().is_err() {
         return select_menu_plain(items, default, shortcuts);
     }
+    drop_pending_keys();
     let mut out = std::io::stdout();
     let mut idx = default.min(items.len() - 1);
     let render = |out: &mut std::io::Stdout, idx: usize| -> Result<()> {
@@ -164,6 +187,7 @@ fn run_menu(
         }
     };
     let result = run();
+    drop_pending_keys();
     let _ = terminal::disable_raw_mode();
     let result = result?;
     execute!(
@@ -281,6 +305,7 @@ pub(crate) fn pick_many(
     if terminal::enable_raw_mode().is_err() {
         return pick_many_plain(items, &chosen);
     }
+    drop_pending_keys();
     let width = items
         .iter()
         .map(|(label, _)| label.chars().count())
@@ -335,6 +360,7 @@ pub(crate) fn pick_many(
         }
     };
     let result = run();
+    drop_pending_keys();
     let _ = terminal::disable_raw_mode();
     let result = result?;
     execute!(

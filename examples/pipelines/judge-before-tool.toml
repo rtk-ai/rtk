@@ -10,10 +10,9 @@
 #
 # ── PREREQUISITE: a System-1 endpoint (pick one) ──────────────────────────
 #
-# A. Laya, local, exposed on loopback in the systemone wire format — see
-#    laya-route.toml for the setup — then: export RTK_LAYA_TOKEN=local
-#    (rtk requires a declared credential per classifier upstream; a local
-#    service ignores it).
+# A. Laya, local, on loopback in the systemone wire format. laya-route.toml
+#    declares it as a dependency, so installing that pipeline installs it
+#    (after you say yes). A local service needs no key.
 #
 # B. TypeSafe Jev, hosted: swap the judge upstream below for
 #    classify-routing.toml's (base_url https://api.typesafe.ai/v1/systemone,
@@ -22,7 +21,7 @@
 # Workers bill your Anthropic account: with the rtk llm-proxy running they
 # borrow the credential your agent already relays, else ANTHROPIC_API_KEY.
 #
-# Fail-open: endpoint down, token unset, timeout, or an unsure answer inserts
+# Fail-open: endpoint down, key unset, timeout, or an unsure answer inserts
 # no fact, no rule matches, and the tool runs normally.
 
 schema_version = 1
@@ -35,7 +34,6 @@ extends = "rtk:posthook"
 provider     = "laya"
 model        = "laya"
 base_url     = "http://127.0.0.1:41733/v1/systemone"
-api_key_env  = "RTK_LAYA_TOKEN"
 timeout_secs = 4
 
 [upstream.haiku]

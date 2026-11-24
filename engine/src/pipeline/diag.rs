@@ -22,6 +22,8 @@ pub enum Code {
     E018,
     E019,
     E020,
+    E021,
+    E022,
     W001,
     W002,
     W003,
@@ -46,6 +48,7 @@ pub enum Code {
     W023,
     W024,
     W025,
+    W026,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +82,8 @@ impl Code {
             Code::E018 => "E018",
             Code::E019 => "E019",
             Code::E020 => "E020",
+            Code::E021 => "E021",
+            Code::E022 => "E022",
             Code::W001 => "W001",
             Code::W002 => "W002",
             Code::W003 => "W003",
@@ -103,6 +108,7 @@ impl Code {
             Code::W023 => "W023",
             Code::W024 => "W024",
             Code::W025 => "W025",
+            Code::W026 => "W026",
         }
     }
 

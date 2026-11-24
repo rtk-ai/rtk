@@ -15,11 +15,10 @@
 # A. Laya, local (no key, no tokens, nothing leaves your machine)
 #    https://github.com/receptron/laya — an open-source Jev-compatible
 #    decision model on ONNX (requires ~1.7 GB of disk for its weights).
-#    Expose it on loopback in the systemone wire format with a ~60-line
-#    Node wrapper around its `systemOne` call (request: {state, questions},
-#    response: {answers} — the shapes match natively; normalize `score` to
-#    0..1), then: export RTK_LAYA_TOKEN=local  (rtk requires a declared
-#    credential per classifier upstream; a local service ignores it).
+#    This file declares it under [dependency.laya] below: the pinned npm
+#    package plus a small server that speaks the systemone wire format.
+#    `rtk init -g` and `rtk pipeline add` ask before installing it, and rtk
+#    starts it again when a tool call finds it stopped. It needs no key.
 #
 # B. TypeSafe Jev, hosted (no local model, needs an API key)
 #    Swap the judge upstream below for classify-routing.toml's
@@ -29,7 +28,7 @@
 # Workers bill your Anthropic account: with the rtk llm-proxy running they
 # borrow the credential your agent already relays, else ANTHROPIC_API_KEY.
 #
-# Fail-open end to end: endpoint down, token unset, timeout, or an unsure
+# Fail-open end to end: endpoint down, key unset, timeout, or an unsure
 # answer inserts no fact, no rule matches, output passes untouched.
 # One consequence of memoization: verdicts are cached per content, and cache
 # hits apply without consulting the endpoint — so removing the credential
@@ -59,8 +58,114 @@ extends = "rtk:posthook"
 provider     = "laya"
 model        = "laya"
 base_url     = "http://127.0.0.1:41733/v1/systemone"
-api_key_env  = "RTK_LAYA_TOKEN"
+dependency   = "laya"
 timeout_secs = 4
+
+# Laya runs on this computer, installed only after you say yes. rtk checks
+# the package's sha512 before anything runs, serves it on 127.0.0.1:41733
+# with the server below, and it exits after 30 idle minutes.
+[dependency.laya]
+about     = "Laya, an open-source decision model the judge asks"
+needs     = "Node.js 20+, ~1.7 GB of model weights downloaded on first start (kept in ~/.cache/receptron-laya), ~2 GB of RAM while running"
+npm       = "@receptron/laya@0.2.0"
+integrity = "sha512-C7eBcUUj/S4Mn2ccQoqflZghEi9OPu6RBUbSjcbnuPbQQAWTVFGxDRoLyyP59hm2t4oF8JbE+dP0IaUE58XsJQ=="
+node      = 20
+run       = ["node", "server.mjs"]
+listen    = "127.0.0.1:41733"
+health    = "/health"
+env       = { LAYA_PORT = "41733", LAYA_IDLE_SECS = "1800", ONNXRUNTIME_NODE_INSTALL = "skip" }
+
+[dependency.laya.files]
+"server.mjs" = '''
+import { createServer } from "node:http";
+import { Laya } from "@receptron/laya";
+
+const PORT = Number(process.env.LAYA_PORT ?? 41733);
+const HOST = process.env.LAYA_HOST ?? "127.0.0.1";
+const IDLE_SECS = Number(process.env.LAYA_IDLE_SECS ?? 1800);
+const state = { phase: "loading", file: "", received: 0, total: 0 };
+let laya = null;
+let lastUse = Date.now();
+let logged = { file: "", pct: -10 };
+
+const server = createServer((req, res) => {
+  if (req.method === "GET" && req.url === "/health") {
+    if (laya) return res.end("ok");
+    const pct = state.total ? Math.floor((state.received / state.total) * 100) : 0;
+    res.statusCode = 503;
+    return res.end(state.phase === "downloading" ? `downloading ${state.file} ${pct}%` : "loading the model");
+  }
+  if (req.method !== "POST" || !req.url.startsWith("/v1/systemone")) {
+    res.statusCode = 404;
+    return res.end();
+  }
+  if (!laya) {
+    res.statusCode = 503;
+    return res.end(JSON.stringify({ error: "loading" }));
+  }
+  lastUse = Date.now();
+  let body = "";
+  req.setEncoding("utf8");
+  req.on("data", (c) => { body += c; if (body.length > 1_000_000) req.destroy(); });
+  req.on("end", async () => {
+    try {
+      const { state: input, questions } = JSON.parse(body);
+      const t0 = Date.now();
+      const result = await laya.systemOne(input ?? "", questions ?? {});
+      const answers = {};
+      for (const [name, a] of Object.entries(result.answers)) {
+        if (a.type === "score") {
+          const levels = Object.keys(a.probabilities ?? {}).length;
+          answers[name] = { ...a, score: levels > 1 ? a.score / (levels - 1) : a.score };
+        } else answers[name] = a;
+      }
+      console.log(`laya: verdict ${Date.now() - t0}ms chars=${(input ?? "").length}`);
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ model: result.model, answers, usage: result.usage }));
+    } catch (e) {
+      console.error("laya: request failed", e);
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "Bad request" }));
+    }
+  });
+});
+server.on("error", (e) => {
+  console.error(`laya: cannot listen on ${HOST}:${PORT}: ${e.message}`);
+  process.exit(1);
+});
+server.listen(PORT, HOST, () => console.log(`laya: listening on ${HOST}:${PORT}/v1/systemone`));
+
+try {
+  laya = await Laya.load({
+    onProgress: ({ file, received, total }) => {
+      state.phase = "downloading";
+      state.file = file;
+      state.received = received;
+      state.total = total;
+      const pct = total ? Math.floor((received / total) * 100) : 0;
+      if (file !== logged.file || pct >= logged.pct + 10) {
+        logged = { file, pct };
+        console.log(`laya: downloading ${file} ${pct}%`);
+      }
+    },
+  });
+} catch (e) {
+  console.error("laya: model failed to load", e);
+  process.exit(1);
+}
+state.phase = "ready";
+lastUse = Date.now();
+console.log("laya: model warm");
+
+if (IDLE_SECS > 0) {
+  setInterval(() => {
+    if (Date.now() - lastUse > IDLE_SECS * 1000) {
+      console.log(`laya: idle ${IDLE_SECS}s, exiting`);
+      process.exit(0);
+    }
+  }, 60000).unref();
+}
+'''
 
 # The WORKERS: where `action = "route"` sends the work.
 [upstream.haiku]

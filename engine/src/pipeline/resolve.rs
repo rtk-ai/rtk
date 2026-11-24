@@ -3,8 +3,8 @@ use super::conditions::{Condition, parse_when};
 use super::diag::{Code, Diagnostic, did_you_mean};
 use super::position::Position;
 use super::schema::{
-    ClassifierDef, DirectiveDef, MethodDef, OverrideDef, PipelineFile, RuleDef, TaskDef,
-    UpstreamDef,
+    ClassifierDef, DependencyDef, DirectiveDef, MethodDef, OverrideDef, PipelineFile, RuleDef,
+    TaskDef, UpstreamDef,
 };
 use std::collections::BTreeMap;
 
@@ -83,6 +83,7 @@ pub struct Resolved {
     pub tasks: BTreeMap<String, (TaskDef, String)>,
     pub upstreams: BTreeMap<String, (UpstreamDef, String)>,
     pub classifiers: BTreeMap<String, (ClassifierDef, String)>,
+    pub dependencies: BTreeMap<String, (DependencyDef, String)>,
     pub guards: Guards,
 }
 
@@ -375,6 +376,11 @@ pub fn resolve(local: &[SourceFile]) -> (Resolved, Vec<Diagnostic>) {
                 .classifiers
                 .insert(classifier_name.clone(), (def.clone(), source.label.clone()));
         }
+        for (dependency_name, def) in &source.file.dependencies {
+            resolved
+                .dependencies
+                .insert(dependency_name.clone(), (def.clone(), source.label.clone()));
+        }
         for (upstream_name, def) in &source.file.upstreams {
             match resolved.upstreams.get_mut(upstream_name) {
                 Some((existing, origin)) => {
@@ -395,6 +401,9 @@ pub fn resolve(local: &[SourceFile]) -> (Resolved, Vec<Diagnostic>) {
                     }
                     if def.timeout_secs.is_some() {
                         existing.timeout_secs = def.timeout_secs;
+                    }
+                    if def.dependency.is_some() {
+                        existing.dependency = def.dependency.clone();
                     }
                     *origin = source.label.clone();
                 }

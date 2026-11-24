@@ -3081,7 +3081,7 @@ fn run_cli() -> Result<i32> {
                     hooks::init::print_default_agent_hint(global);
                 }
                 #[cfg(feature = "engine")]
-                if global || pipeline.is_some() {
+                if pipeline.is_some() {
                     hooks::init::pipeline_step(pipeline.as_deref(), patch_mode, ctx)?;
                 }
                 #[cfg(not(feature = "engine"))]
