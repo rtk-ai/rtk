@@ -7,11 +7,13 @@ import { delimiter, dirname, join } from "node:path"
 import RtkOpenCodePlugin, {
   candidateRtkDirs,
   durationMsOf,
+  hookTimeoutMs,
   parseAfterEnvelope,
   probeRtkHookOpencode,
   probeRtkHookOpencodeAfter,
   resolveRtkPath,
   runHookOpencode,
+  runHookOpencodeAfter,
   tryCompressOutput,
   tryRewriteCommand,
   _resetCachedRtkPath,
@@ -221,6 +223,7 @@ after(() => {
   delete process.env.MOCK_PROBE_LOG
   delete process.env.RTK_DISABLED
   delete process.env.RTK_BIN
+  delete process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS
   _resetCachedRtkPath()
   rmSync(mockDir, { recursive: true, force: true })
   rmSync(emptyDir, { recursive: true, force: true })
@@ -673,6 +676,70 @@ test("tryRewriteCommand guards the tool name and the command shape", async () =>
   assert.equal(await tryRewriteCommand("shell", "   "), null)
   // lowercased, so the real tool names match
   assert.equal(await tryRewriteCommand("SHELL", "ls -la"), "rtk ls -la")
+})
+
+test("hookTimeoutMs covers a classifier by default and honours the env var", () => {
+  const saved = process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS
+  try {
+    delete process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS
+    // A classifier defaults to 8 s; the budget must not kill it at 3 s as the
+    // old hard-coded value did.
+    assert.equal(hookTimeoutMs(), 15000)
+    assert.ok(hookTimeoutMs() > 8000)
+
+    process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS = "25000"
+    assert.equal(hookTimeoutMs(), 25000)
+
+    // Unusable values fall back to the default instead of disabling the
+    // timeout: an unbounded spawn would hang the tool call.
+    for (const bad of ["", "0", "-5", "abc", "NaN", "Infinity"]) {
+      process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS = bad
+      assert.equal(hookTimeoutMs(), 15000, bad)
+    }
+
+    // Past 2^31-1 a setTimeout fires after ~1 ms instead of after the delay, so
+    // an over-large value has to clamp — not fall back, and never reach the
+    // timer as-is.
+    process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS = "9999999999"
+    assert.equal(hookTimeoutMs(), 2 ** 31 - 1)
+    assert.ok(hookTimeoutMs() <= 2 ** 31 - 1)
+  } finally {
+    if (saved === undefined) delete process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS
+    else process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS = saved
+  }
+})
+
+test("a timed-out hook warns once, never per call", async () => {
+  const warnings = []
+  const realWarn = console.warn
+  console.warn = (message) => warnings.push(String(message))
+  const saved = process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS
+  try {
+    process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS = "100"
+    _resetCachedRtkPath()
+
+    // Both transports, several times: the warning is about the configuration,
+    // not about the particular call.
+    assert.equal(await runHookOpencode(mockBin(), "sleep"), null)
+    assert.equal(await runHookOpencode(mockBin(), "sleep"), null)
+    assert.equal(
+      await runHookOpencodeAfter(
+        mockBin(),
+        JSON.stringify({ tool: "bash", args: {}, output: "sleep-after" })
+      ),
+      null
+    )
+
+    const timeouts = warnings.filter((w) => /timed out/.test(w))
+    assert.equal(timeouts.length, 1, warnings.join("\n"))
+    assert.match(timeouts[0], /RTK_OPENCODE_HOOK_TIMEOUT_MS/)
+    assert.match(timeouts[0], /100 ms/)
+  } finally {
+    console.warn = realWarn
+    if (saved === undefined) delete process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS
+    else process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS = saved
+    _resetCachedRtkPath()
+  }
 })
 
 test("runHookOpencode fails open on anything unusable", async () => {

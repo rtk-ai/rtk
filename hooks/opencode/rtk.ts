@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process"
+import { execFile, spawn, type ChildProcess } from "node:child_process"
 import { existsSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, delimiter, dirname, isAbsolute, join } from "node:path"
@@ -29,11 +29,78 @@ const MAX_AFTER_BYTES = 64 * 1024 * 1024
 let cachedRtkPath: string | null = null
 let probedBin: { bin: string; capable: boolean } | null = null
 let probedAfterBin: { bin: string; capable: boolean; active: boolean } | null = null
+let warnedHookTimeout = false
 
 export function _resetCachedRtkPath(): void {
   cachedRtkPath = null
   probedBin = null
   probedAfterBin = null
+  warnedHookTimeout = false
+}
+
+/**
+ * Default budget for one hook call, in milliseconds.
+ *
+ * 15 s covers an 8 s classifier with room for process start. The 3 s budget
+ * this replaced did not: a classifier rule was killed at 3 s and the tool call
+ * silently kept its raw output.
+ */
+const DEFAULT_HOOK_TIMEOUT_MS = 15000
+
+/**
+ * Largest delay a single `setTimeout` can hold: 2^31 - 1 ms (~24.8 days).
+ *
+ * Node overflows a larger delay and fires it after ~1 ms instead, which would
+ * kill every hook call at once — the probe included — and read as "no
+ * subcommand". Clamping keeps an over-large value meaning "as long as possible".
+ */
+const MAX_HOOK_TIMEOUT_MS = 2 ** 31 - 1
+
+/** Grace period between SIGTERM and SIGKILL when a hook call times out. */
+const KILL_GRACE_MS = 2000
+
+/**
+ * Stop a hook process that outstayed its budget: SIGTERM, then SIGKILL once
+ * [`KILL_GRACE_MS`] has passed. A child that ignores the first signal must not
+ * outlive the hook that gave up on it. The escalation timer is unref'd and
+ * cleared when the child does exit, so it never holds OpenCode open.
+ */
+function killWithEscalation(child: ChildProcess): void {
+  child.kill()
+  const escalate = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS)
+  escalate.unref?.()
+  child.once("close", () => clearTimeout(escalate))
+}
+
+/**
+ * How long a hook call may take, in milliseconds.
+ *
+ * `RTK_OPENCODE_HOOK_TIMEOUT_MS` raises it for a pipeline whose rules call a
+ * model directly (route workers default to 30 s). A missing, non-numeric or
+ * non-positive value falls back to the default rather than disabling the
+ * timeout: an unbounded spawn would hang the tool call it is compressing. A
+ * value past [`MAX_HOOK_TIMEOUT_MS`] is clamped, not taken at face value.
+ */
+export function hookTimeoutMs(): number {
+  const raw = process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS
+  const parsed = raw === undefined || raw === "" ? Number.NaN : Number(raw)
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_HOOK_TIMEOUT_MS
+  return Math.min(Math.floor(parsed), MAX_HOOK_TIMEOUT_MS)
+}
+
+/**
+ * Warn once per process that a hook call hit its budget.
+ *
+ * Once, not per call: a slow pipeline rule would otherwise print a line for
+ * every tool call. The line names the variable that fixes it, which is the
+ * only thing a user can act on.
+ */
+function warnHookTimeoutOnce(): void {
+  if (warnedHookTimeout) return
+  warnedHookTimeout = true
+  console.warn(
+    `[rtk] a hook call timed out after ${hookTimeoutMs()} ms — raise RTK_OPENCODE_HOOK_TIMEOUT_MS for slow pipeline rules (this warning prints once)`
+  )
 }
 
 function probeDirsForRtk(dirs: string[], exts: string[]): string | null {
@@ -178,7 +245,7 @@ export function probeRtkHookOpencode(rtkBin: string): Promise<boolean> {
     execFile(
       rtkBin,
       ["hook", "opencode", "--help"],
-      { encoding: "utf8", timeout: 3000, windowsHide: true },
+      { encoding: "utf8", timeout: hookTimeoutMs(), windowsHide: true },
       (error) => {
         if (error) return resolve(false)
         probedBin = { bin: rtkBin, capable: true }
@@ -231,7 +298,7 @@ function probeAfterActivity(rtkBin: string): Promise<boolean | null> {
     execFile(
       rtkBin,
       ["hook", "opencode-after", "--probe"],
-      { encoding: "utf8", timeout: 3000, windowsHide: true },
+      { encoding: "utf8", timeout: hookTimeoutMs(), windowsHide: true },
       (error, stdout) => {
         // A non-zero exit means the flag or the subcommand is unknown.
         if (error) return resolve(null)
@@ -247,7 +314,7 @@ function probeAfterCapable(rtkBin: string): Promise<boolean> {
     execFile(
       rtkBin,
       ["hook", "opencode-after", "--help"],
-      { encoding: "utf8", timeout: 3000, windowsHide: true },
+      { encoding: "utf8", timeout: hookTimeoutMs(), windowsHide: true },
       (error) => resolve(!error)
     )
   })
@@ -304,26 +371,53 @@ export function runHookOpencode(
   rtkBin: string,
   command: string,
   agent?: string,
-  timeoutMs = 3000
+  timeoutMs = hookTimeoutMs()
 ): Promise<string | null> {
   const argv = ["hook", "opencode"]
   if (agent) argv.push("--agent", agent)
   argv.push(command)
 
   return new Promise((resolve) => {
-    execFile(rtkBin, argv, { encoding: "utf8", timeout: timeoutMs, windowsHide: true }, (error, stdout) => {
-      if (error) return resolve(null)
+    let settled = false
+    let child: ChildProcess | undefined
+    const finish = (value: string | null) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    }
+    // The budget is enforced here rather than with execFile's own `timeout`,
+    // which sends one SIGTERM and gives up: the same escalation as the after
+    // path keeps a wedged rtk from outliving the hook.
+    const timer = setTimeout(() => {
+      warnHookTimeoutOnce()
+      if (child) killWithEscalation(child)
+      finish(null)
+    }, timeoutMs)
 
-      let answer: Answer
-      try {
-        answer = JSON.parse(String(stdout ?? "").trim() || "{}")
-      } catch {
-        return resolve(null)
-      }
+    try {
+      child = execFile(
+        rtkBin,
+        argv,
+        { encoding: "utf8", windowsHide: true },
+        (error, stdout) => {
+          if (error) return finish(null)
 
-      const rewritten = typeof answer?.command === "string" ? answer.command.trim() : ""
-      resolve(rewritten && rewritten !== command ? rewritten : null)
-    })
+          let answer: Answer
+          try {
+            answer = JSON.parse(String(stdout ?? "").trim() || "{}")
+          } catch {
+            return finish(null)
+          }
+
+          const rewritten = typeof answer?.command === "string" ? answer.command.trim() : ""
+          finish(rewritten && rewritten !== command ? rewritten : null)
+        }
+      )
+    } catch {
+      // A binary that cannot be spawned at all: same answer as a failed call.
+      finish(null)
+    }
   })
 }
 
@@ -342,7 +436,7 @@ export function runHookOpencode(
 export function runHookOpencodeAfter(
   rtkBin: string,
   payload: string,
-  timeoutMs = 3000
+  timeoutMs = hookTimeoutMs()
 ): Promise<string | null> {
   return new Promise((resolve) => {
     let settled = false
@@ -369,7 +463,8 @@ export function runHookOpencodeAfter(
     if (!child) return finish(null)
 
     timer = setTimeout(() => {
-      child.kill()
+      warnHookTimeoutOnce()
+      killWithEscalation(child)
       finish(null)
     }, timeoutMs)
 
