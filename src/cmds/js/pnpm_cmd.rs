@@ -7,7 +7,7 @@ use crate::core::truncate::CAP_LIST;
 use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 
 use crate::parser::{
@@ -20,7 +20,8 @@ const MAX_LISTING: usize = CAP_LIST;
 /// pnpm list JSON output structure
 #[derive(Debug, Deserialize)]
 struct PnpmListOutput {
-    name: String,
+    name: Option<String>,
+    path: Option<String>,
     #[serde(flatten)]
     package: PackageJsonListItem,
 }
@@ -29,9 +30,9 @@ struct PnpmListOutput {
 struct PackageJsonListItem {
     version: Option<String>,
     #[serde(rename = "dependencies", default)]
-    dependencies: HashMap<String, PackageJsonListItem>,
+    dependencies: BTreeMap<String, PackageJsonListItem>,
     #[serde(rename = "devDependencies", default)]
-    dev_dependencies: HashMap<String, PackageJsonListItem>,
+    dev_dependencies: BTreeMap<String, PackageJsonListItem>,
 }
 
 /// pnpm outdated JSON output structure
@@ -58,29 +59,8 @@ impl OutputParser for PnpmListParser {
 
     fn parse(input: &str) -> ParseResult<DependencyState> {
         // Tier 1: Try JSON parsing
-        match serde_json::from_str::<Vec<PnpmListOutput>>(input) {
-            Ok(json) => {
-                let mut dependencies = Vec::new();
-                let mut total_count = 0;
-
-                for pkg in &json {
-                    collect_dependencies(
-                        pkg.name.as_str(),
-                        &pkg.package,
-                        false,
-                        &mut dependencies,
-                        &mut total_count,
-                    );
-                }
-
-                let result = DependencyState {
-                    total_packages: total_count,
-                    outdated_count: 0, // list doesn't provide outdated info
-                    dependencies,
-                };
-
-                ParseResult::Full(result)
-            }
+        match parse_list_json(input) {
+            Ok(data) => ParseResult::Full(data),
             Err(e) => {
                 // Tier 2: Try text extraction
                 match extract_list_text(input) {
@@ -97,31 +77,38 @@ impl OutputParser for PnpmListParser {
     }
 }
 
-/// Recursively collect dependencies from pnpm package tree
-fn collect_dependencies(
-    name: &str,
-    pkg: &PackageJsonListItem,
-    is_dev: bool,
-    deps: &mut Vec<Dependency>,
-    count: &mut usize,
-) {
-    if let Some(version) = &pkg.version {
-        deps.push(Dependency {
-            name: name.to_string(),
-            current_version: version.clone(),
-            latest_version: None,
-            wanted_version: None,
-            dev_dependency: is_dev,
-        });
-        *count += 1;
+fn parse_list_json(input: &str) -> Result<DependencyState> {
+    let projects: Vec<PnpmListOutput> = serde_json::from_str(input)?;
+    let mut dependencies = Vec::new();
+    for project in projects {
+        anyhow::ensure!(
+            project.name.is_some() || project.path.is_some(),
+            "pnpm list project has neither a name nor a path"
+        );
+        collect_dependencies(&project.package, false, &mut dependencies);
     }
+    Ok(DependencyState {
+        total_packages: dependencies.len(),
+        outdated_count: 0,
+        dependencies,
+    })
+}
 
-    for (dep_name, dep_pkg) in &pkg.dependencies {
-        collect_dependencies(dep_name, dep_pkg, is_dev, deps, count);
-    }
-
-    for (dep_name, dep_pkg) in &pkg.dev_dependencies {
-        collect_dependencies(dep_name, dep_pkg, true, deps, count);
+/// The list roots describe projects. Only their descendants are dependencies.
+fn collect_dependencies(pkg: &PackageJsonListItem, is_dev: bool, deps: &mut Vec<Dependency>) {
+    for (children, dev_dependency) in [(&pkg.dependencies, is_dev), (&pkg.dev_dependencies, true)] {
+        for (name, child) in children {
+            if let Some(version) = &child.version {
+                deps.push(Dependency {
+                    name: name.clone(),
+                    current_version: version.clone(),
+                    latest_version: None,
+                    wanted_version: None,
+                    dev_dependency,
+                });
+            }
+            collect_dependencies(child, dev_dependency, deps);
+        }
     }
 }
 
@@ -713,7 +700,30 @@ mod tests {
         assert!(result.is_ok());
 
         let data = result.unwrap();
-        assert!(data.total_packages >= 2);
+        assert_eq!(data.total_packages, 1);
+        assert_eq!(data.dependencies[0].name, "express");
+    }
+
+    #[test]
+    fn pnpm_list_counts_children_across_workspace_roots() {
+        let json = r#"[
+            {"name":"empty","version":"1.0.0"},
+            {"path":"/workspace/app","devDependencies":{
+                "tool":{"version":"2","dependencies":{"helper":{"version":"3"}}}
+            }}
+        ]"#;
+        let ParseResult::Full(data) = PnpmListParser::parse(json) else {
+            panic!("expected pnpm workspace JSON to parse");
+        };
+        assert_eq!(data.total_packages, 2);
+        assert_eq!(
+            format_dependency_listing(&data, false),
+            "2 packages (0 prod / 2 dev)\n[dev]\n  tool 2\n  helper 3"
+        );
+        assert_eq!(
+            PnpmListParser::parse(r#"[{"error":"unexpected"}]"#).tier(),
+            3
+        );
     }
 
     #[test]
