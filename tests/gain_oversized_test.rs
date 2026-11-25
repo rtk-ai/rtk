@@ -58,30 +58,25 @@ fn gain_split(args: &[&str], home: &Path) -> (String, String) {
     )
 }
 
-/// A tracker holding one row whose input passes the headline cap: a read of a
-/// file larger than the ~30,000-char agent cap, booked at the raw file's size.
+/// Book one `rtk read` row in the tracker under `home`, for a file of `lines`
+/// lines written there. Returns the file's size in bytes.
 ///
 /// `rtk read` applies no line window unless one is asked for, so the row it
-/// books is the whole file — 37,000 bytes, ~9,250 tokens.
-fn oversized_only_home() -> TempDir {
-    let tmp = tempfile::tempdir().expect("tempdir");
+/// books is the whole file.
+fn record_read(home: &Path, lines: usize) -> usize {
     let mut content = String::new();
-    for i in 0..1_000 {
+    for i in 0..lines {
         content.push_str(&format!("line {i:04} lorem ipsum dolor sit amet\n"));
     }
-    let big = tmp.path().join("big.txt");
-    std::fs::write(&big, &content).expect("write big file");
-    assert!(
-        content.len() > 30_000,
-        "the fixture must pass the ~30k-char agent cap"
-    );
+    let file = home.join(format!("read-{lines}.txt"));
+    std::fs::write(&file, &content).expect("write fixture file");
 
     let mut cmd = common::rtk_command();
     let output = cmd
         .arg("read")
-        .arg(&big)
-        .current_dir(tmp.path())
-        .envs(isolating_env(tmp.path()))
+        .arg(&file)
+        .current_dir(home)
+        .envs(isolating_env(home))
         .env("LC_ALL", "C")
         .output()
         .expect("spawn rtk read");
@@ -90,12 +85,38 @@ fn oversized_only_home() -> TempDir {
         "rtk read failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    content.len()
+}
+
+/// A tracker holding one row whose input passes the headline cap: a read of a
+/// file larger than the ~30,000-char agent cap — 37,000 bytes, ~9,250 tokens.
+fn oversized_only_home() -> TempDir {
+    let tmp = common::tempdir();
+    let bytes = record_read(tmp.path(), 1_000);
+    assert!(
+        bytes > 30_000,
+        "the fixture must pass the ~30k-char agent cap"
+    );
     tmp
+}
+
+/// A tracker holding one row far under the headline cap (10 lines, ~370
+/// bytes), so nothing is excluded.
+fn under_cap_home() -> TempDir {
+    let tmp = common::tempdir();
+    record_read(tmp.path(), 10);
+    tmp
+}
+
+/// Whether `stdout` has a line that is exactly `line`, so "By Command" does
+/// not match "By Command (unfiltered)".
+fn has_line(stdout: &str, line: &str) -> bool {
+    stdout.lines().any(|l| l.trim_end() == line)
 }
 
 /// A tracker with no rows at all.
 fn empty_home() -> TempDir {
-    tempfile::tempdir().expect("tempdir")
+    common::tempdir()
 }
 
 #[test]
@@ -120,9 +141,38 @@ fn oversized_only_tracker_is_not_an_empty_database() {
         "the exclusion must say what was excluded: {stdout}"
     );
     assert!(
-        stdout.contains("By Command"),
-        "the per-command listing must still be rendered: {stdout}"
+        has_line(&stdout, "By Command (unfiltered)"),
+        "the uncapped per-command listing must be rendered and labelled: {stdout}"
     );
+}
+
+#[test]
+fn a_tracker_with_no_oversized_rows_keeps_the_plain_header_and_no_exclusion() {
+    // Nothing was excluded, so the per-command table and the headline count
+    // the same rows: no label, and no `Excluded:` line in the summary or any
+    // period view.
+    let home = under_cap_home();
+    let (stdout, _) = gain_split(&["gain"], home.path());
+    assert!(
+        has_line(&stdout, "By Command"),
+        "with nothing excluded the per-command header stays plain: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Excluded:"),
+        "with nothing excluded the summary names no exclusion: {stdout}"
+    );
+
+    for flag in ["--all", "--daily", "--monthly", "--weekly"] {
+        let (stdout, _) = gain_split(&["gain", flag], home.path());
+        assert!(
+            stdout.contains("TOTAL"),
+            "the `rtk gain {flag}` table must hold the row: {stdout}"
+        );
+        assert!(
+            !stdout.contains("Excluded:"),
+            "with nothing excluded `rtk gain {flag}` names no exclusion: {stdout}"
+        );
+    }
 }
 
 #[test]
@@ -165,7 +215,7 @@ fn oversized_only_tracker_reports_no_daily_data_rather_than_no_tracking_data() {
 #[test]
 fn oversized_only_tracker_names_the_exclusion_in_every_period_view() {
     let home = oversized_only_home();
-    for flag in ["--weekly", "--monthly", "--all"] {
+    for flag in ["--all", "--monthly", "--weekly"] {
         let (stdout, _) = gain_split(&["gain", flag], home.path());
         assert!(
             !stdout.contains("No tracking data yet."),
