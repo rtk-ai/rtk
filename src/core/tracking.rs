@@ -173,6 +173,46 @@ pub struct CommandRecord {
     pub savings_pct: f64,
 }
 
+/// A bounded JSON export row. IDs are nullable for pre-migration history and
+/// when entropy was unavailable. These IDs stay local.
+#[derive(Debug, Serialize)]
+pub struct InvocationRecord {
+    pub id: i64,
+    pub timestamp: String,
+    pub invocation_id: Option<String>,
+    pub rtk_cmd: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub saved_tokens: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecallEventRecord {
+    pub event_id: String,
+    pub timestamp: String,
+    pub invoking_id: Option<String>,
+    pub source_invocation_id: Option<String>,
+    pub source_capture_id: Option<String>,
+    pub emitted_bytes: i64,
+    pub output_tokens: i64,
+}
+
+/// Observed output events within retained history, grouped by their own event
+/// dates. This is not a complete agent-session, source-capture or billing metric.
+#[derive(Debug, Serialize)]
+pub struct OutputAccounting {
+    pub scope: &'static str,
+    pub retention_days: i64,
+    pub measurement_complete: bool,
+    pub initial_input_tokens: i64,
+    pub initial_output_tokens: i64,
+    pub retrieved_output_tokens: i64,
+    pub initial_oversized_excluded: i64,
+    pub recall_events: i64,
+    pub unattributed_recall_events: i64,
+    pub commands_without_invocation_id: i64,
+}
+
 /// The real outcome a PreToolUse hook reached for one Bash call.
 ///
 /// Shared by both ends of the `hook_decisions` log: `hooks::hook_cmd` writes it at
@@ -480,6 +520,8 @@ enum SchemaVersion {
     /// `Initial` again, with every error reported: releases that stamped 1 or 2
     /// discarded some of its statement errors and stamped the database anyway.
     InitialRecheck = 3,
+    /// Invocation IDs on command rows and measured recall output.
+    RecallAccounting = 4,
     // New schema changes go directly above this line.
     Next,
 }
@@ -509,6 +551,7 @@ const MIGRATIONS: &[(SchemaVersion, Migration)] = &[
     (SchemaVersion::Initial, migrate_initial),
     (SchemaVersion::EngineTables, migrate_engine_tables),
     (SchemaVersion::InitialRecheck, migrate_initial),
+    (SchemaVersion::RecallAccounting, migrate_recall_accounting),
 ];
 
 const _: () = {
@@ -645,6 +688,25 @@ fn migrate_engine_tables(conn: &Connection) -> Result<()> {
     )
     .context("Failed to create the engine_attribution table")?;
 
+    Ok(())
+}
+
+fn migrate_recall_accounting(conn: &Connection) -> Result<()> {
+    db::add_column_if_missing(conn, "commands", "invocation_id", "TEXT")?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS recall_events (
+             event_id TEXT PRIMARY KEY,
+             timestamp TEXT NOT NULL,
+             project_path TEXT NOT NULL DEFAULT '',
+             invoking_id TEXT,
+             source_invocation_id TEXT,
+             source_capture_id TEXT,
+             emitted_bytes INTEGER NOT NULL,
+             output_tokens INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_recall_events_timestamp ON recall_events(timestamp);
+         CREATE INDEX IF NOT EXISTS idx_recall_events_project ON recall_events(project_path, timestamp);"
+    )?;
     Ok(())
 }
 
@@ -936,8 +998,8 @@ impl Tracker {
         let project_path = current_project_path_string(); // added: record cwd
 
         self.conn.execute(
-            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", // added: project_path
+            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms, invocation_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 Utc::now().to_rfc3339(),
                 original_cmd,
@@ -947,7 +1009,8 @@ impl Tracker {
                 output_tokens as i64,
                 saved,
                 pct,
-                exec_time_ms as i64
+                exec_time_ms as i64,
+                super::invocation::current(),
             ],
         )
         .inspect_err(|e| warn_if_missing_table("record", e))?;
@@ -1055,6 +1118,10 @@ impl Tracker {
         self.conn
             .execute("DELETE FROM commands WHERE timestamp < ?1", params![cutoff])?;
         self.conn.execute(
+            "DELETE FROM recall_events WHERE timestamp < ?1",
+            params![cutoff],
+        )?;
+        self.conn.execute(
             "DELETE FROM parse_failures WHERE timestamp < ?1",
             params![cutoff],
         )?;
@@ -1083,12 +1150,131 @@ impl Tracker {
                  DELETE FROM commands;
                  DELETE FROM parse_failures;
                  DELETE FROM hook_decisions;
+                 DELETE FROM recall_events;
                  DELETE FROM engine_attribution;
                  DELETE FROM classifier_cache;
                  COMMIT;",
             )
             .context("Failed to reset tracking database")?;
         Ok(())
+    }
+
+    /// Record each recall emission, including empty matches, partial writes and
+    /// repeated reads. Legacy hash lookups have no source ownership.
+    pub fn record_recall_event(
+        &self,
+        emitted_bytes: usize,
+        source_invocation_id: Option<&str>,
+        source_capture_id: Option<&str>,
+    ) -> Result<()> {
+        let Some(event_id) = super::invocation::new_id() else {
+            return Ok(());
+        };
+        self.conn
+            .execute(
+                "INSERT INTO recall_events
+             (event_id, timestamp, project_path, invoking_id, source_invocation_id,
+              source_capture_id, emitted_bytes, output_tokens)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    event_id,
+                    Utc::now().to_rfc3339(),
+                    current_project_path_string(),
+                    super::invocation::current(),
+                    source_invocation_id,
+                    source_capture_id,
+                    emitted_bytes as i64,
+                    estimate_tokens_from_len(emitted_bytes) as i64
+                ],
+            )
+            .context("record recall output event")?;
+        self.cleanup_old()
+    }
+
+    pub fn output_accounting(&self, project: Option<&str>) -> Result<OutputAccounting> {
+        let (exact, prefix) = project_filter_params(project);
+        let (input, output, unknown, oversized): (i64, i64, i64, i64) = self.conn.query_row(
+            "SELECT COALESCE(SUM(input_tokens) FILTER (WHERE input_tokens BETWEEN 0 AND ?3), 0),
+                    COALESCE(SUM(output_tokens) FILTER (WHERE input_tokens BETWEEN 0 AND ?3), 0),
+                    COALESCE(SUM(invocation_id IS NULL) FILTER (WHERE input_tokens BETWEEN 0 AND ?3), 0),
+                    COALESCE(SUM(input_tokens NOT BETWEEN 0 AND ?3), 0)
+             FROM commands WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)",
+            params![exact, prefix, HEADLINE_INPUT_CAP_TOKENS as i64],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        let (retrieved, events, unattributed): (i64, i64, i64) = self.conn.query_row(
+            "SELECT COALESCE(SUM(output_tokens), 0), COUNT(*),
+                    COALESCE(SUM(source_invocation_id IS NULL), 0) FROM recall_events
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)",
+            params![exact, prefix],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        Ok(OutputAccounting {
+            scope: "headline-eligible initial commands and all observed recall outputs are separate cohorts by event date and project",
+            retention_days: self.history_days,
+            measurement_complete: false,
+            initial_input_tokens: input,
+            initial_output_tokens: output,
+            retrieved_output_tokens: retrieved,
+            initial_oversized_excluded: oversized,
+            recall_events: events,
+            unattributed_recall_events: unattributed,
+            commands_without_invocation_id: unknown,
+        })
+    }
+
+    pub fn invocation_history(
+        &self,
+        limit: usize,
+        project: Option<&str>,
+    ) -> Result<Vec<InvocationRecord>> {
+        let (exact, prefix) = project_filter_params(project);
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id, c.timestamp, c.invocation_id, c.rtk_cmd, c.input_tokens, c.output_tokens, c.saved_tokens
+             FROM commands c
+             WHERE (?1 IS NULL OR c.project_path = ?1 OR c.project_path GLOB ?2)
+             ORDER BY c.timestamp DESC, c.id DESC LIMIT ?3"
+        )?;
+        let rows = stmt.query_map(params![exact, prefix, limit.min(1000) as i64], |r| {
+            Ok(InvocationRecord {
+                id: r.get(0)?,
+                timestamp: r.get(1)?,
+                invocation_id: r.get(2)?,
+                rtk_cmd: r.get(3)?,
+                input_tokens: r.get(4)?,
+                output_tokens: r.get(5)?,
+                saved_tokens: r.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("read invocation history")
+    }
+
+    pub fn recall_event_history(
+        &self,
+        limit: usize,
+        project: Option<&str>,
+    ) -> Result<Vec<RecallEventRecord>> {
+        let (exact, prefix) = project_filter_params(project);
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, timestamp, invoking_id, source_invocation_id, source_capture_id,
+                    emitted_bytes, output_tokens FROM recall_events
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+             ORDER BY timestamp DESC, rowid DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![exact, prefix, limit.min(1000) as i64], |r| {
+            Ok(RecallEventRecord {
+                event_id: r.get(0)?,
+                timestamp: r.get(1)?,
+                invoking_id: r.get(2)?,
+                source_invocation_id: r.get(3)?,
+                source_capture_id: r.get(4)?,
+                emitted_bytes: r.get(5)?,
+                output_tokens: r.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("read recall events")
     }
 
     /// Record a parse failure for analytics.
@@ -3105,6 +3291,187 @@ mod tests {
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
+    fn repeated_recall_events_charge_actual_output() {
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        tracker
+            .record("cmd", "rtk cmd", 100, 20, 1)
+            .expect("command");
+        tracker
+            .record_recall_event(240, None, None)
+            .expect("first read");
+        tracker
+            .record_recall_event(240, None, None)
+            .expect("repeat read");
+        tracker
+            .record_recall_event(0, None, None)
+            .expect("empty match");
+        let accounting = tracker.output_accounting(None).expect("accounting");
+        assert_eq!(accounting.recall_events, 3);
+        assert_eq!(accounting.initial_input_tokens, 100);
+        assert_eq!(accounting.initial_output_tokens, 20);
+        assert_eq!(accounting.unattributed_recall_events, 3);
+        assert_eq!(accounting.retrieved_output_tokens, 120);
+        assert!(!accounting.measurement_complete);
+        let events = tracker.recall_event_history(100, None).expect("events");
+        assert_eq!(events.len(), 3);
+        assert_ne!(events[0].event_id, events[1].event_id);
+        tracker.reset_all().expect("reset");
+        assert_eq!(
+            tracker
+                .output_accounting(None)
+                .expect("reset stats")
+                .recall_events,
+            0
+        );
+    }
+
+    #[test]
+    fn version_three_tracking_upgrades_accounting_without_replaying_initial() {
+        let conn = Connection::open_in_memory().expect("db");
+        migrate_initial(&conn).expect("initial");
+        migrate_engine_tables(&conn).expect("engine");
+        conn.execute_batch(
+            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd,
+            input_tokens, output_tokens, saved_tokens, savings_pct)
+            VALUES ('2026-11-18', 'cmd', 'rtk cmd', 100, 20, 80, 80);",
+        )
+        .expect("legacy row");
+        conn.pragma_update(None, "user_version", SchemaVersion::InitialRecheck.number())
+            .expect("stamp");
+        for _ in 0..2 {
+            run_schema_migrations(&conn, MigrationMode::GatedByVersion).expect("upgrade");
+            let (count, attributed): (i64, i64) = conn
+                .query_row(
+                    "SELECT COUNT(*), COUNT(invocation_id) FROM commands",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("rows");
+            assert_eq!((count, attributed), (1, 0));
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM recall_events", [], |row| row
+                    .get::<_, i64>(0))
+                    .expect("events"),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn migration_keeps_legacy_rows_unattributed_and_is_idempotent() {
+        let conn = Connection::open_in_memory().expect("db");
+        conn.execute_batch("CREATE TABLE commands (
+            id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, original_cmd TEXT NOT NULL,
+            rtk_cmd TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+            saved_tokens INTEGER NOT NULL, savings_pct REAL NOT NULL);
+            INSERT INTO commands VALUES (1, '2026-10-12T00:00:00Z', 'cmd', 'rtk cmd', 100, 20, 80, 80);
+            PRAGMA user_version = 1;").expect("legacy schema");
+        run_schema_migrations(&conn, MigrationMode::Always).expect("migrate");
+        run_schema_migrations(&conn, MigrationMode::Always).expect("repeat migration");
+        let tracker = Tracker {
+            conn: Db { conn, behind: None },
+            history_days: DEFAULT_HISTORY_DAYS,
+        };
+        let row = tracker
+            .invocation_history(100, None)
+            .expect("history")
+            .remove(0);
+        assert_eq!(row.saved_tokens, 80);
+        assert!(row.invocation_id.is_none());
+        assert_eq!(
+            tracker
+                .output_accounting(None)
+                .expect("accounting")
+                .commands_without_invocation_id,
+            1
+        );
+    }
+
+    #[test]
+    fn only_recall_events_without_a_source_invocation_count_as_unattributed() {
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        tracker
+            .record_recall_event(4, Some("source-invocation"), None)
+            .expect("sourced event");
+        tracker
+            .record_recall_event(4, None, None)
+            .expect("unsourced event");
+        let accounting = tracker.output_accounting(None).expect("accounting");
+        assert_eq!(accounting.recall_events, 2);
+        assert_eq!(accounting.unattributed_recall_events, 1);
+    }
+
+    #[test]
+    fn invocation_history_orders_by_timestamp_before_id() {
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        tracker
+            .conn
+            .execute_batch(
+                "INSERT INTO commands (id, timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens, saved_tokens, savings_pct)
+                 VALUES (1, '2026-11-19T00:00:00+00:00', 'middle', 'rtk middle', 10, 2, 8, 80),
+                        (2, '2026-11-20T00:00:00+00:00', 'newest', 'rtk newest', 10, 2, 8, 80),
+                        (3, '2026-11-18T00:00:00+00:00', 'oldest', 'rtk oldest', 10, 2, 8, 80);",
+            )
+            .expect("seed commands");
+        let ids: Vec<i64> = tracker
+            .invocation_history(10, None)
+            .expect("history")
+            .iter()
+            .map(|row| row.id)
+            .collect();
+        // Neither id order nor its reverse gives this sequence.
+        assert_eq!(
+            ids,
+            [2, 1, 3],
+            "the newest timestamp comes first, whatever its id"
+        );
+    }
+
+    #[test]
+    fn recall_event_history_orders_by_timestamp_before_insertion() {
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        tracker
+            .conn
+            .execute_batch(
+                "INSERT INTO recall_events (event_id, timestamp, emitted_bytes, output_tokens)
+                 VALUES ('middle', '2026-11-19T00:00:00+00:00', 4, 1),
+                        ('newest', '2026-11-20T00:00:00+00:00', 4, 1),
+                        ('oldest', '2026-11-18T00:00:00+00:00', 4, 1);",
+            )
+            .expect("seed recall events");
+        let ids: Vec<String> = tracker
+            .recall_event_history(10, None)
+            .expect("history")
+            .into_iter()
+            .map(|row| row.event_id)
+            .collect();
+        // Neither insertion order nor its reverse gives this sequence.
+        assert_eq!(ids, ["newest", "middle", "oldest"]);
+    }
+
+    #[test]
+    fn history_limits_both_lists_and_breaks_timestamp_ties_newest_first() {
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        tracker.conn.execute_batch(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 1002)
+             INSERT INTO commands (id, timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens, saved_tokens, savings_pct)
+             SELECT i, '2026-11-18', 'cmd', 'rtk cmd', 10, 2, 8, 80 FROM n ORDER BY i;
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 1002)
+             INSERT INTO recall_events (event_id, timestamp, emitted_bytes, output_tokens)
+             SELECT CAST(i AS TEXT), '2026-11-18', 8, 2 FROM n ORDER BY i;"
+        ).expect("seed history");
+        let commands = tracker.invocation_history(5000, None).expect("commands");
+        assert_eq!(commands.len(), 1000);
+        assert_eq!((commands[0].id, commands[1].id), (1002, 1001));
+        let events = tracker.recall_event_history(5000, None).expect("recalls");
+        assert_eq!(events.len(), 1000);
+        assert_eq!(
+            (events[0].event_id.as_str(), events[1].event_id.as_str()),
+            ("1002", "1001")
+        );
+    }
+
+    #[test]
     fn test_estimate_tokens() {
         assert_eq!(estimate_tokens(""), 0);
         assert_eq!(estimate_tokens("abcd"), 1); // 4 chars = 1 token
@@ -4122,6 +4489,44 @@ mod tests {
         t
     }
 
+    #[test]
+    fn test_recall_cleanup_respects_configured_retention() {
+        for (history_days, expected) in [(3, 0), (30, 1)] {
+            let t = tracker_with_10_day_old_rows(history_days);
+            let old = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+            t.conn.execute(
+                "INSERT INTO recall_events (event_id, timestamp, emitted_bytes, output_tokens) VALUES ('old', ?1, 4, 1)",
+                params![old],
+            ).expect("insert backdated recall event");
+            t.record_recall_event(4, None, None)
+                .expect("recording the fresh event should also prune old ones");
+            assert_eq!(
+                t.output_accounting(None)
+                    .expect("accounting")
+                    .retention_days,
+                history_days
+            );
+            let old_count: i64 = t
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM recall_events WHERE event_id = 'old'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("count old recall events");
+            let fresh_count: i64 = t
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM recall_events WHERE event_id != 'old' AND invoking_id IS NOT NULL",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("count fresh recall events");
+            assert_eq!(old_count, expected);
+            assert_eq!(fresh_count, 1);
+        }
+    }
+
     // Regression: cleanup_old hardcoded DEFAULT_HISTORY_DAYS, so tracking.history_days
     // was declared, defaulted, written into config.toml, documented — and never read.
     // Both directions are asserted deliberately: a hardcoded 90 still passes the
@@ -4279,6 +4684,12 @@ mod tests {
             user_env::with_path("RTK_DB_PATH", Some(&db_path), || {
                 let t = Tracker::new().expect("tracker from config");
                 assert_eq!(t.history_days, 7);
+                assert_eq!(
+                    t.output_accounting(None)
+                        .expect("configured accounting")
+                        .retention_days,
+                    7
+                );
             });
         });
     }
