@@ -147,9 +147,64 @@ fn project_export_scopes_commands_and_recalls_by_their_own_directories() {
     assert_eq!(
         all["output_accounting"]["initial_input_tokens"].as_i64(),
         Some(
-            a["summary"]["total_input"].as_i64().unwrap()
-                + b["summary"]["total_input"].as_i64().unwrap()
+            a["summary"]["total_input"]
+                .as_i64()
+                .expect("project A input")
+                + b["summary"]["total_input"]
+                    .as_i64()
+                    .expect("project B input")
         )
+    );
+}
+
+#[test]
+fn project_export_includes_rows_recorded_in_subdirectories() {
+    let db = common::tempdir();
+    let project = common::temp_git_repo();
+    let sub = project.path().join("sub");
+    std::fs::create_dir(&sub).expect("subdirectory");
+    seed_recall(db.path());
+    assert!(
+        command(&sub, db.path())
+            .args(["git", "log", "--oneline", "-1"])
+            .output()
+            .expect("command")
+            .status
+            .success()
+    );
+    assert!(
+        command(&sub, db.path())
+            .args(["recall", "abc123", "--lines", "1"])
+            .output()
+            .expect("recall")
+            .status
+            .success()
+    );
+    let export = exported(project.path(), db.path(), &["--project", "--history"]);
+    assert_eq!(export["commands"].as_array().expect("commands").len(), 1);
+    assert_eq!(
+        export["recall_events"]
+            .as_array()
+            .expect("recall events")
+            .len(),
+        1
+    );
+    let accounting = &export["output_accounting"];
+    assert_eq!(accounting["recall_events"], 1);
+    assert_eq!(accounting["retrieved_output_tokens"], 2);
+    assert_eq!(
+        accounting["commands_without_invocation_id"], 0,
+        "rows rtk records itself carry an invocation ID"
+    );
+    // The project is the only one recorded, so scoping must keep every row.
+    let unscoped = exported(project.path(), db.path(), &["--history"]);
+    let scoped_input = accounting["initial_input_tokens"]
+        .as_i64()
+        .expect("scoped initial input");
+    assert!(scoped_input > 0);
+    assert_eq!(
+        Some(scoped_input),
+        unscoped["output_accounting"]["initial_input_tokens"].as_i64()
     );
 }
 
@@ -157,6 +212,7 @@ fn project_export_scopes_commands_and_recalls_by_their_own_directories() {
 fn json_history_caps_pages_and_initial_accounting_matches_headline() {
     let dir = common::tempdir();
     let plain = exported(dir.path(), dir.path(), &[]);
+    assert!(plain.get("output_accounting").is_none());
     assert!(plain.get("commands").is_none());
     assert!(plain.get("recall_events").is_none());
     let conn = Connection::open(dir.path().join("history.db")).expect("initialized tracking");
@@ -194,6 +250,10 @@ fn json_history_caps_pages_and_initial_accounting_matches_headline() {
     );
     assert_eq!(accounting["recall_events"], 101);
     assert_eq!(accounting["retrieved_output_tokens"], 202);
+    assert_eq!(
+        accounting["commands_without_invocation_id"], 100,
+        "only headline-eligible rows are counted, like the totals next to it"
+    );
 }
 
 #[cfg(target_os = "linux")]

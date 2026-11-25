@@ -1094,8 +1094,9 @@ mod tests {
 
         let dir = crate::core::test_isolation::tempdir();
         let cfg = temp_cfg(dir.path());
-        let stored = store_inner(&cfg, b"first\nsecond\n", "test", Some(0), 1).unwrap();
-        let conn = open(&cfg).unwrap();
+        let stored = store_inner(&cfg, b"first\nsecond\n", "test", Some(0), 1)
+            .expect("the entry should be stored");
+        let conn = open(&cfg).expect("the store should open");
         let args = RecallArgs {
             hash: Some(&stored.hash),
             full: true,
@@ -1108,16 +1109,97 @@ mod tests {
             let error =
                 recall_from(&conn, &args, &mut PartialWriter(5)).expect_err("partial write");
             assert_eq!(
-                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .expect("the write error should be propagated")
+                    .kind(),
                 std::io::ErrorKind::BrokenPipe
             );
             let tracker = tracking::Tracker::new().expect("tracking");
-            let events = tracker.recall_event_history(10, None).unwrap();
+            let events = tracker
+                .recall_event_history(10, None)
+                .expect("events should be readable");
             assert_eq!(events.len(), 1);
             assert_eq!(events[0].emitted_bytes, 5);
             assert_eq!(events[0].output_tokens, 2);
             assert!(events[0].invoking_id.is_some());
             assert!(events[0].source_capture_id.is_none());
+        });
+        let recalled: i64 = conn
+            .query_row(
+                "SELECT recalled FROM recall WHERE hash = ?1",
+                params![stored.hash],
+                |row| row.get(0),
+            )
+            .expect("the entry should still exist");
+        assert_eq!(recalled, 0, "a failed write must not count as a recall");
+    }
+
+    #[test]
+    fn recall_still_emits_when_tracking_is_unavailable_or_rejects_the_event() {
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let stored = store_inner(&cfg, b"first\nsecond\n", "test", Some(0), 1)
+            .expect("the entry should be stored");
+        let conn = open(&cfg).expect("the store should open");
+        let args = RecallArgs {
+            hash: Some(&stored.hash),
+            full: true,
+            from: None,
+            lines: None,
+            grep: None,
+            list: false,
+        };
+
+        // A tracking path whose parent is a regular file cannot be created.
+        let not_a_dir = dir.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, b"").expect("file should be written");
+        user_env::with_path("RTK_DB_PATH", Some(not_a_dir.join("history.db")), || {
+            assert!(tracking::Tracker::new().is_err());
+            let mut out = Vec::new();
+            assert_eq!(
+                recall_from(&conn, &args, &mut out).expect("recall without tracking"),
+                0
+            );
+            assert_eq!(out, b"first\nsecond\n");
+        });
+        let recalled: i64 = conn
+            .query_row(
+                "SELECT recalled FROM recall WHERE hash = ?1",
+                params![stored.hash],
+                |row| row.get(0),
+            )
+            .expect("the entry should still exist");
+        assert_eq!(recalled, 1, "a delivered recall counts");
+
+        // A tracking database that refuses the recall event. That recall_from
+        // attempts the insert after a successful write is pinned by
+        // `repeated_filtered_reads_count_actual_stdout_and_stay_unattributed`.
+        let tracking_db = dir.path().join("tracking.db");
+        user_env::with_path("RTK_DB_PATH", Some(tracking_db.clone()), || {
+            drop(tracking::Tracker::new().expect("tracking should initialize"));
+            Connection::open(&tracking_db)
+                .expect("tracking should open")
+                .execute_batch(
+                    "CREATE TRIGGER reject_recall_events BEFORE INSERT ON recall_events
+                     BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+                )
+                .expect("trigger should be created");
+            tracking::Tracker::new()
+                .expect("tracking should open")
+                .record_recall_event(1, None, None)
+                .expect_err("the trigger should reject a recall event");
+            let mut out = Vec::new();
+            assert_eq!(
+                recall_from(&conn, &args, &mut out).expect("recall despite a rejected event"),
+                0
+            );
+            assert_eq!(out, b"first\nsecond\n");
+            let events: i64 = Connection::open(&tracking_db)
+                .expect("tracking should open")
+                .query_row("SELECT COUNT(*) FROM recall_events", [], |row| row.get(0))
+                .expect("events should be countable");
+            assert_eq!(events, 0, "the trigger must have rejected the event");
         });
     }
 

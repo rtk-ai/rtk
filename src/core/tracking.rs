@@ -520,7 +520,7 @@ enum SchemaVersion {
     /// `Initial` again, with every error reported: releases that stamped 1 or 2
     /// discarded some of its statement errors and stamped the database anyway.
     InitialRecheck = 3,
-    /// Explicit invocation associations and measured recall output.
+    /// Invocation IDs on command rows and measured recall output.
     RecallAccounting = 4,
     // New schema changes go directly above this line.
     Next,
@@ -3387,6 +3387,68 @@ mod tests {
     }
 
     #[test]
+    fn only_recall_events_without_a_source_invocation_count_as_unattributed() {
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        tracker
+            .record_recall_event(4, Some("source-invocation"), None)
+            .expect("sourced event");
+        tracker
+            .record_recall_event(4, None, None)
+            .expect("unsourced event");
+        let accounting = tracker.output_accounting(None).expect("accounting");
+        assert_eq!(accounting.recall_events, 2);
+        assert_eq!(accounting.unattributed_recall_events, 1);
+    }
+
+    #[test]
+    fn invocation_history_orders_by_timestamp_before_id() {
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        tracker
+            .conn
+            .execute_batch(
+                "INSERT INTO commands (id, timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens, saved_tokens, savings_pct)
+                 VALUES (1, '2026-11-19T00:00:00+00:00', 'middle', 'rtk middle', 10, 2, 8, 80),
+                        (2, '2026-11-20T00:00:00+00:00', 'newest', 'rtk newest', 10, 2, 8, 80),
+                        (3, '2026-11-18T00:00:00+00:00', 'oldest', 'rtk oldest', 10, 2, 8, 80);",
+            )
+            .expect("seed commands");
+        let ids: Vec<i64> = tracker
+            .invocation_history(10, None)
+            .expect("history")
+            .iter()
+            .map(|row| row.id)
+            .collect();
+        // Neither id order nor its reverse gives this sequence.
+        assert_eq!(
+            ids,
+            [2, 1, 3],
+            "the newest timestamp comes first, whatever its id"
+        );
+    }
+
+    #[test]
+    fn recall_event_history_orders_by_timestamp_before_insertion() {
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        tracker
+            .conn
+            .execute_batch(
+                "INSERT INTO recall_events (event_id, timestamp, emitted_bytes, output_tokens)
+                 VALUES ('middle', '2026-11-19T00:00:00+00:00', 4, 1),
+                        ('newest', '2026-11-20T00:00:00+00:00', 4, 1),
+                        ('oldest', '2026-11-18T00:00:00+00:00', 4, 1);",
+            )
+            .expect("seed recall events");
+        let ids: Vec<String> = tracker
+            .recall_event_history(10, None)
+            .expect("history")
+            .into_iter()
+            .map(|row| row.event_id)
+            .collect();
+        // Neither insertion order nor its reverse gives this sequence.
+        assert_eq!(ids, ["newest", "middle", "oldest"]);
+    }
+
+    #[test]
     fn history_limits_both_lists_and_breaks_timestamp_ties_newest_first() {
         let tracker = Tracker::new_in_memory().expect("tracker");
         tracker.conn.execute_batch(
@@ -4434,7 +4496,7 @@ mod tests {
             t.conn.execute(
                 "INSERT INTO recall_events (event_id, timestamp, emitted_bytes, output_tokens) VALUES ('old', ?1, 4, 1)",
                 params![old],
-            ).unwrap();
+            ).expect("insert backdated recall event");
             t.record_recall_event(4, None, None)
                 .expect("recording the fresh event should also prune old ones");
             assert_eq!(
@@ -4450,7 +4512,7 @@ mod tests {
                     [],
                     |r| r.get(0),
                 )
-                .unwrap();
+                .expect("count old recall events");
             let fresh_count: i64 = t
                 .conn
                 .query_row(
@@ -4458,7 +4520,7 @@ mod tests {
                     [],
                     |r| r.get(0),
                 )
-                .unwrap();
+                .expect("count fresh recall events");
             assert_eq!(old_count, expected);
             assert_eq!(fresh_count, 1);
         }
