@@ -5,8 +5,9 @@ use crate::core::arg_tokenizer::{
     self, Abbreviation, Attachment, Dialect, Flag, Grammar, Token, TokenKind, ValueSpec,
 };
 use crate::core::args_utils;
+use crate::core::child_command::ChildCommand;
 use crate::core::guard::never_worse;
-use crate::core::operand_glob;
+use crate::core::operand_glob::{self, ChildGlobs};
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::display_args;
 use crate::core::tracking::estimate_tokens;
@@ -14,6 +15,7 @@ use crate::core::truncate::CAP_INVENTORY;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
 use regex::Regex;
+use std::collections::HashSet;
 use std::process::Stdio;
 use std::sync::LazyLock;
 
@@ -195,6 +197,9 @@ struct LsPlan {
     show_all: bool,
     show_long: bool,
     child_args: Vec<String>,
+    /// Where the user's file operands sit in `child_args`, the only arguments the child may be
+    /// left to glob (see `operand_glob::for_child`).
+    operands: std::ops::Range<usize>,
 }
 
 fn plan(args: &[String]) -> LsPlan {
@@ -222,10 +227,12 @@ fn plan_for(args: &[String], flavor: Flavor) -> LsPlan {
             }
     });
 
+    let (child_args, operands) = build_child_args(&tokens);
     LsPlan {
         show_all,
         show_long,
-        child_args: build_child_args(&tokens),
+        child_args,
+        operands,
     }
 }
 
@@ -241,7 +248,7 @@ fn dangling_value_flag(tokens: &[Token<'_>]) -> Option<usize> {
 
 /// Rebuilds the user's options as argv for the child `ls`, re-attaching every flag's value to
 /// the flag rather than letting it drift into the path list.
-fn build_child_args(tokens: &[Token<'_>]) -> Vec<String> {
+fn build_child_args(tokens: &[Token<'_>]) -> (Vec<String>, std::ops::Range<usize>) {
     // RTK asks for its own long listing, so `-l`/`-a`/`--all` from the user are redundant, and
     // the human-readable ones would pre-format the sizes RTK renders itself. Bare spellings
     // only: `--all=x` is an error the child still has to report.
@@ -287,7 +294,8 @@ fn build_child_args(tokens: &[Token<'_>]) -> Vec<String> {
             .filter(|t| t.is_free_positional())
             .map(|t| t.text.to_string()),
     );
-    if child_args.len() == before {
+    let operands = before..child_args.len();
+    if operands.is_empty() {
         child_args.push(".".to_string());
     }
 
@@ -300,41 +308,75 @@ fn build_child_args(tokens: &[Token<'_>]) -> Vec<String> {
         child_args.push(format!("{}{}", dashes, token.text));
     }
 
-    child_args
+    (child_args, operands)
+}
+
+/// The indices of `args`' file operands: the free positionals of `flavor`'s grammar, so a flag's
+/// value such as `-I '*.o'` or `--hide='*~'` still reaches `ls` as the pattern it is.
+fn file_operands(args: &[String], flavor: Flavor) -> HashSet<usize> {
+    arg_tokenizer::tokenize_grammar(args, grammar(flavor))
+        .iter()
+        .filter(|t| t.is_free_positional())
+        .map(|t| t.source_index)
+        .collect()
 }
 
 /// `args` with every file operand glob expanded (see `operand_glob`) and everything else as
-/// written. The operands are the free positionals of `flavor`'s grammar, so a flag's value such
-/// as `-I '*.o'` or `--hide='*~'` still reaches `ls` as the pattern it is.
+/// written.
+#[cfg(test)]
 fn expand_file_operands(
     args: &[String],
     flavor: Flavor,
     expand: impl Fn(&str) -> Vec<String>,
 ) -> Vec<String> {
-    let operands = arg_tokenizer::tokenize_grammar(args, grammar(flavor))
-        .iter()
-        .filter(|t| t.is_free_positional())
-        .map(|t| t.source_index)
-        .collect();
-    operand_glob::expand_at(args, &operands, expand)
+    operand_glob::expand_at(args, &file_operands(args, flavor), expand)
+}
+
+/// The child that lists `child_args` for the filtered run.
+fn ls_command(
+    child_args: &[String],
+    operands: &std::ops::Range<usize>,
+    globs: &ChildGlobs,
+) -> ChildCommand {
+    let mut cmd = resolved_command("ls");
+    cmd.env("LC_ALL", "C");
+    for (index, arg) in child_args.iter().enumerate() {
+        if operands.contains(&index) {
+            globs.push_operand(&mut cmd, arg);
+        } else {
+            cmd.arg(arg);
+        }
+    }
+    cmd
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let typed = &args_utils::restore_double_dash(args);
     // Expanded once, before either spawn: the filtered listing and `native_listing` must name
-    // the same files. The tracked command stays what the user typed.
-    let args = &expand_file_operands(typed, HOST_FLAVOR, |path| {
-        operand_glob::expand_operands([path])
-    });
+    // the same files. The tracked command stays what the user typed. Past the command-line
+    // limit both get the operands as typed, for `ls` to glob itself.
+    let (args, globs) = operand_glob::for_child(
+        typed,
+        &file_operands(typed, HOST_FLAVOR),
+        |path| operand_glob::expand_operands([path]),
+        |expanded| {
+            let plan = plan(expanded);
+            operand_glob::fits(&ls_command(
+                &plan.child_args,
+                &plan.operands,
+                &ChildGlobs::default(),
+            ))
+        },
+    );
+    let args = &args;
     let LsPlan {
         show_all,
         show_long,
         child_args,
+        operands,
     } = plan(args);
 
-    let mut cmd = resolved_command("ls");
-    cmd.env("LC_ALL", "C");
-    cmd.args(&child_args);
+    let cmd = ls_command(&child_args, &operands, &globs);
 
     let label = if typed.is_empty() {
         ".".to_string()
@@ -342,7 +384,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         display_args(typed)
     };
 
-    let native = native_listing(args);
+    let native = native_listing(args, &globs);
     let listed = native
         .as_ref()
         .filter(|(stdout, succeeded)| *succeeded || !stdout.is_empty())
@@ -361,9 +403,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
-fn native_listing(args: &[String]) -> Option<(String, bool)> {
-    let output = resolved_command("ls")
-        .args(args)
+fn native_listing(args: &[String], globs: &ChildGlobs) -> Option<(String, bool)> {
+    let mut cmd = resolved_command("ls");
+    globs.push_all(&mut cmd, args);
+    let output = cmd
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()

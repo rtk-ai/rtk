@@ -27,12 +27,31 @@ use std::process::{Child, Command, ExitStatus, Output, Stdio};
 #[cfg(any(windows, test))]
 const CYGWIN_REINTERPRETED: &[char] = &['"', '\'', '(', ')', '*', '?', '[', '{', '}'];
 
+/// The longest command line Windows' `CreateProcessW` accepts, in UTF-16 units, its
+/// terminating NUL included. Past it the spawn fails with `os error 206`.
+#[cfg(any(windows, test))]
+pub const COMMAND_LINE_LIMIT: usize = 32_767;
+
 /// Arguments are handled as UTF-16 code units, what a Windows command line is
 /// made of, so an unpaired surrogate is encoded like any other text (#4116).
 /// Every character the rules test for is ASCII.
 #[cfg(any(windows, test))]
 fn has_any(units: &[u16], set: &[char]) -> bool {
     units.iter().any(|&u| set.iter().any(|&c| u == c as u16))
+}
+
+/// `text` as the UTF-16 units of a Windows command line. Off Windows, where only
+/// the tests read it, a lossy conversion is all the length needs.
+#[cfg(any(windows, test))]
+fn utf16_of(text: &OsStr) -> Vec<u16> {
+    #[cfg(windows)]
+    {
+        std::os::windows::ffi::OsStrExt::encode_wide(text).collect()
+    }
+    #[cfg(not(windows))]
+    {
+        text.to_string_lossy().encode_utf16().collect()
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -97,6 +116,44 @@ fn quote_arg_for_child(units: &[u16]) -> Vec<u16> {
     out.extend(std::iter::repeat_n(BACKSLASH, backslashes * 2));
     out.push(QUOTE);
     out
+}
+
+/// How many UTF-16 units std's own encoder (`append_arg`, with no forced quotes) writes for
+/// `units`: wrapped in `"` only for a space, a tab or an empty argument, each `"` escaped with
+/// one more backslash than the run in front of it, and a trailing run doubled when wrapped.
+#[cfg(any(windows, test))]
+fn std_encoded_len(units: &[u16]) -> usize {
+    const QUOTE: u16 = b'"' as u16;
+    const BACKSLASH: u16 = b'\\' as u16;
+    let quoted = units.is_empty() || has_any(units, &[' ', '\t']);
+    let mut len = units.len();
+    let mut backslashes = 0usize;
+    for &unit in units {
+        match unit {
+            BACKSLASH => backslashes += 1,
+            QUOTE => {
+                len += backslashes + 1;
+                backslashes = 0;
+            }
+            _ => backslashes = 0,
+        }
+    }
+    if quoted {
+        len += 2 + backslashes;
+    }
+    len
+}
+
+/// How one argument is written to the child's command line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sent {
+    /// [`ChildCommand::arg`]: quoted so the child takes it literally.
+    Literal,
+    /// [`ChildCommand::glob_arg`]: std's encoding, which leaves a glob for an MSYS child.
+    ChildGlobs,
+    /// `verbatim_arg`: written as it is.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Verbatim,
 }
 
 /// A shell family, told apart by the program's name.
@@ -176,10 +233,11 @@ pub struct ChildCommand {
     /// Only the encoder reads it, and only Windows encodes.
     #[cfg_attr(not(any(windows, test)), allow(dead_code))]
     cmd_parsed: bool,
-    /// The arguments as the caller passed them. On Windows the command line
-    /// carries their encoding instead, so they are kept for whoever reads the
-    /// argv (see [`ChildCommand::args_as_written`]).
-    written: Vec<std::ffi::OsString>,
+    /// The arguments as the caller passed them, and how each was sent. On Windows
+    /// the command line carries their encoding instead, so they are kept for
+    /// whoever reads the argv (see [`ChildCommand::args_as_written`]) and for
+    /// [`ChildCommand::command_line_len`].
+    written: Vec<(std::ffi::OsString, Sent)>,
 }
 
 impl ChildCommand {
@@ -213,6 +271,71 @@ impl ChildCommand {
             self.push(arg.as_ref());
         }
         self
+    }
+
+    /// Append a file operand that an MSYS child should **glob-expand itself**.
+    ///
+    /// It gets std's encoding, which quotes only for a space or a tab, so the
+    /// child's `globify` expands `*.txt` as it does for a caller that does not
+    /// glob. Only for an operand rtk would have expanded but could not fit on
+    /// the command line expanded (see `operand_glob::for_child`): a pattern, a
+    /// flag or a flag's value goes through [`ChildCommand::arg`].
+    pub fn glob_arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Self {
+        let arg = arg.as_ref();
+        self.written.push((arg.to_owned(), Sent::ChildGlobs));
+        self.inner.arg(arg);
+        self
+    }
+
+    /// The length, in UTF-16 units and without the terminating NUL, of the
+    /// command line std hands `CreateProcessW` for this program and these
+    /// arguments: the program wrapped in `"`, then each argument after a space,
+    /// encoded as it was sent. It fits while it is below [`COMMAND_LINE_LIMIT`].
+    ///
+    /// Exact for a program std starts directly. A batch file is run through
+    /// `cmd.exe /c` with a command line of its own, which this does not model.
+    #[cfg(any(windows, test))]
+    pub(crate) fn command_line_len(&self) -> usize {
+        let program = utf16_of(self.inner.get_program());
+        let args: usize = self
+            .written
+            .iter()
+            .map(|(arg, sent)| {
+                let units = utf16_of(arg);
+                1 + match sent {
+                    Sent::Literal => self
+                        .encoded(&units)
+                        .map_or_else(|| std_encoded_len(&units), |encoded| encoded.len()),
+                    Sent::ChildGlobs => std_encoded_len(&units),
+                    Sent::Verbatim => units.len(),
+                }
+            })
+            .sum();
+        program.len() + 2 + args
+    }
+
+    /// An error naming the limit when the command line would not fit, where the
+    /// spawn itself would only report `os error 206`. A program cmd.exe parses
+    /// is left to std, whose batch command line this does not measure.
+    #[cfg(any(windows, test))]
+    fn check_command_line(&self) -> std::io::Result<()> {
+        if self.cmd_parsed {
+            return Ok(());
+        }
+        let len = self.command_line_len();
+        if len < COMMAND_LINE_LIMIT {
+            return Ok(());
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "the command line for {} would be {} characters with its terminating NUL, past \
+                 Windows' limit of {COMMAND_LINE_LIMIT} (name fewer files, or run it from bash, \
+                 which expands globs itself)",
+                self.inner.get_program().to_string_lossy(),
+                len + 1
+            ),
+        ))
     }
 
     /// The encoding this argument needs, or `None` to leave it to std.
@@ -255,7 +378,7 @@ impl ChildCommand {
     #[cfg(windows)]
     fn push(&mut self, arg: &OsStr) {
         use std::os::windows::ffi::{OsStrExt, OsStringExt};
-        self.written.push(arg.to_owned());
+        self.written.push((arg.to_owned(), Sent::Literal));
         let units: Vec<u16> = arg.encode_wide().collect();
         match self.encoded(&units) {
             Some(encoded) => {
@@ -274,7 +397,7 @@ impl ChildCommand {
     /// to encode.
     #[cfg(not(windows))]
     fn push(&mut self, arg: &OsStr) {
-        self.written.push(arg.to_owned());
+        self.written.push((arg.to_owned(), Sent::Literal));
         self.inner.arg(arg);
     }
 
@@ -287,7 +410,7 @@ impl ChildCommand {
             self.cmd_parsed,
             "verbatim_arg is for a program cmd.exe parses"
         );
-        self.written.push(arg.into());
+        self.written.push((arg.into(), Sent::Verbatim));
         std::os::windows::process::CommandExt::raw_arg(&mut self.inner, arg);
         self
     }
@@ -296,7 +419,7 @@ impl ChildCommand {
     /// (help detection). What std sends carries the encoding on Windows: `/?`
     /// reads back from it as `"/?"`.
     pub(crate) fn args_as_written(&self) -> impl Iterator<Item = &OsStr> {
-        self.written.iter().map(std::ffi::OsString::as_os_str)
+        self.written.iter().map(|(arg, _)| arg.as_os_str())
     }
 
     // ---- plain forwards: nothing about these touches argument encoding ----
@@ -339,14 +462,20 @@ impl ChildCommand {
     }
 
     pub fn output(&mut self) -> std::io::Result<Output> {
+        #[cfg(windows)]
+        self.check_command_line()?;
         self.inner.output()
     }
 
     pub fn status(&mut self) -> std::io::Result<ExitStatus> {
+        #[cfg(windows)]
+        self.check_command_line()?;
         self.inner.status()
     }
 
     pub fn spawn(&mut self) -> std::io::Result<Child> {
+        #[cfg(windows)]
+        self.check_command_line()?;
         self.inner.spawn()
     }
 
@@ -750,6 +879,100 @@ mod tests {
         // With only a space or a tab std does the wrapping, whole as well.
         assert_eq!(encoding_of("grep", r"\\1srv\my share\x"), None);
         assert_eq!(encoding_of("grep", "\\\\1srv\\my\tshare\\x"), None);
+    }
+
+    #[test]
+    fn std_encoded_len_follows_stds_append_arg() {
+        for (arg, sent) in [
+            ("", r#""""#),
+            ("a", "a"),
+            ("a b", r#""a b""#),
+            ("a\tb", "\"a\tb\""),
+            (r#"a"b"#, r#"a\"b"#),
+            (r#"a\"b"#, r#"a\\\"b"#),
+            (r"a b\", r#""a b\\""#),
+            (r"\\x", r"\\x"),
+            ("*.rs", "*.rs"),
+        ] {
+            assert_eq!(std_encoded_len(&utf16(arg)), sent.len(), "{arg:?} → {sent}");
+        }
+    }
+
+    #[test]
+    fn command_line_len_counts_each_argument_as_it_was_sent() {
+        let mut cmd = ChildCommand::new("grep");
+        // `"grep"`
+        assert_eq!(cmd.command_line_len(), 6);
+        // ` "*.rs"`: quoted, so the child takes it literally.
+        cmd.arg("*.rs");
+        assert_eq!(cmd.command_line_len(), 6 + 7);
+        // ` *.rs`: std's encoding, for the child to glob.
+        cmd.glob_arg("*.rs");
+        assert_eq!(cmd.command_line_len(), 6 + 7 + 5);
+        // ` "a b"`
+        cmd.glob_arg("a b");
+        assert_eq!(cmd.command_line_len(), 6 + 7 + 5 + 6);
+        let written: Vec<_> = cmd.args_as_written().collect();
+        assert_eq!(written, ["*.rs", "*.rs", "a b"]);
+    }
+
+    #[test]
+    fn a_command_line_past_the_limit_is_refused_with_the_limit_named() {
+        // `"grep"` and a space take 7 units; the NUL needs one more.
+        let fits = "a".repeat(COMMAND_LINE_LIMIT - 7 - 1);
+        let mut cmd = ChildCommand::new("grep");
+        cmd.arg(&fits);
+        assert_eq!(cmd.command_line_len(), COMMAND_LINE_LIMIT - 1);
+        assert!(cmd.check_command_line().is_ok());
+
+        let mut cmd = ChildCommand::new("grep");
+        cmd.arg(format!("{fits}a"));
+        let err = cmd
+            .check_command_line()
+            .expect_err("one unit past the limit");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        let message = err.to_string();
+        assert!(message.contains("32768 characters"), "{message}");
+        assert!(message.contains("limit of 32767"), "{message}");
+
+        // cmd.exe builds a batch file's command line itself; std reports it.
+        let mut cmd = ChildCommand::new("gradlew.bat");
+        cmd.arg(format!("{fits}a"));
+        assert!(cmd.check_command_line().is_ok());
+    }
+
+    /// The length model against Windows itself: a command line one unit below the limit
+    /// spawns, one at the limit fails with `ERROR_FILENAME_EXCED_RANGE` (206). The inner
+    /// `Command` is spawned directly, past the check under test.
+    #[cfg(windows)]
+    #[test]
+    fn command_line_len_is_exact_at_windows_limit() {
+        // std writes the program to the command line as given and finds it on PATH, so a
+        // bare name is measured exactly like a path.
+        let program = "hostname";
+        // One argument std quotes and escapes, one rtk quotes, then padding to the limit.
+        let build = |extra: usize| {
+            let mut cmd = ChildCommand::new(program);
+            cmd.glob_arg(r#"a b"c\"#).arg("*.rs");
+            let pad = COMMAND_LINE_LIMIT - 1 - cmd.command_line_len() - 1 + extra;
+            cmd.arg("x".repeat(pad));
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            cmd
+        };
+        let mut fits = build(0);
+        assert_eq!(fits.command_line_len(), COMMAND_LINE_LIMIT - 1);
+        let mut child = fits
+            .inner
+            .spawn()
+            .expect("a line one unit below the limit spawns");
+        child.wait().expect("hostname exits");
+
+        let mut over = build(1);
+        let err = over
+            .inner
+            .spawn()
+            .expect_err("a line at the limit does not");
+        assert_eq!(err.raw_os_error(), Some(206), "{err}");
     }
 
     #[test]

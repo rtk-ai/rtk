@@ -15,6 +15,7 @@ use crate::core::runner::{self, RunOptions};
 use crate::core::shell::display_args;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
+use std::collections::HashSet;
 
 /// A required value. getopt hands it the next argument whatever that is, `--` included, and
 /// libxo reads `--libxo`'s the same way.
@@ -34,13 +35,13 @@ const FILES0_FROM: Flag = Flag::long("files0-from").takes(MANDATORY);
 const GNU_FLAGS: &[Flag] = &[
     BYTES,
     CHARS,
-    LINES,
-    WORDS,
-    MAX_LINE_LENGTH,
     FILES0_FROM,
-    Flag::long("total").takes(MANDATORY),
     Flag::long("help"),
+    LINES,
+    MAX_LINE_LENGTH,
+    Flag::long("total").takes(MANDATORY),
     Flag::long("version"),
+    WORDS,
 ];
 
 const BSD_BYTES: Flag = Flag::short("c");
@@ -52,11 +53,11 @@ const BSD_MAX_LINE_LENGTH: Flag = Flag::short("L");
 /// BSD wc (macOS, FreeBSD): `wc [--libxo] [-Lclmw] [file ...]`, short flags only, plus libxo's
 /// `--libxo` taking its options as the next argument or after `=`.
 const BSD_FLAGS: &[Flag] = &[
-    BSD_BYTES,
-    BSD_CHARS,
-    BSD_LINES,
-    BSD_WORDS,
     BSD_MAX_LINE_LENGTH,
+    BSD_BYTES,
+    BSD_LINES,
+    BSD_CHARS,
+    BSD_WORDS,
     Flag::long("libxo").takes(MANDATORY),
 ];
 
@@ -84,22 +85,21 @@ fn grammar(flavor: Flavor) -> &'static Grammar {
 struct WcPlan {
     mode: WcMode,
     reads_stdin: bool,
-    /// `args` with every file operand glob expanded (see `operand_glob`): the free positionals,
-    /// never a flag's value such as `--files0-from`'s.
-    child_args: Vec<String>,
+    /// The indices of the file operands, which get glob expanded (see `operand_glob`): the free
+    /// positionals, never a flag's value such as `--files0-from`'s.
+    operands: HashSet<usize>,
 }
 
-fn plan_for(args: &[String], flavor: Flavor, expand: impl Fn(&str) -> Vec<String>) -> WcPlan {
+fn plan_for(args: &[String], flavor: Flavor) -> WcPlan {
     let tokens = arg_tokenizer::tokenize_grammar(args, grammar(flavor));
-    let operands = tokens
-        .iter()
-        .filter(|t| t.is_free_positional())
-        .map(|t| t.source_index)
-        .collect();
     WcPlan {
         mode: detect_mode(&tokens, flavor),
         reads_stdin: reads_stdin(&tokens),
-        child_args: operand_glob::expand_at(args, &operands, expand),
+        operands: tokens
+            .iter()
+            .filter(|t| t.is_free_positional())
+            .map(|t| t.source_index)
+            .collect(),
     }
 }
 
@@ -122,13 +122,17 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let WcPlan {
         mode,
         reads_stdin,
-        child_args,
-    } = plan_for(typed, HOST_FLAVOR, |path| {
-        operand_glob::expand_operands([path])
-    });
+        operands,
+    } = plan_for(typed, HOST_FLAVOR);
+    let (child_args, child_globs) = operand_glob::for_child(
+        typed,
+        &operands,
+        |path| operand_glob::expand_operands([path]),
+        |expanded| operand_glob::fits(resolved_command("wc").args(expanded)),
+    );
 
     let mut cmd = resolved_command("wc");
-    cmd.args(&child_args);
+    child_globs.push_all(&mut cmd, &child_args);
 
     if verbose > 0 {
         eprintln!("Running: wc {}", child_args.join(" "));
@@ -465,11 +469,18 @@ mod tests {
 
     use crate::core::arg_tokenizer::{TakesValueRow, TokenKind, assert_takes_value_table};
 
-    /// Plans `args` for `flavor`'s wc, marking each argument handed to the expander, so the
-    /// expectations describe one wc rather than whichever one the test machine ships.
+    /// Plans `args` for `flavor`'s wc, so the expectations describe one wc rather than
+    /// whichever one the test machine ships.
     fn plan(args: &[&str], flavor: Flavor) -> WcPlan {
         let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        plan_for(&args, flavor, |path| vec![format!("<{path}>")])
+        plan_for(&args, flavor)
+    }
+
+    /// `args` as `flavor`'s wc gets them, each file operand marked as the expander saw it.
+    fn child_args(args: &[&str], flavor: Flavor) -> Vec<String> {
+        let operands = plan(args, flavor).operands;
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        operand_glob::expand_at(&args, &operands, |path| vec![format!("<{path}>")])
     }
 
     fn mode_gnu(args: &[&str]) -> WcMode {
@@ -479,17 +490,17 @@ mod tests {
     #[test]
     fn test_grammars_match_their_tables() {
         let gnu: [TakesValueRow; 3] = [
-            (TokenKind::Short, &["c", "m", "l", "w", "L"], None),
+            (TokenKind::Short, &["L", "c", "l", "m", "w"], None),
             (
                 TokenKind::Long,
                 &[
                     "bytes",
                     "chars",
-                    "lines",
-                    "words",
-                    "max-line-length",
                     "help",
+                    "lines",
+                    "max-line-length",
                     "version",
+                    "words",
                 ],
                 None,
             ),
@@ -497,7 +508,7 @@ mod tests {
         ];
         assert_takes_value_table(&GNU_GRAMMAR, &gnu);
         let bsd: [TakesValueRow; 2] = [
-            (TokenKind::Short, &["c", "m", "l", "w", "L"], None),
+            (TokenKind::Short, &["L", "c", "l", "m", "w"], None),
             (TokenKind::Long, &["libxo"], Some(MANDATORY)),
         ];
         assert_takes_value_table(&BSD_GRAMMAR, &bsd);
@@ -582,19 +593,19 @@ mod tests {
     #[test]
     fn test_only_file_operands_are_expanded() {
         assert_eq!(
-            plan(&["-l", "*.rs", "-"], Flavor::Gnu).child_args,
+            child_args(&["-l", "*.rs", "-"], Flavor::Gnu),
             ["-l", "<*.rs>", "<->"]
         );
         assert_eq!(
-            plan(&["--files0-from", "list*", "--total=a*"], Flavor::Gnu).child_args,
+            child_args(&["--files0-from", "list*", "--total=a*"], Flavor::Gnu),
             ["--files0-from", "list*", "--total=a*"]
         );
         assert_eq!(
-            plan(&["--f", "l*", "--", "-w*"], Flavor::Gnu).child_args,
+            child_args(&["--f", "l*", "--", "-w*"], Flavor::Gnu),
             ["--f", "l*", "--", "<-w*>"]
         );
         assert_eq!(
-            plan(&["--libxo", "j*", "a*"], Flavor::Bsd).child_args,
+            child_args(&["--libxo", "j*", "a*"], Flavor::Bsd),
             ["--libxo", "j*", "<a*>"]
         );
     }

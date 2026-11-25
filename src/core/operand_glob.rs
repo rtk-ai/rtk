@@ -19,7 +19,13 @@
 //! a second time.
 //!
 //! On Unix the caller's shell has already expanded, so operands pass through.
+//!
+//! An expanded list can be longer than the 32,767 characters a Windows command
+//! line holds, which the child's own expansion never had to fit in. Past that,
+//! [`for_child`] hands an MSYS child the operands as typed, through
+//! `ChildCommand::glob_arg`, so it expands them itself as it used to.
 
+use crate::core::child_command::ChildCommand;
 use std::collections::HashSet;
 #[cfg(any(windows, test))]
 use std::path::Path;
@@ -55,24 +61,105 @@ where
 }
 
 /// `args` with each argument whose index is in `operands` replaced by what `expand` makes of
-/// it, and every other argument as written, in order. The command's parser picks the indices,
-/// since only it knows which arguments name files; callers pass [`expand_operands`] as
-/// `expand`, and tests a marker.
+/// it, and every other argument as written, in order: [`for_child`] when the result always
+/// fits, which is what the parsers' tests read their operand choices through, with a marker
+/// as `expand`.
+#[cfg(test)]
 pub fn expand_at(
     args: &[String],
     operands: &HashSet<usize>,
     expand: impl Fn(&str) -> Vec<String>,
 ) -> Vec<String> {
-    args.iter()
-        .enumerate()
-        .flat_map(|(index, arg)| {
-            if operands.contains(&index) {
-                expand(arg)
+    for_child(args, operands, expand, |_| true).0
+}
+
+/// The operands [`for_child`] hands an MSYS child as typed, for it to glob itself, because
+/// rtk's expansion of them would not fit on the command line. Empty when rtk expanded them.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ChildGlobs {
+    /// Their indices in the arguments [`for_child`] returned.
+    indices: HashSet<usize>,
+    /// Their text, for a caller that has picked the operands out of those arguments.
+    texts: HashSet<String>,
+}
+
+impl ChildGlobs {
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+
+    /// Append `args`, the arguments [`for_child`] returned, in order: each operand left to the
+    /// child through [`ChildCommand::glob_arg`], everything else literally.
+    pub fn push_all<S: AsRef<str>>(&self, cmd: &mut ChildCommand, args: &[S]) {
+        for (index, arg) in args.iter().enumerate() {
+            if self.indices.contains(&index) {
+                cmd.glob_arg(arg.as_ref());
             } else {
-                vec![arg.clone()]
+                cmd.arg(arg.as_ref());
             }
-        })
-        .collect()
+        }
+    }
+
+    /// Append `operand`, which the caller knows to be one of the file operands: left to the
+    /// child when it is one rtk could not expand in place, literal otherwise. Only for an
+    /// argument that is an operand, since a pattern can be spelled like one.
+    pub fn push_operand(&self, cmd: &mut ChildCommand, operand: &str) {
+        if self.texts.contains(operand) {
+            cmd.glob_arg(operand);
+        } else {
+            cmd.arg(operand);
+        }
+    }
+}
+
+/// `args` with each operand (an index in `operands`) expanded by `expand`, when `fits` accepts
+/// the command line that makes. When it does not, `args` as written instead, with the operands
+/// `expand` would have changed marked in the [`ChildGlobs`], so an MSYS child globs them itself,
+/// as it did before rtk expanded them: past Windows' command-line limit an expanded list cannot
+/// be spawned at all, while the child's own expansion has no such limit.
+///
+/// `fits` sees the expanded arguments and builds the command they would make; it is not called
+/// when nothing expanded. A child with no globbing of its own, such as `rg`, passes `|_| true`,
+/// and the spawn reports the limit (see `ChildCommand::command_line_len`).
+pub fn for_child(
+    args: &[String],
+    operands: &HashSet<usize>,
+    expand: impl Fn(&str) -> Vec<String>,
+    fits: impl FnOnce(&[String]) -> bool,
+) -> (Vec<String>, ChildGlobs) {
+    let mut expanded = Vec::with_capacity(args.len());
+    let mut globs = ChildGlobs::default();
+    for (index, arg) in args.iter().enumerate() {
+        if !operands.contains(&index) {
+            expanded.push(arg.clone());
+            continue;
+        }
+        let words = expand(arg);
+        if words != [arg.as_str()] {
+            globs.indices.insert(index);
+            globs.texts.insert(arg.clone());
+        }
+        expanded.extend(words);
+    }
+    if globs.is_empty() || fits(&expanded) {
+        (expanded, ChildGlobs::default())
+    } else {
+        (args.to_vec(), globs)
+    }
+}
+
+/// Whether `cmd`'s command line is short enough for Windows to spawn it. Off Windows there is no
+/// such limit to fall back from, and operands are never expanded there.
+pub fn fits(cmd: &ChildCommand) -> bool {
+    #[cfg(windows)]
+    {
+        cmd.command_line_len() < crate::core::child_command::COMMAND_LINE_LIMIT
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+        true
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -337,6 +424,61 @@ mod tests {
         assert_eq!(expanded, ["-l", "<a*>", "+", "-I", "b*", "<c*>", "+"]);
     }
 
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    /// Expands `*.txt` into two names and leaves everything else as written.
+    fn two_names(arg: &str) -> Vec<String> {
+        match arg {
+            "*.txt" => strings(&["a.txt", "b.txt"]),
+            other => vec![other.to_string()],
+        }
+    }
+
+    #[test]
+    fn for_child_expands_when_the_command_line_fits() {
+        let args = strings(&["-l", "*.txt", "x.rs"]);
+        let operands = HashSet::from([1, 2]);
+        let (sent, globs) = for_child(&args, &operands, two_names, |expanded| {
+            assert_eq!(expanded, ["-l", "a.txt", "b.txt", "x.rs"]);
+            true
+        });
+        assert_eq!(sent, ["-l", "a.txt", "b.txt", "x.rs"]);
+        assert!(globs.is_empty());
+    }
+
+    #[test]
+    fn for_child_leaves_the_globs_to_the_child_when_it_would_not_fit() {
+        // `*.txt` as a flag's value (index 0's) is not an operand and stays literal.
+        let args = strings(&["*.txt", "*.txt", "x.rs"]);
+        let operands = HashSet::from([1, 2]);
+        let (sent, globs) = for_child(&args, &operands, two_names, |_| false);
+        assert_eq!(sent, args);
+        assert_eq!(globs.indices, HashSet::from([1]));
+        assert_eq!(globs.texts, HashSet::from(["*.txt".to_string()]));
+
+        // `"grep"` is 6 units; a literal `*.txt` is sent quoted (8 with its space), one the
+        // child globs bare (6), and `x.rs` needs no quoting either way (5).
+        let mut cmd = ChildCommand::new("grep");
+        globs.push_all(&mut cmd, &sent);
+        assert_eq!(cmd.command_line_len(), 6 + 8 + 6 + 5);
+        let mut cmd = ChildCommand::new("grep");
+        globs.push_operand(&mut cmd, "*.txt");
+        globs.push_operand(&mut cmd, "*.rs");
+        assert_eq!(cmd.command_line_len(), 6 + 6 + 7);
+    }
+
+    #[test]
+    fn for_child_does_not_measure_when_nothing_expanded() {
+        let args = strings(&["-l", "x.rs"]);
+        let (sent, globs) = for_child(&args, &HashSet::from([1]), two_names, |_| {
+            panic!("nothing expanded, so there is no longer line to measure")
+        });
+        assert_eq!(sent, args);
+        assert!(globs.is_empty());
+    }
+
     #[test]
     fn a_star_matches_within_the_directory_and_skips_dotfiles() {
         let (_tmp, root) = tree();
@@ -425,6 +567,10 @@ mod tests {
         assert!(matches("[!abc].rs", "d.rs"));
         assert!(!matches("[^abc].rs", "a.rs"));
         assert!(matches("[a-c]x", "bx"));
+        // A `-` just before the closing `]` is literal, not a range up to `]`.
+        assert!(matches("[a-]x", "-x"));
+        assert!(matches("[a-]x", "ax"));
+        assert!(!matches("[a-]x", "bx"));
         assert!(matches("[]]x", "]x"));
         assert!(matches("[x", "[x"));
         assert!(matches("**", ""));

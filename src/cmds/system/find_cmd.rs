@@ -173,17 +173,19 @@ fn dispatch(original: &[String]) -> Result<Dispatch> {
     let expr = rest[split..].to_vec();
 
     if expr.iter().any(|t| VERBATIM_ACTIONS.contains(&t.as_str())) {
-        let verbatim = if legacy {
+        // `args` is `full` less the rtk flags peeled off its end, which go to find as well so it
+        // refuses them; both put the same options and starting points first.
+        let full = if legacy {
             legacy_to_find_syntax(original)
         } else {
-            // `args` is `original` less the rtk flags peeled off its end.
-            [
-                options.as_slice(),
-                paths.as_slice(),
-                &original[options.len() + split..],
-            ]
-            .concat()
+            original.to_vec()
         };
+        let verbatim = [
+            options.as_slice(),
+            paths.as_slice(),
+            &full[options.len() + split..],
+        ]
+        .concat();
         return Ok(Dispatch::Verbatim(verbatim));
     }
     if options.is_empty()
@@ -820,6 +822,25 @@ mod tests {
         {
             Dispatch::Verbatim(a) => assert!(a.ends_with(&args(&["-t", "d"]))),
             _ => panic!("expected verbatim"),
+        }
+    }
+
+    /// A verbatim action keeps every word once, in order: the starting points are rebuilt from
+    /// the expanded list, and the expression after them follows unchanged. `src` is a directory
+    /// in the crate root, where the tests run.
+    #[test]
+    fn a_verbatim_action_reaches_find_with_its_argv_unchanged() {
+        for words in [
+            &["src", "-name", "*.rs", "-exec", "echo", "hit", "{}", ";"][..],
+            &[
+                "-L", "src", "-name", "*.rs", "-exec", "echo", "hit", "{}", ";",
+            ],
+            &["src", "src", "-print"],
+        ] {
+            match dispatch(&args(words)).unwrap() {
+                Dispatch::Verbatim(a) => assert_eq!(a, args(words), "{words:?}"),
+                _ => panic!("{words:?}: expected verbatim"),
+            }
         }
     }
 
