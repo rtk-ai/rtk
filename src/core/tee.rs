@@ -124,12 +124,52 @@ const POSTHOOK_MAX_FILES: usize = 20;
 /// once per invocation. Honors the recovery kill switches like every other
 /// tee write; per-file cap + truncation marker reused unchanged.
 pub fn posthook_tee_hint(config: &Config, raw: &str, command_slug: &str) -> Option<String> {
+    posthook_tee_hint_with_receipt(config, raw, command_slug).map(|(hint, _)| hint)
+}
+
+/// What a posthook hint points at, so a caller that decides not to emit the
+/// filtered result can take the stored bytes back out.
+#[cfg(feature = "engine")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PosthookRecall {
+    /// An `rtk recall <hash>` entry in the sqlite store.
+    Entry { hash: String },
+    /// A file under the posthook tee directory.
+    File(std::path::PathBuf),
+}
+
+/// Undo a [`PosthookRecall`].
+///
+/// The posthook's size gate can only decide *after* the hint is stored, because
+/// the hint's own length is part of the comparison. A rejected result must not
+/// leave the raw output behind: not in `rtk recall --list`, not in the tee
+/// directory.
+#[cfg(feature = "engine")]
+pub fn discard_posthook_recall(recall: &PosthookRecall, cfg: &RetrieverConfig) {
+    match recall {
+        PosthookRecall::Entry { hash } => retriever::discard(cfg, hash),
+        PosthookRecall::File(path) => {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// [`posthook_tee_hint`] with the handle needed to take the stored bytes back.
+#[cfg(feature = "engine")]
+pub fn posthook_tee_hint_with_receipt(
+    config: &Config,
+    raw: &str,
+    command_slug: &str,
+) -> Option<(String, PosthookRecall)> {
     if raw.is_empty() || retriever::recovery_disabled_by_env() {
         return None;
     }
     match config.retriever.mode {
         RecoveryMode::Disabled => return None,
-        RecoveryMode::Sqlite => return posthook_store_hint(&config.retriever, raw, command_slug),
+        RecoveryMode::Sqlite => {
+            let (hint, hash) = posthook_store_hint_with_hash(&config.retriever, raw, command_slug)?;
+            return Some((hint, PosthookRecall::Entry { hash }));
+        }
         RecoveryMode::Tee => {}
     }
 
@@ -150,18 +190,31 @@ pub fn posthook_tee_hint(config: &Config, raw: &str, command_slug: &str) -> Opti
         config.retriever.tee_max_file_size,
         POSTHOOK_MAX_FILES,
     )?;
-    Some(super::tee_file::format_hint(&path))
+    let hint = super::tee_file::format_hint(&path);
+    Some((hint, PosthookRecall::File(path)))
 }
 
 #[cfg(feature = "engine")]
 pub const POSTHOOK_RECALL_PREFIX: &str = "posthook:";
 
+/// The sqlite store's hint and the hash it points at, so the caller can undo it.
 #[cfg(feature = "engine")]
-fn posthook_store_hint(cfg: &RetrieverConfig, raw: &str, command_slug: &str) -> Option<String> {
+fn posthook_store_hint_with_hash(
+    cfg: &RetrieverConfig,
+    raw: &str,
+    command_slug: &str,
+) -> Option<(String, String)> {
     let command = format!("{POSTHOOK_RECALL_PREFIX}{command_slug}");
-    let hint = store_hint(cfg, raw, &command, None)?;
-    retriever::trim_family(cfg, POSTHOOK_RECALL_PREFIX, POSTHOOK_MAX_FILES);
-    Some(hint)
+    match retriever::store(cfg, raw.as_bytes(), &command, None, 1) {
+        Stored::Saved(saved) => {
+            retriever::trim_family(cfg, POSTHOOK_RECALL_PREFIX, POSTHOOK_MAX_FILES);
+            Some((
+                format!("[full output: rtk recall {}]", saved.hash),
+                saved.hash,
+            ))
+        }
+        Stored::Unavailable | Stored::Empty => None,
+    }
 }
 
 #[cfg(feature = "engine")]

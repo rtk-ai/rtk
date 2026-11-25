@@ -180,12 +180,26 @@ fn agent_text_with_config(
     if raw.is_empty() || !is_completed(result.status.as_deref()) {
         return None;
     }
-    let subject = subject_of_for(agent, tool_name);
-    let source = source_of_args(subject, &result.args);
-    let format = text_format(tool_name, subject, &source, raw)?;
+    // Size floor first, in the same order as the Claude adapter: a result below
+    // `guards.min_size` must not earn a `rtk gain` row on its way to being
+    // dropped.
     if raw.len() < pipeline.guards.min_size {
         return None;
     }
+    let subject = subject_of_for(agent, tool_name);
+    let source = source_of_args(subject, &result.args);
+    let Some(format) = text_format(tool_name, subject, &source, raw) else {
+        // Unsupported shape for a subject whose output RTK would otherwise
+        // rewrite (e.g. a `glob` result, which is not grep output): the text
+        // passes through, but the zero-saving row keeps coverage visible in
+        // `rtk gain`, exactly as the Claude adapter does for Grep count mode.
+        // Write/Edit results carry no output to compress at all, so they are
+        // not tracked.
+        if !matches!(subject, Subject::Write | Subject::Edit) {
+            track(tool_name, "raw", &source, raw, raw, result.duration_ms);
+        }
+        return None;
+    };
     let composed = filter_and_compose(
         config,
         pipeline,
@@ -196,14 +210,23 @@ fn agent_text_with_config(
         format,
         result.duration_ms,
         result.exit_code,
+        Gate::Bytes,
     )?;
-    // `filter_and_compose` refuses a token-larger result; the host contract is
-    // bytes, so refuse anything that is not strictly smaller.
-    accept_smaller(raw, composed)
-}
-
-fn accept_smaller(raw: &str, composed: String) -> Option<String> {
-    (composed.len() < raw.len()).then_some(composed)
+    // `filter_and_compose`'s byte gate already refused anything the host would
+    // not shrink, so this text is the answer.
+    let output = composed;
+    // The row `rtk gain` reads, labelled `rtk posthook <tool> <format>` — the
+    // same label the Claude transport writes. Without it an OpenCode
+    // compression lived only in the session.
+    track(
+        tool_name,
+        format.as_str(),
+        &source,
+        raw,
+        &output,
+        result.duration_ms,
+    );
+    Some(output)
 }
 
 /// Path, URL or command the facts and tracking rows key on, taken from the
@@ -315,6 +338,7 @@ fn process_with_config(event: &Value, config: &Config, pipeline: &Resolved) -> O
         format,
         duration_ms,
         None,
+        Gate::Tokens,
     )?;
 
     let (updated, converted) = rebuild(event, tool_name, &composed)?;
@@ -655,6 +679,24 @@ fn record_recovery(command: &str) {
     }
 }
 
+/// Which size guard the caller wants.
+///
+/// The Claude path keeps the engine's token guard: its host swaps a structured
+/// response back in and `rtk gain` reports tokens. A plain-text host answers in
+/// bytes, so the OpenCode path gates on bytes instead.
+///
+/// The bytes gate also sits earlier: it rejects before `attribute`, `queue_log`
+/// and `apply_terminal` run, and it takes back the recall write the hint made
+/// ([`tee::discard_posthook_recall`]), so a rejected result is never recorded as
+/// a saving and leaves nothing in the recall store. Redaction (`apply_terminal`)
+/// is a terminal step on both paths — in this build the registry registers no
+/// redactor at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    Tokens,
+    Bytes,
+}
+
 /// Chain + recall store + guard for a single content string.
 /// `None` = no matching rule, chain was a no-op, not smaller, or shadow.
 #[allow(clippy::too_many_arguments)]
@@ -668,6 +710,7 @@ fn filter_and_compose(
     format: ContentFormat,
     duration_ms: u64,
     exit_code: Option<i64>,
+    gate: Gate,
 ) -> Option<String> {
     // `is_rtk_command` is only meaningful for shell output. The Claude shell
     // path computes it in `process_shell`; the plain-text path (OpenCode
@@ -708,17 +751,36 @@ fn filter_and_compose(
         return None;
     }
 
-    // Ordering invariant (emit_guarded pattern): compose filtered + hint
-    // FIRST, then guard — the hint can never push output above raw.
+    // Byte gate, taken before the hint stores the raw output and before
+    // attribution claims a saving: a result the host would not accept must not
+    // be recorded as one. The Claude path keeps its token guard below.
+    if gate == Gate::Bytes && filtered.len() >= raw.len() {
+        return None;
+    }
+
+    // Ordering invariant (emit_guarded pattern): compose filtered + hint, then
+    // guard — the hint can never push output above raw. The receipt is kept
+    // because the hint stores the raw output before its own length is known.
     let slug = format!("{}_{}", tool_name.to_lowercase(), basename_of(source));
-    let hint = tee::posthook_tee_hint(config, raw, &slug);
-    let composed = match hint {
-        Some(h) => format!("{filtered}\n{h}"),
+    let recall_hint = tee::posthook_tee_hint_with_receipt(config, raw, &slug);
+    let composed = match &recall_hint {
+        Some((hint, _)) => format!("{filtered}\n{hint}"),
         None => filtered,
     };
 
-    if estimate_tokens(&composed) > estimate_tokens(raw) {
+    if gate == Gate::Tokens && estimate_tokens(&composed) > estimate_tokens(raw) {
         track(tool_name, format.as_str(), source, raw, raw, duration_ms);
+        return None;
+    }
+    // Same decision in bytes, after the hint: a marginal saving plus the hint
+    // can exceed the raw output, and then nothing is emitted — so nothing is
+    // attributed, logged or tracked, and the store write is taken back out.
+    // Otherwise `rtk recall --list` would keep listing an entry nothing points
+    // at, with the raw (unredacted) bytes still readable through `rtk recall`.
+    if gate == Gate::Bytes && composed.len() >= raw.len() {
+        if let Some((_, recall)) = &recall_hint {
+            tee::discard_posthook_recall(recall, &config.retriever);
+        }
         return None;
     }
     attribute(&applied, raw, &composed);
@@ -1233,6 +1295,35 @@ fn basename_of(source: &str) -> String {
         .to_string()
 }
 
+/// One row `track` writes: what `rtk gain` aggregates over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrackRow {
+    original_cmd: String,
+    rtk_cmd: String,
+    input_tokens: usize,
+    output_tokens: usize,
+    duration_ms: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Rows `track` wrote on this test thread, in order. `tracker()` is an
+    /// in-memory database built per call, so a test cannot read the real table
+    /// back; the thread-local sink is per test because libtest gives each one
+    /// its own thread.
+    static TRACKED: std::cell::RefCell<Vec<TrackRow>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn tracked_rows() -> Vec<TrackRow> {
+    TRACKED.with(|rows| rows.borrow().clone())
+}
+
+#[cfg(test)]
+fn clear_tracked_rows() {
+    TRACKED.with(|rows| rows.borrow_mut().clear());
+}
+
 /// Record a tracking row without ever crashing (mirrors
 /// `record_parse_failure_silent`). Every posthook code path tracks, including
 /// passthroughs — otherwise gains silently fail (pipe_cmd precedent).
@@ -1244,19 +1335,26 @@ fn track(
     emitted: &str,
     duration_ms: u64,
 ) {
-    let rtk_cmd = format!("rtk posthook {} {}", tool_name.to_lowercase(), format_token);
-    let original_cmd = if source.is_empty() {
-        tool_name.to_string()
-    } else {
-        format!("{tool_name} {source}")
+    let row = TrackRow {
+        original_cmd: if source.is_empty() {
+            tool_name.to_string()
+        } else {
+            format!("{tool_name} {source}")
+        },
+        rtk_cmd: format!("rtk posthook {} {}", tool_name.to_lowercase(), format_token),
+        input_tokens: estimate_tokens(raw),
+        output_tokens: estimate_tokens(emitted),
+        duration_ms,
     };
+    #[cfg(test)]
+    TRACKED.with(|rows| rows.borrow_mut().push(row.clone()));
     if let Ok(tracker) = tracker() {
         let _ = tracker.record(
-            &original_cmd,
-            &rtk_cmd,
-            estimate_tokens(raw),
-            estimate_tokens(emitted),
-            duration_ms,
+            &row.original_cmd,
+            &row.rtk_cmd,
+            row.input_tokens,
+            row.output_tokens,
+            row.duration_ms,
         );
     }
 }
@@ -1264,6 +1362,7 @@ fn track(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::retriever::RecoveryMode;
 
     #[test]
     fn recall_commands_pass_the_recovery_gate() {
@@ -1382,6 +1481,131 @@ mod tests {
             args: args.clone(),
             output: raw.to_string(),
             ..AgentToolResult::default()
+        }
+    }
+
+    #[test]
+    fn test_agent_text_tracks_a_compressed_result() {
+        // Before this, an OpenCode compression reached the model but never
+        // `rtk gain`: the plain-text path returned the text without tracking.
+        clear_tracked_rows();
+        let pipeline =
+            pipeline_from("[[hook.after_tool.shell]]\nname = \"squeeze\"\nuse = [\"dedup\"]\n");
+        let raw = repeated_output();
+        let result = agent_result("bash", &serde_json::json!({"command": "make build"}), &raw);
+        assert!(agent_text_with_config("opencode", &result, &test_config(), &pipeline).is_some());
+
+        let rows = tracked_rows();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = &rows[0];
+        assert_eq!(row.rtk_cmd, "rtk posthook bash term");
+        assert_eq!(row.original_cmd, "bash make build");
+        assert!(
+            row.output_tokens < row.input_tokens,
+            "a saving must be recorded: {row:?}"
+        );
+    }
+
+    #[test]
+    fn test_agent_text_tracks_a_shape_it_cannot_rewrite_as_a_passthrough() {
+        // Mirrors the Claude adapter's Grep-count row: nothing is emitted, but
+        // the call still shows up in `rtk gain` with zero savings.
+        clear_tracked_rows();
+        let pipeline =
+            pipeline_from("[[hook.after_tool.search]]\nname = \"squeeze\"\nuse = [\"dedup\"]\n");
+        let result = agent_result(
+            "glob",
+            &serde_json::json!({"pattern": "**/*.rs"}),
+            &repeated_output(),
+        );
+        assert!(agent_text_with_config("opencode", &result, &test_config(), &pipeline).is_none());
+
+        let rows = tracked_rows();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].rtk_cmd, "rtk posthook glob raw");
+        assert_eq!(rows[0].input_tokens, rows[0].output_tokens);
+    }
+
+    /// A pipeline whose chain saves only a few bytes, so the recall hint the
+    /// host would also receive pushes the composed result above the raw size.
+    fn thin_saving_pipeline() -> Resolved {
+        pipeline_from("[[hook.after_tool.shell]]\nname = \"ansi\"\nuse = [\"ansi\"]\n")
+    }
+
+    /// Three long lines carrying an ANSI prefix each: the chain saves ~27 bytes.
+    fn thin_saving_output(secret: Option<&str>) -> String {
+        let body = match secret {
+            Some(secret) => format!("{secret} {}", "x".repeat(300)),
+            None => "x".repeat(300),
+        };
+        format!("\x1b[31m{body}\x1b[0m\n").repeat(3)
+    }
+
+    /// A config that writes the recall store into `dir`, in the given mode.
+    fn recall_config(dir: &std::path::Path, mode: RecoveryMode) -> Config {
+        let mut config = test_config();
+        config.retriever.mode = mode;
+        config.retriever.tee_directory = Some(dir.join("tee"));
+        config.retriever.database_path = Some(dir.join("recall.db"));
+        config
+    }
+
+    /// Rows in the recall store the config points at; 0 when nothing was stored.
+    fn recall_rows(config: &Config) -> i64 {
+        let path = config
+            .retriever
+            .database_path
+            .as_ref()
+            .expect("test config sets a path");
+        let Ok(conn) = rusqlite::Connection::open(path) else {
+            return 0;
+        };
+        conn.query_row("SELECT COUNT(*) FROM recall", [], |row| row.get(0))
+            .unwrap_or(0)
+    }
+
+    /// Files under the posthook tee directory, which a rejected result must
+    /// leave empty.
+    fn posthook_tee_files(config: &Config) -> usize {
+        let dir = tee::posthook_recall_dir(config).expect("tee dir resolves");
+        std::fs::read_dir(dir)
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn test_agent_text_tracks_nothing_when_the_guarded_result_is_rejected() {
+        // A saving smaller than the recall hint appended after it: the composed
+        // result is larger than the raw one, so it must not reach the model.
+        // Every effect of accepting it has to be absent — no `rtk gain` row, no
+        // decision-log line, and nothing left in the recall store or the tee
+        // directory, since `rtk recall --list` enumerates it either way.
+        for mode in [RecoveryMode::Tee, RecoveryMode::Sqlite] {
+            clear_tracked_rows();
+            pipeline_log::clear_offered_entries();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let config = recall_config(dir.path(), mode);
+
+            let result = agent_result(
+                "bash",
+                &serde_json::json!({"command": "make build"}),
+                &thin_saving_output(None),
+            );
+            assert!(
+                agent_text_with_config("opencode", &result, &config, &thin_saving_pipeline())
+                    .is_none(),
+                "{mode:?}: the hint pushes the result above the raw size"
+            );
+
+            let rows = tracked_rows();
+            assert!(rows.is_empty(), "{mode:?}: `rtk gain` recorded {rows:?}");
+            let offered = pipeline_log::offered_entries();
+            assert!(
+                offered.is_empty(),
+                "{mode:?}: the decision log recorded {offered:?}"
+            );
+            assert_eq!(recall_rows(&config), 0, "{mode:?}: `rtk recall --list`");
+            assert_eq!(posthook_tee_files(&config), 0, "{mode:?}: tee directory");
         }
     }
 
@@ -1601,16 +1825,6 @@ mod tests {
         }
         // No subject is a todo list; OpenCode's own confirmation is passed on.
         assert_eq!(subject_of_for("opencode", "todowrite"), Subject::Any);
-    }
-
-    #[test]
-    fn test_accept_smaller_refuses_equal_and_larger_output() {
-        assert_eq!(accept_smaller("abc", "abc".to_string()), None);
-        assert_eq!(accept_smaller("abc", "abcd".to_string()), None);
-        assert_eq!(
-            accept_smaller("abcd", "abc".to_string()).as_deref(),
-            Some("abc")
-        );
     }
 
     #[test]
