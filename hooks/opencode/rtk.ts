@@ -440,7 +440,11 @@ export function runHookOpencodeAfter(
 ): Promise<string | null> {
   return new Promise((resolve) => {
     let settled = false
-    let stdout = ""
+    const chunks: string[] = []
+    // Running byte count: `Buffer.byteLength(stdout)` inside the data handler
+    // re-measured the whole answer on every chunk, which is quadratic on an
+    // output rtk is explicitly allowed to grow to 64 MiB.
+    let bytes = 0
     let timer: ReturnType<typeof setTimeout> | undefined
 
     const finish = (value: string | null) => {
@@ -475,13 +479,16 @@ export function runHookOpencodeAfter(
     })
     child.stdout.setEncoding("utf8")
     child.stdout.on("data", (chunk: string) => {
-      stdout += chunk
-      if (Buffer.byteLength(stdout, "utf8") > MAX_AFTER_BYTES) {
+      chunks.push(chunk)
+      bytes += Buffer.byteLength(chunk, "utf8")
+      if (bytes > MAX_AFTER_BYTES) {
         child.kill()
         finish(null)
       }
     })
-    child.on("close", (code) => finish(code === 0 && stdout ? stdout : null))
+    child.on("close", (code) =>
+      finish(code === 0 && bytes > 0 ? chunks.join("") : null)
+    )
 
     child.stdin.end(payload)
   })

@@ -271,6 +271,12 @@ fn agent_text_with_config(
     }
     let subject = subject_of_for(agent, tool_name);
     let source = source_of_args(subject, &result.args);
+    // A shell result with no command has no subject matter: the recall-recovery
+    // gate keys on the command, `is_rtk_command` cannot be judged, and the
+    // tracking row would name nothing. Pass it through.
+    if subject == Subject::Shell && source.is_empty() {
+        return None;
+    }
     let Some(format) = text_format(tool_name, subject, &source, raw) else {
         // Unsupported shape for a subject whose output RTK would otherwise
         // rewrite (e.g. a `glob` result, which is not grep output): the text
@@ -1697,6 +1703,62 @@ mod tests {
         // Present and empty, so a host never has to tell "absent" from "none".
         assert_eq!(envelope["append"], "");
         assert_eq!(envelope["output"], composed.text);
+    }
+
+    #[test]
+    fn test_agent_text_refuses_a_shell_result_without_a_command() {
+        // No command means no source: the recall-recovery gate cannot fire and
+        // the tracking row would be attributed to nothing, so the result passes
+        // through untouched.
+        let pipeline =
+            pipeline_from("[[hook.after_tool.shell]]\nname = \"squeeze\"\nuse = [\"dedup\"]\n");
+        for args in [
+            serde_json::json!({}),
+            serde_json::json!({"command": ""}),
+            serde_json::json!({"command": 42}),
+        ] {
+            let result = agent_result("shell", &args, &repeated_output());
+            assert!(
+                agent_text_with_config("opencode", &result, &test_config(), &pipeline).is_none(),
+                "{args}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_text_leaves_no_trace_of_a_rejected_result_carrying_a_secret() {
+        // A result the host would not accept must leave nothing behind — the
+        // raw bytes here carry a secret-looking string that redaction would
+        // have replaced, and both recovery stores are reachable afterwards:
+        // `rtk recall` prints the entry, `rtk recall --list` enumerates it, and
+        // the tee directory holds the same bytes as a file.
+        const SECRET: &str = "sk-live-1f8c2d9e4b7a6c3f5d2e1b0a";
+        for mode in [RecoveryMode::Tee, RecoveryMode::Sqlite] {
+            clear_tracked_rows();
+            pipeline_log::clear_offered_entries();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let config = recall_config(dir.path(), mode);
+
+            let raw = thin_saving_output(Some(&format!("AKIAIOSFODNN7EXAMPLE {SECRET}")));
+            let result = agent_result("bash", &serde_json::json!({"command": "make build"}), &raw);
+            assert!(
+                agent_text_with_config("opencode", &result, &config, &thin_saving_pipeline())
+                    .is_none(),
+                "{mode:?}: not smaller than the raw output, so nothing is emitted"
+            );
+            assert!(
+                tracked_rows().is_empty(),
+                "{mode:?}: a rejected result records no row"
+            );
+            let offered = pipeline_log::offered_entries();
+            assert!(offered.is_empty(), "{mode:?}: nothing logged: {offered:?}");
+            assert_eq!(recall_rows(&config), 0, "{mode:?}: recall store entry");
+            assert_eq!(
+                posthook_tee_files(&config),
+                0,
+                "{mode:?}: the raw bytes must not stay in the tee directory"
+            );
+        }
     }
 
     #[test]
