@@ -74,7 +74,7 @@ dirs = "7"
 # resolve. See proxy/Cargo.toml.
 rusqlite = { version = "0.42", features = ["bundled"] }
 toml = "1.2"
-toml_edit = "0.22"
+toml_edit = "0.25"
 chrono = "0.4"
 tempfile = "3"
 sha2 = "0.11"
