@@ -1,7 +1,7 @@
 //! Shows users how many tokens RTK has saved them over time.
 
 use crate::core::display_helpers::{format_duration, print_period_table};
-use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
+use crate::core::tracking::{self, DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::user_dirs;
 use crate::core::utils::{format_tokens, truncate};
 use crate::hooks::hook_check;
@@ -11,6 +11,11 @@ use colored::Colorize;
 use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
+
+// Background reads stay quiet; only report failures from known tracking queries.
+fn tracking_read<T>(result: Result<T>) -> Result<T> {
+    result.inspect_err(|e| tracking::warn_if_missing_table("gain", e))
+}
 
 #[cfg(windows)]
 fn requires_plain_console_output(mode: Option<u32>) -> bool {
@@ -54,8 +59,7 @@ fn attribution_json(
 ) -> Result<()> {
     use serde_json::json;
     let rows = |site: &str, dim: &str| -> Result<Vec<serde_json::Value>> {
-        Ok(tracker
-            .attribution_site(site, dim, days)?
+        Ok(tracking_read(tracker.attribution_site(site, dim, days))?
             .iter()
             .map(|r| {
                 json!({
@@ -104,7 +108,7 @@ fn attribution_json(
     if by_layer {
         let mut per_layer: std::collections::BTreeMap<&'static str, (i64, i64)> =
             std::collections::BTreeMap::new();
-        for row in tracker.attribution_site("hook", "method", days)? {
+        for row in tracking_read(tracker.attribution_site("hook", "method", days))? {
             #[cfg(feature = "engine")]
             let layer = rtk_engine::registry::info_of(&row.name)
                 .and_then(|info| info.saves_on.first().copied())
@@ -228,7 +232,7 @@ pub fn run_attribution(
     if shadow {
         print_rows(
             &format!("Shadow — recorded, nothing emitted (last {DAYS}d)"),
-            &tracker.attribution_site("shadow", "rule", DAYS)?,
+            &tracking_read(tracker.attribution_site("shadow", "rule", DAYS))?,
         );
         println!("turn `shadow` off on a rule when its numbers convince you.");
         println!();
@@ -237,7 +241,7 @@ pub fn run_attribution(
     if by_layer {
         let mut per_layer: std::collections::BTreeMap<&'static str, (i64, i64)> =
             std::collections::BTreeMap::new();
-        for row in tracker.attribution_site("hook", "method", DAYS)? {
+        for row in tracking_read(tracker.attribution_site("hook", "method", DAYS))? {
             #[cfg(feature = "engine")]
             let layer = rtk_engine::registry::info_of(&row.name)
                 .and_then(|info| info.saves_on.first().copied())
@@ -283,7 +287,7 @@ pub fn run_attribution(
         println!();
     }
 
-    let tasks = tracker.attribution_site("task", "task", DAYS)?;
+    let tasks = tracking_read(tracker.attribution_site("task", "task", DAYS))?;
     if !tasks.is_empty() {
         // Context reduction: the corpus WOULD have put `tokens_in` into the
         // agent's context; the summary that came back is `tokens_out`. The
@@ -316,7 +320,7 @@ pub fn run_attribution(
     if by_method {
         print_rows(
             &format!("By Method — hook site (last {DAYS}d)"),
-            &tracker.attribution_site("hook", "method", DAYS)?,
+            &tracking_read(tracker.attribution_site("hook", "method", DAYS))?,
         );
         if let Some(proxy) = crate::llm_proxy::read_gain_summary() {
             let methods = proxy.savings_by_method();
@@ -339,7 +343,7 @@ pub fn run_attribution(
     if by_rule {
         print_rows(
             &format!("By Rule — hook site (last {DAYS}d)"),
-            &tracker.attribution_site("hook", "rule", DAYS)?,
+            &tracking_read(tracker.attribution_site("hook", "rule", DAYS))?,
         );
         if let Some(proxy) = crate::llm_proxy::read_gain_summary()
             && !proxy.by_rule.is_empty()
@@ -359,7 +363,7 @@ pub fn run_attribution(
     if by_pipeline {
         print_rows(
             &format!("By Pipeline — hook site (last {DAYS}d)"),
-            &tracker.attribution_site("hook", "pipeline", DAYS)?,
+            &tracking_read(tracker.attribution_site("hook", "pipeline", DAYS))?,
         );
         if let Some(rows) = crate::llm_proxy::savings_by_pipeline()
             && !rows.is_empty()
@@ -388,7 +392,7 @@ pub fn run_attribution(
         }
     }
 
-    let recoveries = tracker.attribution("recovery", DAYS)?;
+    let recoveries = tracking_read(tracker.attribution("recovery", DAYS))?;
     if !recoveries.is_empty() {
         println!(
             "{}",
@@ -451,11 +455,10 @@ pub fn run_pipeline_detail(name: &str) -> Result<()> {
     let tracker = tracker_for_report("Failed to open tracking database")?;
     const DAYS: u32 = 30;
 
-    let hook_total = tracker
-        .attribution_site("hook", "pipeline", DAYS)?
+    let hook_total = tracking_read(tracker.attribution_site("hook", "pipeline", DAYS))?
         .into_iter()
         .find(|r| r.name == name);
-    let slices = hook_slices_for(&tracker, name, DAYS)?;
+    let slices = tracking_read(hook_slices_for(&tracker, name, DAYS))?;
     let tasks: Vec<_> = tracker
         .attribution_site("task", "task", DAYS)
         .unwrap_or_default()
@@ -467,11 +470,11 @@ pub fn run_pipeline_detail(name: &str) -> Result<()> {
 
     if hook_total.is_none() && slices.is_empty() && proxy.is_none() && tasks.is_empty() {
         println!("no recorded savings for pipeline `{name}` (last {DAYS}d hook, all-time proxy)");
-        let mut known: Vec<String> = tracker
-            .attribution_site("hook", "pipeline", DAYS)?
-            .into_iter()
-            .map(|r| r.name)
-            .collect();
+        let mut known: Vec<String> =
+            tracking_read(tracker.attribution_site("hook", "pipeline", DAYS))?
+                .into_iter()
+                .map(|r| r.name)
+                .collect();
         if let Some(rows) = crate::llm_proxy::savings_by_pipeline() {
             known.extend(
                 rows.into_iter()
@@ -757,8 +760,7 @@ pub fn run(
         _ => {} // Continue with text format
     }
 
-    let summary = tracker
-        .get_summary_filtered(project_scope.as_deref()) // changed: use filtered variant
+    let summary = tracking_read(tracker.get_summary_filtered(project_scope.as_deref())) // changed: use filtered variant
         .context("Failed to load token savings summary from database")?;
 
     if crate::core::tee_file::legacy_tee_migration_pending() {
@@ -1141,7 +1143,7 @@ pub fn run(
         }
 
         if history {
-            let recent = tracker.get_recent_filtered(10, project_scope.as_deref())?; // changed: filtered
+            let recent = tracking_read(tracker.get_recent_filtered(10, project_scope.as_deref()))?; // changed: filtered
             if !recent.is_empty() {
                 println!("{}", styled("Recent Commands", true)); // added: styled header
                 println!("──────────────────────────────────────────────────────────");
@@ -1635,21 +1637,21 @@ fn print_ascii_graph(data: &[(String, usize)]) {
 
 fn print_daily_full(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
     // changed: add project scope
-    let days = tracker.get_all_days_filtered(project_scope)?; // changed: use filtered variant
+    let days = tracking_read(tracker.get_all_days_filtered(project_scope))?; // changed: use filtered variant
     print_period_table(&days);
     Ok(())
 }
 
 fn print_weekly(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
     // changed: add project scope
-    let weeks = tracker.get_by_week_filtered(project_scope)?; // changed: use filtered variant
+    let weeks = tracking_read(tracker.get_by_week_filtered(project_scope))?; // changed: use filtered variant
     print_period_table(&weeks);
     Ok(())
 }
 
 fn print_monthly(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
     // changed: add project scope
-    let months = tracker.get_by_month_filtered(project_scope)?; // changed: use filtered variant
+    let months = tracking_read(tracker.get_by_month_filtered(project_scope))?; // changed: use filtered variant
     print_period_table(&months);
     Ok(())
 }
@@ -1693,19 +1695,18 @@ fn export_json(
     all: bool,
     project_scope: Option<&str>, // added: project scope
 ) -> Result<()> {
-    let summary = tracker
-        .get_summary_filtered(project_scope) // changed: use filtered variant
+    let summary = tracking_read(tracker.get_summary_filtered(project_scope)) // changed: use filtered variant
         .context("Failed to load token savings summary from database")?;
 
     let export = ExportData {
         output_accounting: history
-            .then(|| tracker.output_accounting(project_scope))
+            .then(|| tracking_read(tracker.output_accounting(project_scope)))
             .transpose()?,
         commands: history
-            .then(|| tracker.invocation_history(100, project_scope))
+            .then(|| tracking_read(tracker.invocation_history(100, project_scope)))
             .transpose()?,
         recall_events: history
-            .then(|| tracker.recall_event_history(100, project_scope))
+            .then(|| tracking_read(tracker.recall_event_history(100, project_scope)))
             .transpose()?,
         summary: ExportSummary {
             total_commands: summary.total_commands,
@@ -1718,17 +1719,17 @@ fn export_json(
             oversized_excluded: summary.oversized_excluded,
         },
         daily: if all || daily {
-            Some(tracker.get_all_days_filtered(project_scope)?) // changed: use filtered
+            Some(tracking_read(tracker.get_all_days_filtered(project_scope))?) // changed: use filtered
         } else {
             None
         },
         weekly: if all || weekly {
-            Some(tracker.get_by_week_filtered(project_scope)?) // changed: use filtered
+            Some(tracking_read(tracker.get_by_week_filtered(project_scope))?) // changed: use filtered
         } else {
             None
         },
         monthly: if all || monthly {
-            Some(tracker.get_by_month_filtered(project_scope)?) // changed: use filtered
+            Some(tracking_read(tracker.get_by_month_filtered(project_scope))?) // changed: use filtered
         } else {
             None
         },
@@ -1749,7 +1750,7 @@ fn export_csv(
     project_scope: Option<&str>, // added: project scope
 ) -> Result<()> {
     if all || daily {
-        let days = tracker.get_all_days_filtered(project_scope)?; // changed: use filtered
+        let days = tracking_read(tracker.get_all_days_filtered(project_scope))?; // changed: use filtered
         println!("# Daily Data");
         println!(
             "date,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms"
@@ -1771,7 +1772,7 @@ fn export_csv(
     }
 
     if all || weekly {
-        let weeks = tracker.get_by_week_filtered(project_scope)?; // changed: use filtered
+        let weeks = tracking_read(tracker.get_by_week_filtered(project_scope))?; // changed: use filtered
         println!("# Weekly Data");
         println!(
             "week_start,week_end,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms"
@@ -1794,7 +1795,7 @@ fn export_csv(
     }
 
     if all || monthly {
-        let months = tracker.get_by_month_filtered(project_scope)?; // changed: use filtered
+        let months = tracking_read(tracker.get_by_month_filtered(project_scope))?; // changed: use filtered
         println!("# Monthly Data");
         println!(
             "month,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms"
@@ -1867,8 +1868,7 @@ fn check_rtk_disabled_bypass() -> Option<String> {
 }
 
 fn show_failures(tracker: &Tracker) -> Result<()> {
-    let summary = tracker
-        .get_parse_failure_summary()
+    let summary = tracking_read(tracker.get_parse_failure_summary())
         .context("Failed to load parse failure data")?;
 
     if summary.total == 0 {

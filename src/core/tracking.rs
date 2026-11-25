@@ -144,7 +144,7 @@ impl Db {
     }
 }
 
-/// Warn the user when a write fails because a table is missing.
+/// Warn the user when a statement fails because a table is missing.
 ///
 /// `Tracker::new()` applies only the steps above the database's stamp, so a
 /// table dropped or corrupted out-of-band (manual `sqlite3` surgery, disk issue,
@@ -152,7 +152,7 @@ impl Db {
 /// re-applies every step. Point the user at that fix instead of failing
 /// silently. On a database that is behind, the table is missing because its step
 /// failed, which `rtk init` would repeat, so nothing is said.
-fn warn_if_missing_table(context: &str, err: &anyhow::Error) {
+pub(crate) fn warn_if_missing_table(context: &str, err: &anyhow::Error) {
     if db::missing_table(err).is_some() {
         eprintln!("{}", SCHEMA.repair_hint(&format!("{context}: {err}")));
     }
