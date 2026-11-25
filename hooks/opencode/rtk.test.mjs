@@ -7,6 +7,7 @@ import { delimiter, dirname, join } from "node:path"
 import RtkOpenCodePlugin, {
   candidateRtkDirs,
   durationMsOf,
+  parseAfterEnvelope,
   probeRtkHookOpencode,
   probeRtkHookOpencodeAfter,
   resolveRtkPath,
@@ -66,6 +67,22 @@ if (sub === "opencode-after") {
     if (!payload || typeof payload.output !== "string") return
     if (payload.output === "unchanged") return
     if (payload.output === "sleep-after") { setTimeout(() => process.exit(0), 5000); return }
+    // The stdout envelope a current binary prints — only when the request
+    // asked for it, exactly like the real binary.
+    const wantsEnvelope = payload.expect && payload.expect.envelope === 1
+    if (process.env.MOCK_AFTER_ENVELOPE && wantsEnvelope) {
+      process.stdout.write(JSON.stringify({
+        v: 1,
+        output: "compressed:" + payload.tool,
+        append: "NOTE: reread before editing",
+      }))
+      return
+    }
+    // An envelope from a version this plugin does not know.
+    if (process.env.MOCK_AFTER_UNKNOWN_V) {
+      process.stdout.write(JSON.stringify({ v: 2, output: "compressed:" + payload.tool }))
+      return
+    }
     // Echo the metadata the plugin forwarded, so a test can see exactly what
     // reached the binary in either API shape.
     if (process.env.MOCK_ECHO_PAYLOAD) {
@@ -76,6 +93,7 @@ if (sub === "opencode-after") {
         exit: payload.metadata && payload.metadata.exit,
         description: payload.description,
         duration_ms: payload.duration_ms,
+        expect: payload.expect,
       }))
       return
     }
@@ -180,6 +198,9 @@ after(() => {
   delete process.env.MOCK_NO_SUB
   delete process.env.MOCK_NO_AFTER
   delete process.env.MOCK_AFTER_FAIL
+  delete process.env.MOCK_AFTER_ENVELOPE
+  delete process.env.MOCK_AFTER_UNKNOWN_V
+  delete process.env.MOCK_ECHO_PAYLOAD
   delete process.env.MOCK_PROBE_LOG
   delete process.env.RTK_DISABLED
   delete process.env.RTK_BIN
@@ -321,6 +342,8 @@ test("the forwarded payload carries the tool metadata for both API shapes", asyn
       exit: 2,
       description: "build the crate",
       duration_ms: 1234,
+      // The stdout envelope is opt-in from this side.
+      expect: { envelope: 1 },
     })
 
     // 1.x: no status field; exit code and description live on the output.
@@ -339,6 +362,7 @@ test("the forwarded payload carries the tool metadata for both API shapes", asyn
       exit: 1,
       description: "build the crate",
       duration_ms: 35,
+      expect: { envelope: 1 },
     })
     // 1.x reports no status, and the plugin must not invent one.
     assert.equal("status" in forwarded1, false)
@@ -355,6 +379,63 @@ test("durationMsOf reads the shapes a tool may report timing in", () => {
   assert.equal(durationMsOf({ exit: 0 }), undefined)
   assert.equal(durationMsOf(null), undefined)
   assert.equal(durationMsOf("nope"), undefined)
+})
+
+test("the stdout envelope is parsed, its note appended, and unknown versions fall back to text", async () => {
+  const raw = "raw build output ".repeat(40)
+
+  // 1. Current binary: `{"v":1,"output":…,"append":…}`. The note is appended
+  // to the content the model sees, never substituted for it.
+  try {
+    process.env.MOCK_AFTER_ENVELOPE = "1"
+    const { hooks } = await captureServer()
+    const output = { title: "make", output: raw, metadata: {} }
+    await hooks["tool.execute.after"](v1Input, output)
+    assert.equal(output.output, "compressed:bash\nNOTE: reread before editing")
+  } finally {
+    delete process.env.MOCK_AFTER_ENVELOPE
+  }
+
+  // 2. A binary from before the envelope prints the replacement text alone.
+  // It still replaces the output.
+  const legacy = { title: "make", output: raw, metadata: {} }
+  await (await captureServer())["hooks"]["tool.execute.after"](v1Input, legacy)
+  assert.equal(legacy.output, "compressed:bash")
+
+  // 3. An envelope version this plugin does not know is read as raw text, not
+  // parsed. Here that text is larger than the tool's output, so the result is
+  // left exactly as it was; `parseAfterEnvelope` below covers the returned
+  // bytes.
+  try {
+    process.env.MOCK_AFTER_UNKNOWN_V = "1"
+    const unknown = { title: "make", output: "tiny", metadata: {} }
+    await (await captureServer())["hooks"]["tool.execute.after"](v1Input, unknown)
+    assert.equal(unknown.output, "tiny")
+  } finally {
+    delete process.env.MOCK_AFTER_UNKNOWN_V
+  }
+})
+
+test("parseAfterEnvelope keeps the three stdout shapes apart", () => {
+  assert.deepEqual(parseAfterEnvelope('{"v":1,"output":"a","append":"note"}'), {
+    output: "a",
+    append: "note",
+  })
+  // `append` absent or empty: nothing to add, no note.
+  assert.deepEqual(parseAfterEnvelope('{"v":1,"output":"a"}'), { output: "a", append: "" })
+  assert.deepEqual(parseAfterEnvelope('{"v":1,"output":"a","append":""}'), {
+    output: "a",
+    append: "",
+  })
+  // Version skew and plain text both keep the bytes as the replacement text.
+  const future = '{"v":2,"output":"a"}'
+  assert.deepEqual(parseAfterEnvelope(future), { output: future, append: "" })
+  assert.deepEqual(parseAfterEnvelope("plain replacement"), {
+    output: "plain replacement",
+    append: "",
+  })
+  // A v1 object with no usable output is not an envelope either.
+  assert.deepEqual(parseAfterEnvelope('{"v":1}'), { output: '{"v":1}', append: "" })
 })
 
 test("tryCompressOutput accepts only a strictly smaller result", async () => {

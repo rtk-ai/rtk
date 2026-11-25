@@ -1339,6 +1339,12 @@ fn opencode_after_payload(input: &str) -> Option<crate::hooks::posthook::AgentTo
         exit_code,
         description,
         duration_ms,
+        // The envelope is opt-in: a plugin written before it existed sends no
+        // `expect` field and would show the raw JSON as tool output.
+        expect_envelope: v
+            .pointer("/expect/envelope")
+            .and_then(Value::as_u64)
+            .is_some_and(|version| version == 1),
     })
 }
 
@@ -3102,6 +3108,25 @@ mod tests {
                 opencode_after_payload(r#"{"tool":"bash","output":"x","duration_ms":-2.5}"#)
                     .expect("valid payload");
             assert_eq!(negative.duration_ms, 0);
+        }
+
+        #[test]
+        fn the_envelope_is_opt_in_from_the_request() {
+            for (input, want) in [
+                (r#"{"tool":"bash","output":"x"}"#, false),
+                (r#"{"tool":"bash","output":"x","expect":{}}"#, false),
+                (
+                    r#"{"tool":"bash","output":"x","expect":{"envelope":2}}"#,
+                    false,
+                ),
+                (
+                    r#"{"tool":"bash","output":"x","expect":{"envelope":1}}"#,
+                    true,
+                ),
+            ] {
+                let result = opencode_after_payload(input).expect(input);
+                assert_eq!(result.expect_envelope, want, "{input}");
+            }
         }
 
         #[test]

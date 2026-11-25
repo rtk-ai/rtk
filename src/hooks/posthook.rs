@@ -110,6 +110,88 @@ pub struct AgentToolResult {
     pub exit_code: Option<i64>,
     pub description: Option<String>,
     pub duration_ms: u64,
+    /// The host asked for the versioned stdout envelope (`expect.envelope`).
+    ///
+    /// Opt-in from the request side, because the installed plugin is a snapshot
+    /// written by `rtk init`: a binary upgrade without re-running init hands an
+    /// old plugin this envelope, and an old plugin would put the raw JSON in
+    /// front of the model as tool output. Without the field, stdout stays the
+    /// replacement text.
+    pub expect_envelope: bool,
+}
+
+/// Version of the stdout envelope a plain-text host reads.
+///
+/// `v` is the compatibility handle: a plugin built against another release can
+/// tell this envelope from a bare replacement string, and a stdout that is not
+/// `{"v":1,…}` is read as text (see `hooks/opencode/rtk.ts`).
+const AGENT_TEXT_ENVELOPE_VERSION: u64 = 1;
+
+/// The replacement text, plus the note that must ride beside it.
+///
+/// OpenCode's profile declares `can_append`, but plain stdout cannot carry two
+/// strings — the Read→Edit fidelity guard would be lost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Composed {
+    text: String,
+    /// `Some` for a converted Read output: the model may not use it to build
+    /// `Edit.old_string`, and only an appended note can say so.
+    append: Option<&'static str>,
+}
+
+/// One stdout object for a plain-text host:
+/// `{"v":1,"output":"<replacement>","append":"<note or empty>"}`.
+///
+/// `append` is always present and empty when there is no note, so a host never
+/// has to distinguish "absent" from "nothing to add". Only a host that asked
+/// for it (`expect.envelope`) gets this; see [`stdout_for`].
+fn envelope_for(composed: &Composed) -> String {
+    json!({
+        "v": AGENT_TEXT_ENVELOPE_VERSION,
+        "output": composed.text,
+        "append": composed.append.unwrap_or(""),
+    })
+    .to_string()
+}
+
+/// Bytes the model ends up reading: the replacement, plus the newline and the
+/// note a host appends beside it.
+///
+/// The size decision has to be about this, not about the replacement alone. The
+/// plugin appends `append` and compares the result, so a Read that saves less
+/// than the note costs would otherwise be tracked and stored here and then
+/// dropped there — the model kept the raw output while `rtk gain` claimed a
+/// saving.
+fn rendered_len(text: &str, append: Option<&str>) -> usize {
+    match append {
+        Some(note) => text.len() + 1 + note.len(),
+        None => text.len(),
+    }
+}
+
+/// What a host that does not read the envelope puts in front of the model: one
+/// string, the note on its own line after the replacement.
+fn rendered(composed: &Composed) -> String {
+    match composed.append {
+        Some(note) => format!("{}\n{note}", composed.text),
+        None => composed.text.clone(),
+    }
+}
+
+/// The single stdout string for `result`.
+///
+/// The envelope is opt-in (`expect.envelope` in the request): an installed
+/// plugin is a snapshot from `rtk init`, so a binary that upgraded without init
+/// is talking to a plugin that cannot parse JSON. That plugin gets the
+/// replacement text — note included in the same string — exactly as before the
+/// envelope existed, and the tolerant parser covers the other direction (a new
+/// plugin against an old binary that answers plain text).
+fn stdout_for(result: &AgentToolResult, composed: &Composed) -> String {
+    if result.expect_envelope {
+        envelope_for(composed)
+    } else {
+        rendered(composed)
+    }
 }
 
 /// Entry point for a host that hands RTK plain tool text instead of Claude
@@ -117,8 +199,9 @@ pub struct AgentToolResult {
 ///
 /// Same fail-open envelope as [`run`], with the payload reduced to the tool
 /// name, its arguments, and the text the tool produced. The only stdout write
-/// is the replacement text, and only when it is strictly smaller in bytes than
-/// the input; every early return leaves the host's original output in place.
+/// is the [`envelope_for`] object, and only when the replacement is strictly
+/// smaller in bytes than the input; every early return leaves the host's
+/// original output in place.
 pub fn run_agent_text(agent: &str, result: &AgentToolResult) {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         process_agent_text(agent, result)
@@ -140,8 +223,8 @@ fn process_agent_text(agent: &str, result: &AgentToolResult) -> Option<(String, 
     }
     let (config, loaded) = load_context()?;
     prime_call_context(result);
-    let output = agent_text_with_config(agent, result, &config, &loaded.resolved)?;
-    Some((output, loaded))
+    let composed = agent_text_with_config(agent, result, &config, &loaded.resolved)?;
+    Some((stdout_for(result, &composed), loaded))
 }
 
 /// Feed the host's `description` to the call-context reader the Claude path
@@ -174,7 +257,7 @@ fn agent_text_with_config(
     result: &AgentToolResult,
     config: &Config,
     pipeline: &Resolved,
-) -> Option<String> {
+) -> Option<Composed> {
     let tool_name = result.tool.as_str();
     let raw = result.output.as_str();
     if raw.is_empty() || !is_completed(result.status.as_deref()) {
@@ -200,6 +283,11 @@ fn agent_text_with_config(
         }
         return None;
     };
+    // A converted Read output can no longer anchor `Edit.old_string`; the
+    // Claude path says so in `additionalContext`, and `append` is the only
+    // channel a plain-text host has for the same sentence. It is decided here
+    // because the size gate below has to count its bytes.
+    let append = (subject == Subject::Read).then_some(READ_CONVERSION_NOTE);
     let composed = filter_and_compose(
         config,
         pipeline,
@@ -210,6 +298,7 @@ fn agent_text_with_config(
         format,
         result.duration_ms,
         result.exit_code,
+        append,
         Gate::Bytes,
     )?;
     // `filter_and_compose`'s byte gate already refused anything the host would
@@ -226,7 +315,10 @@ fn agent_text_with_config(
         &output,
         result.duration_ms,
     );
-    Some(output)
+    Some(Composed {
+        text: output,
+        append,
+    })
 }
 
 /// Path, URL or command the facts and tracking rows key on, taken from the
@@ -337,6 +429,7 @@ fn process_with_config(event: &Value, config: &Config, pipeline: &Resolved) -> O
         &raw,
         format,
         duration_ms,
+        None,
         None,
         Gate::Tokens,
     )?;
@@ -710,6 +803,7 @@ fn filter_and_compose(
     format: ContentFormat,
     duration_ms: u64,
     exit_code: Option<i64>,
+    append: Option<&'static str>,
     gate: Gate,
 ) -> Option<String> {
     // `is_rtk_command` is only meaningful for shell output. The Claude shell
@@ -751,10 +845,11 @@ fn filter_and_compose(
         return None;
     }
 
-    // Byte gate, taken before the hint stores the raw output and before
-    // attribution claims a saving: a result the host would not accept must not
-    // be recorded as one. The Claude path keeps its token guard below.
-    if gate == Gate::Bytes && filtered.len() >= raw.len() {
+    // Byte gate, taken on what the model would read (the note costs bytes too)
+    // and before the hint stores the raw output or attribution claims a saving:
+    // a result the host would not accept must not be recorded as one. The
+    // Claude path keeps its token guard below.
+    if gate == Gate::Bytes && rendered_len(&filtered, append) >= raw.len() {
         return None;
     }
 
@@ -777,7 +872,7 @@ fn filter_and_compose(
     // attributed, logged or tracked, and the store write is taken back out.
     // Otherwise `rtk recall --list` would keep listing an entry nothing points
     // at, with the raw (unredacted) bytes still readable through `rtk recall`.
-    if gate == Gate::Bytes && composed.len() >= raw.len() {
+    if gate == Gate::Bytes && rendered_len(&composed, append) >= raw.len() {
         if let Some((_, recall)) = &recall_hint {
             tee::discard_posthook_recall(recall, &config.retriever);
         }
@@ -1485,6 +1580,126 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_text_answers_plain_text_unless_the_host_expects_an_envelope() {
+        // The installed plugin is a snapshot from `rtk init`, so a binary that
+        // upgraded without re-running it must keep answering the way the plugin
+        // there understands. The note rides in the same string, which is what a
+        // host that never asked for the envelope does with the text anyway.
+        let composed = Composed {
+            text: "smaller".to_string(),
+            append: Some("NOTE"),
+        };
+        let mut result = AgentToolResult::default();
+        assert_eq!(stdout_for(&result, &composed), "smaller\nNOTE");
+
+        result.expect_envelope = true;
+        let line = stdout_for(&result, &composed);
+        let envelope: Value = serde_json::from_str(&line).expect("the envelope is JSON");
+        assert_eq!(envelope["v"], 1);
+        assert_eq!(envelope["output"], "smaller");
+        assert_eq!(envelope["append"], "NOTE");
+    }
+
+    #[test]
+    fn test_agent_text_plain_text_stdout_is_the_replacement_itself() {
+        // Nothing about the plain answer is JSON, so an old plugin replaces the
+        // tool output with it verbatim — the pre-envelope behaviour.
+        let composed = Composed {
+            text: "compressed build output".to_string(),
+            append: None,
+        };
+        let line = stdout_for(&AgentToolResult::default(), &composed);
+        assert_eq!(line, "compressed build output");
+        assert!(serde_json::from_str::<Value>(&line).is_err());
+    }
+
+    #[test]
+    fn test_agent_text_read_note_counts_towards_the_size_gate() {
+        // A Read that saves less than the conversion note costs: the plugin
+        // appends the note and would refuse the result, so Rust must refuse it
+        // first — otherwise it tracked the saving and stored the raw output for
+        // an answer the model never saw.
+        for mode in [RecoveryMode::Disabled, RecoveryMode::Sqlite] {
+            clear_tracked_rows();
+            pipeline_log::clear_offered_entries();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let config = recall_config(dir.path(), mode);
+
+            let pipeline =
+                pipeline_from("[[hook.after_tool.read]]\nname = \"ansi\"\nuse = [\"ansi\"]\n");
+            let raw = thin_saving_output(None);
+            assert!(
+                raw.len() > 1 + READ_CONVERSION_NOTE.len(),
+                "premise: the note fits inside the raw output"
+            );
+            let result = agent_result(
+                "read",
+                &serde_json::json!({"filePath": "/tmp/build.log"}),
+                &raw,
+            );
+            assert!(
+                agent_text_with_config("opencode", &result, &config, &pipeline).is_none(),
+                "{mode:?}: the note pushes the result above the raw size"
+            );
+            assert!(tracked_rows().is_empty(), "{mode:?}: no `rtk gain` row");
+            let offered = pipeline_log::offered_entries();
+            assert!(
+                offered.is_empty(),
+                "{mode:?}: no decision-log row: {offered:?}"
+            );
+            assert_eq!(recall_rows(&config), 0, "{mode:?}: recall store");
+        }
+    }
+
+    #[test]
+    fn test_agent_text_envelope_carries_the_read_conversion_note() {
+        // The note the Claude path puts in `additionalContext` has no channel
+        // in plain stdout; the envelope's `append` is that channel.
+        let pipeline =
+            pipeline_from("[[hook.after_tool.read]]\nname = \"squeeze\"\nuse = [\"dedup\"]\n");
+        let raw = repeated_output();
+        let result = agent_result(
+            "read",
+            &serde_json::json!({"filePath": "/tmp/build.log"}),
+            &raw,
+        );
+        let composed = agent_text_with_config("opencode", &result, &test_config(), &pipeline)
+            .expect("read rule must run");
+        assert_eq!(composed.append, Some(READ_CONVERSION_NOTE));
+
+        let envelope: Value =
+            serde_json::from_str(&envelope_for(&composed)).expect("the envelope is JSON");
+        assert_eq!(envelope["v"], 1);
+        assert_eq!(envelope["output"], composed.text);
+        assert_eq!(envelope["append"], READ_CONVERSION_NOTE);
+    }
+
+    #[test]
+    fn test_agent_text_envelope_has_an_empty_append_without_a_note() {
+        let pipeline =
+            pipeline_from("[[hook.after_tool.shell]]\nname = \"squeeze\"\nuse = [\"dedup\"]\n");
+        let composed = agent_text_with_config(
+            "opencode",
+            &agent_result(
+                "bash",
+                &serde_json::json!({"command": "make build"}),
+                &repeated_output(),
+            ),
+            &test_config(),
+            &pipeline,
+        )
+        .expect("shell rule must run");
+        assert_eq!(composed.append, None);
+
+        let envelope: Value =
+            serde_json::from_str(&envelope_for(&composed)).expect("the envelope is JSON");
+        assert_eq!(envelope["v"], 1);
+        // Present and empty, so a host never has to tell "absent" from "none".
+        assert_eq!(envelope["append"], "");
+        assert_eq!(envelope["output"], composed.text);
+    }
+
+    #[test]
     fn test_agent_text_tracks_a_compressed_result() {
         // Before this, an OpenCode compression reached the model but never
         // `rtk gain`: the plain-text path returned the text without tracking.
@@ -1681,6 +1896,7 @@ mod tests {
             &test_config(),
             &pipeline,
         )
+        .map(|composed| composed.text)
         .expect("shell rule must run for an OpenCode bash result");
         assert!(out.contains("[x400]"), "{out}");
         assert!(out.len() < raw.len());
@@ -1755,6 +1971,7 @@ mod tests {
             &test_config(),
             &posthook_pipeline(),
         )
+        .map(|composed| composed.text)
         .expect("the shipped term-default rule must match a non-rtk shell result");
 
         let lines = out.lines().count();

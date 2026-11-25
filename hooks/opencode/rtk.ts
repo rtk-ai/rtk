@@ -364,6 +364,45 @@ export function durationMsOf(metadata: unknown): number | undefined {
 }
 
 /**
+ * The stdout contract of a current `rtk hook opencode-after`.
+ *
+ * `v` is the compatibility handle: the replacement text lives in `output`, and
+ * `append` carries the note plain text has no room for (the Read→Edit fidelity
+ * guard), always present and empty when there is none.
+ */
+const AFTER_ENVELOPE_VERSION = 1
+
+/**
+ * Reads the stdout of `rtk hook opencode-after`.
+ *
+ * The plugin asks for the envelope (`expect.envelope`, see `tryCompressOutput`),
+ * and a current binary answers `{"v":1,"output":"…","append":"…"}`. Anything
+ * else — an older binary that printed the replacement text alone, or an
+ * envelope version this plugin does not know — is read as the replacement text
+ * itself, so version skew leaves the model with rtk's output rather than a JSON
+ * blob it cannot use.
+ */
+export function parseAfterEnvelope(stdout: string): { output: string; append: string } {
+  try {
+    const parsed = JSON.parse(stdout)
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      parsed.v === AFTER_ENVELOPE_VERSION &&
+      typeof parsed.output === "string"
+    ) {
+      return {
+        output: parsed.output,
+        append: typeof parsed.append === "string" ? parsed.append : "",
+      }
+    }
+  } catch {
+    // Not JSON: a binary from before the envelope, or a crash message.
+  }
+  return { output: stdout, append: "" }
+}
+
+/**
  * Compresses one tool result through the resolved pipeline. Returns null when
  * there is no rule, the pipeline leaves the text unchanged, or the result is
  * not strictly smaller — the caller then keeps the tool's own output.
@@ -393,6 +432,10 @@ export async function tryCompressOutput(
     tool,
     args: args && typeof args === "object" ? args : {},
     output,
+    // The envelope is opt-in: rtk answers plain replacement text unless the
+    // host asks, which is what a plugin from before this field understands. An
+    // old binary ignores it and keeps answering plain text.
+    expect: { envelope: 1 },
   }
   if (typeof meta.status === "string" && meta.status) payload.status = meta.status
   if (typeof meta.exit === "number" && Number.isFinite(meta.exit)) {
@@ -408,11 +451,15 @@ export async function tryCompressOutput(
   try {
     const rewritten = await runHookOpencodeAfter(rtkBin, JSON.stringify(payload))
     if (!rewritten) return null
+    const { output: replacement, append } = parseAfterEnvelope(rewritten)
+    if (!replacement) return null
+    // `append` rides beside the replacement, never in place of it: the note
+    // explains a format conversion, it is not the converted text.
+    const text = append ? `${replacement}\n${append}` : replacement
     // The Rust side refuses a non-smaller result; compare bytes here as well
-    // so a misbehaving binary cannot grow the agent's context.
-    return Buffer.byteLength(rewritten, "utf8") < Buffer.byteLength(output, "utf8")
-      ? rewritten
-      : null
+    // so a misbehaving binary cannot grow the agent's context — and so the
+    // appended note can never tip a marginal saving over the raw size.
+    return Buffer.byteLength(text, "utf8") < Buffer.byteLength(output, "utf8") ? text : null
   } catch {
     return null
   }
