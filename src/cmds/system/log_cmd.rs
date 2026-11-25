@@ -3,6 +3,7 @@
 use crate::core::guard::never_worse;
 use crate::core::tracking;
 use crate::core::truncate::{CAP_WARNINGS, reduced};
+use crate::core::utils::truncate;
 use anyhow::Result;
 use regex::Regex;
 use std::collections::HashMap;
@@ -70,6 +71,10 @@ fn analyze_logs(content: &str) -> String {
     let mut info_counts: HashMap<String, usize> = HashMap::new();
     let mut unique_errors: Vec<String> = Vec::new();
     let mut unique_warnings: Vec<String> = Vec::new();
+    let mut unclassified_count = 0;
+    let mut examples = Vec::new();
+    // Leave room for error and warning details when the log is mostly routine output.
+    const MAX_OTHER_EXAMPLES: usize = reduced(CAP_WARNINGS, 7);
 
     // Use module-level LazyLock regexes for normalization
 
@@ -105,6 +110,11 @@ fn analyze_logs(content: &str) -> String {
             *count += 1;
         } else if line_lower.contains("info") {
             *info_counts.entry(normalized).or_insert(0) += 1;
+        } else if !line.trim().is_empty() {
+            unclassified_count += 1;
+            if examples.len() < MAX_OTHER_EXAMPLES && !examples.contains(&line) {
+                examples.push(line);
+            }
         }
     }
 
@@ -125,6 +135,19 @@ fn analyze_logs(content: &str) -> String {
         warn_counts.len()
     ));
     result.push(format!("   [info] {} info messages", total_info));
+    if unclassified_count > 0 {
+        let unit = if unclassified_count == 1 {
+            "line"
+        } else {
+            "lines"
+        };
+        result.push(format!(
+            "   [other] {unclassified_count} unclassified {unit}"
+        ));
+        for line in examples {
+            result.push(format!("      {}", truncate(line, 100)));
+        }
+    }
     result.push(String::new());
 
     // Errors with counts
@@ -233,6 +256,31 @@ fn normalize_log_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unclassified_lines_are_counted_with_distinct_bounded_examples() {
+        let mut log = String::new();
+        for id in 1..=40 {
+            log.push_str(&format!("api-log-line\nrequest served id={id}\n"));
+        }
+        let result = run_stdin_str(&log);
+        assert!(result.contains("80 unclassified lines"), "{result}");
+        assert_eq!(result.matches("api-log-line").count(), 1);
+        assert!(result.contains("request served id=1\n"));
+        assert!(!result.contains("request served id=40"));
+        assert!(result.len() < log.len());
+    }
+
+    #[test]
+    fn unclassified_lines_in_mixed_logs_exclude_blank_lines() {
+        let result = run_stdin_str("INFO ready\nWARN retry\nERROR timeout\n\n  \nworker stopped\n");
+        assert!(result.contains("1 info messages"));
+        assert!(result.contains("1 warnings"));
+        assert!(result.contains("1 errors"));
+        assert!(result.contains("1 unclassified line"));
+        assert!(result.contains("worker stopped"));
+        assert!(!run_stdin_str(" \nINFO ready\n").contains("unclassified"));
+    }
 
     #[test]
     fn test_analyze_logs() {
