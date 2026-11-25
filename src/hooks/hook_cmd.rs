@@ -1267,22 +1267,26 @@ pub fn run_opencode(cmd: &str, agent: Option<&str>) -> Result<()> {
 
 /// Run OpenCode's `tool.execute.after` transport.
 ///
-/// Reads `{"tool": ..., "args": {...}, "output": ...}` on stdin and writes the
-/// replacement text to stdout, or nothing. Every parse, size or pipeline
-/// failure is a silent pass-through: OpenCode keeps the tool's original
-/// output, exactly as Claude Code does when the posthook emits nothing.
+/// Reads `{"tool": ..., "args": {...}, "output": ...}` plus the metadata the
+/// plugin could collect (`status`, `metadata.exit`, `description`,
+/// `duration_ms`) on stdin and writes the replacement text to stdout, or
+/// nothing. Every parse, size or pipeline failure is a silent pass-through:
+/// OpenCode keeps the tool's original output, exactly as Claude Code does when
+/// the posthook emits nothing.
 #[cfg(feature = "engine")]
 pub fn run_opencode_after() -> Result<()> {
     let Ok(input) = read_stdin_capped(STDIN_CAP_AFTER_TOOL) else {
         return Ok(());
     };
-    let Some((tool, args, output)) = opencode_after_payload(strip_leading_bom(&input)) else {
+    let Some(result) = opencode_after_payload(strip_leading_bom(&input)) else {
         return Ok(());
     };
-    crate::hooks::posthook::run_agent_text("opencode", &tool, &args, &output);
+    crate::hooks::posthook::run_agent_text("opencode", &result);
     Ok(())
 }
 
+/// The `--no-default-features` binary carries no engine, so there is no after
+/// transport to run: the subcommand stays reachable and answers nothing.
 #[cfg(not(feature = "engine"))]
 pub fn run_opencode_after() -> Result<()> {
     Ok(())
@@ -1290,8 +1294,14 @@ pub fn run_opencode_after() -> Result<()> {
 
 /// Parse the `tool.execute.after` payload. `None` for anything that is not
 /// the shape the plugin promised — the caller then emits nothing.
+///
+/// Every metadata field is optional: a plugin that predates this payload (or
+/// does not have the number) simply omits it, and the pipeline sees the same
+/// facts it always did.
 #[cfg(feature = "engine")]
-fn opencode_after_payload(input: &str) -> Option<(String, Value, String)> {
+fn opencode_after_payload(input: &str) -> Option<crate::hooks::posthook::AgentToolResult> {
+    use crate::hooks::posthook::AgentToolResult;
+
     let v: Value = serde_json::from_str(input.trim()).ok()?;
     let tool = v.get("tool")?.as_str()?;
     let output = v.get("output")?.as_str()?;
@@ -1302,7 +1312,34 @@ fn opencode_after_payload(input: &str) -> Option<(String, Value, String)> {
         Some(args) if args.is_object() => args.clone(),
         _ => json!({}),
     };
-    Some((tool.to_string(), args, output.to_string()))
+    let status = v.get("status").and_then(Value::as_str).map(str::to_string);
+    let exit_code = v
+        .pointer("/metadata/exit")
+        .and_then(Value::as_i64)
+        .or_else(|| v.pointer("/metadata/exitCode").and_then(Value::as_i64));
+    let description = v
+        .get("description")
+        .and_then(Value::as_str)
+        .or_else(|| v.pointer("/metadata/description").and_then(Value::as_str))
+        .map(str::to_string);
+    // Fractional milliseconds are real: `metadata.time { start, end }` reaches
+    // the plugin as float subtraction, so read a float and truncate.
+    let duration_ms = v
+        .get("duration_ms")
+        .and_then(Value::as_f64)
+        .or_else(|| v.get("durationMs").and_then(Value::as_f64))
+        .map(|ms| ms.max(0.0).trunc() as u64)
+        .unwrap_or(0);
+
+    Some(AgentToolResult {
+        tool: tool.to_string(),
+        args,
+        output: output.to_string(),
+        status,
+        exit_code,
+        description,
+        duration_ms,
+    })
 }
 
 /// [`opencode_answer`] against the rules OpenCode resolves for `agent`.
@@ -3011,20 +3048,67 @@ mod tests {
 
         #[test]
         fn a_valid_payload_carries_tool_args_and_output() {
-            let (tool, args, output) = opencode_after_payload(
+            let result = opencode_after_payload(
                 r#"{"tool":"bash","args":{"command":"cargo build"},"output":"x"}"#,
             )
             .expect("valid payload");
-            assert_eq!(tool, "bash");
-            assert_eq!(args, json!({"command": "cargo build"}));
-            assert_eq!(output, "x");
+            assert_eq!(result.tool, "bash");
+            assert_eq!(result.args, json!({"command": "cargo build"}));
+            assert_eq!(result.output, "x");
+            // Metadata the host did not send stays absent rather than defaulting
+            // to a value a rule would read as real.
+            assert_eq!(result.status, None);
+            assert_eq!(result.exit_code, None);
+            assert_eq!(result.description, None);
+            assert_eq!(result.duration_ms, 0);
+        }
+
+        #[test]
+        fn shell_metadata_is_forwarded() {
+            let result = opencode_after_payload(
+                r#"{"tool":"shell","args":{"command":"make"},
+                    "output":"boom",
+                    "status":"completed",
+                    "metadata":{"exit":3},
+                    "description":"build the crate",
+                    "duration_ms":12}"#,
+            )
+            .expect("valid payload");
+            assert_eq!(result.status.as_deref(), Some("completed"));
+            assert_eq!(result.exit_code, Some(3));
+            assert_eq!(result.description.as_deref(), Some("build the crate"));
+            assert_eq!(result.duration_ms, 12);
+        }
+
+        #[test]
+        fn missing_metadata_defaults_to_nothing() {
+            let result = opencode_after_payload(
+                r#"{"tool":"read","output":"x","metadata":{"truncated":true}}"#,
+            )
+            .expect("valid payload");
+            assert_eq!(result.exit_code, None);
+            assert_eq!(result.duration_ms, 0);
+        }
+
+        #[test]
+        fn fractional_duration_is_truncated() {
+            // `metadata.time { start, end }` reaches the plugin as float
+            // subtraction, so the host can send 35.9.
+            let result =
+                opencode_after_payload(r#"{"tool":"bash","output":"x","duration_ms":35.9}"#)
+                    .expect("valid payload");
+            assert_eq!(result.duration_ms, 35);
+            let negative =
+                opencode_after_payload(r#"{"tool":"bash","output":"x","duration_ms":-2.5}"#)
+                    .expect("valid payload");
+            assert_eq!(negative.duration_ms, 0);
         }
 
         #[test]
         fn non_object_args_are_dropped() {
-            let (_, args, _) = opencode_after_payload(r#"{"tool":"read","args":[],"output":"x"}"#)
+            let result = opencode_after_payload(r#"{"tool":"read","args":[],"output":"x"}"#)
                 .expect("valid payload");
-            assert_eq!(args, json!({}));
+            assert_eq!(result.args, json!({}));
         }
     }
 

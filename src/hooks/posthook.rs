@@ -93,6 +93,25 @@ fn load_context() -> Option<(Config, LoadedPipeline)> {
     Some((Config::load().unwrap_or_default(), pipeline_config::load()))
 }
 
+/// What a plain-text host (OpenCode's `tool.execute.after`, either API shape)
+/// hands the after path.
+///
+/// `tool`, `args` and `output` are the minimum; `status`, `exit_code`,
+/// `description` and `duration_ms` are the metadata the host already has and
+/// the Claude path gets for free (its event carries `duration_ms` and its shell
+/// response carries the exit code). Each is optional because older OpenCode
+/// versions and non-shell tools do not carry all of them.
+#[derive(Debug, Default, Clone)]
+pub struct AgentToolResult {
+    pub tool: String,
+    pub args: Value,
+    pub output: String,
+    pub status: Option<String>,
+    pub exit_code: Option<i64>,
+    pub description: Option<String>,
+    pub duration_ms: u64,
+}
+
 /// Entry point for a host that hands RTK plain tool text instead of Claude
 /// Code's event shape — OpenCode's `tool.execute.after`.
 ///
@@ -100,9 +119,9 @@ fn load_context() -> Option<(Config, LoadedPipeline)> {
 /// name, its arguments, and the text the tool produced. The only stdout write
 /// is the replacement text, and only when it is strictly smaller in bytes than
 /// the input; every early return leaves the host's original output in place.
-pub fn run_agent_text(agent: &str, tool_name: &str, args: &Value, raw: &str) {
+pub fn run_agent_text(agent: &str, result: &AgentToolResult) {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        process_agent_text(agent, tool_name, args, raw)
+        process_agent_text(agent, result)
     }));
     match outcome {
         Ok(Some((output, loaded))) => {
@@ -115,38 +134,68 @@ pub fn run_agent_text(agent: &str, tool_name: &str, args: &Value, raw: &str) {
 }
 
 /// Full pipeline behind the plain-text envelope. `None` = emit nothing.
-fn process_agent_text(
-    agent: &str,
-    tool_name: &str,
-    args: &Value,
-    raw: &str,
-) -> Option<(String, LoadedPipeline)> {
-    if raw.is_empty() {
+fn process_agent_text(agent: &str, result: &AgentToolResult) -> Option<(String, LoadedPipeline)> {
+    if result.output.is_empty() {
         return None;
     }
     let (config, loaded) = load_context()?;
-    let output = agent_text_with_config(agent, tool_name, args, raw, &config, &loaded.resolved)?;
+    prime_call_context(result);
+    let output = agent_text_with_config(agent, result, &config, &loaded.resolved)?;
     Some((output, loaded))
+}
+
+/// Feed the host's `description` to the call-context reader the Claude path
+/// fills from its event. A pipeline whose rules read `intent` then sees the
+/// sentence the model wrote for the call instead of nothing; `goal` and
+/// `recent_calls` come from a transcript OpenCode does not hand over, so they
+/// stay absent. `set_source` keeps the first call in the process, which is
+/// this one: a hook process handles exactly one tool result.
+fn prime_call_context(result: &AgentToolResult) {
+    let mut event = json!({ "tool_input": {} });
+    if let Some(description) = &result.description {
+        event["tool_input"]["description"] = json!(description);
+    }
+    crate::core::call_context::set_source(&event);
+}
+
+/// A status the host reports for a call whose result is worth compressing.
+///
+/// OpenCode 2.x sends `completed` for a finished call; anything else (an error,
+/// a cancellation) is passed through, mirroring PostToolUse, which only fires
+/// on success. `None` covers 1.x, which sends no status at all.
+fn is_completed(status: Option<&str>) -> bool {
+    matches!(status, None | Some("") | Some("completed"))
 }
 
 /// Testable core: map tool → subject/format/source, then run the same
 /// `hook.after_tool.<subject>` evaluation and guards as the Claude adapter.
 fn agent_text_with_config(
     agent: &str,
-    tool_name: &str,
-    args: &Value,
-    raw: &str,
+    result: &AgentToolResult,
     config: &Config,
     pipeline: &Resolved,
 ) -> Option<String> {
+    let tool_name = result.tool.as_str();
+    let raw = result.output.as_str();
+    if raw.is_empty() || !is_completed(result.status.as_deref()) {
+        return None;
+    }
     let subject = subject_of_for(agent, tool_name);
-    let source = source_of_args(subject, args);
+    let source = source_of_args(subject, &result.args);
     let format = text_format(tool_name, subject, &source, raw)?;
     if raw.len() < pipeline.guards.min_size {
         return None;
     }
     let composed = filter_and_compose(
-        config, pipeline, subject, tool_name, &source, raw, format, 0,
+        config,
+        pipeline,
+        subject,
+        tool_name,
+        &source,
+        raw,
+        format,
+        result.duration_ms,
+        result.exit_code,
     )?;
     // `filter_and_compose` refuses a token-larger result; the host contract is
     // bytes, so refuse anything that is not strictly smaller.
@@ -265,6 +314,7 @@ fn process_with_config(event: &Value, config: &Config, pipeline: &Resolved) -> O
         &raw,
         format,
         duration_ms,
+        None,
     )?;
 
     let (updated, converted) = rebuild(event, tool_name, &composed)?;
@@ -294,6 +344,7 @@ fn facts_for(
     raw: &str,
     duration_ms: u64,
     is_rtk_command: Option<bool>,
+    exit_code: Option<i64>,
 ) -> Facts {
     let mut facts = Facts::new();
     facts.insert("tool".into(), Fact::Str(subject.as_str().to_string()));
@@ -304,6 +355,9 @@ fn facts_for(
     facts.insert("duration_ms".into(), Fact::Num(duration_ms as f64));
     if let Some(value) = is_rtk_command {
         facts.insert("is_rtk_command".into(), Fact::Bool(value));
+    }
+    if let Some(code) = exit_code {
+        facts.insert("exit_code".into(), Fact::Num(code as f64));
     }
     if !source.is_empty() {
         if source.starts_with("http://") || source.starts_with("https://") {
@@ -385,8 +439,17 @@ fn run_selected(
     raw: &str,
     duration_ms: u64,
     is_rtk_command: Option<bool>,
+    exit_code: Option<i64>,
 ) -> Option<Applied> {
-    let mut facts = facts_for(subject, format, source, raw, duration_ms, is_rtk_command);
+    let mut facts = facts_for(
+        subject,
+        format,
+        source,
+        raw,
+        duration_ms,
+        is_rtk_command,
+        exit_code,
+    );
     if subject == Subject::Mcp
         && let Some(rest) = tool_name.strip_prefix("mcp__")
     {
@@ -604,6 +667,7 @@ fn filter_and_compose(
     raw: &str,
     format: ContentFormat,
     duration_ms: u64,
+    exit_code: Option<i64>,
 ) -> Option<String> {
     // `is_rtk_command` is only meaningful for shell output. The Claude shell
     // path computes it in `process_shell`; the plain-text path (OpenCode
@@ -634,6 +698,7 @@ fn filter_and_compose(
         raw,
         duration_ms,
         is_rtk_command,
+        exit_code,
     )?;
     let filtered = applied.text.clone();
 
@@ -710,6 +775,7 @@ fn process_websearch(
                     source,
                     text,
                     duration_ms,
+                    None,
                     None,
                 ) {
                     Some(applied) => {
@@ -881,6 +947,7 @@ fn process_shell(
         stdout,
         duration_ms,
         Some(is_rtk_command),
+        None,
     );
     let shadow = applied_stdout.as_ref().map(|a| a.shadow).unwrap_or(false);
     let filtered_stdout = applied_stdout
@@ -899,6 +966,7 @@ fn process_shell(
             stderr,
             duration_ms,
             Some(is_rtk_command),
+            None,
         )
         .map(|a| a.text)
         .unwrap_or_else(|| stderr.to_string())
@@ -1306,15 +1374,70 @@ mod tests {
             .join("\n")
     }
 
+    /// A host payload with the fields a shell result carries; metadata fields
+    /// are set per test.
+    fn agent_result(tool: &str, args: &Value, raw: &str) -> AgentToolResult {
+        AgentToolResult {
+            tool: tool.to_string(),
+            args: args.clone(),
+            output: raw.to_string(),
+            ..AgentToolResult::default()
+        }
+    }
+
+    #[test]
+    fn test_agent_text_carries_the_host_exit_code_into_the_facts() {
+        // `exit_code` is a legal `hook.after_tool.shell` condition, and the
+        // host's `metadata.exit` is the only place it can come from on the
+        // OpenCode path.
+        let pipeline = pipeline_from(
+            "[[hook.after_tool.shell]]\nname = \"failed-only\"\nuse = [\"dedup\"]\n\
+             when = { exit_code = 1 }\n",
+        );
+        let raw = repeated_output();
+        let args = serde_json::json!({"command": "make build"});
+        for (exit, want) in [(Some(1), true), (Some(0), false), (None, false)] {
+            let mut result = agent_result("shell", &args, &raw);
+            result.exit_code = exit;
+            assert_eq!(
+                agent_text_with_config("opencode", &result, &test_config(), &pipeline).is_some(),
+                want,
+                "exit_code = {exit:?} must {}match",
+                if want { "" } else { "not " }
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_text_carries_the_host_duration_into_the_facts() {
+        // The plain-text path used to hard-code duration_ms to 0, so a rule
+        // keyed on how long the call took could never fire.
+        let pipeline = pipeline_from(
+            "[[hook.after_tool.shell]]\nname = \"slow-only\"\nuse = [\"dedup\"]\n\
+             when = { duration_ms_gt = 0 }\n",
+        );
+        let raw = repeated_output();
+        let args = serde_json::json!({"command": "make build"});
+        let mut result = agent_result("shell", &args, &raw);
+        result.duration_ms = 12;
+        assert!(
+            agent_text_with_config("opencode", &result, &test_config(), &pipeline).is_some(),
+            "a non-zero duration_ms must reach the facts"
+        );
+        result.duration_ms = 0;
+        assert!(
+            agent_text_with_config("opencode", &result, &test_config(), &pipeline).is_none(),
+            "duration_ms = 0 must not match"
+        );
+    }
+
     #[test]
     fn test_agent_text_passes_through_when_no_after_tool_rule_matches() {
         let raw = repeated_output();
         assert!(
             agent_text_with_config(
                 "opencode",
-                "bash",
-                &serde_json::json!({"command": "make build"}),
-                &raw,
+                &agent_result("bash", &serde_json::json!({"command": "make build"}), &raw),
                 &test_config(),
                 &default_pipeline(),
             )
@@ -1330,9 +1453,7 @@ mod tests {
         let raw = repeated_output();
         let out = agent_text_with_config(
             "opencode",
-            "bash",
-            &serde_json::json!({"command": "make build"}),
-            &raw,
+            &agent_result("bash", &serde_json::json!({"command": "make build"}), &raw),
             &test_config(),
             &pipeline,
         )
@@ -1349,9 +1470,11 @@ mod tests {
         assert!(
             agent_text_with_config(
                 "opencode",
-                "read",
-                &serde_json::json!({"filePath": "/tmp/build.log"}),
-                &raw,
+                &agent_result(
+                    "read",
+                    &serde_json::json!({"filePath": "/tmp/build.log"}),
+                    &raw
+                ),
                 &test_config(),
                 &pipeline,
             )
@@ -1361,9 +1484,7 @@ mod tests {
         assert!(
             agent_text_with_config(
                 "opencode",
-                "bash",
-                &serde_json::json!({"command": "make build"}),
-                &raw,
+                &agent_result("bash", &serde_json::json!({"command": "make build"}), &raw),
                 &test_config(),
                 &pipeline,
             )
@@ -1383,9 +1504,7 @@ mod tests {
         assert!(
             agent_text_with_config(
                 "opencode",
-                "bash",
-                &serde_json::json!({"command": "make build"}),
-                &raw,
+                &agent_result("bash", &serde_json::json!({"command": "make build"}), &raw),
                 &test_config(),
                 &pipeline,
             )
@@ -1408,9 +1527,7 @@ mod tests {
         let raw = numbered_output(600);
         let out = agent_text_with_config(
             "opencode",
-            "shell",
-            &serde_json::json!({"command": "seq"}),
-            &raw,
+            &agent_result("shell", &serde_json::json!({"command": "seq"}), &raw),
             &test_config(),
             &posthook_pipeline(),
         )
@@ -1432,9 +1549,7 @@ mod tests {
             assert!(
                 agent_text_with_config(
                     "opencode",
-                    "shell",
-                    &serde_json::json!({ "command": command }),
-                    &raw,
+                    &agent_result("shell", &serde_json::json!({ "command": command }), &raw),
                     &test_config(),
                     &posthook_pipeline(),
                 )
@@ -1457,9 +1572,7 @@ mod tests {
             assert!(
                 agent_text_with_config(
                     "opencode",
-                    "shell",
-                    &serde_json::json!({ "command": command }),
-                    &raw,
+                    &agent_result("shell", &serde_json::json!({ "command": command }), &raw),
                     &test_config(),
                     &posthook_pipeline(),
                 )
@@ -2076,6 +2189,7 @@ mod tests {
             &raw,
             0,
             Some(false),
+            None,
         )
         .expect("term chain applies");
         assert_eq!(applied.pipeline, "shared-pipe");

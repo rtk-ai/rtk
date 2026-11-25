@@ -115,7 +115,9 @@ export function resolveRtkPath(): string | null {
   return (cachedRtkPath = null)
 }
 
-/** Install directories probed when rtk is on neither `PATH` nor `RTK_BIN`. */
+/**
+ * Install directories probed when rtk is on neither `PATH` nor `RTK_BIN`.
+ */
 export function candidateRtkDirs(): string[] {
   const home = homedir()
   const dirs: string[] = [
@@ -320,14 +322,62 @@ export function runHookOpencodeAfter(
 }
 
 /**
+ * The metadata both OpenCode API shapes carry about a finished tool call.
+ * Everything is optional: 1.x has no `status`, and a tool that reports no exit
+ * code simply omits `metadata.exit`.
+ */
+export type ToolMeta = {
+  status?: string
+  exit?: number
+  description?: string
+  durationMs?: number
+}
+
+/** First number among `values`, ignoring anything that is not a finite number. */
+function firstNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) return value
+  }
+  return undefined
+}
+
+/**
+ * Milliseconds the call took, when the tool's metadata carries them.
+ *
+ * OpenCode has no timing field on the plugin hooks, so this only ever reports
+ * what a tool put in its own `metadata`: `durationMs`/`duration_ms`, or a
+ * `{ start, end }` pair. Absent means 0, which is what the Rust side treats as
+ * "unknown".
+ */
+export function durationMsOf(metadata: unknown): number | undefined {
+  if (!metadata || typeof metadata !== "object") return undefined
+  const meta = metadata as Record<string, any>
+  const direct = firstNumber(meta.durationMs, meta.duration_ms)
+  if (direct !== undefined) return direct
+  const time = meta.time
+  if (time && typeof time === "object") {
+    const start = firstNumber((time as any).start, (time as any).started)
+    const end = firstNumber((time as any).end, (time as any).ended)
+    if (start !== undefined && end !== undefined && end >= start) return end - start
+  }
+  return undefined
+}
+
+/**
  * Compresses one tool result through the resolved pipeline. Returns null when
  * there is no rule, the pipeline leaves the text unchanged, or the result is
  * not strictly smaller — the caller then keeps the tool's own output.
+ *
+ * `meta` is the call metadata the host already has (status, exit code,
+ * description, duration). It rides along in the same payload so pipeline
+ * conditions such as `exit_code` or `duration_ms` see the same facts the Claude
+ * path gets from its event.
  */
 export async function tryCompressOutput(
   toolName: unknown,
   args: unknown,
-  output: unknown
+  output: unknown,
+  meta: ToolMeta = {}
 ): Promise<string | null> {
   const tool = String(toolName ?? "").toLowerCase()
   if (!tool || typeof output !== "string" || !output) return null
@@ -339,14 +389,24 @@ export async function tryCompressOutput(
   const rtkBin = resolveRtkPath()
   if (!rtkBin) return null
 
-  const payload = JSON.stringify({
+  const payload: Record<string, unknown> = {
     tool,
     args: args && typeof args === "object" ? args : {},
     output,
-  })
+  }
+  if (typeof meta.status === "string" && meta.status) payload.status = meta.status
+  if (typeof meta.exit === "number" && Number.isFinite(meta.exit)) {
+    payload.metadata = { exit: meta.exit }
+  }
+  if (typeof meta.description === "string" && meta.description) {
+    payload.description = meta.description
+  }
+  if (typeof meta.durationMs === "number" && Number.isFinite(meta.durationMs)) {
+    payload.duration_ms = meta.durationMs
+  }
 
   try {
-    const rewritten = await runHookOpencodeAfter(rtkBin, payload)
+    const rewritten = await runHookOpencodeAfter(rtkBin, JSON.stringify(payload))
     if (!rewritten) return null
     // The Rust side refuses a non-smaller result; compare bytes here as well
     // so a misbehaving binary cannot grow the agent's context.
@@ -423,6 +483,9 @@ function rebuildContent(content: unknown, text: string): unknown {
  * OpenCode 2.x `execute.after`: `event.result.content` is the model-visible
  * text. Only completed calls are touched, and only when the result can be put
  * back in its original shape.
+ *
+ * `status`, `result.metadata.exit` and `input.description` are forwarded so
+ * pipeline conditions see the same facts the Claude path reads from its event.
  */
 async function handleToolAfter(event: any) {
   try {
@@ -431,7 +494,16 @@ async function handleToolAfter(event: any) {
     if (!result || typeof result !== "object") return
     const text = joinedTextContent(result.content)
     if (text === null) return
-    const rewritten = await tryCompressOutput(event.tool, event.input, text)
+    const metadata = result.metadata
+    const rewritten = await tryCompressOutput(event.tool, event.input, text, {
+      status: typeof event.status === "string" ? event.status : undefined,
+      exit: firstNumber(
+        metadata && typeof metadata === "object" ? (metadata as any).exit : undefined,
+        metadata && typeof metadata === "object" ? (metadata as any).exitCode : undefined
+      ),
+      description: typeof event.input?.description === "string" ? event.input.description : undefined,
+      durationMs: durationMsOf(metadata),
+    })
     if (rewritten) {
       event.result = { ...result, content: rebuildContent(result.content, rewritten) }
     }
@@ -443,11 +515,26 @@ async function handleToolAfter(event: any) {
 /**
  * OpenCode 1.x `tool.execute.after`: `output.output` is the text the model
  * reads, and `input.args` is the per-tool input the source mapping needs.
+ *
+ * 1.x has no `status` (the hook only fires on completion); the exit code, the
+ * call description and any timing live in `output.metadata` / `output.args`.
  */
 async function handleToolAfterV1(input: any, output: any) {
   try {
     if (!output || typeof output !== "object" || typeof output.output !== "string") return
-    const rewritten = await tryCompressOutput(input?.tool, input?.args, output.output)
+    const metadata = output.metadata
+    // `output.args` is the tool's own arguments (the same object the before
+    // hook mutates); `input.args` is the fallback when the host omits them.
+    // One source, so the command and the description always agree.
+    const args = output?.args ?? input?.args
+    const rewritten = await tryCompressOutput(input?.tool, args, output.output, {
+      exit: firstNumber(
+        metadata && typeof metadata === "object" ? (metadata as any).exit : undefined,
+        metadata && typeof metadata === "object" ? (metadata as any).exitCode : undefined
+      ),
+      description: typeof args?.description === "string" ? args.description : undefined,
+      durationMs: durationMsOf(metadata),
+    })
     if (rewritten) output.output = rewritten
   } catch {
     // Fail open: compression must never fail the tool call.

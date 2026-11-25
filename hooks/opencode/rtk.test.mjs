@@ -6,6 +6,7 @@ import { tmpdir } from "node:os"
 import { delimiter, dirname, join } from "node:path"
 import RtkOpenCodePlugin, {
   candidateRtkDirs,
+  durationMsOf,
   probeRtkHookOpencode,
   probeRtkHookOpencodeAfter,
   resolveRtkPath,
@@ -65,6 +66,19 @@ if (sub === "opencode-after") {
     if (!payload || typeof payload.output !== "string") return
     if (payload.output === "unchanged") return
     if (payload.output === "sleep-after") { setTimeout(() => process.exit(0), 5000); return }
+    // Echo the metadata the plugin forwarded, so a test can see exactly what
+    // reached the binary in either API shape.
+    if (process.env.MOCK_ECHO_PAYLOAD) {
+      process.stdout.write(JSON.stringify({
+        tool: payload.tool,
+        command: payload.args && payload.args.command,
+        status: payload.status,
+        exit: payload.metadata && payload.metadata.exit,
+        description: payload.description,
+        duration_ms: payload.duration_ms,
+      }))
+      return
+    }
     process.stdout.write("compressed:" + payload.tool)
   })
 } else if (sub === "opencode") {
@@ -280,6 +294,67 @@ test("the after transport fails open on anything unusable", async () => {
     delete process.env.MOCK_AFTER_FAIL
     _resetCachedRtkPath()
   }
+})
+
+test("the forwarded payload carries the tool metadata for both API shapes", async () => {
+  const raw = "raw build output ".repeat(60)
+  process.env.MOCK_ECHO_PAYLOAD = "1"
+  try {
+    // 2.x: `execute.after` carries `status`, `result.metadata.exit`, the call
+    // description from `input`, and any timing the tool reported.
+    const { hooks } = await captureSetup()
+    const v2 = {
+      ...v2Event("make"),
+      input: { command: "make", description: "build the crate" },
+      status: "completed",
+      result: {
+        content: raw,
+        metadata: { exit: 2, durationMs: 1234 },
+      },
+    }
+    await hooks["execute.after"](v2)
+    const forwarded2 = JSON.parse(v2.result.content)
+    assert.deepEqual(forwarded2, {
+      tool: "shell",
+      command: "make",
+      status: "completed",
+      exit: 2,
+      description: "build the crate",
+      duration_ms: 1234,
+    })
+
+    // 1.x: no status field; exit code and description live on the output.
+    const { hooks: v1Hooks } = await captureServer()
+    const v1 = {
+      title: "make",
+      output: raw,
+      metadata: { exit: 1, time: { start: 10, end: 45 } },
+      args: { command: "make", description: "build the crate" },
+    }
+    await v1Hooks["tool.execute.after"](v1Input, v1)
+    const forwarded1 = JSON.parse(v1.output)
+    assert.deepEqual(forwarded1, {
+      tool: "bash",
+      command: "make",
+      exit: 1,
+      description: "build the crate",
+      duration_ms: 35,
+    })
+    // 1.x reports no status, and the plugin must not invent one.
+    assert.equal("status" in forwarded1, false)
+  } finally {
+    delete process.env.MOCK_ECHO_PAYLOAD
+  }
+})
+
+test("durationMsOf reads the shapes a tool may report timing in", () => {
+  assert.equal(durationMsOf({ durationMs: 12 }), 12)
+  assert.equal(durationMsOf({ duration_ms: 7 }), 7)
+  assert.equal(durationMsOf({ time: { start: 100, end: 160 } }), 60)
+  assert.equal(durationMsOf({ time: { end: 5 } }), undefined)
+  assert.equal(durationMsOf({ exit: 0 }), undefined)
+  assert.equal(durationMsOf(null), undefined)
+  assert.equal(durationMsOf("nope"), undefined)
 })
 
 test("tryCompressOutput accepts only a strictly smaller result", async () => {
