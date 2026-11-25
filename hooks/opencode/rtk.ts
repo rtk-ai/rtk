@@ -28,7 +28,7 @@ const MAX_AFTER_BYTES = 64 * 1024 * 1024
 
 let cachedRtkPath: string | null = null
 let probedBin: { bin: string; capable: boolean } | null = null
-let probedAfterBin: { bin: string; capable: boolean } | null = null
+let probedAfterBin: { bin: string; capable: boolean; active: boolean } | null = null
 
 export function _resetCachedRtkPath(): void {
   cachedRtkPath = null
@@ -189,28 +189,99 @@ export function probeRtkHookOpencode(rtkBin: string): Promise<boolean> {
 }
 
 /**
- * Probes for the `rtk hook opencode-after` subcommand, separately from the
- * before path.
+ * What the after transport can do for this binary: whether it is supported at
+ * all, and whether the resolved pipeline actually has a rule to run.
  *
- * A binary that predates the after transport still carries `hook opencode`,
- * so reusing that probe would register nothing. This one is independent and
- * cached per binary: when it fails, rewriting keeps working and only output
- * compression stays off.
+ * `active: false` with `capable: true` means "supported, but nothing to do" —
+ * the plugin then registers no after hook, so a tool call spawns no process.
  */
-export function probeRtkHookOpencodeAfter(rtkBin: string): Promise<boolean> {
-  if (probedAfterBin?.bin === rtkBin) return Promise.resolve(probedAfterBin.capable)
+export type AfterProbe = { capable: boolean; active: boolean }
+
+/** Version of the probe envelope; anything else is not an answer. */
+const PROBE_ENVELOPE_VERSION = 1
+
+/**
+ * Reads `{"v":1,"active":true|false}` from `rtk hook opencode-after --probe`.
+ *
+ * `null` means the binary did not answer: the flag is unknown (an older
+ * binary), or the output is not the probe envelope. The caller then falls back
+ * to registering, which is what the plugin did before the probe existed.
+ */
+function parseProbeEnvelope(stdout: string): boolean | null {
+  try {
+    const parsed = JSON.parse(stdout)
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      parsed.v === PROBE_ENVELOPE_VERSION &&
+      typeof parsed.active === "boolean"
+    ) {
+      return parsed.active
+    }
+  } catch {
+    // Not JSON: a crash message, or a binary whose stdout is not this
+    // envelope at all.
+  }
+  return null
+}
+
+/** Asks the binary's resolved pipeline whether it has an after-tool rule. */
+function probeAfterActivity(rtkBin: string): Promise<boolean | null> {
+  return new Promise((resolve) => {
+    execFile(
+      rtkBin,
+      ["hook", "opencode-after", "--probe"],
+      { encoding: "utf8", timeout: 3000, windowsHide: true },
+      (error, stdout) => {
+        // A non-zero exit means the flag or the subcommand is unknown.
+        if (error) return resolve(null)
+        resolve(parseProbeEnvelope(String(stdout ?? "")))
+      }
+    )
+  })
+}
+
+/** Whether `rtk hook opencode-after --help` answers at all. */
+function probeAfterCapable(rtkBin: string): Promise<boolean> {
   return new Promise((resolve) => {
     execFile(
       rtkBin,
       ["hook", "opencode-after", "--help"],
       { encoding: "utf8", timeout: 3000, windowsHide: true },
-      (error) => {
-        if (error) return resolve(false)
-        probedAfterBin = { bin: rtkBin, capable: true }
-        resolve(true)
-      }
+      (error) => resolve(!error)
     )
   })
+}
+
+/**
+ * Probes for the `rtk hook opencode-after` subcommand, separately from the
+ * before path, and asks whether there is anything for it to do.
+ *
+ * A binary that predates the after transport still carries `hook opencode`,
+ * so reusing that probe would register nothing. This one is independent and
+ * cached per binary: when it fails, rewriting keeps working and only output
+ * compression stays off.
+ *
+ * The probe is fail-open by design. An unknown `--probe` flag (an older binary
+ * that has the subcommand), a failed probe or a non-JSON answer all resolve to
+ * `active: true` — registering is the behaviour every release before this one
+ * had, so version skew never turns compression off.
+ */
+export async function probeRtkHookOpencodeAfter(rtkBin: string): Promise<AfterProbe> {
+  if (probedAfterBin?.bin === rtkBin) {
+    return { capable: probedAfterBin.capable, active: probedAfterBin.active }
+  }
+
+  const active = await probeAfterActivity(rtkBin)
+  if (active !== null) {
+    // A binary that answers the probe supports the subcommand by definition.
+    probedAfterBin = { bin: rtkBin, capable: true, active }
+    return { capable: true, active }
+  }
+
+  const capable = await probeAfterCapable(rtkBin)
+  probedAfterBin = { bin: rtkBin, capable, active: capable }
+  return { capable, active: capable }
 }
 
 /**
@@ -593,7 +664,10 @@ async function handleToolAfterV1(input: any, output: any) {
  *
  * The before subcommand is the baseline: without it the plugin disables
  * itself. The after transport is additive, so a binary that predates it keeps
- * rewriting and only skips output compression.
+ * rewriting and only skips output compression. It is also conditional on the
+ * pipeline: `after` is false both when the subcommand is missing and when the
+ * resolved pipeline has no `hook.after_tool.*` rule, so no process is spawned
+ * per tool call for a rule set that cannot match.
  */
 async function ensureRtkUsable(): Promise<{ after: boolean; bin: string } | null> {
   const rtkBin = resolveRtkPath()
@@ -608,12 +682,12 @@ async function ensureRtkUsable(): Promise<{ after: boolean; bin: string } | null
     return null
   }
   const after = await probeRtkHookOpencodeAfter(rtkBin)
-  if (!after) {
+  if (!after.capable) {
     console.warn(
       `[rtk] ${rtkBin} has no \`rtk hook opencode-after\` subcommand — output compression disabled`
     )
   }
-  return { after, bin: rtkBin }
+  return { after: after.capable && after.active, bin: rtkBin }
 }
 
 /**

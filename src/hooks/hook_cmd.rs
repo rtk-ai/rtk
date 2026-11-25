@@ -1285,11 +1285,38 @@ pub fn run_opencode_after() -> Result<()> {
     Ok(())
 }
 
-/// The `--no-default-features` binary carries no engine, so there is no after
-/// transport to run: the subcommand stays reachable and answers nothing.
-#[cfg(not(feature = "engine"))]
-pub fn run_opencode_after() -> Result<()> {
+/// Answer the plugin's registration probe: does this binary's resolved
+/// pipeline actually carry a `hook.after_tool.<subject>` rule?
+///
+/// Without it the plugin registers the after hooks whenever the subcommand
+/// exists, and every tool call spawns a process that finds no rule and prints
+/// nothing. The answer is one object, `{"v":1,"active":true|false}`; a load
+/// that falls back to `rtk:default` (no after_tool rules) answers `false`.
+#[cfg(feature = "engine")]
+pub fn run_opencode_after_probe() -> Result<()> {
+    let loaded = crate::core::pipeline_config::load();
+    let _ = writeln!(io::stdout(), "{}", probe_answer(&loaded));
     Ok(())
+}
+
+/// The probe's answer for a loaded pipeline: `{"v":1,"active":…}`.
+///
+/// `active` is the resolver's own answer to "which positions can actually
+/// fire" (`events_used`), which already drops disabled rules *and* rules
+/// carrying a pro-only key — an Apache-edition build holds those as inert, so
+/// counting `def.enabled` by hand would answer `active: true` for a rule that
+/// can never run, and the plugin would spawn a process per tool call for
+/// nothing.
+#[cfg(feature = "engine")]
+fn probe_answer(loaded: &crate::core::pipeline_config::LoadedPipeline) -> Value {
+    use rtk_engine::block::Event;
+    use rtk_engine::pipeline::SiteKind;
+
+    let active = loaded
+        .resolved
+        .events_used()
+        .contains(&(SiteKind::Hook, Event::AfterTool));
+    json!({ "v": 1, "active": active })
 }
 
 /// Parse the `tool.execute.after` payload. `None` for anything that is not
@@ -3134,6 +3161,80 @@ mod tests {
             let result = opencode_after_payload(r#"{"tool":"read","args":[],"output":"x"}"#)
                 .expect("valid payload");
             assert_eq!(result.args, json!({}));
+        }
+    }
+
+    // --- OpenCode: the registration probe ---
+    //
+    // The plugin asks before it registers the after hooks: a pipeline with no
+    // after-tool rule would otherwise spawn a process on every tool call just
+    // to learn there is nothing to do.
+
+    #[cfg(feature = "engine")]
+    mod opencode_probe {
+        use super::super::probe_answer;
+        use rtk_engine::block::Event;
+        use rtk_engine::pipeline::Position;
+
+        /// The probe's answer for a pipeline body, through the same function the
+        /// subcommand prints.
+        fn active(text: &str) -> bool {
+            let loaded = crate::core::pipeline_config::load_candidate(text, "probe.toml");
+            let answer = probe_answer(&loaded);
+            assert_eq!(answer["v"], 1, "{answer}");
+            answer["active"].as_bool().expect("active is a boolean")
+        }
+
+        #[test]
+        fn a_pipeline_with_an_after_tool_rule_is_active() {
+            for text in [
+                "[[hook.after_tool.shell]]\nname = \"s\"\nuse = [\"dedup\"]\n",
+                "[[hook.after_tool.read]]\nname = \"r\"\nuse = [\"dedup\"]\n",
+                "[[hook.after_tool.any]]\nname = \"a\"\nuse = [\"dedup\"]\n",
+            ] {
+                assert!(active(text), "{text}");
+            }
+        }
+
+        #[test]
+        fn a_pipeline_without_one_is_inactive() {
+            for text in [
+                "",
+                "[pipeline]\nname = \"empty\"\n",
+                // A before-tool rule is not an after-tool rule.
+                "[[hook.before_tool.shell]]\nname = \"b\"\nuse = [\"dedup\"]\n",
+                // A disabled rule stays in the resolved set but never fires, so
+                // counting it would spawn a process for nothing.
+                "[[hook.after_tool.shell]]\nname = \"off\"\nenabled = false\nuse = [\"dedup\"]\n",
+            ] {
+                assert!(!active(text), "{text}");
+            }
+        }
+
+        #[test]
+        fn a_pro_only_rule_is_inert_and_so_inactive() {
+            // `locked` is a pro-edition key: the file still loads, the rule is
+            // marked inert, and the evaluator skips it. Answering `active` here
+            // would spawn a process per tool call for a rule that can never run.
+            let text =
+                "[[hook.after_tool.shell]]\nname = \"pro\"\nuse = [\"dedup\"]\nlocked = true\n";
+            let loaded = crate::core::pipeline_config::load_candidate(text, "probe.toml");
+            let rules = loaded.resolved.rules_at(Position::hook(
+                Event::AfterTool,
+                rtk_engine::block::Subject::Shell,
+            ));
+            assert!(
+                rules.iter().any(|rule| rule.def.pro_inert),
+                "premise: the rule is inert in this edition"
+            );
+            assert!(!active(text));
+        }
+
+        #[test]
+        fn the_default_pipeline_is_inactive() {
+            // `rtk:default` ships no after_tool rules; upgrading must not
+            // register a hook that can never do anything.
+            assert!(!active(""));
         }
     }
 

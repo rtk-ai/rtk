@@ -1304,7 +1304,13 @@ enum HookCommands {
     },
     /// Answer for OpenCode's `tool.execute.after`: the compressed tool output,
     /// or nothing when no rule matches or the result is not smaller
-    OpencodeAfter,
+    #[cfg(feature = "engine")]
+    OpencodeAfter {
+        /// Answer whether the resolved pipeline has an after-tool rule, and
+        /// read no stdin (the plugin probes before registering the hook)
+        #[arg(long)]
+        probe: bool,
+    },
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -3676,8 +3682,13 @@ fn run_cli() -> Result<i32> {
                 hooks::hook_cmd::run_opencode(&args.join(" "), agent.as_deref())?;
                 0
             }
-            HookCommands::OpencodeAfter => {
-                hooks::hook_cmd::run_opencode_after()?;
+            #[cfg(feature = "engine")]
+            HookCommands::OpencodeAfter { probe } => {
+                if probe {
+                    hooks::hook_cmd::run_opencode_after_probe()?;
+                } else {
+                    hooks::hook_cmd::run_opencode_after()?;
+                }
                 0
             }
             HookCommands::Check { agent, command } => {

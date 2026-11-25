@@ -56,6 +56,20 @@ if (rest[0] === "--help") {
   process.exit(0)
 }
 
+// The registration probe: answers whether the resolved pipeline has an
+// after-tool rule. Older binaries do not know the flag (exit 2).
+if (sub === "opencode-after" && rest[0] === "--probe") {
+  // A binary that predates the subcommand answers like clap: exit 2.
+  if (process.env.MOCK_NO_AFTER) process.exit(2)
+  if (process.env.MOCK_PROBE_UNSUPPORTED) process.exit(2)
+  if (process.env.MOCK_PROBE_GARBAGE) {
+    process.stdout.write("not an envelope")
+    process.exit(0)
+  }
+  process.stdout.write(JSON.stringify({ v: 1, active: process.env.MOCK_PROBE_STATE !== "inactive" }))
+  process.exit(0)
+}
+
 if (sub === "opencode-after") {
   let data = ""
   process.stdin.setEncoding("utf8")
@@ -198,6 +212,9 @@ after(() => {
   delete process.env.MOCK_NO_SUB
   delete process.env.MOCK_NO_AFTER
   delete process.env.MOCK_AFTER_FAIL
+  delete process.env.MOCK_PROBE_STATE
+  delete process.env.MOCK_PROBE_UNSUPPORTED
+  delete process.env.MOCK_PROBE_GARBAGE
   delete process.env.MOCK_AFTER_ENVELOPE
   delete process.env.MOCK_AFTER_UNKNOWN_V
   delete process.env.MOCK_ECHO_PAYLOAD
@@ -528,12 +545,61 @@ test("the `hook opencode --help` probe is asked once per binary", async () => {
   }
 })
 
+test("a pipeline with no after-tool rule registers no after hook", async () => {
+  // The probe answers `active: false`, so no process is spawned per tool call
+  // for a rule set that cannot match.
+  process.env.MOCK_PROBE_STATE = "inactive"
+  _resetCachedRtkPath()
+  try {
+    assert.deepEqual(await probeRtkHookOpencodeAfter(mockBin()), {
+      capable: true,
+      active: false,
+    })
+    assert.deepEqual((await captureSetup()).names, ["execute.before"])
+    assert.deepEqual((await captureServer()).names, ["shell.env", "tool.execute.before"])
+
+    // An active pipeline still registers both paths.
+    process.env.MOCK_PROBE_STATE = "active"
+    _resetCachedRtkPath()
+    assert.deepEqual((await captureSetup()).names, ["execute.before", "execute.after"])
+    assert.deepEqual((await captureServer()).names, [
+      "shell.env",
+      "tool.execute.before",
+      "tool.execute.after",
+    ])
+  } finally {
+    delete process.env.MOCK_PROBE_STATE
+    _resetCachedRtkPath()
+  }
+})
+
+test("an rtk that does not know --probe still registers the after hook", async () => {
+  // `--probe` exits 2 on a binary from before this flag. Registration is what
+  // every earlier release did, so the plugin falls back to it rather than
+  // turning compression off.
+  for (const unusable of ["MOCK_PROBE_UNSUPPORTED", "MOCK_PROBE_GARBAGE"]) {
+    process.env[unusable] = "1"
+    _resetCachedRtkPath()
+    try {
+      assert.equal(
+        (await probeRtkHookOpencodeAfter(mockBin())).active,
+        true,
+        `${unusable}: registration is the fallback`
+      )
+      assert.deepEqual((await captureSetup()).names, ["execute.before", "execute.after"])
+    } finally {
+      delete process.env[unusable]
+      _resetCachedRtkPath()
+    }
+  }
+})
+
 test("an rtk without `hook opencode-after` keeps rewriting and skips compression", async () => {
   process.env.MOCK_NO_AFTER = "1"
   _resetCachedRtkPath()
   try {
     assert.equal(await probeRtkHookOpencode(mockBin()), true)
-    assert.equal(await probeRtkHookOpencodeAfter(mockBin()), false)
+    assert.deepEqual(await probeRtkHookOpencodeAfter(mockBin()), { capable: false, active: false })
 
     // The before path still registers; only the after hook is absent.
     const { names } = await captureSetup()
