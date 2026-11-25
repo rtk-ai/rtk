@@ -1,0 +1,71 @@
+* legacyPackages.x86_64-linux.fq (0.18.0)
+  jq for binary formats
+
+* legacyPackages.x86_64-linux.haskellPackages.fay-jquery (0.6.1.0)
+  jQuery bindings for Fay
+
+* legacyPackages.x86_64-linux.haskellPackages.haquery (0.1.1.3)
+  jQuery for Haskell
+
+* legacyPackages.x86_64-linux.haskellPackages.xml-conduit-selectors (0.2.0.2)
+  jQuery-style CSS selectors for xml-conduit
+
+* legacyPackages.x86_64-linux.jaq (3.2.0)
+  Jq clone focused on correctness, speed and simplicity
+
+* legacyPackages.x86_64-linux.jq (1.8.2)
+  Lightweight and flexible command-line JSON processor
+
+* legacyPackages.x86_64-linux.jq-lsp (0.1.19)
+  jq language server
+
+* legacyPackages.x86_64-linux.jq-zsh-plugin (0.6.1)
+  Interactively build jq expressions in Zsh
+
+* legacyPackages.x86_64-linux.jqfmt (0.1.0)
+  Like gofmt, but for jq
+
+* legacyPackages.x86_64-linux.jql (8.1.2)
+  JSON Query Language CLI tool built with Rust
+
+* legacyPackages.x86_64-linux.jqp (0.8.0)
+  TUI playground to experiment with jq
+
+* legacyPackages.x86_64-linux.jquake (1.8.5)
+  Real-time earthquake map of Japan
+
+* legacyPackages.x86_64-linux.perl5Packages.HTMLQuery (0.09)
+  jQuery-like selection queries for HTML::Element
+
+* legacyPackages.x86_64-linux.perlPackages.HTMLQuery (0.09)
+  jQuery-like selection queries for HTML::Element
+
+* legacyPackages.x86_64-linux.python313Packages.django-jquery-js (3.1.1)
+  jQuery, bundled up so apps can depend upon it
+
+* legacyPackages.x86_64-linux.python313Packages.pyquery (2.1.0)
+  Jquery-like library for Python
+
+* legacyPackages.x86_64-linux.python313Packages.xstatic-jquery (3.5.1.1)
+  jquery packaged static files for python
+
+* legacyPackages.x86_64-linux.python313Packages.xstatic-jquery-file-upload (10.32.0.1)
+  jquery-file-upload packaged static files for python
+
+* legacyPackages.x86_64-linux.python313Packages.xstatic-jquery-ui (1.13.0.2)
+  jquery-ui packaged static files for python
+
+* legacyPackages.x86_64-linux.python314Packages.django-jquery-js (3.1.1)
+  jQuery, bundled up so apps can depend upon it
+
+* legacyPackages.x86_64-linux.python314Packages.pyquery (2.1.0)
+  Jquery-like library for Python
+
+* legacyPackages.x86_64-linux.python314Packages.xstatic-jquery (3.5.1.1)
+  jquery packaged static files for python
+
+* legacyPackages.x86_64-linux.python314Packages.xstatic-jquery-file-upload (10.32.0.1)
+  jquery-file-upload packaged static files for python
+
+* legacyPackages.x86_64-linux.python314Packages.xstatic-jquery-ui (1.13.0.2)
+  jquery-ui packaged static files for python

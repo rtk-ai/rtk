@@ -25,7 +25,7 @@ rtk gain        # should show the savings dashboard
 
 If both commands work, RTK is already installed. Skip to [Project initialization](#project-initialization).
 
-## Quick install (Linux and macOS)
+## Quick install (Linux, macOS, or Git Bash on Windows)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
@@ -64,7 +64,7 @@ cargo install --git https://github.com/rtk-ai/rtk --branch master rtk
 Download from [GitHub releases](https://github.com/rtk-ai/rtk/releases):
 
 - macOS: `rtk-x86_64-apple-darwin.tar.gz` / `rtk-aarch64-apple-darwin.tar.gz`
-- Linux: `rtk-x86_64-unknown-linux-musl.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
+- Linux: `rtk-x86_64-unknown-linux-musl.tar.gz` / `rtk-aarch64-unknown-linux-musl.tar.gz`
 - Windows: `rtk-x86_64-pc-windows-msvc.zip`
 
 **Windows users**: Extract the zip and place `rtk.exe` in a directory on your PATH. Run RTK from Command Prompt, PowerShell, or Windows Terminal — do not double-click the `.exe` (it prints usage and exits immediately). See [Windows](#windows) below — the hook system works natively, no WSL required.

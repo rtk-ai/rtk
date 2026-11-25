@@ -1,0 +1,1 @@
+* legacyPackages.x86_64-linux.vimPlugins.blink-ripgrep-nvim (2.2.7)

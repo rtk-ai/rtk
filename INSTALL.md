@@ -41,7 +41,7 @@ If you accidentally installed Rust Type Kit:
 cargo uninstall rtk
 ```
 
-### Quick Install (Linux/macOS)
+### Quick Install (Linux/macOS/Git for Windows)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
@@ -82,8 +82,8 @@ brew install rtk-ai/tap/rtk-oss
 cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
 ```
 
-Release assets are named `rtk-oss-<target>`, plus `rtk-oss_amd64.deb` and
-`rtk-oss.x86_64.rpm`. It does not include `rtk pipeline`, PostToolUse
+Release assets are named `rtk-oss-<target>`, plus `rtk-oss_amd64.deb`,
+`rtk-oss_arm64.deb`, `rtk-oss.x86_64.rpm` and `rtk-oss.aarch64.rpm`. It does not include `rtk pipeline`, PostToolUse
 compression, or delegation tasks.
 
 ## Project Initialization

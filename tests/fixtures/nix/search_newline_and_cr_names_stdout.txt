@@ -1,0 +1,9 @@
+* packages.x86_64-linux.a
+b (1)
+  newline attr
+
+* packages.x86_64-linux.cd (1)
+  cr attr
+
+* packages.x86_64-linux.zz (1)
+  after

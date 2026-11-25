@@ -1,0 +1,27 @@
+* packages.x86_64-linux.errlike (1.0)
+  error: looks like an error
+
+* packages.x86_64-linux.evallike (1.0)
+  evaluating 'something'
+
+* packages.x86_64-linux.last (9.9)
+
+* packages.x86_64-linux.locish (1.0)
+  at default.nix:3: odd
+
+* packages.x86_64-linux.nodesc (1.0)
+
+* packages.x86_64-linux.noversion (0)
+  has no version
+
+* packages.x86_64-linux.padded (1.0)
+    padded description  
+
+* packages.x86_64-linux.starred (1.0)
+  * starred description
+
+* packages.x86_64-linux.unicode (1.0)
+  Ünïcödé — 日本語 description
+
+* packages.x86_64-linux.warnlike (1.0)
+  warning: looks like a warning
