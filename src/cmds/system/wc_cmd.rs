@@ -162,8 +162,19 @@ enum WcMode {
     Bytes,
     /// Chars only (-m)
     Chars,
-    /// Multiple flags combined — keep compact format
-    Mixed,
+    /// Several columns, or `-L` alone: this many numbers, with no fixed label
+    Mixed(usize),
+}
+
+impl WcMode {
+    /// How many count columns `wc` prints before the name on each line.
+    fn columns(&self) -> usize {
+        match self {
+            WcMode::Full => 3,
+            WcMode::Lines | WcMode::Words | WcMode::Bytes | WcMode::Chars => 1,
+            WcMode::Mixed(columns) => *columns,
+        }
+    }
 }
 
 /// One count column a flag asks `wc` for.
@@ -214,12 +225,12 @@ fn detect_mode(tokens: &[Token<'_>], flavor: Flavor) -> WcMode {
         [Column::Bytes] => WcMode::Bytes,
         [Column::Chars] => WcMode::Chars,
         // Several columns, or `-L` alone: numbers with no fixed label.
-        _ => WcMode::Mixed,
+        columns => WcMode::Mixed(columns.len()),
     }
 }
 
 fn filter_wc_output(raw: &str, mode: &WcMode) -> String {
-    let lines: Vec<&str> = raw.trim().lines().collect();
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
 
     if lines.is_empty() {
         return String::new();
@@ -234,110 +245,80 @@ fn filter_wc_output(raw: &str, mode: &WcMode) -> String {
     format_multi_line(&lines, mode)
 }
 
+/// One `wc` output line: its counts, and the name after them unless it is stdin's.
+type Row<'a> = (Vec<&'a str>, Option<&'a str>);
+
+/// One `wc` output line split into its `columns` counts and the name after them, `None` for
+/// stdin's nameless line. Both GNU and BSD right-align each count and put one space before the
+/// name, so the name is everything after that space, spaces included. `None` when the line does
+/// not start with that many counts.
+fn split_line(line: &str, columns: usize) -> Option<Row<'_>> {
+    let mut counts = Vec::with_capacity(columns);
+    let mut rest = line;
+    for _ in 0..columns {
+        rest = rest.trim_start_matches([' ', '\t']);
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        if digits == 0 {
+            return None;
+        }
+        counts.push(&rest[..digits]);
+        rest = &rest[digits..];
+    }
+    if rest.is_empty() {
+        return Some((counts, None));
+    }
+    let name = rest.strip_prefix([' ', '\t'])?;
+    Some((counts, (!name.is_empty()).then_some(name)))
+}
+
+/// The counts of one line in `mode`'s compact form: `30L 96W 978B` for the default columns, the
+/// numbers alone otherwise.
+fn format_counts(counts: &[&str], mode: &WcMode) -> String {
+    match (mode, counts) {
+        (WcMode::Full, [lines, words, bytes]) => format!("{lines}L {words}W {bytes}B"),
+        _ => counts.join(" "),
+    }
+}
+
 /// Format a single wc output line (one file or stdin)
 fn format_single_line(line: &str, mode: &WcMode) -> String {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-
-    match mode {
-        WcMode::Lines | WcMode::Words | WcMode::Bytes | WcMode::Chars => {
-            // First number is the only requested column
-            parts.first().map(|s| s.to_string()).unwrap_or_default()
-        }
-        WcMode::Full => {
-            if parts.len() >= 3 {
-                format!("{}L {}W {}B", parts[0], parts[1], parts[2])
-            } else {
-                line.trim().to_string()
-            }
-        }
-        WcMode::Mixed => {
-            // Strip file path, keep numbers only
-            if parts.len() >= 2 {
-                let last_is_path = parts.last().is_some_and(|p| p.parse::<u64>().is_err());
-                if last_is_path {
-                    parts[..parts.len() - 1].join(" ")
-                } else {
-                    parts.join(" ")
-                }
-            } else {
-                line.trim().to_string()
-            }
-        }
+    match split_line(line, mode.columns()) {
+        Some((counts, _)) => format_counts(&counts, mode),
+        None => line.trim().to_string(),
     }
 }
 
 /// Format multiple files as a compact table
 fn format_multi_line(lines: &[&str], mode: &WcMode) -> String {
-    let mut result = Vec::new();
+    let rows: Vec<(&str, Option<Row<'_>>)> = lines
+        .iter()
+        .map(|line| (*line, split_line(line, mode.columns())))
+        .collect();
 
     // Find common directory prefix to shorten paths
-    let paths: Vec<&str> = lines
+    let paths: Vec<&str> = rows
         .iter()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            parts.last().copied()
-        })
-        .filter(|p| *p != "total")
+        .filter_map(|(_, row)| row.as_ref()?.1)
+        .filter(|name| *name != "total")
         .collect();
 
     let common_prefix = find_common_prefix(&paths);
 
-    for line in lines {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() {
-            continue;
-        }
-
-        let is_total = parts.last().is_some_and(|p| *p == "total");
-
-        match mode {
-            WcMode::Lines | WcMode::Words | WcMode::Bytes | WcMode::Chars => {
-                if is_total {
-                    result.push(format!("Σ {}", parts.first().unwrap_or(&"0")));
-                } else {
-                    let name = strip_prefix(parts.last().unwrap_or(&""), &common_prefix);
-                    result.push(format!("{} {}", parts.first().unwrap_or(&"0"), name));
-                }
-            }
-            WcMode::Full => {
-                if is_total {
-                    result.push(format!(
-                        "Σ {}L {}W {}B",
-                        parts.first().unwrap_or(&"0"),
-                        parts.get(1).unwrap_or(&"0"),
-                        parts.get(2).unwrap_or(&"0"),
-                    ));
-                } else if parts.len() >= 4 {
-                    let name = strip_prefix(parts[3], &common_prefix);
-                    result.push(format!(
-                        "{}L {}W {}B {}",
-                        parts[0], parts[1], parts[2], name
-                    ));
-                } else {
-                    result.push(line.trim().to_string());
-                }
-            }
-            WcMode::Mixed => {
-                if is_total {
-                    let nums: Vec<&str> = parts[..parts.len() - 1].to_vec();
-                    result.push(format!("Σ {}", nums.join(" ")));
-                } else if parts.len() >= 2 {
-                    let last_is_path = parts.last().is_some_and(|p| p.parse::<u64>().is_err());
-                    if last_is_path {
-                        let name = strip_prefix(parts.last().unwrap_or(&""), &common_prefix);
-                        let nums: Vec<&str> = parts[..parts.len() - 1].to_vec();
-                        result.push(format!("{} {}", nums.join(" "), name));
-                    } else {
-                        result.push(parts.join(" "));
-                    }
-                } else {
-                    result.push(line.trim().to_string());
-                }
-            }
-        }
-    }
-
-    result.join("\n")
+    rows.iter()
+        .map(|(line, row)| match row {
+            Some((counts, Some("total"))) => format!("Σ {}", format_counts(counts, mode)),
+            Some((counts, Some(name))) => format!(
+                "{} {}",
+                format_counts(counts, mode),
+                strip_prefix(name, &common_prefix)
+            ),
+            Some((counts, None)) => format_counts(counts, mode),
+            None => line.trim().to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Find common directory prefix among paths
@@ -436,6 +417,52 @@ mod tests {
         );
     }
 
+    /// Git for Windows' wc (coreutils 8.32) over `my file.txt` (`ab\n`) and `a.txt`
+    /// (`abcde\n`): the name is everything after the counts, not the last word.
+    #[test]
+    fn test_multi_file_name_with_a_space_is_kept_whole() {
+        let bytes = "3 my file.txt\n6 a.txt\n9 total\n";
+        assert_eq!(
+            filter_wc_output(bytes, &WcMode::Bytes),
+            "3 my file.txt\n6 a.txt\nΣ 9"
+        );
+        let lines = "1 my file.txt\n1 a.txt\n2 total\n";
+        assert_eq!(
+            filter_wc_output(lines, &WcMode::Lines),
+            "1 my file.txt\n1 a.txt\nΣ 2"
+        );
+        let full = "1 1 3 my file.txt\n1 1 6 a.txt\n2 2 9 total\n";
+        assert_eq!(
+            filter_wc_output(full, &WcMode::Full),
+            "1L 1W 3B my file.txt\n1L 1W 6B a.txt\nΣ 2L 2W 9B"
+        );
+        let mixed = "1 2 my file.txt\n1 5 a.txt\n2 5 total\n";
+        assert_eq!(
+            filter_wc_output(mixed, &WcMode::Mixed(2)),
+            "1 2 my file.txt\n1 5 a.txt\nΣ 2 5"
+        );
+    }
+
+    #[test]
+    fn test_padded_columns_and_a_leading_space_in_a_name() {
+        // GNU pads every count to the widest; the one space before the name is the separator.
+        let raw = "  1 my file.txt\n 10  lead.txt\n 11 total\n";
+        assert_eq!(
+            filter_wc_output(raw, &WcMode::Lines),
+            "1 my file.txt\n10  lead.txt\nΣ 11"
+        );
+    }
+
+    #[test]
+    fn test_a_name_made_of_digits_is_not_read_as_a_count() {
+        // `-l` prints one count, so `2024 01.log` is the name, not two more columns.
+        let raw = "5 2024 01.log\n7 b\n12 total\n";
+        assert_eq!(
+            filter_wc_output(raw, &WcMode::Lines),
+            "5 2024 01.log\n7 b\nΣ 12"
+        );
+    }
+
     use crate::core::arg_tokenizer::{TakesValueRow, TokenKind, assert_takes_value_table};
 
     /// Plans `args` for `flavor`'s wc, marking each argument handed to the expander, so the
@@ -488,12 +515,12 @@ mod tests {
 
     #[test]
     fn test_detect_mode_mixed() {
-        assert_eq!(mode_gnu(&["-lw", "file.py"]), WcMode::Mixed);
+        assert_eq!(mode_gnu(&["-lw", "file.py"]), WcMode::Mixed(2));
     }
 
     #[test]
     fn test_detect_mode_separate_flags() {
-        assert_eq!(mode_gnu(&["-l", "-w", "file.py"]), WcMode::Mixed);
+        assert_eq!(mode_gnu(&["-l", "-w", "file.py"]), WcMode::Mixed(2));
     }
 
     #[test]
@@ -502,7 +529,7 @@ mod tests {
         assert_eq!(mode_gnu(&["--chars", "f"]), WcMode::Chars);
         assert_eq!(mode_gnu(&["--bytes", "f"]), WcMode::Bytes);
         assert_eq!(mode_gnu(&["--lin", "f"]), WcMode::Lines);
-        assert_eq!(mode_gnu(&["--words", "--lines", "f"]), WcMode::Mixed);
+        assert_eq!(mode_gnu(&["--words", "--lines", "f"]), WcMode::Mixed(2));
     }
 
     #[test]
@@ -516,8 +543,8 @@ mod tests {
 
     #[test]
     fn test_detect_mode_max_line_length_is_a_column() {
-        assert_eq!(mode_gnu(&["-L", "f"]), WcMode::Mixed);
-        assert_eq!(mode_gnu(&["-lL", "f"]), WcMode::Mixed);
+        assert_eq!(mode_gnu(&["-L", "f"]), WcMode::Mixed(1));
+        assert_eq!(mode_gnu(&["-lL", "f"]), WcMode::Mixed(2));
     }
 
     #[test]
@@ -531,7 +558,7 @@ mod tests {
     fn test_detect_mode_bsd_bytes_and_chars_cancel() {
         assert_eq!(plan(&["-cm", "f"], Flavor::Bsd).mode, WcMode::Chars);
         assert_eq!(plan(&["-m", "-c", "f"], Flavor::Bsd).mode, WcMode::Bytes);
-        assert_eq!(mode_gnu(&["-cm", "f"]), WcMode::Mixed);
+        assert_eq!(mode_gnu(&["-cm", "f"]), WcMode::Mixed(2));
     }
 
     #[test]
