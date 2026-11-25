@@ -326,7 +326,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             "All parsing tiers failed",
             !shown.trim().is_empty(),
         );
-        timer.track_passthrough(&tracked, &format!("rtk {tracked} (passthrough)"));
+        timer.track_passthrough(&tracked, &tracking::passthrough_label(&tracked));
     } else {
         timer.track(&tracked, &format!("rtk {tracked}"), &raw, &shown);
     }

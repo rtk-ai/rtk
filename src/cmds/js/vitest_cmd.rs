@@ -292,7 +292,7 @@ fn run_framework_test(invocation: TestInvocation, verbose: u8) -> Result<i32> {
             "All parsing tiers failed",
             !shown.trim().is_empty(),
         );
-        timer.track_passthrough(&cmd_label, &format!("rtk {} (passthrough)", cmd_label));
+        timer.track_passthrough(&cmd_label, &tracking::passthrough_label(&cmd_label));
     } else {
         timer.track(
             cmd_label.as_str(),

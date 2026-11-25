@@ -442,7 +442,7 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
             "All parsing tiers failed",
             !shown.trim().is_empty(),
         );
-        timer.track_passthrough(&cmd_label, &format!("rtk {} (passthrough)", cmd_label));
+        timer.track_passthrough(&cmd_label, &tracking::passthrough_label(&cmd_label));
     } else {
         // Tiers 1/2 are unaffected by the passthrough fix: keep guarding
         // and tracking against stdout alone, as before, so a stderr-only
@@ -519,7 +519,10 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
             "All parsing tiers failed",
             !shown.trim().is_empty(),
         );
-        timer.track_passthrough("pnpm outdated", "rtk pnpm outdated (passthrough)");
+        timer.track_passthrough(
+            "pnpm outdated",
+            &tracking::passthrough_label("pnpm outdated"),
+        );
     } else {
         timer.track("pnpm outdated", "rtk pnpm outdated", &combined, shown);
     }
