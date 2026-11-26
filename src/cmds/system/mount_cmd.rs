@@ -41,7 +41,7 @@ fn compact_mounts(raw: &str) -> String {
         let filesystem = rest.split_once(" (").map_or(rest, |(fs, _)| fs);
         output.push(format!("{source} -> {target} [{filesystem}]"));
     }
-    if output.is_empty() { String::new() } else { output.join("\\n") + "\\n" }
+    if output.is_empty() { String::new() } else { output.join("\n") + "\n" }
 }
 
 #[cfg(test)]
@@ -50,13 +50,13 @@ mod tests {
 
     #[test]
     fn compact_listing_keeps_source_target_and_filesystem() {
-        let raw = "/dev/sda1 on / type ext4 (rw,relatime)\\n/dev/sdb1 on /media/usb type vfat (rw,nosuid)\\n";
-        assert_eq!(compact_mounts(raw), "/dev/sda1 -> / [ext4]\\n/dev/sdb1 -> /media/usb [vfat]\\n");
+        let raw = "/dev/sda1 on / type ext4 (rw,relatime)\n/dev/sdb1 on /media/usb type vfat (rw,nosuid)\n";
+        assert_eq!(compact_mounts(raw), "/dev/sda1 -> / [ext4]\n/dev/sdb1 -> /media/usb [vfat]\n");
     }
 
     #[test]
     fn unknown_mount_format_is_preserved() {
-        let raw = "custom mount output\\n";
+        let raw = "custom mount output\n";
         assert_eq!(compact_mounts(raw), raw);
     }
 }
