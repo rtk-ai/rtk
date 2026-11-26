@@ -466,27 +466,34 @@ fn run_build(args: &[OsString], command_args: &[String], verbose: u8) -> Result<
     )
 }
 
+/// libtest flags that consume the following argument as a value. Without this
+/// grammar `--skip --format json` would mistake a filter for a format flag.
+fn libtest_option_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
+    if kind != TokenKind::Long {
+        return None;
+    }
+    matches!(
+        name,
+        "format" | "skip" | "test-threads" | "logfile" | "report-time" | "shuffle-seed" | "color"
+    )
+    .then(ValueSpec::value)
+}
+
 fn has_machine_readable_libtest_format(args: &[String]) -> bool {
     let Some(dash_pos) = args.iter().position(|a| a == "--") else {
         return false;
     };
-    let mut iter = args[dash_pos + 1..].iter();
-    while let Some(arg) = iter.next() {
-        let val = if let Some(val) = arg.strip_prefix("--format=") {
-            Some(val)
-        } else if arg == "--format" {
-            iter.next().map(|s| s.as_str())
-        } else {
-            None
-        };
-        if let Some(format) = val {
-            let f = format.to_ascii_lowercase();
-            if f == "json" || f == "junit" {
-                return true;
-            }
-        }
-    }
-    false
+    let tail = &args[dash_pos + 1..];
+    // A second `--` ends libtest's own options: everything after it is a test
+    // name filter, not a flag. Dialect::Posix models exactly that boundary.
+    let tokens = arg_tokenizer::tokenize_grammar(tail, &libtest_option_value, Dialect::Posix);
+    tokens.iter().any(|token| {
+        token.kind == TokenKind::Long
+            && token.text == "format"
+            && token.value(&tokens).is_some_and(|value| {
+                matches!(value.to_ascii_lowercase().as_str(), "json" | "junit")
+            })
+    })
 }
 
 fn run_test(args: &[OsString], command_args: &[String], verbose: u8) -> Result<i32> {
@@ -3335,6 +3342,26 @@ error: aborting due to 1 previous error
             "--format".into(),
         ]));
         assert!(!has_machine_readable_libtest_format(&[]));
+    }
+
+    #[test]
+    fn test_machine_readable_format_after_skip_flag_value_is_not_detected() {
+        assert!(!has_machine_readable_libtest_format(&[
+            "--".into(),
+            "--skip".into(),
+            "--format".into(),
+            "json".into(),
+        ]));
+    }
+
+    #[test]
+    fn test_machine_readable_format_after_second_dashdash_is_not_detected() {
+        assert!(!has_machine_readable_libtest_format(&[
+            "--".into(),
+            "--".into(),
+            "--format".into(),
+            "json".into(),
+        ]));
     }
 
     #[test]
