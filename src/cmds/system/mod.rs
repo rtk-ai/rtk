@@ -8,6 +8,7 @@ pub mod format_cmd;
 pub mod json_cmd;
 pub mod local_llm;
 pub mod log_cmd;
+pub mod mount_cmd;
 pub mod ls;
 pub mod nix_cmd;
 pub mod pipe_cmd;
