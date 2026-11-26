@@ -160,7 +160,12 @@ pub fn run_guided(
         .zip(&hints)
         .map(|(t, hint)| (t.label(), hint.as_str()))
         .collect();
-    let preselected: Vec<bool> = found.iter().map(Option::is_some).collect();
+    let mut preselected: Vec<bool> = found.iter().map(Option::is_some).collect();
+    if !preselected.contains(&true)
+        && let Some(claude) = targets.iter().position(|t| *t == InitTarget::Claude)
+    {
+        preselected[claude] = true;
+    }
     let question = if global {
         "Which agents should RTK set up for your user account?"
     } else {
@@ -177,9 +182,13 @@ pub fn run_guided(
     };
 
     #[cfg(feature = "engine")]
-    if global || pipeline.is_some() {
-        pipeline_step(pipeline, patch_mode, ctx)?;
-    }
+    let code = if global || pipeline.is_some() {
+        pipeline_step_or_warn(pipeline, patch_mode, ctx)
+    } else {
+        0
+    };
+    #[cfg(not(feature = "engine"))]
+    let code = 0;
     #[cfg(not(feature = "engine"))]
     if pipeline.is_some() {
         anyhow::bail!("--pipeline needs the full edition of rtk");
@@ -207,7 +216,7 @@ pub fn run_guided(
     if !failed.is_empty() {
         anyhow::bail!("setup failed for {}", failed.join(", "));
     }
-    Ok(0)
+    Ok(code)
 }
 
 fn install(
@@ -280,8 +289,24 @@ fn can_ask(patch_mode: PatchMode, ctx: InitContext) -> bool {
 }
 
 #[cfg(feature = "engine")]
-pub fn pipeline_step(choice: Option<&str>, patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
+pub fn pipeline_step_or_warn(choice: Option<&str>, patch_mode: PatchMode, ctx: InitContext) -> i32 {
+    match pipeline_step(choice, patch_mode, ctx) {
+        Ok(code) => code,
+        Err(e) => {
+            use colored::Colorize;
+            eprintln!(
+                "{}",
+                format!("rtk: the pipeline was not changed: {e:#}").yellow()
+            );
+            1
+        }
+    }
+}
+
+#[cfg(feature = "engine")]
+pub fn pipeline_step(choice: Option<&str>, patch_mode: PatchMode, ctx: InitContext) -> Result<i32> {
     use crate::core::pipeline_catalog::{self, Origin};
+    use crate::core::pipeline_needs::Consent;
     if let Some(name) = choice {
         let catalog = pipeline_catalog::load();
         if catalog.origin == Origin::Missing {
@@ -298,24 +323,33 @@ pub fn pipeline_step(choice: Option<&str>, patch_mode: PatchMode, ctx: InitConte
                 pipeline_catalog::CATALOG_PAGE
             );
         };
-        switch_pipeline(entry, &catalog.entries, ctx)?;
+        let consent = if can_ask(patch_mode, ctx) {
+            Consent::Ask
+        } else if patch_mode == PatchMode::Skip {
+            Consent::NoTerminal
+        } else {
+            Consent::Auto
+        };
+        let code = switch_pipeline(entry, &catalog.entries, consent, ctx)?;
         if ctx.dry_run {
             if !entry.is_default() {
                 println!(
-                    "[dry-run] init would then ask before installing any dependency {} declares",
+                    "[dry-run] init would then check what {} needs to run, and install or ask for each missing piece",
                     entry.name
                 );
             }
-            return Ok(());
+            return Ok(0);
         }
-        return dependency_step(&catalog.entries, patch_mode, ctx);
+        dependency_step(&catalog.entries, patch_mode, ctx)?;
+        return Ok(code);
     }
     if !can_ask(patch_mode, ctx) || onramp_disabled() {
-        return Ok(());
+        return Ok(0);
     }
     let catalog = pipeline_catalog::load();
-    pipeline_menu(&catalog, ctx)?;
-    dependency_step(&catalog.entries, patch_mode, ctx)
+    let code = pipeline_menu(&catalog, ctx)?;
+    dependency_step(&catalog.entries, patch_mode, ctx)?;
+    Ok(code)
 }
 
 #[cfg(feature = "engine")]
@@ -324,7 +358,7 @@ fn dependency_step(
     patch_mode: PatchMode,
     ctx: InitContext,
 ) -> Result<()> {
-    use crate::core::deps::{self, Mode};
+    use crate::core::deps::{self, Mode, Offered};
     let loaded = crate::core::pipeline_cmd::load_for_cli();
     if loaded.resolved.dependencies.is_empty() {
         return Ok(());
@@ -336,13 +370,24 @@ fn dependency_step(
     };
     for (name, (def, origin)) in &loaded.resolved.dependencies {
         let pipeline = deps::pipeline_name(origin);
-        deps::offer(
+        let offered = deps::offer(
             &pipeline,
             name,
             def,
             &deps::review_of(origin, entries),
             mode,
+            &format!("{pipeline} runs without the rules that need it; `rtk init -g` asks again"),
         )?;
+        match offered {
+            Offered::Ready | Offered::Installed => {}
+            Offered::Declined => println!(
+                "  {name} not installed: {pipeline} runs without the rules that need it. `rtk init -g` asks again."
+            ),
+            Offered::Failed(reason) => eprintln!("  [warn] {name}: {reason}"),
+            Offered::Unavailable(reason) => println!(
+                "  {pipeline} needs {name} ({reason}); {pipeline} runs without the rules that need it."
+            ),
+        }
     }
     Ok(())
 }
@@ -351,7 +396,7 @@ fn dependency_step(
 fn pipeline_menu(
     catalog: &crate::core::pipeline_catalog::Catalog,
     ctx: InitContext,
-) -> Result<Option<crate::core::pipeline_catalog::Entry>> {
+) -> Result<i32> {
     use crate::core::pipeline_catalog::{self, DEFAULT_PIPELINE, Origin};
     println!();
     if catalog.entries.is_empty() {
@@ -366,7 +411,7 @@ fn pipeline_menu(
             pipeline_catalog::CATALOG_PAGE
         );
         println!("  pick another later with `rtk init -g --pipeline <name>`.");
-        return Ok(None);
+        return Ok(0);
     }
     let mut entries: Vec<&pipeline_catalog::Entry> = catalog.entries.iter().collect();
     entries.sort_by_key(|e| !e.is_default());
@@ -438,15 +483,19 @@ fn pipeline_menu(
     )?
     else {
         println!("  Pipeline unchanged.");
-        return Ok(None);
+        return Ok(0);
     };
     if choice < offset {
         println!("  Pipeline unchanged.");
-        return Ok(None);
+        return Ok(0);
     }
     let entry = entries[choice - offset].clone();
-    switch_pipeline(&entry, &catalog.entries, ctx)?;
-    Ok(Some(entry))
+    switch_pipeline(
+        &entry,
+        &catalog.entries,
+        crate::core::pipeline_needs::Consent::Ask,
+        ctx,
+    )
 }
 
 #[cfg(feature = "engine")]
@@ -498,12 +547,21 @@ fn custom_pipelines(catalog: &[(String, String)]) -> Vec<String> {
 fn switch_pipeline(
     entry: &crate::core::pipeline_catalog::Entry,
     entries: &[crate::core::pipeline_catalog::Entry],
+    consent: crate::core::pipeline_needs::Consent,
     ctx: InitContext,
-) -> Result<()> {
+) -> Result<i32> {
+    use crate::core::deps::Review;
+    use crate::core::pipeline_cmd::Added;
     let installed = catalog_installs(entries);
-    let others: Vec<&(String, String)> =
-        installed.iter().filter(|(_, id)| *id != entry.id).collect();
-    let already = installed.iter().any(|(_, id)| *id == entry.id);
+    let others: Vec<(String, String)> = installed
+        .iter()
+        .filter(|(_, id)| *id != entry.id)
+        .cloned()
+        .collect();
+    let already = installed
+        .iter()
+        .find(|(_, id)| *id == entry.id)
+        .map(|(name, _)| name.clone());
     let Some(source) = entry.source() else {
         anyhow::bail!("{} has no pinned install source", entry.name);
     };
@@ -511,42 +569,121 @@ fn switch_pipeline(
         for (name, _) in &others {
             println!("[dry-run] would turn off pipeline {name} (moved to {name}.toml.bak)");
         }
-        if !already && !entry.is_default() {
+        if already.is_none() && !entry.is_default() {
             println!("[dry-run] would install pipeline {} ({source})", entry.name);
         }
-        return Ok(());
-    }
-    if let Some(dir) = crate::core::pipeline_config::user_pipelines_dir() {
-        for (name, id) in &others {
-            let path = dir.join(format!("{name}.toml"));
-            let backup = dir.join(format!("{name}.toml.bak"));
-            std::fs::rename(&path, &backup).map_err(|e| {
-                anyhow::anyhow!("move {} to {}: {e}", path.display(), backup.display())
-            })?;
-            let readd = entries
-                .iter()
-                .find(|e| e.id == *id)
-                .map_or(id.as_str(), |e| e.name.as_str());
-            println!(
-                "  Turned off pipeline {name}: its file is now {} (re-add: rtk init -g --pipeline {readd})",
-                tilde(&backup)
-            );
-        }
-    }
-    if already {
-        println!("  Pipeline: {} (already installed)", entry.name);
-        return Ok(());
+        return Ok(0);
     }
     if entry.is_default() {
+        turn_off(&others, entries)?;
         println!(
             "  Pipeline: {}, RTK's default. Nothing to install.",
             entry.name
         );
-        return Ok(());
+        return Ok(0);
     }
-    let code = crate::core::pipeline_cmd::install_from_init(source)?;
-    if code != 0 {
-        anyhow::bail!("pipeline {} was not installed", entry.name);
+    let rerun = format!("rtk init -g --pipeline {}", entry.name);
+    let review = entry
+        .sha
+        .clone()
+        .map_or(Review::Unreviewed, Review::Reviewed);
+    if let Some(name) = already {
+        let installed_sha =
+            crate::core::pipeline_remote::install_origin(&name).and_then(|origin| origin.sha);
+        let outdated = entry.sha.is_some() && installed_sha != entry.sha;
+        let code = if outdated {
+            let added =
+                crate::core::pipeline_cmd::install_from_init(source, consent, review, &rerun)?;
+            match added {
+                Added::Live => 0,
+                Added::Declined | Added::Unmet => kept_code(consent),
+                Added::Code(_) => anyhow::bail!("pipeline {} was not updated", entry.name),
+            }
+        } else {
+            let code = keep_installed(&name, entry, entries, consent, &rerun)?;
+            if code == 0 {
+                println!("  Pipeline: {} (already installed)", entry.name);
+            }
+            code
+        };
+        turn_off(&others, entries)?;
+        return Ok(code);
+    }
+    match crate::core::pipeline_cmd::install_from_init(source, consent, review, &rerun)? {
+        Added::Live => {
+            turn_off(&others, entries)?;
+            Ok(0)
+        }
+        Added::Declined => Ok(0),
+        Added::Unmet => Ok(1),
+        Added::Code(_) => anyhow::bail!("pipeline {} was not installed", entry.name),
+    }
+}
+
+#[cfg(feature = "engine")]
+fn kept_code(consent: crate::core::pipeline_needs::Consent) -> i32 {
+    i32::from(consent != crate::core::pipeline_needs::Consent::Ask)
+}
+
+#[cfg(feature = "engine")]
+fn keep_installed(
+    name: &str,
+    entry: &crate::core::pipeline_catalog::Entry,
+    entries: &[crate::core::pipeline_catalog::Entry],
+    consent: crate::core::pipeline_needs::Consent,
+    rerun: &str,
+) -> Result<i32> {
+    use crate::core::pipeline_needs::{self, Settled};
+    let Some(dir) = crate::core::pipeline_config::user_pipelines_dir() else {
+        return Ok(0);
+    };
+    let path = dir.join(format!("{name}.toml"));
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+    let loaded = crate::core::pipeline_config::load_candidate(&text, name);
+    let needs = pipeline_needs::of(&loaded.resolved, name);
+    let review = crate::core::deps::review_of(name, entries);
+    let settled = pipeline_needs::settle(
+        &needs,
+        name,
+        &review,
+        consent,
+        &format!("{} stays installed without it", entry.name),
+    )?;
+    if settled == Settled::Met {
+        return Ok(0);
+    }
+    pipeline_needs::alert(
+        &entry.name,
+        &settled,
+        "stays installed, but parts of it cannot run",
+        &pipeline_needs::running_now(""),
+        rerun,
+    );
+    Ok(kept_code(consent))
+}
+
+#[cfg(feature = "engine")]
+fn turn_off(
+    pipelines: &[(String, String)],
+    entries: &[crate::core::pipeline_catalog::Entry],
+) -> Result<()> {
+    let Some(dir) = crate::core::pipeline_config::user_pipelines_dir() else {
+        return Ok(());
+    };
+    for (name, id) in pipelines {
+        let path = dir.join(format!("{name}.toml"));
+        let backup = crate::core::pipeline_config::backup_path(&dir, name);
+        std::fs::rename(&path, &backup)
+            .map_err(|e| anyhow::anyhow!("move {} to {}: {e}", path.display(), backup.display()))?;
+        let readd = entries
+            .iter()
+            .find(|e| e.id == *id)
+            .map_or(id.as_str(), |e| e.name.as_str());
+        println!(
+            "  Turned off pipeline {name}: its file is now {} (re-add: rtk init -g --pipeline {readd})",
+            tilde(&backup)
+        );
     }
     Ok(())
 }

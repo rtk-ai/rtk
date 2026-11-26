@@ -65,7 +65,7 @@ pub use copilot::{run_copilot, run_copilot_global, uninstall_copilot, uninstall_
 pub use droid::{run_droid_mode, uninstall_droid};
 pub use gemini::run_gemini;
 #[cfg(feature = "engine")]
-pub use guided::pipeline_step;
+pub use guided::pipeline_step_or_warn;
 pub use guided::{guided_allowed, print_default_agent_hint, run_guided};
 pub use hermes::{run_hermes_mode, uninstall_hermes};
 pub use instructions_agents::{run_kilocode_mode, run_kimi_mode};
@@ -857,9 +857,6 @@ fn backup_and_atomic_write(path: &Path, content: &str) -> Result<Option<PathBuf>
 }
 
 /// Prompt user for confirmation.
-/// A Yes/No menu when stdin and stdout are a terminal. Otherwise prints to
-/// stderr (stdout may be piped), reads from stdin, and defaults to No when
-/// stdin is not a terminal.
 pub(super) fn prompt_user_confirmation(
     prompt: &str,
     yes_hint: &str,
@@ -929,6 +926,36 @@ pub(super) fn proxy_env_target() -> Option<String> {
     root.pointer("/env/ANTHROPIC_BASE_URL")?
         .as_str()
         .map(str::to_string)
+}
+
+#[cfg(feature = "engine")]
+pub(crate) fn daemon_ready() -> bool {
+    let base_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
+    proxy_env_target().as_deref() == Some(base_url.as_str()) || crate::llm_proxy::is_reachable()
+}
+
+#[cfg(feature = "engine")]
+pub(crate) fn daemon_unavailable() -> Option<String> {
+    if !crate::llm_proxy::binary_available() {
+        return Some(
+            "rtk-proxy is not installed (`rtk llm-proxy start` says where to get it)".to_string(),
+        );
+    }
+    if crate::core::user_env::var("RTK_ONRAMP_DISABLED").as_deref() == Some("1") {
+        return Some("RTK_ONRAMP_DISABLED=1 turns off the question that sets it up".to_string());
+    }
+    None
+}
+
+#[cfg(feature = "engine")]
+pub(crate) fn ask_daemon(pipeline: &str) -> Result<bool> {
+    let settings_path = resolve_claude_dir()?.join(SETTINGS_JSON);
+    println!();
+    println!(
+        "  {pipeline} needs the RTK daemon: its rules act on the requests your agent sends to the model."
+    );
+    offer_proxy_onramp(&settings_path, PatchMode::Ask, InitContext::default())?;
+    Ok(daemon_ready())
 }
 
 #[cfg(feature = "engine")]
@@ -3149,6 +3176,8 @@ level = "high"
 
     #[test]
     fn test_uninstall_handles_both_artifacts() {
+        #[cfg(feature = "engine")]
+        let _deps = crate::core::deps::test_root_lock();
         let temp = TempDir::new().expect("create isolated home");
         with_claude_dir_override(&temp, |claude_dir| {
             let claude_md = claude_dir.join(CLAUDE_MD);
@@ -3179,6 +3208,8 @@ level = "high"
 
     #[test]
     fn test_uninstall_preserves_prose_without_exact_rtk_reference() {
+        #[cfg(feature = "engine")]
+        let _deps = crate::core::deps::test_root_lock();
         let temp = TempDir::new().expect("create isolated home");
         with_claude_dir_override(&temp, |claude_dir| {
             let claude_md = claude_dir.join(CLAUDE_MD);
@@ -3207,6 +3238,8 @@ level = "high"
 
     #[test]
     fn test_uninstall_dry_run_preserves_instruction_artifacts() {
+        #[cfg(feature = "engine")]
+        let _deps = crate::core::deps::test_root_lock();
         let temp = TempDir::new().expect("create isolated home");
         with_claude_dir_override(&temp, |claude_dir| {
             let claude_md = claude_dir.join(CLAUDE_MD);

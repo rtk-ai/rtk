@@ -1,9 +1,11 @@
 //! Local services a pipeline declares under `[dependency.<name>]`, such as a
 //! decision model its classifier asks. rtk installs one only after the user
-//! says yes in a terminal (no flag or variable can answer for them), from the
-//! recipe in the pipeline file: an exact package version or file whose hash
-//! rtk checks before anything runs. A pipeline from the reviewed catalog says
-//! so; any other source is installed at the user's own risk.
+//! says yes in a terminal, or, with no terminal, when the user named a pipeline
+//! from the reviewed catalog with `rtk init -g --pipeline <name>`; no flag or
+//! variable answers for any other source. The recipe comes from the pipeline
+//! file: an exact package version or file whose hash rtk checks before
+//! anything runs. A pipeline from the reviewed catalog says so; any other
+//! source is installed at the user's own risk.
 //!
 //! What was accepted is stored with the install, and only that copy is ever
 //! started: when a call to an upstream linked with `dependency = "<name>"`
@@ -62,6 +64,7 @@ pub enum Review {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Ask,
+    Auto,
     NoTerminal,
 }
 
@@ -249,22 +252,69 @@ pub fn install(name: &str, def: &DependencyDef) -> Result<()> {
     if let Err(reason) = installable(def) {
         anyhow::bail!("rtk cannot install {name}: {reason}");
     }
+    let root = root().context("no data directory for dependencies")?;
     let dir = dir(name).context("no data directory for dependencies")?;
-    if dir.exists() {
-        if installed(name).is_some() {
-            let _ = stop(name);
-        }
-        remove_inside_root(&dir)?;
+    let previous = root.join(format!(".previous-{name}"));
+    if previous.exists() {
+        remove_inside_root(&previous)?;
+    }
+    let replacing = dir.exists();
+    if replacing {
+        stop(name)?;
+        std::fs::rename(&dir, &previous)
+            .with_context(|| format!("move the installed {name} aside"))?;
     }
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let result = install_into(name, &dir, def);
-    if result.is_err() {
-        let logged = std::fs::metadata(dir.join(LOG)).is_ok_and(|m| m.len() > 0);
-        if !logged {
-            let _ = remove_inside_root(&dir);
+    let Err(error) = install_into(name, &dir, def) else {
+        if replacing {
+            let _ = remove_inside_root(&previous);
         }
+        return Ok(());
+    };
+    let log = dir.join(LOG);
+    let logged = std::fs::metadata(&log).is_ok_and(|m| m.len() > 0);
+    if replacing {
+        let kept = root.join(format!(".failed-{name}.log"));
+        let kept_log = logged && std::fs::rename(&log, &kept).is_ok();
+        remove_inside_root(&dir)?;
+        std::fs::rename(&previous, &dir)
+            .with_context(|| format!("put the previous {name} back"))?;
+        let note = if kept_log {
+            format!(
+                "the previous {name} was put back; the failed install's log is {}",
+                kept.display()
+            )
+        } else {
+            format!("the previous {name} was put back")
+        };
+        return Err(error.context(note));
     }
-    result
+    if !logged {
+        let _ = remove_inside_root(&dir);
+    }
+    Err(error)
+}
+
+pub fn listen_answers(def: &DependencyDef) -> bool {
+    def.listen.as_deref().is_some_and(address_answers)
+}
+
+pub fn address_answers(address: &str) -> bool {
+    socket_addr(address)
+        .and_then(|addr| connect(&addr))
+        .is_some()
+}
+
+fn connect(addr: &SocketAddr) -> Option<TcpStream> {
+    // nosemgrep: raw-socket-usage
+    TcpStream::connect_timeout(addr, Duration::from_millis(300)).ok()
+}
+
+fn command_for(program: &Path) -> Result<Command> {
+    let name = program
+        .to_str()
+        .with_context(|| format!("{} is not a UTF-8 path", program.display()))?;
+    Ok(crate::core::utils::resolved_command(name))
 }
 
 fn install_into(name: &str, dir: &Path, def: &DependencyDef) -> Result<()> {
@@ -277,11 +327,11 @@ fn install_into(name: &str, dir: &Path, def: &DependencyDef) -> Result<()> {
             package,
             integrity,
             node,
-        }) => install_npm(name, &dir, package, integrity, *node, &def.env)?,
+        }) => install_npm(name, &dir, package, integrity, *node)?,
         Some(Installer::Pip {
             requirements,
             python,
-        }) => install_pip(&dir, requirements, python.as_deref(), &def.env)?,
+        }) => install_pip(&dir, requirements, python.as_deref())?,
         Some(Installer::Binary { platforms }) => {
             let bin = platforms
                 .get(&platform())
@@ -306,7 +356,6 @@ fn install_npm(
     package: &str,
     integrity: &str,
     min_node: Option<u32>,
-    env: &BTreeMap<String, String>,
 ) -> Result<()> {
     let (node, _) = find_node(min_node.unwrap_or(0)).with_context(|| node_missing(min_node))?;
     let bin = node.parent().context("node has no parent directory")?;
@@ -320,11 +369,10 @@ fn install_npm(
     )
     .context("write package.json")?;
     let path = path_with(&[bin.to_path_buf()])?;
-    let out = Command::new(&npm)
+    let out = command_for(&npm)?
         .args(["pack", package, "--silent", "--pack-destination", "."])
         .current_dir(dir)
         .env("PATH", &path)
-        .envs(env)
         .stdin(Stdio::null())
         .stderr(open_log(dir)?)
         .output()
@@ -357,7 +405,7 @@ fn install_npm(
             "{package} does not match the hash its pipeline declares (declared {integrity}, downloaded {actual}); nothing was installed"
         );
     }
-    let status = Command::new(&npm)
+    let status = command_for(&npm)?
         .args([
             "install",
             &format!("./{tarball}"),
@@ -367,7 +415,6 @@ fn install_npm(
         ])
         .current_dir(dir)
         .env("PATH", &path)
-        .envs(env)
         .stdin(Stdio::null())
         .stdout(open_log(dir)?)
         .stderr(open_log(dir)?)
@@ -383,17 +430,12 @@ fn install_npm(
     Ok(())
 }
 
-fn install_pip(
-    dir: &Path,
-    requirements: &[String],
-    min_python: Option<&str>,
-    env: &BTreeMap<String, String>,
-) -> Result<()> {
+fn install_pip(dir: &Path, requirements: &[String], min_python: Option<&str>) -> Result<()> {
     let python = find_python(min_python).with_context(|| match min_python {
         Some(v) => format!("Python {v} or newer was not found"),
         None => "Python 3 was not found".to_string(),
     })?;
-    let status = Command::new(&python)
+    let status = command_for(&python)?
         .args(["-m", "venv", "venv"])
         .current_dir(dir)
         .stdin(Stdio::null())
@@ -417,7 +459,7 @@ fn install_pip(
     } else {
         "python"
     });
-    let status = Command::new(&venv_python)
+    let status = command_for(&venv_python)?
         .args([
             "-m",
             "pip",
@@ -429,7 +471,6 @@ fn install_pip(
             "requirements.txt",
         ])
         .current_dir(dir)
-        .envs(env)
         .stdin(Stdio::null())
         .stdout(open_log(dir)?)
         .stderr(open_log(dir)?)
@@ -601,7 +642,7 @@ pub fn start(name: &str) -> Result<Started> {
     }
     let (program, path) = resolve_program(&found)?;
     let log = open_log(&found.dir)?;
-    let mut command = Command::new(&program);
+    let mut command = command_for(&program)?;
     command
         .args(found.def.run.iter().skip(1))
         .current_dir(&found.dir)
@@ -675,10 +716,14 @@ fn health_of(dir: &Path, def: &DependencyDef) -> Health {
     let Some(addr) = def.listen.as_deref().and_then(socket_addr) else {
         return Health::Down;
     };
-    let Ok(stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) else {
-        return Health::Down;
+    let Some(stream) = connect(&addr) else {
+        return if ours_running(dir, def) {
+            Health::Starting(None)
+        } else {
+            Health::Down
+        };
     };
-    if !ours_running(dir) {
+    if !ours_running(dir, def) {
         return Health::Foreign;
     }
     let Some(path) = def.health.as_deref() else {
@@ -728,26 +773,53 @@ fn short_line(body: &str) -> Option<String> {
     plain.then(|| crate::core::utils::sanitize_for_terminal(line))
 }
 
-fn ours_running(dir: &Path) -> bool {
+fn read_pid(dir: &Path) -> Option<u32> {
     std::fs::read_to_string(dir.join(PID))
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
-        .is_some_and(pid_alive)
+}
+
+fn ours_running(dir: &Path, def: &DependencyDef) -> bool {
+    read_pid(dir).is_some_and(|pid| runs(pid, def))
 }
 
 #[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
+fn runs(pid: u32, def: &DependencyDef) -> bool {
+    let Some(program) = def
+        .run
+        .first()
+        .and_then(|p| Path::new(p).file_name())
+        .and_then(|n| n.to_str())
+    else {
         return false;
     };
-    #[allow(unsafe_code)]
-    let alive = unsafe { libc::kill(pid, 0) == 0 };
-    alive
+    let Ok(out) = crate::core::utils::resolved_command("ps")
+        .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    let line = String::from_utf8_lossy(&out.stdout);
+    out.status.success()
+        && !line.contains("<defunct>")
+        && line.contains(program)
+        && def
+            .run
+            .iter()
+            .skip(1)
+            .all(|arg| arg.is_empty() || line.contains(arg.as_str()))
+}
+
+#[cfg(windows)]
+fn runs(pid: u32, _def: &DependencyDef) -> bool {
+    pid_alive(pid)
 }
 
 #[cfg(windows)]
 fn pid_alive(pid: u32) -> bool {
-    Command::new("tasklist")
+    crate::core::utils::resolved_command("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
         .stdin(Stdio::null())
         .output()
@@ -755,23 +827,28 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn pid_alive(_pid: u32) -> bool {
+fn runs(_pid: u32, _def: &DependencyDef) -> bool {
     false
 }
 
 #[cfg(unix)]
-fn terminate(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        return false;
+fn terminate(pid: u32, force: bool) -> bool {
+    let signal = if force { "KILL" } else { "TERM" };
+    let send = |target: String| {
+        crate::core::utils::resolved_command("kill")
+            .args(["-s", signal, "--", &target])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
     };
-    #[allow(unsafe_code)]
-    let sent = unsafe { libc::kill(pid, libc::SIGTERM) == 0 };
-    sent
+    send(format!("-{pid}")) || send(pid.to_string())
 }
 
 #[cfg(windows)]
-fn terminate(pid: u32) -> bool {
-    Command::new("taskkill")
+fn terminate(pid: u32, _force: bool) -> bool {
+    crate::core::utils::resolved_command("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -781,7 +858,7 @@ fn terminate(pid: u32) -> bool {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn terminate(_pid: u32) -> bool {
+fn terminate(_pid: u32, _force: bool) -> bool {
     false
 }
 
@@ -803,24 +880,30 @@ fn detach(command: &mut Command) {
 fn detach(_command: &mut Command) {}
 
 pub fn stop(name: &str) -> Result<bool> {
-    let Some(dir) = dir(name) else {
+    let Some(found) = installed(name) else {
         return Ok(false);
     };
-    let pid = std::fs::read_to_string(dir.join(PID))
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok());
-    let Some(pid) = pid.filter(|p| pid_alive(*p)) else {
+    let Some(pid) = read_pid(&found.dir).filter(|pid| runs(*pid, &found.def)) else {
+        let _ = std::fs::remove_file(found.dir.join(PID));
         return Ok(false);
     };
-    if !terminate(pid) {
-        anyhow::bail!("could not stop {name} (process {pid})");
+    for (force, wait) in [
+        (false, Duration::from_secs(3)),
+        (true, Duration::from_secs(1)),
+    ] {
+        if !terminate(pid, force) && runs(pid, &found.def) {
+            anyhow::bail!("could not stop {name} (process {pid})");
+        }
+        let deadline = Instant::now() + wait;
+        while runs(pid, &found.def) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if !runs(pid, &found.def) {
+            let _ = std::fs::remove_file(found.dir.join(PID));
+            return Ok(true);
+        }
     }
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while pid_alive(pid) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let _ = std::fs::remove_file(dir.join(PID));
-    Ok(true)
+    anyhow::bail!("{name} (process {pid}) is still running after rtk asked it to stop")
 }
 
 pub fn wake(upstream: &UpstreamDef) {
@@ -830,7 +913,10 @@ pub fn wake(upstream: &UpstreamDef) {
     let Some(found) = installed(name) else {
         return;
     };
-    if health_of(&found.dir, &found.def) != Health::Down || !claim_start(&found.dir) {
+    if recently_claimed(&found.dir)
+        || health_of(&found.dir, &found.def) != Health::Down
+        || !claim_start(&found.dir)
+    {
         return;
     }
     let message = match start(name) {
@@ -848,22 +934,25 @@ pub fn wake(upstream: &UpstreamDef) {
     crate::core::notice::push(message);
 }
 
+fn recently_claimed(dir: &Path) -> bool {
+    let wait = if last_start_failed(dir) {
+        RETRY_AFTER_FAILURE
+    } else {
+        RETRY_AFTER_START
+    };
+    std::fs::metadata(dir.join(STAMP))
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| at.elapsed().ok())
+        .is_some_and(|age| age < wait)
+}
+
 fn claim_start(dir: &Path) -> bool {
     let stamp = dir.join(STAMP);
-    if let Ok(meta) = std::fs::metadata(&stamp) {
-        let wait = if last_start_failed(dir) {
-            RETRY_AFTER_FAILURE
-        } else {
-            RETRY_AFTER_START
-        };
-        let recent = meta
-            .modified()
-            .ok()
-            .and_then(|at| at.elapsed().ok())
-            .is_none_or(|age| age < wait);
-        if recent {
-            return false;
-        }
+    if recently_claimed(dir) {
+        return false;
+    }
+    if stamp.exists() {
         let _ = std::fs::remove_file(&stamp);
     }
     std::fs::OpenOptions::new()
@@ -887,9 +976,7 @@ pub fn status_lines(resolved: &Resolved) -> Vec<String> {
         } else {
             match state(name, def) {
                 State::Missing => {
-                    let busy = socket_addr(&listen).is_some_and(|addr| {
-                        TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
-                    });
+                    let busy = address_answers(&listen);
                     if busy {
                         format!(
                             "not installed; another program answers on {listen}. To install it, run `rtk init -g` in a terminal"
@@ -966,10 +1053,35 @@ pub fn remove_all(dry_run: bool) -> Result<Vec<PathBuf>> {
             continue;
         };
         if !dry_run {
-            let _ = stop(&name);
+            if let Err(e) = stop(&name) {
+                eprintln!(
+                    "  [warn] {e:#}; its files stay in {} until it stops",
+                    dir.display()
+                );
+                continue;
+            }
             remove_inside_root(&dir)?;
         }
         removed.push(dir);
+    }
+    if !dry_run
+        && let Some(root) = root()
+        && let Ok(read) = std::fs::read_dir(&root)
+    {
+        for entry in read.filter_map(|e| e.ok()) {
+            let leftover = entry.file_name().to_str().is_some_and(|n| {
+                n.starts_with(".previous-") || (n.starts_with(".failed-") && n.ends_with(".log"))
+            });
+            if !leftover {
+                continue;
+            }
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                let _ = remove_inside_root(&path);
+            } else {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
     if !dry_run
         && let Some(root) = root()
@@ -989,13 +1101,26 @@ pub fn pipeline_name(origin: &str) -> String {
 }
 
 pub fn review_of(origin: &str, entries: &[crate::core::pipeline_catalog::Entry]) -> Review {
-    let Some(installed) = crate::core::pipeline_remote::install_origin(&pipeline_name(origin))
-    else {
+    let name = pipeline_name(origin);
+    let Some(installed) = crate::core::pipeline_remote::install_origin(&name) else {
         return Review::Unreviewed;
     };
-    let Some(sha) = installed.sha else {
+    let (Some(sha), Some(content)) = (installed.sha, installed.content) else {
         return Review::Unreviewed;
     };
+    let path = if Path::new(origin).is_file() {
+        PathBuf::from(origin)
+    } else {
+        match crate::core::pipeline_config::user_pipelines_dir() {
+            Some(dir) => dir.join(format!("{name}.toml")),
+            None => return Review::Unreviewed,
+        }
+    };
+    let unchanged = std::fs::read_to_string(&path)
+        .is_ok_and(|text| crate::core::pipeline_remote::content_digest(&text) == content);
+    if !unchanged {
+        return Review::Unreviewed;
+    }
     let reviewed = entries.iter().any(|entry| {
         entry.canonical() == installed.source && entry.sha.as_deref() == Some(sha.as_str())
     });
@@ -1065,6 +1190,17 @@ pub fn recipe_lines(name: &str, def: &DependencyDef) -> Vec<String> {
         run.join(" "),
         clean(def.listen.as_deref().unwrap_or_default())
     ));
+    if !def.env.is_empty() {
+        let vars: Vec<String> = def
+            .env
+            .iter()
+            .map(|(key, value)| format!("{}={}", clean(key), clean(value)))
+            .collect();
+        out.push(format!(
+            "  env (only while it runs, never while installing): {}",
+            vars.join(", ")
+        ));
+    }
     if let Some(needs) = &def.needs {
         out.push(format!("  needs: {} (as its author says)", clean(needs)));
     }
@@ -1074,33 +1210,45 @@ pub fn recipe_lines(name: &str, def: &DependencyDef) -> Vec<String> {
     out
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Offered {
+    Ready,
+    Installed,
+    Declined,
+    Failed(String),
+    Unavailable(String),
+}
+
 pub fn offer(
     pipeline: &str,
     name: &str,
     def: &DependencyDef,
     review: &Review,
     mode: Mode,
-) -> Result<()> {
+    refusal: &str,
+) -> Result<Offered> {
     if let Err(reason) = installable(def) {
-        println!(
-            "  {name}: {pipeline} needs it, but rtk cannot install it on this computer ({reason}); {pipeline} runs without the rules that need it."
-        );
-        return Ok(());
+        return Ok(Offered::Unavailable(format!(
+            "rtk cannot install it on this computer ({reason})"
+        )));
     }
     let current = state(name, def);
-    if current == State::Installed {
-        return Ok(());
+    if current == State::Installed || (current == State::Missing && listen_answers(def)) {
+        return Ok(Offered::Ready);
     }
-    let what = if current == State::Outdated {
-        format!("{pipeline} declares a different {name} than the one installed")
-    } else {
-        format!("{pipeline} needs {name}, which is not installed")
-    };
-    if mode == Mode::NoTerminal {
-        println!(
-            "  {what}: {pipeline} runs without the rules that need it. To install it, run `rtk init -g` in a terminal."
-        );
-        return Ok(());
+    let auto = mode == Mode::Auto && matches!(review, Review::Reviewed(_));
+    if mode == Mode::NoTerminal || (mode == Mode::Auto && !auto) {
+        let why = if mode == Mode::Auto {
+            "rtk-ai has not reviewed this pipeline, so rtk installs it only after a yes in a terminal"
+        } else {
+            "rtk installs it only after a yes in a terminal"
+        };
+        let what = if current == State::Outdated {
+            format!("the installed copy differs from the one {pipeline} declares; {why}")
+        } else {
+            format!("not installed; {why}")
+        };
+        return Ok(Offered::Unavailable(what));
     }
     println!();
     let mut lines = recipe_lines(name, def);
@@ -1121,31 +1269,40 @@ pub fn offer(
             format!("{pipeline} needs a local service (not reviewed by rtk-ai)")
         }
     };
+    if auto {
+        lines.push(String::new());
+        lines.push(
+            "Installing it without a question: you named this reviewed pipeline with --pipeline, and no terminal is here to answer. `rtk init -g --uninstall` stops and removes it."
+                .to_string(),
+        );
+    }
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
     crate::core::pipeline_cmd::warning_panel(&title, &refs);
-    let accepted = crate::core::ask::confirm(
-        &format!("  Install {name}?"),
-        "install it and start it in the background",
-        &format!("{pipeline} runs without the rules that need it; `rtk init -g` asks again"),
-    )?;
-    if !accepted {
-        println!(
-            "  {name} not installed: {pipeline} runs without the rules that need it. `rtk init -g` asks again."
-        );
-        return Ok(());
+    if !auto {
+        let accepted = crate::core::ask::confirm(
+            &format!("  Install {name}?"),
+            "install it and start it in the background",
+            refusal,
+        )?;
+        if !accepted {
+            return Ok(Offered::Declined);
+        }
     }
     println!("  Installing {name}…");
     if let Err(e) = install(name, def) {
-        eprintln!("  [warn] {name} was not installed: {e:#}");
-        return Ok(());
+        return Ok(Offered::Failed(format!("the install failed: {e:#}")));
     }
     match start(name) {
-        Ok(_) => println!(
-            "  {name}: starting in the background; `rtk pipeline status` shows when it is ready. Until then, {pipeline} runs without the rules that need it. If it stops, rtk starts it again when a tool call needs it."
-        ),
-        Err(e) => eprintln!("  [warn] {name} was installed but did not start: {e:#}"),
+        Ok(_) => {
+            println!(
+                "  {name}: starting in the background; `rtk pipeline status` shows when it is ready. Until then, tool calls run without the rules that need it. If it stops, rtk starts it again when a tool call needs it."
+            );
+            Ok(Offered::Installed)
+        }
+        Err(e) => Ok(Offered::Failed(format!(
+            "it was installed but did not start: {e:#}"
+        ))),
     }
-    Ok(())
 }
 
 pub fn find_node(min_major: u32) -> Option<(PathBuf, String)> {
@@ -1241,7 +1398,8 @@ fn major(version: &str) -> u32 {
 }
 
 fn tool_version(tool: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new(tool)
+    let out = command_for(tool)
+        .ok()?
         .args(args)
         .stdin(Stdio::null())
         .output()
@@ -1272,8 +1430,22 @@ fn open_log(dir: &Path) -> Result<std::fs::File> {
 }
 
 #[cfg(test)]
+static TEST_ROOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn test_root_lock() -> std::sync::MutexGuard<'static, ()> {
+    TEST_ROOT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    fn root_lock() -> std::sync::MutexGuard<'static, ()> {
+        test_root_lock()
+    }
 
     const INTEGRITY: &str = "sha512-C7eBcUUj/S4Mn2ccQoqflZghEi9OPu6RBUbSjcbnuPbQQAWTVFGxDRoLyyP59hm2t4oF8JbE+dP0IaUE58XsJQ==";
 
@@ -1302,6 +1474,7 @@ mod tests {
 
     #[test]
     fn base64_matches_the_npm_integrity_encoding() {
+        let _guard = root_lock();
         assert_eq!(base64(b""), "");
         assert_eq!(base64(b"f"), "Zg==");
         assert_eq!(base64(b"fo"), "Zm8=");
@@ -1315,6 +1488,7 @@ mod tests {
 
     #[test]
     fn the_accepted_recipe_is_what_gets_started() {
+        let _guard = root_lock();
         let def = recipe("roundtrip", "server.mjs");
         let stored = recipe_from_json(&recipe_json(&def)).expect("stored recipe");
         assert_eq!(stored, def);
@@ -1327,6 +1501,7 @@ mod tests {
 
     #[test]
     fn state_follows_the_recorded_install() {
+        let _guard = root_lock();
         let def = recipe("state-probe", "server.mjs");
         assert_eq!(state("state-probe", &def), State::Missing);
         let dir = record("state-probe", &def);
@@ -1341,6 +1516,7 @@ mod tests {
 
     #[test]
     fn only_a_dependency_directory_is_ever_removed() {
+        let _guard = root_lock();
         let root = root().expect("root");
         std::fs::create_dir_all(&root).expect("mkdir");
         assert!(remove_inside_root(&root).is_err());
@@ -1353,6 +1529,7 @@ mod tests {
 
     #[test]
     fn a_failed_install_leaves_nothing_and_uninstall_clears_leftovers() {
+        let _guard = root_lock();
         let text = "[dependency.bad]\nrun = [\"x\"]\nlisten = \"127.0.0.1:41896\"\n[dependency.bad.binary.macos-arm64]\nurl = \"https://127.0.0.1:1/x\"\nsha256 = \"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\"\n[dependency.bad.binary.macos-x64]\nurl = \"https://127.0.0.1:1/x\"\nsha256 = \"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\"\n[dependency.bad.binary.linux-x64]\nurl = \"https://127.0.0.1:1/x\"\nsha256 = \"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\"\n[dependency.bad.binary.linux-arm64]\nurl = \"https://127.0.0.1:1/x\"\nsha256 = \"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\"\n[dependency.bad.binary.windows-x64]\nurl = \"https://127.0.0.1:1/x\"\nsha256 = \"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\"\n";
         let def = rtk_engine::pipeline::parse(text, "t.toml")
             .file
@@ -1372,23 +1549,163 @@ mod tests {
         assert!(!leftover.exists());
     }
 
+    fn unreachable_binary(name: &str, listen: &str, run: &str) -> DependencyDef {
+        let text = format!(
+            "[dependency.{name}]\nrun = [{run}]\nlisten = \"{listen}\"\n[dependency.{name}.binary.{}]\nurl = \"https://127.0.0.1:1/x\"\nsha256 = \"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\"\n",
+            platform()
+        );
+        let mut def = rtk_engine::pipeline::parse(&text, "t.toml")
+            .file
+            .expect("parses")
+            .dependencies[name]
+            .clone();
+        def.line = None;
+        def
+    }
+
+    #[test]
+    fn a_failed_reinstall_puts_the_previous_copy_back() {
+        let _guard = root_lock();
+        let old = recipe("keep-old", "server.mjs");
+        let installed_dir = record("keep-old", &old);
+        std::fs::write(installed_dir.join("server.mjs"), "old").expect("write");
+        let newer = unreachable_binary("keep-old", "127.0.0.1:41897", "\"x\"");
+        let error = install("keep-old", &newer).expect_err("the download cannot succeed");
+        assert!(format!("{error:#}").contains("was put back"), "{error:#}");
+        assert_eq!(state("keep-old", &old), State::Installed);
+        assert_eq!(
+            std::fs::read_to_string(installed_dir.join("server.mjs")).expect("read"),
+            "old"
+        );
+        let root = root().expect("root");
+        assert!(!root.join(".previous-keep-old").exists());
+        remove_inside_root(&installed_dir).expect("cleanup");
+        let _ = std::fs::remove_file(root.join(".failed-keep-old.log"));
+    }
+
+    #[test]
+    fn a_service_already_answering_counts_as_ready() {
+        let _guard = root_lock();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let mut def = recipe("answered", "server.mjs");
+        def.listen = Some(listener.local_addr().expect("addr").to_string());
+        let offered = offer(
+            "p",
+            "answered",
+            &def,
+            &Review::Unreviewed,
+            Mode::NoTerminal,
+            "",
+        )
+        .expect("offer");
+        assert_eq!(offered, Offered::Ready);
+        assert!(!dir("answered").expect("dir").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_leaves_alone_a_process_that_is_not_the_service() {
+        let _guard = root_lock();
+        let def = recipe("not-ours", "server.mjs");
+        let installed_dir = record("not-ours", &def);
+        std::fs::write(installed_dir.join(PID), format!("{}\n", std::process::id())).expect("pid");
+        assert!(!stop("not-ours").expect("stop"));
+        assert!(!installed_dir.join(PID).exists());
+        remove_inside_root(&installed_dir).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_service_still_binding_is_starting_and_stop_ends_its_process_group() {
+        let _guard = root_lock();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind")
+            .local_addr()
+            .expect("addr")
+            .port();
+        let def = unreachable_binary("sleeper", &format!("127.0.0.1:{port}"), "\"sleep\", \"30\"");
+        let installed_dir = record("sleeper", &def);
+        let mut command = crate::core::utils::resolved_command("sleep");
+        command.arg("30");
+        detach(&mut command);
+        let mut child = command.spawn().expect("spawn sleep");
+        let pid = child.id();
+        std::fs::write(installed_dir.join(PID), format!("{pid}\n")).expect("pid");
+        assert_eq!(health_of(&installed_dir, &def), Health::Starting(None));
+        assert!(stop("sleeper").expect("stop"));
+        assert!(!runs(pid, &def));
+        let _ = child.wait();
+        remove_inside_root(&installed_dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_stamp_dated_in_the_future_does_not_block_starts() {
+        let _guard = root_lock();
+        let stamped = dir("future-stamp").expect("dir");
+        std::fs::create_dir_all(&stamped).expect("mkdir");
+        let file = std::fs::File::create(stamped.join(STAMP)).expect("stamp");
+        file.set_modified(std::time::SystemTime::now() + Duration::from_secs(3600))
+            .expect("set mtime");
+        drop(file);
+        assert!(!recently_claimed(&stamped));
+        assert!(claim_start(&stamped));
+        assert!(recently_claimed(&stamped));
+        remove_inside_root(&stamped).expect("cleanup");
+    }
+
+    #[test]
+    fn the_consent_panel_shows_the_service_environment() {
+        let _guard = root_lock();
+        let def = recipe("env-shown", "server.mjs");
+        assert!(
+            recipe_lines("env-shown", &def)
+                .iter()
+                .any(|l| l.contains("PORT=41899") && l.contains("only while it runs"))
+        );
+    }
+
     #[test]
     fn without_a_terminal_nothing_is_installed() {
+        let _guard = root_lock();
         let def = recipe("no-terminal", "server.mjs");
-        offer(
+        let offered = offer(
             "p",
             "no-terminal",
             &def,
             &Review::Unreviewed,
             Mode::NoTerminal,
+            "",
         )
         .expect("offer");
+        assert!(matches!(offered, Offered::Unavailable(_)), "{offered:?}");
         assert_eq!(state("no-terminal", &def), State::Missing);
         assert!(!dir("no-terminal").expect("dir").exists());
     }
 
     #[test]
+    fn named_without_a_terminal_an_unreviewed_pipeline_installs_nothing() {
+        let _guard = root_lock();
+        let def = recipe("auto-unreviewed", "server.mjs");
+        let offered = offer(
+            "p",
+            "auto-unreviewed",
+            &def,
+            &Review::Unreviewed,
+            Mode::Auto,
+            "",
+        )
+        .expect("offer");
+        assert!(
+            matches!(&offered, Offered::Unavailable(reason) if reason.contains("has not reviewed")),
+            "{offered:?}"
+        );
+        assert_eq!(state("auto-unreviewed", &def), State::Missing);
+        assert!(!dir("auto-unreviewed").expect("dir").exists());
+    }
+
+    #[test]
     fn a_recipe_this_computer_cannot_use_is_reported_not_installed() {
+        let _guard = root_lock();
         let text = "[dependency.bin]\nrun = [\"x\"]\nlisten = \"127.0.0.1:41898\"\n[dependency.bin.binary.plan9-mips]\nurl = \"https://example.com/x\"\nsha256 = \"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\"\n";
         let def = rtk_engine::pipeline::parse(text, "t.toml")
             .file
@@ -1404,6 +1721,7 @@ mod tests {
 
     #[test]
     fn only_a_linked_installed_dependency_is_woken() {
+        let _guard = root_lock();
         let hosted = UpstreamDef {
             provider: "jev".to_string(),
             base_url: Some("https://api.example.com/v1/systemone".to_string()),
@@ -1421,6 +1739,7 @@ mod tests {
 
     #[test]
     fn a_start_is_tried_once_then_waits() {
+        let _guard = root_lock();
         let tmp = tempfile::tempdir().expect("tempdir");
         assert!(claim_start(tmp.path()));
         assert!(!claim_start(tmp.path()));
@@ -1445,6 +1764,7 @@ mod tests {
 
     #[test]
     fn health_answers_and_addresses_parse() {
+        let _guard = root_lock();
         assert_eq!(
             parse_response("HTTP/1.1 503 Service Unavailable\r\n\r\ndownloading model.onnx 42%"),
             Some((503, "downloading model.onnx 42%".to_string()))
@@ -1466,11 +1786,19 @@ mod tests {
 
     #[test]
     fn a_catalog_pin_is_reviewed_any_other_is_not() {
+        let _guard = root_lock();
         let sha = "26b8683d0eeffde220a8d25a60b9654f752c7eb4";
+        let reviewed = "schema_version = 1\n[pipeline]\nname = \"review-probe\"\n";
+        let dir = crate::core::pipeline_config::user_pipelines_dir().expect("pipelines dir");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let file = dir.join("review-probe.toml");
+        std::fs::write(&file, reviewed).expect("write");
+        let origin = file.display().to_string();
         crate::core::pipeline_remote::record_install(
             "review-probe",
             "github:acme/rtk-pipeline-probe",
             Some(sha),
+            reviewed,
         );
         let entry = |sha: &str| crate::core::pipeline_catalog::Entry {
             id: "acme/rtk-pipeline-probe".to_string(),
@@ -1482,12 +1810,16 @@ mod tests {
             install: format!("rtk pipeline add github:acme/rtk-pipeline-probe@{sha}"),
         };
         assert_eq!(
-            review_of("/x/review-probe.toml", &[entry(sha)]),
+            review_of(&origin, &[entry(sha)]),
+            Review::Reviewed(sha.to_string())
+        );
+        assert_eq!(
+            review_of("review-probe", &[entry(sha)]),
             Review::Reviewed(sha.to_string())
         );
         assert_eq!(
             review_of(
-                "/x/review-probe.toml",
+                &origin,
                 &[entry("0000000000000000000000000000000000000000")]
             ),
             Review::Unreviewed
@@ -1496,5 +1828,10 @@ mod tests {
             review_of("/x/never-added.toml", &[entry(sha)]),
             Review::Unreviewed
         );
+        std::fs::write(&file, format!("{reviewed}# edited\n")).expect("edit");
+        assert_eq!(review_of(&origin, &[entry(sha)]), Review::Unreviewed);
+        std::fs::write(&file, reviewed).expect("restore");
+        crate::core::pipeline_remote::forget_install("review-probe");
+        assert_eq!(review_of(&origin, &[entry(sha)]), Review::Unreviewed);
     }
 }

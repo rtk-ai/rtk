@@ -140,6 +140,7 @@ fn http_get(url: &str) -> Result<String> {
 pub struct InstallOrigin {
     pub source: String,
     pub sha: Option<String>,
+    pub content: Option<String>,
 }
 
 fn read_ledger() -> toml::Table {
@@ -169,11 +170,23 @@ fn ledger_upsert(table: &mut toml::Table, name: &str, updates: &[(&str, String)]
 /// fork offer, and the card's publish CTA), so a failed write warns and
 /// never blocks anything.
 fn ledger_write(name: &str, updates: &[(&str, String)]) {
+    ledger_edit(name, updates, &[]);
+}
+
+fn ledger_edit(name: &str, updates: &[(&str, String)], removals: &[&str]) {
     let Some(path) = pipeline_config::installs_ledger_path() else {
         return;
     };
     let mut table = read_ledger();
     ledger_upsert(&mut table, name, updates);
+    if let Some(entry) = table.get_mut(name).and_then(|e| e.as_table_mut()) {
+        for key in removals {
+            entry.remove(*key);
+        }
+        if entry.is_empty() {
+            table.remove(name);
+        }
+    }
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -182,15 +195,32 @@ fn ledger_write(name: &str, updates: &[(&str, String)]) {
     }
 }
 
-pub fn record_install(name: &str, source: &str, sha: Option<&str>) {
+pub fn record_install(name: &str, source: &str, sha: Option<&str>, toml: &str) {
     let mut updates = vec![
         ("source", source.to_string()),
         ("date", chrono::Local::now().format("%Y-%m-%d").to_string()),
+        ("content", content_digest(toml)),
     ];
-    if let Some(sha) = sha {
-        updates.push(("sha", sha.to_string()));
-    }
-    ledger_write(name, &updates);
+    let removals: &[&str] = match sha {
+        Some(sha) => {
+            updates.push(("sha", sha.to_string()));
+            &[]
+        }
+        None => &["sha"],
+    };
+    ledger_edit(name, &updates, removals);
+}
+
+pub fn forget_install(name: &str) {
+    ledger_edit(name, &[], &["source", "sha", "content", "date"]);
+}
+
+pub fn content_digest(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Where this pipeline was published, as the install source others run
@@ -215,6 +245,10 @@ pub fn install_origin(name: &str) -> Option<InstallOrigin> {
         source: entry.get("source")?.as_str()?.to_string(),
         sha: entry
             .get("sha")
+            .and_then(|s| s.as_str())
+            .map(str::to_string),
+        content: entry
+            .get("content")
             .and_then(|s| s.as_str())
             .map(str::to_string),
     })

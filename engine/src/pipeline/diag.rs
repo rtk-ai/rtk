@@ -50,6 +50,7 @@ pub enum Code {
     W025,
     W026,
     W027,
+    W028,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +112,7 @@ impl Code {
             Code::W025 => "W025",
             Code::W026 => "W026",
             Code::W027 => "W027",
+            Code::W028 => "W028",
         }
     }
 

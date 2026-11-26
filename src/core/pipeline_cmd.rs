@@ -651,17 +651,60 @@ pub(crate) fn publish_gist(
     Ok(0)
 }
 
+pub(crate) enum Added {
+    Live,
+    Declined,
+    Unmet,
+    Code(i32),
+}
+
 pub fn run_add(
     source: &str,
     name_override: Option<&str>,
     force: bool,
     shadow: bool,
 ) -> Result<i32> {
-    add_pipeline(source, name_override, force, shadow, false)
+    use crate::core::pipeline_needs::Consent;
+    let consent = if crate::core::ask::interactive() && !crate::core::ask::in_ci() {
+        Consent::Ask
+    } else {
+        Consent::NoTerminal
+    };
+    let rerun = format!(
+        "rtk pipeline add {}",
+        crate::core::utils::sanitize_for_terminal(source)
+    );
+    let added = add_pipeline(
+        source,
+        name_override,
+        force,
+        shadow,
+        false,
+        (consent, None),
+        &rerun,
+    )?;
+    Ok(match added {
+        Added::Live | Added::Declined => 0,
+        Added::Unmet => 1,
+        Added::Code(code) => code,
+    })
 }
 
-pub fn install_from_init(source: &str) -> Result<i32> {
-    add_pipeline(source, None, true, false, true)
+pub(crate) fn install_from_init(
+    source: &str,
+    consent: crate::core::pipeline_needs::Consent,
+    review: crate::core::deps::Review,
+    rerun: &str,
+) -> Result<Added> {
+    add_pipeline(
+        source,
+        None,
+        true,
+        false,
+        true,
+        (consent, Some(review)),
+        rerun,
+    )
 }
 
 fn add_pipeline(
@@ -670,7 +713,12 @@ fn add_pipeline(
     force: bool,
     shadow: bool,
     from_init: bool,
-) -> Result<i32> {
+    (consent, review): (
+        crate::core::pipeline_needs::Consent,
+        Option<crate::core::deps::Review>,
+    ),
+    rerun: &str,
+) -> Result<Added> {
     let (raw, pin) = match crate::core::pipeline_remote::parse_github_source(source) {
         Some(src) => {
             let fetched = crate::core::pipeline_remote::fetch_github_pipeline(&src)?;
@@ -723,7 +771,7 @@ fn add_pipeline(
         );
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
         warning_panel_err("Refused: api_key_command", &refs);
-        return Ok(1);
+        return Ok(Added::Code(1));
     }
     let loaded = pipeline_config::load_candidate(&toml, &name);
     print_diagnostics(&loaded);
@@ -746,7 +794,7 @@ fn add_pipeline(
             );
         }
         eprintln!("not installed — fix the errors above");
-        return Ok(1);
+        return Ok(Added::Code(1));
     }
 
     println!();
@@ -823,9 +871,9 @@ fn add_pipeline(
         if *old == toml {
             println!("`{name}` is already installed and identical — nothing to change");
             if let Some((src, sha)) = &pin {
-                crate::core::pipeline_remote::record_install(&name, src, sha.as_deref());
+                crate::core::pipeline_remote::record_install(&name, src, sha.as_deref(), &toml);
             }
-            return Ok(0);
+            return Ok(Added::Live);
         }
         let mut lines = vec![format!(
             "`{name}` is already installed — what you install REPLACES the live version."
@@ -859,7 +907,7 @@ fn add_pipeline(
     match choose_install_mode(existing.is_some(), force, shadow)? {
         InstallMode::Quit => {
             println!("nothing installed");
-            return Ok(1);
+            return Ok(Added::Code(1));
         }
         InstallMode::Shadow => {
             let sdir = pipeline_config::shadow_pipelines_dir().context("no config directory")?;
@@ -868,7 +916,7 @@ fn add_pipeline(
             std::fs::write(&sdest, &toml).with_context(|| format!("write {}", sdest.display()))?;
             pipeline_config::set_eval_candidate(Some(&name)).context("write eval state")?;
             if let Some((src, sha)) = &pin {
-                crate::core::pipeline_remote::record_install(&name, src, sha.as_deref());
+                crate::core::pipeline_remote::record_install(&name, src, sha.as_deref(), &toml);
             }
             println!("trying `{name}` silently — measured on your sessions, applied to nothing.");
             if existing.is_some() {
@@ -877,46 +925,70 @@ fn add_pipeline(
             println!("  measure:   rtk pipeline eval {name}      (after a few sessions)");
             println!("  go live:   rtk pipeline promote {name}");
             println!("  discard:   rtk pipeline promote {name} --discard");
-            return Ok(0);
+            return Ok(Added::Code(0));
         }
         InstallMode::Live => {}
     }
+    let needs = crate::core::pipeline_needs::of(&loaded.resolved, &name);
+    if !needs.is_empty() {
+        let review = match review {
+            Some(review) => review,
+            None if consent == crate::core::pipeline_needs::Consent::NoTerminal => {
+                crate::core::deps::Review::Unreviewed
+            }
+            None => catalog_review(pin.as_ref()),
+        };
+        let refusal = if existing.is_some() {
+            format!("{name} is not updated; the installed version stays")
+        } else {
+            format!("{name} is not installed")
+        };
+        let settled =
+            crate::core::pipeline_needs::settle(&needs, &name, &review, consent, &refusal)?;
+        if settled != crate::core::pipeline_needs::Settled::Met {
+            let (outcome, running) = if existing.is_some() {
+                (
+                    "is not updated",
+                    crate::core::pipeline_needs::running_now(""),
+                )
+            } else {
+                (
+                    "is not installed",
+                    crate::core::pipeline_needs::running_now(&name),
+                )
+            };
+            crate::core::pipeline_needs::alert(&name, &settled, outcome, &running, rerun);
+            return Ok(if settled.exit_code() == 0 {
+                Added::Declined
+            } else {
+                Added::Unmet
+            });
+        }
+    }
+    if from_init && let Some(old) = &existing {
+        let untouched = crate::core::pipeline_remote::install_origin(&name)
+            .and_then(|o| o.content)
+            .is_some_and(|c| c == crate::core::pipeline_remote::content_digest(old));
+        if !untouched {
+            let backup = pipeline_config::backup_path(&dir, &name);
+            std::fs::rename(&dest, &backup)
+                .with_context(|| format!("move {} to {}", dest.display(), backup.display()))?;
+            println!(
+                "your previous {name}.toml differs from what rtk installed; it is kept as {}",
+                backup.display()
+            );
+        }
+    }
     std::fs::write(&dest, &toml).with_context(|| format!("write {}", dest.display()))?;
-    if let Some((src, sha)) = &pin {
-        crate::core::pipeline_remote::record_install(&name, src, sha.as_deref());
+    match &pin {
+        Some((src, sha)) => {
+            crate::core::pipeline_remote::record_install(&name, src, sha.as_deref(), &toml)
+        }
+        None => crate::core::pipeline_remote::forget_install(&name),
     }
 
     println!("installed: {}", dest.display());
     print_auth_guidance(&loaded.resolved);
-    if !from_init && !loaded.resolved.dependencies.is_empty() {
-        use crate::core::deps::{self, Mode};
-        let pinned = pin.as_ref().is_some_and(|(_, sha)| sha.is_some());
-        let entries = if pinned {
-            crate::core::pipeline_catalog::load().entries
-        } else {
-            Vec::new()
-        };
-        let mode = if crate::core::ask::interactive() && !crate::core::ask::in_ci() {
-            Mode::Ask
-        } else {
-            Mode::NoTerminal
-        };
-        let review = deps::review_of(&name, &entries);
-        for (dependency, (def, _)) in &loaded.resolved.dependencies {
-            deps::offer(&name, dependency, def, &review, mode)?;
-        }
-    }
-    let wants_proxy = loaded.resolved.extends.iter().any(|e| e == "rtk:proxy")
-        || loaded
-            .resolved
-            .rules
-            .iter()
-            .filter(|(p, _)| p.site == rtk_engine::pipeline::SiteKind::Proxy)
-            .flat_map(|(_, rules)| rules)
-            .any(|r| !BUILTIN_NAMES.contains(&r.origin.as_str()));
-    if wants_proxy {
-        println!("this pipeline has proxy rules — start the daemon: rtk llm-proxy start");
-    }
     let has_after_tool = loaded
         .resolved
         .rules
@@ -934,7 +1006,23 @@ fn add_pipeline(
         );
     }
     println!("active now, merged with your other pipelines — see `rtk pipeline show`");
-    Ok(0)
+    Ok(Added::Live)
+}
+
+fn catalog_review(pin: Option<&(String, Option<String>)>) -> crate::core::deps::Review {
+    use crate::core::deps::Review;
+    let Some((source, Some(sha))) = pin else {
+        return Review::Unreviewed;
+    };
+    let reviewed = crate::core::pipeline_catalog::load()
+        .entries
+        .iter()
+        .any(|entry| entry.canonical() == *source && entry.sha.as_deref() == Some(sha.as_str()));
+    if reviewed {
+        Review::Reviewed(sha.clone())
+    } else {
+        Review::Unreviewed
+    }
 }
 
 enum InstallMode {

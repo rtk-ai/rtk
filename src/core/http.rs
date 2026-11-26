@@ -77,7 +77,7 @@ pub fn get_within(
     timeout: Duration,
 ) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
     use anyhow::Context;
-    // nosemgrep: ureq-outside-telemetry -- inbound GET of the reviewed-pipeline catalog, only during an interactive rtk init or --pipeline
+    // nosemgrep: ureq-outside-telemetry -- inbound GET of the reviewed-pipeline catalog, during rtk init and a terminal rtk pipeline add
     let request = ureq::get(url);
     global_timeout(request, timeout)
         .call()

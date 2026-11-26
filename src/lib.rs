@@ -542,7 +542,7 @@ enum Commands {
         #[arg(long = "dry-run", conflicts_with = "show")]
         dry_run: bool,
 
-        /// Use a reviewed pipeline from rtk-ai.app/pipelines by name (e.g. laya-delegate), installed pinned to its reviewed commit
+        /// Use a reviewed pipeline from rtk-ai.app/pipelines by name, installed pinned to its reviewed commit, for your user account (every project, with or without -g)
         #[arg(long, value_name = "NAME", conflicts_with_all = ["show", "uninstall"])]
         pipeline: Option<String>,
     },
@@ -3081,9 +3081,13 @@ fn run_cli() -> Result<i32> {
                     hooks::init::print_default_agent_hint(global);
                 }
                 #[cfg(feature = "engine")]
-                if pipeline.is_some() {
-                    hooks::init::pipeline_step(pipeline.as_deref(), patch_mode, ctx)?;
-                }
+                let pipeline_code = if pipeline.is_some() {
+                    hooks::init::pipeline_step_or_warn(pipeline.as_deref(), patch_mode, ctx)
+                } else {
+                    0
+                };
+                #[cfg(not(feature = "engine"))]
+                let pipeline_code = 0;
                 #[cfg(not(feature = "engine"))]
                 if pipeline.is_some() {
                     anyhow::bail!("--pipeline needs the full edition of rtk");
@@ -3147,6 +3151,9 @@ fn run_cli() -> Result<i32> {
                         ctx,
                     )?;
                     hooks::init::finalize_filter_trust(global, dry_run, filter_trust)?;
+                }
+                if pipeline_code != 0 {
+                    return Ok(pipeline_code);
                 }
             }
             0

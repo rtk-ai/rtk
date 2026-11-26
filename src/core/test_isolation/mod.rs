@@ -455,6 +455,7 @@ fn call_text<'a>(code: &'a str, head: regex::Match<'_>) -> (&'a str, &'a str) {
 /// The environment reads that stay direct, as written, each with its reason.
 /// Each covers one read: a second identical call in the same file is refused.
 const DIRECT_READS: [(&str, &str); 11] = [
+    ("src/core/deps.rs", r#"var_os("PATH")"#),
     // Builds the `PATH` a Windows test hands a child, extending the one it runs
     // under so the child still finds its tools.
     ("src/core/utils.rs", r#"var_os("PATH")"#),
@@ -481,10 +482,6 @@ const DIRECT_READS: [(&str, &str); 11] = [
     ("src/core/pipeline_cmd.rs", "var(&env)"),
     ("src/core/task_cmd.rs", "var(var)"),
     ("src/llm_proxy.rs", "var(agent.base_url_var)"),
-    // Puts the tools rtk found (the user's Node.js, a dependency's own
-    // environment) in front of the `PATH` an installer or a pipeline
-    // dependency runs with; the rest stays what the user's shell had.
-    ("src/core/deps.rs", r#"var_os("PATH")"#),
 ];
 
 /// The environment variable an accessor call names: a literal names itself, a

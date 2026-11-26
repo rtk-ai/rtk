@@ -9,7 +9,7 @@ use rtk_engine::pipeline::{
     Code, Diagnostic, Resolved, ResolvedDirective, Scope, Severity, SourceFile, ValidateCtx,
     has_errors, parse, resolve, validate,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const PIPELINES_DIR: &str = "pipelines";
 
@@ -94,6 +94,17 @@ pub fn is_reserved_command_name(name: &str) -> bool {
         || crate::llm_proxy::resolve_agent(name).is_some()
         || crate::core::toml_filter::command_matches_filter(name)
         || crate::core::toml_filter::is_filtered_command_word(name)
+}
+
+pub fn backup_path(dir: &Path, name: &str) -> PathBuf {
+    let first = dir.join(format!("{name}.toml.bak"));
+    if !first.exists() {
+        return first;
+    }
+    (2..)
+        .map(|n| dir.join(format!("{name}.toml.bak{n}")))
+        .find(|p| !p.exists())
+        .unwrap_or(first)
 }
 
 pub fn user_pipeline_path() -> Option<PathBuf> {
@@ -966,7 +977,9 @@ pub fn trust_summary(content: &str) -> Result<Vec<String>, String> {
         lines.push(line);
     }
     for (name, dependency) in &file.dependencies {
-        let mut line = format!("dependency `{name}` — installed only if you say yes when rtk asks");
+        let mut line = format!(
+            "dependency `{name}` — installed only after a yes in a terminal, or when you name a reviewed pipeline with `rtk init -g --pipeline`"
+        );
         for detail in crate::core::deps::recipe_lines(name, dependency)
             .into_iter()
             .skip(1)

@@ -2009,6 +2009,8 @@ mod tests {
 
     #[test]
     fn test_global_uninstall_removes_artifacts() {
+        #[cfg(feature = "engine")]
+        let _deps = crate::core::deps::test_root_lock();
         let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
@@ -2161,6 +2163,8 @@ mod tests {
 
     #[test]
     fn test_uninstall_dry_run_preserves_artifacts() {
+        #[cfg(feature = "engine")]
+        let _deps = crate::core::deps::test_root_lock();
         let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             // Stage a real install first

@@ -1275,14 +1275,24 @@ fn exact_npm_spec(spec: &str) -> bool {
     let Some((name, version)) = spec.rsplit_once('@') else {
         return false;
     };
-    let name_ok = !name.is_empty()
-        && name.chars().all(|c| {
-            c.is_ascii_lowercase()
-                || c.is_ascii_digit()
-                || matches!(c, '-' | '.' | '_' | '~' | '/' | '@')
-        })
-        && (!name.starts_with('@') || name.matches('/').count() == 1);
-    name_ok && exact_semver(version)
+    npm_package_name(name) && exact_semver(version)
+}
+
+fn npm_package_name(name: &str) -> bool {
+    let part = |p: &str| {
+        !p.is_empty()
+            && !p.starts_with(['.', '_'])
+            && p.chars().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.' | '_' | '~')
+            })
+    };
+    name.len() <= 214
+        && match name.strip_prefix('@') {
+            Some(scoped) => scoped
+                .split_once('/')
+                .is_some_and(|(scope, package)| part(scope) && part(package)),
+            None => part(name),
+        }
 }
 
 fn exact_semver(version: &str) -> bool {
@@ -1652,6 +1662,30 @@ mod dependency_tests {
         assert_eq!(dep.env["JUDGE_PORT"], "41800");
         assert!(dep.files["server.mjs"].contains("console.log"));
         assert!(dep.unknown.is_empty());
+    }
+
+    #[test]
+    fn an_npm_spec_must_name_a_registry_package() {
+        for bad in [
+            "../x@1.0.0",
+            "./x@1.0.0",
+            "owner/repo@1.0.0",
+            ".hidden@1.0.0",
+            "_private@1.0.0",
+            "@scope@1.0.0",
+            "@scope/@x@1.0.0",
+            "Upper@1.0.0",
+            "git+https@1.0.0",
+        ] {
+            assert!(!exact_npm_spec(bad), "{bad}");
+        }
+        for good in [
+            "laya@0.2.0",
+            "@receptron/laya@0.2.0",
+            "a.b-c_d~e@1.2.3-rc.1",
+        ] {
+            assert!(exact_npm_spec(good), "{good}");
+        }
     }
 
     #[test]

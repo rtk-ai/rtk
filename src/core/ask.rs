@@ -23,8 +23,11 @@ pub(crate) fn interactive() -> bool {
 
 pub(crate) fn in_ci() -> bool {
     use crate::core::user_env;
-    user_env::var("CI").is_some()
-        || user_env::var("GITHUB_ACTIONS").is_some()
+    let ci = user_env::var("CI").is_some_and(|v| {
+        let v = v.trim();
+        !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+    });
+    ci || user_env::var("GITHUB_ACTIONS").is_some()
         || user_env::var("GITLAB_CI").is_some()
         || user_env::var("JENKINS_URL").is_some()
         || user_env::var("BUILDKITE").is_some()

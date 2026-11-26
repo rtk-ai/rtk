@@ -30,6 +30,8 @@ pub mod pipeline_config;
 #[cfg(feature = "engine")]
 pub mod pipeline_log;
 #[cfg(feature = "engine")]
+pub mod pipeline_needs;
+#[cfg(feature = "engine")]
 pub mod pipeline_remote;
 #[cfg(feature = "engine")]
 pub mod plugins_cmd;
