@@ -28,7 +28,7 @@ use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
     ast_grep_cmd, ctest_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls,
-    nix_cmd, pipe_cmd, read, search, summary, tree, wc_cmd,
+    nix_cmd, pipe_cmd, read, search, summary, tree, wc_cmd, mount_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -551,6 +551,24 @@ enum Commands {
         #[arg(short = 'O', long = "output-document", allow_hyphen_values = true)]
         output: Option<String>,
         /// Additional wget arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Compact mounted-filesystem listing (native mount)
+    Mount {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Unmount a filesystem (native umount)
+    Umount {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Disk utility commands (native udisksctl)
+    Udisksctl {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -3149,6 +3167,10 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Nix { args } => nix_cmd::run(&args, cli.verbose)?,
+
+        Commands::Mount { args } => mount_cmd::run("mount", &args, cli.verbose)?,
+        Commands::Umount { args } => mount_cmd::run("umount", &args, cli.verbose)?,
+        Commands::Udisksctl { args } => mount_cmd::run("udisksctl", &args, cli.verbose)?,
 
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
