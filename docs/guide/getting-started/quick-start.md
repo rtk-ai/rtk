@@ -23,24 +23,39 @@ If not, see [Installation](./installation.md).
 ## Step 1: Initialize for your AI assistant
 
 ```bash
-# For Claude Code (global — applies to all projects)
+# Every project (recommended)
 rtk init --global
 
-# For a single project only (CLAUDE.md instructions, no hook)
+# A single project only (for Claude Code: CLAUDE.md instructions, no hook)
 cd /your/project && rtk init
 ```
 
-`rtk init --global` installs the hook that automatically rewrites commands. Restart your AI assistant after this step.
+In a terminal, `rtk init` first shows the agents that scope supports, with the ones it finds on this computer already ticked (Claude Code when it finds none):
 
-Using something other than Claude Code? Every agent has its own flag:
+```
+Which agents should RTK set up for your user account?
+  ▶ [x] Claude Code         detected (~/.claude)
+    [ ] Codex
+    [x] Cursor              detected (~/.cursor)
+    [ ] Gemini CLI
+    …
+  ↑/↓ move · space select · enter confirm · esc cancel
+```
+
+Space ticks or unticks an agent, enter confirms. With `--global` RTK then lists the [reviewed pipelines](https://www.rtk-ai.app/pipelines/) and asks which one to run, with the one you run now marked `current`. If unsure, keep `default-bash-compress`, RTK's default, which installs nothing. Pipelines apply to your user account, so a project-only `rtk init` skips this menu. Then RTK sets up each agent you picked. For Claude Code that is the hook that automatically rewrites commands, registered in `~/.claude/settings.json` once you answer Yes. Restart your AI assistant after this step.
+
+To skip the menu, name the agent. Every agent has its own line:
 
 ```bash
+rtk init -g --agent claude      # Claude Code
 rtk init -g --gemini            # Gemini CLI
 rtk init -g --codex             # Codex (OpenAI)
 rtk init -g --agent cursor      # Cursor
 rtk init -g --agent windsurf    # Windsurf
 rtk init --agent cline          # Cline / Roo Code
 ```
+
+Scripts and CI jobs get no menu: without a terminal, a bare `rtk init` sets up Claude Code and says on stderr how to choose another agent. Add `--pipeline <name>` to pick a reviewed pipeline there; it applies to your user account, with or without `--global`.
 
 See [Supported agents](./supported-agents.md) for the full list, including per-agent uninstall and the project-local vs global distinction.
 
@@ -52,7 +67,7 @@ To see exactly what `init` would change before it touches anything, add `--dry-r
 rtk init --global --dry-run
 ```
 
-Every would-be file create/update/patch is printed with a `[dry-run] would ...` prefix, then a `[dry-run] Nothing written.` footer. Nothing on disk is modified, no settings.json is patched, and the telemetry consent prompt is skipped. Combine with `-v` to also print the full content RTK would write:
+Every would-be file create/update/patch is printed with a `[dry-run] would ...` prefix, then a `[dry-run] Nothing written.` footer. Nothing on disk is modified, no settings.json is patched, and the telemetry consent prompt is skipped. `--dry-run` shows no menu, so without `--agent` it previews the Claude Code setup. Combine with `-v` to also print the full content RTK would write:
 
 ```bash
 rtk init --global --dry-run -v

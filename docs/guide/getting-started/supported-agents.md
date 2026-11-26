@@ -62,20 +62,22 @@ See [Agent Coverage](../resources/agent-coverage.md) for the per-agent table.
 
 Run `rtk init -g` (or `rtk init` for a project) in a terminal without naming an agent and RTK
 shows a menu of the agents that scope supports, with the ones it finds on this machine already
-ticked (space toggles, enter confirms). With `-g` it then asks which
+ticked, or Claude Code when it finds none (space toggles, enter confirms). With `-g` it then asks which
 [reviewed pipeline](https://www.rtk-ai.app/pipelines/) to run, and sets up each agent you picked.
 Every line below sets up one agent directly, with no menu, and leaves your pipeline as it is
-unless you add `--pipeline <name>`.
+unless you add `--pipeline <name>`. Pipelines apply to your user account, so every project: a
+project-only `rtk init` shows no pipeline menu, and `--pipeline` installs for your user account
+even without `-g`.
 
 Without a terminal, or in a CI job (pipes, `CI` set, `--auto-patch`, `--no-patch`, `--dry-run`),
 a bare `rtk init` sets up Claude Code, as it always has, and prints one line on stderr saying how to choose
 another agent. Add `--pipeline <name>` to pick a reviewed pipeline there too:
 
 ```bash
-rtk init -g --agent claude --auto-patch --pipeline laya-delegate
+rtk init -g --agent claude --auto-patch --pipeline <name>    # a name from rtk-ai.app/pipelines
 ```
 
-A pipeline's [dependencies](../pipelines/commands.md#dependencies), such as a local decision model, are installed only after a yes in a terminal; a run without one says to run `rtk init -g` in a terminal.
+Before installing a pipeline, init checks [what it needs](../pipelines/commands.md#what-a-pipeline-needs): a local service such as a decision model, or the RTK daemon. In a terminal it asks for each missing piece. Without one, a reviewed pipeline named with `--pipeline` gets its dependencies installed without a question. If something stays missing, or you answer No, the pipeline is not installed, your current pipeline stays, and a yellow alert gives the command to run again. Without a terminal that exits 1.
 
 ### Claude Code
 

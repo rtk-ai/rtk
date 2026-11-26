@@ -23,7 +23,7 @@ rtk --version   # should print: rtk x.y.z
 rtk gain        # should show the savings dashboard
 ```
 
-If both commands work, RTK is already installed. Skip to [Project initialization](#project-initialization).
+If both commands work, RTK is already installed. Skip to [Set up your agent](#set-up-your-agent).
 
 ## Quick install (Linux and macOS)
 
@@ -94,7 +94,7 @@ Prefer [winget](#winget-windows) if you can — it handles PATH for you.
 ```powershell
 # 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases
 # 2. Add rtk.exe to your PATH (e.g. C:\Users\<you>\.local\bin)
-# 3. Initialize - installs the native binary hook
+# 3. Set up your agents: pick them from the menu (installs the native binary hook)
 rtk init -g
 ```
 
@@ -137,25 +137,26 @@ cargo uninstall rtk
 
 Then reinstall using one of the methods above.
 
-## Project initialization
-
-For a single project, `rtk init` adds the RTK block to `./CLAUDE.md` and a `.rtk/filters.toml` template, without installing a hook:
+## Set up your agent
 
 ```bash
-rtk init
+rtk init -g    # every project (recommended)
+rtk init       # this project only
 ```
 
-To install the Claude Code hook (registered in `~/.claude/settings.json`, applies to every project):
+In a terminal, `rtk init` shows a menu of the agents that scope supports, with the ones it finds on this computer already ticked, or Claude Code when it finds none (space toggles, enter confirms). With `-g` it then asks which [reviewed pipeline](https://www.rtk-ai.app/pipelines/) to run; RTK's default, `default-bash-compress`, installs nothing. Pipelines apply to your user account, so a project-only run does not ask, and `--pipeline <name>` installs for your user account even without `-g`. Then it sets up each agent you picked.
 
-```bash
-rtk init --global
-```
+For Claude Code, `-g` registers the `rtk hook claude` hook in `~/.claude/settings.json`, after asking, and writes `~/.claude/RTK.md`. A project-only setup adds the RTK block to `./CLAUDE.md` and a `.rtk/filters.toml` template, without installing a hook.
+
+To skip the menu, name the agent: `rtk init -g --agent claude`. Without a terminal, or in a CI job, a bare `rtk init` sets up Claude Code and says on stderr how to choose another agent. [Supported Agents](supported-agents.md) lists the line for every agent.
 
 ## Uninstall
 
 ```bash
-rtk init -g --uninstall    # remove hook, RTK.md, and settings.json entry
+rtk init -g --uninstall    # remove the Claude Code hook, RTK.md and @RTK.md; stop and remove pipeline dependencies
 cargo uninstall rtk         # remove binary (if installed via Cargo)
 brew uninstall rtk          # remove binary (if installed via Homebrew)
 winget uninstall rtk-ai.rtk # remove binary (if installed via winget)
 ```
+
+For Claude Code, uninstall needs `-g`: after a project-only setup, remove the RTK block from `./CLAUDE.md` by hand. Other agents uninstall with their own line, listed in [Supported Agents](supported-agents.md).

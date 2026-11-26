@@ -70,14 +70,13 @@ This is the full lifecycle of a command through RTK, from LLM agent to filtered 
 
 ### 3.1 Hook Installation (`rtk init`)
 
-The user runs `rtk init` to set up hooks for their LLM agent. This:
+The user runs `rtk init` to set up hooks for their LLM agents. In a terminal with no agent named, `src/hooks/init/guided.rs` first shows a checkbox menu of the agents the scope supports (the ones whose config directory exists are ticked), then, with `-g`, the menu of reviewed pipelines from the catalog (`src/core/pipeline_catalog.rs`), which installs the chosen one pinned to its reviewed commit once `src/core/pipeline_needs.rs` finds what it needs (its dependencies, the local services it calls, the RTK daemon) in place, installed or accepted; otherwise the previous pipelines stay and a yellow alert says how to try again. Naming an agent (`--agent <name>`, `--gemini`, `--codex`, `--copilot`, `--opencode`) or running without a terminal skips both menus; a bare run then sets up Claude Code, and `--pipeline <name>` picks a reviewed pipeline. For each agent, init:
 
-1. Writes a thin shell hook script (e.g., `~/.claude/hooks/rtk-rewrite.sh`)
-2. Stores its SHA-256 hash for integrity verification
-3. Patches the agent's settings file (e.g., `settings.json`) to register the hook
-4. Writes RTK awareness instructions (e.g., `RTK.md`) for prompt-level guidance
+1. Registers the hook in the agent's own configuration. For Claude Code that is the native `rtk hook claude` command in `settings.json`, for the events the active pipeline uses, after a consent prompt (`--auto-patch` skips it) and with a `.bak` backup. Other agents get their plugin, extension or rules file
+2. Writes RTK awareness instructions (e.g., `~/.claude/RTK.md`, referenced from `CLAUDE.md` as `@RTK.md`) for prompt-level guidance
+3. On a global Claude Code setup with `rtk-proxy` installed, offers the RTK daemon
 
-RTK supports 7 agents, each with its own installation mode. The hook scripts are embedded in the binary and written at install time.
+`rtk init` sets up 17 agents, each with its own installation mode. Plugins, extensions and rules files are embedded in the binary and written at install time.
 
 > **Details**: [`src/hooks/README.md`](../../src/hooks/README.md) covers all installation modes, configuration files, and the uninstall flow.
 

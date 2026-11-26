@@ -58,7 +58,7 @@ Two independent ways in. `rtk init` configures your agent once and persists it; 
 
 ### `rtk init -g` — the guided setup
 
-On a Claude Code init, RTK asks:
+When `rtk init -g` sets up Claude Code (picked in the agent menu, or named with `--agent claude`), it asks once the hook is in `settings.json`, after the agent and pipeline menus:
 
 ```
   Set up the RTK daemon? It runs your pipeline on the requests Claude Code sends to the model (model routing, tool-result compression and more).
@@ -81,7 +81,9 @@ Declining leaves everything alone: *"Skipped — enable later with `rtk init -g`
 
 If you already have the base URL set but nothing restarting the daemon, re-running `rtk init -g` asks only the persistence question.
 
-The question is only asked when the daemon can actually run: the `rtk-proxy` binary is installed (next to `rtk` or on `PATH`) or an rtk-proxy already answers on `127.0.0.1:8080`. Otherwise init says the daemon was not offered and leaves `settings.json` alone. `rtk init -g --uninstall` removes the `env.ANTHROPIC_BASE_URL` this flow wrote, when it still points at the RTK daemon; a base URL aimed anywhere else is kept.
+A pipeline that needs the daemon, because it extends `rtk:proxy` or has proxy rules of its own, asks the same question when you pick it in `rtk init -g` or add it with `rtk pipeline add`. If you answer No, the pipeline is not installed (see [What a pipeline needs](../pipelines/commands.md#what-a-pipeline-needs)).
+
+The question is only asked when the daemon can actually run: the `rtk-proxy` binary is installed (next to `rtk` or on `PATH`), so the SessionStart hook can start it again after a reboot. A daemon that only answers on `127.0.0.1:8080` today does not count. Otherwise init says the daemon was not offered and leaves `settings.json` alone. `--auto-patch`, `--no-patch` and `--dry-run` never ask it, and the Apache-2.0 edition does not have it. `rtk init -g --uninstall` removes the `env.ANTHROPIC_BASE_URL` this flow wrote, when it still points at the RTK daemon; a base URL aimed anywhere else is kept.
 
 #### What the SessionStart hook actually does
 

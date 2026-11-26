@@ -105,7 +105,7 @@ cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
 ### 確認
 
 ```bash
-rtk --version   # "rtk 0.27.x" と表示されるはず
+rtk --version   # "rtk x.y.z" と表示されるはず
 rtk gain        # トークン節約統計が表示されるはず
 ```
 
@@ -113,9 +113,9 @@ rtk gain        # トークン節約統計が表示されるはず
 
 ```bash
 # 1. 対応する AI ツール用のフックをインストール
-rtk init --global               # Claude Code（デフォルト）
-rtk init --agent trae           # Trae（プロジェクト）
-rtk init --global --agent trae  # Trae（グローバル）
+rtk init --global               # メニュー：エージェントとパイプラインを選択
+rtk init --global --agent claude  # Claude Code を直接設定（メニューなし）
+# その他のエージェント（Cursor、Gemini、Codex、Copilot など）：https://www.rtk-ai.app/docs/getting-started/supported-agents/ を参照
 
 # 2. 対応する AI ツールを再起動してテスト
 git status  # 自動的に rtk git status に書き換え

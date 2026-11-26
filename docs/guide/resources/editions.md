@@ -36,8 +36,9 @@ It is the same binary minus the compression engine. What that removes:
 | `rtk tasks` | Listing and running delegation tasks |
 | PostToolUse compression | Compressing the output of an agent's own `Read` and MCP tools |
 | Pipeline files | A `pipeline.toml` on disk is inert, exactly as in a build predating the engine |
+| Pipeline and daemon steps of `rtk init` | The reviewed-pipeline menu, `rtk init --pipeline` (it says it needs the full edition), and the question offering the RTK daemon |
 
-**What stays is the part you use all day.** The PreToolUse rewrite hook — the mechanism that turns your agent's `git status` into `rtk git status` — is Apache-2.0 and behaves identically. So does every command filter, `rtk init`, `rtk gain`, `rtk discover`, `rtk session`, `rtk recall`, and `rtk llm-proxy`.
+**What stays is the part you use all day.** The PreToolUse rewrite hook — the mechanism that turns your agent's `git status` into `rtk git status` — is Apache-2.0 and behaves identically. So does every command filter, `rtk init` and its agent menu, `rtk gain`, `rtk discover`, `rtk session`, `rtk recall`, and `rtk llm-proxy`.
 
 The practical difference: bash output is filtered exactly as in the full edition; output your agent reads through its *own* file and MCP tools is not.
 

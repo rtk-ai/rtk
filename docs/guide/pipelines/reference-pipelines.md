@@ -83,7 +83,7 @@ use  = ["web"]
 
 ## `rtk:proxy` — cache alignment in the proxy
 
-Opt in; needs the RTK proxy running (`rtk init` offers to install it). Normalisation
+Opt in; needs the RTK proxy running (`rtk init -g` offers to set it up once `rtk-proxy` is installed). Normalisation
 (`ansi`, `progress`, `dedup`) is inherited from `rtk:default`, so what this pipeline adds on top
 is the cache breakpoint.
 

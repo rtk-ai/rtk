@@ -45,9 +45,10 @@ rtk gain    # should now show token savings stats
 
 2. Initialize the hook:
    ```bash
-   rtk init --global    # Claude Code
+   rtk init --global                   # in a terminal: tick your agents in the menu
+   rtk init --global --agent claude    # Claude Code
    rtk init --global --agent cursor    # Cursor
-   rtk init --global --opencode  # OpenCode
+   rtk init --global --opencode        # OpenCode
    ```
 
 3. Restart your AI assistant.
@@ -114,9 +115,11 @@ rtk --version
 Answer `y` when it asks to patch `settings.json`. Outside a terminal it cannot ask and defaults to `N`, so use `--auto-patch` there:
 
 ```powershell
-rtk init -g                # answer y at the settings.json prompt
-rtk init -g --auto-patch   # or: patch settings.json without asking
+rtk init -g --agent claude                # answer y at the settings.json prompt
+rtk init -g --agent claude --auto-patch   # or: patch settings.json without asking
 ```
+
+A plain `rtk init -g` in a terminal works too: tick Claude Code in the agent menu, then answer `y`.
 
 The default `N` leaves no hook registered: any legacy `rtk-rewrite.sh` entry is removed and `rtk hook claude` is not added. The `RTK hook registered (global).` banner prints either way; the line that confirms the patch is `settings.json: hook added` (or `settings.json: hook already present` when an earlier run added it). Restart Claude Code, then confirm:
 

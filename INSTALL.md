@@ -84,17 +84,18 @@ cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
 
 Release assets are named `rtk-oss-<target>`, plus `rtk-oss_amd64.deb`,
 `rtk-oss_arm64.deb`, `rtk-oss.x86_64.rpm` and `rtk-oss.aarch64.rpm`. It does not include `rtk pipeline`, PostToolUse
-compression, or delegation tasks.
+compression, delegation tasks, or the pipeline and daemon questions of `rtk init` (its agent menu stays).
 
 ## Project Initialization
 
 ### Which mode to choose?
 
 ```
-  Do you want RTK active across ALL Claude Code projects?
+  Do you want RTK active in ALL your projects?
   │
   ├─ YES → rtk init -g              (recommended)
-  │         Hook + RTK.md (~10 tokens in context)
+  │         Menu: tick your agents, then pick a pipeline
+  │         Claude Code: hook + RTK.md (~10 tokens in context)
   │         Commands auto-rewritten transparently
   │
   ├─ YES, minimal → rtk init -g --hook-only
@@ -102,9 +103,15 @@ compression, or delegation tasks.
   │         Zero tokens in context
   │
   └─ NO, single project → rtk init
-            RTK block in ./CLAUDE.md + .rtk/filters.toml template
+            Menu of the agents a project supports
+            Claude Code: RTK block in ./CLAUDE.md + .rtk/filters.toml template
             No hook, no global effect
 ```
+
+In a terminal, `rtk init` without an agent shows these menus. Name the agent (`--agent claude`,
+`--gemini`, `--codex`, …) to skip them; scripts and CI jobs, which have no terminal, set up Claude
+Code when no agent is named. Every agent's line is in
+[Supported Agents](docs/guide/getting-started/supported-agents.md).
 
 ### Recommended: Global Hook-First Setup
 
@@ -112,15 +119,19 @@ compression, or delegation tasks.
 
 ```bash
 rtk init -g
-# → Registers the native `rtk hook claude` PreToolUse hook
-# → Creates ~/.claude/RTK.md (short awareness file)
-# → Adds @RTK.md reference to ~/.claude/CLAUDE.md
-# → Prompts: "Patch settings.json? [y/N]"
-# → If yes: patches + creates backup (~/.claude/settings.json.bak)
+# → Menu: which agents to set up (the ones found on this computer are ticked)
+# → Menu: which reviewed pipeline to run (default-bash-compress, RTK's default, installs nothing)
+# → For Claude Code:
+#   → Creates ~/.claude/RTK.md (short awareness file)
+#   → Adds @RTK.md reference to ~/.claude/CLAUDE.md
+#   → Asks: "Patch existing ~/.claude/settings.json?" (Yes / No; y and n also answer)
+#   → If yes: registers the native `rtk hook claude` PreToolUse hook + creates a backup (~/.claude/settings.json.bak)
+#   → If rtk-proxy is installed: offers the RTK daemon (see docs/guide/proxy/overview.md)
+#   → Asks once whether to enable anonymous telemetry (default No)
 
-# Automated alternatives:
-rtk init -g --auto-patch    # Patch without prompting
-rtk init -g --no-patch      # Print manual instructions instead
+# Automated alternatives (no menu):
+rtk init -g --agent claude --auto-patch    # Patch without prompting
+rtk init -g --agent claude --no-patch      # Print manual instructions instead
 
 # Verify installation
 rtk init --show  # Check the hook is registered
@@ -162,7 +173,8 @@ cp ~/.claude/settings.json.bak ~/.claude/settings.json
 
 ```bash
 cd /path/to/your/project
-rtk init  # Adds the RTK block to ./CLAUDE.md and a .rtk/filters.toml template
+rtk init                  # in a terminal: menu of the agents a project supports
+rtk init --agent claude   # Claude Code: RTK block in ./CLAUDE.md + a .rtk/filters.toml template
 ```
 
 **Context cost**: instructions loaded only for this project
@@ -201,7 +213,8 @@ rtk gain  # Verify (must show the savings dashboard)
 
 # 2. Setup with prompts
 rtk init -g
-# → Answer 'y' when prompted to patch settings.json
+# → Tick your agents, then pick a pipeline (keep default-bash-compress if unsure)
+# → Answer Yes when asked to patch settings.json
 # → Creates backup automatically
 
 # 3. Restart Claude Code
@@ -210,8 +223,13 @@ rtk init -g
 
 ### CI/CD or Automation
 ```bash
-# Non-interactive setup (no prompts)
-rtk init -g --auto-patch
+# Non-interactive setup (no prompts, no menu)
+rtk init -g --agent claude --auto-patch
+
+# Also install a reviewed pipeline: its local dependencies are installed without asking;
+# if it needs something init cannot set up here (the RTK daemon, a service that is not
+# running), the pipeline is not installed and the command exits 1
+rtk init -g --agent claude --auto-patch --pipeline <name>
 
 # Verify in scripts
 rtk init --show | grep "Hook:"
@@ -230,7 +248,7 @@ rtk init -g --no-patch
 ### Temporary Trial
 ```bash
 # Install hook
-rtk init -g --auto-patch
+rtk init -g --agent claude --auto-patch
 
 # Later: remove everything
 rtk init -g --uninstall
@@ -264,10 +282,13 @@ rtk vitest
 rtk init -g --uninstall
 
 # What gets removed:
-#   - Hook: the `rtk hook claude` entry (and any legacy ~/.claude/hooks/rtk-rewrite.sh)
+#   - Hook: the `rtk hook claude` entries (and any legacy ~/.claude/hooks/rtk-rewrite.sh)
 #   - Context: ~/.claude/RTK.md
 #   - Reference: @RTK.md line from ~/.claude/CLAUDE.md
-#   - Registration: RTK hook entry from settings.json
+#   - Registration: RTK hook entries from settings.json
+#   - Proxy: env.ANTHROPIC_BASE_URL in settings.json, only while it points at the RTK daemon
+#   - OpenCode plugin and Cursor hooks, if RTK installed them
+#   - Pipeline dependencies: stopped and removed (data they keep elsewhere, such as a model cache, stays)
 
 # Restart Claude Code after uninstall
 ```
@@ -403,7 +424,7 @@ Before each session:
 
 - [ ] Verify RTK is installed: `rtk --version`
 - [ ] If not installed → follow "Installation" above
-- [ ] If project not initialized → `rtk init`
+- [ ] If project not initialized → `rtk init --agent <your agent>` (e.g. `--agent claude`)
 - [ ] Use `rtk` for ALL git/pnpm/test/vitest commands
 - [ ] Check savings: `rtk gain`
 

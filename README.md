@@ -89,7 +89,8 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 **Then plug it into your agent**
 
 ```bash
-rtk init -g                      # Claude Code; every other agent: see "Works in your agent"
+rtk init -g                      # a menu: tick your agents, then pick a pipeline
+rtk init -g --agent claude       # or set up one agent directly, no menu (see "Works in your agent")
 ```
 
 Restart your agent. That's it: when it runs `git status`, RTK runs `rtk git status` and the agent reads a 3-line summary instead of 40 lines. Nothing to learn, nothing to call, and upgrading RTK never changes this.
@@ -238,9 +239,11 @@ Nothing changes for the developer. No secret value ever leaves the machine. The 
 
 RTK supports 18 AI coding tools. With a **hook** or **plugin**, `rtk init` installs it and compression is automatic. With a **rules file**, RTK asks the model to prefer `rtk` commands instead.
 
+In a terminal, `rtk init -g` shows a menu of the agents it can set up for your user account, with the ones on your computer already ticked, so you can set up several at once. Each line below sets up one agent directly, which is also what scripts and CI jobs use.
+
 | Tool | Install | How |
 |------|---------|-----|
-| **Claude Code** | `rtk init -g` | hook |
+| **Claude Code** | `rtk init -g --agent claude` | hook |
 | **GitHub Copilot** (VS Code, CLI) | `rtk init -g --copilot` | hook |
 | **Cursor** | `rtk init -g --agent cursor` | hook |
 | **Gemini CLI** | `rtk init -g --gemini` | hook |

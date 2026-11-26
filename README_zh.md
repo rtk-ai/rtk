@@ -105,7 +105,7 @@ cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
 ### 验证
 
 ```bash
-rtk --version   # 应显示 "rtk 0.27.x"
+rtk --version   # 应显示 "rtk x.y.z"
 rtk gain        # 应显示 token 节省统计
 ```
 
@@ -113,9 +113,9 @@ rtk gain        # 应显示 token 节省统计
 
 ```bash
 # 1. 为对应的 AI 工具安装 hook
-rtk init --global               # Claude Code（默认）
-rtk init --agent trae           # Trae（项目级）
-rtk init --global --agent trae  # Trae（全局）
+rtk init --global               # 菜单：选择代理和流水线
+rtk init --global --agent claude  # 直接设置 Claude Code（无菜单）
+# 其他代理（Cursor、Gemini、Codex、Copilot 等）：见 https://www.rtk-ai.app/docs/getting-started/supported-agents/
 
 # 2. 重启相应的 AI 工具，然后测试
 git status  # 自动重写为 rtk git status

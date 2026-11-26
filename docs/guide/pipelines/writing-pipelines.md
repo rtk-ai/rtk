@@ -45,6 +45,7 @@ schema_version = 1
 [classifier.<name>]                # AI judges rules can condition on
 [task.<name>]                      # delegation commands
 [upstream.<name>]                  # model endpoints
+[dependency.<name>]                # a local service the pipeline installs and runs
 [override.<name>]                  # patch an inherited rule or directive
 [guards]                           # global safety limits
 ```

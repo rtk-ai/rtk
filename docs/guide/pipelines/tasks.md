@@ -84,7 +84,7 @@ An upstream is a model endpoint, shared by tasks and [judges](./conditions.md#ju
 
 ## Dependencies
 
-A dependency is a service the pipeline needs on this computer, with the recipe to install and run it. RTK installs it only after the user says yes in a terminal ([how that works](./commands.md#dependencies)), and starts it when a call to the upstream that names it finds it stopped.
+A dependency is a service the pipeline needs on this computer, with the recipe to install and run it. RTK installs it only after the user says yes in a terminal, or when the user names a reviewed pipeline with `rtk init -g --pipeline <name>` where no terminal can ask ([how that works](./commands.md#what-a-pipeline-needs)). A pipeline whose dependency is refused is not installed. RTK starts the dependency when a call to the upstream that names it finds it stopped.
 
 ```toml
 [upstream.judge]
@@ -118,10 +118,16 @@ health    = "/health"
 | `listen` | the local address it answers on: `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>` |
 | `health` | optional path RTK asks for status: 2xx is running, 503 is starting (a short plain-text body is shown as its progress) |
 | `files` | small files written next to it before it runs, such as a server script |
-| `env` | variables for installing and running it (not `PATH`) |
+| `env` | variables for running the service (not `PATH`). They are shown before the question, and never passed to npm, pip or the download |
 | `about`, `needs` | what it is and what it needs, shown to the user before the question |
 
-Exactly one installer per dependency. A recipe that is not pinned, or not local, does not load (E021). A key this rtk does not know (from a newer recipe format) loads with W026, and this rtk will not install that dependency.
+Exactly one installer per dependency. A recipe that is not pinned, or not local, does not load (E021). A key this rtk does not know (from a newer recipe format) loads with W026, and this rtk will not install that dependency. rtk 1.2 and older refuse a file with a `[dependency]` section, so set [`rtk_min`](./writing-pipelines.md#pipeline) on it. Dependency names are shared by every pipeline on the computer: two files that declare the same name with different recipes load with W028, and RTK refuses to install the second one.
+
+**What people who install your pipeline need.** Before installing a pipeline, RTK checks what its file needs and does not install it when something is missing ([how that works](./commands.md#what-a-pipeline-needs)). As an author:
+
+- Declare a `[dependency]` for every local service an upstream calls, and link it with `dependency = "<name>"`. An upstream at a loopback address with no linked dependency counts as a service the user must already be running: a user without it cannot install your pipeline, and RTK cannot offer to install it.
+- Extending `rtk:proxy`, or writing `proxy.request` rules, makes the RTK daemon a need. A user who declines it, or has no `rtk-proxy`, does not get the pipeline.
+- A hosted upstream needs only a key, and a key is never a need: RTK installs the pipeline and prints `auth needed` until the key is set.
 
 ## Cost
 

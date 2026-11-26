@@ -105,7 +105,7 @@ cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
 ### Verificacion
 
 ```bash
-rtk --version   # Debe mostrar "rtk 0.27.x"
+rtk --version   # Debe mostrar "rtk x.y.z"
 rtk gain        # Debe mostrar estadisticas de ahorro
 ```
 
@@ -113,9 +113,9 @@ rtk gain        # Debe mostrar estadisticas de ahorro
 
 ```bash
 # 1. Instalar el hook para la herramienta de IA correspondiente
-rtk init --global               # Claude Code (predeterminado)
-rtk init --agent trae           # Trae (proyecto)
-rtk init --global --agent trae  # Trae (global)
+rtk init --global               # Menú: elegir los agentes y el pipeline
+rtk init --global --agent claude  # Claude Code directamente, sin menú
+# Otros agentes (Cursor, Gemini, Codex, Copilot...): ver https://www.rtk-ai.app/docs/getting-started/supported-agents/
 
 # 2. Reiniciar la herramienta de IA correspondiente, luego probar
 git status  # Automaticamente reescrito a rtk git status
