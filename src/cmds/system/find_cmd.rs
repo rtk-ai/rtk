@@ -1733,6 +1733,50 @@ mod tests {
         assert_eq!(code, expected);
     }
 
+    fn io_error_at(path: &str, err: std::io::Error) -> ignore::Error {
+        ignore::Error::WithPath {
+            path: std::path::PathBuf::from(path),
+            err: Box::new(ignore::Error::Io(err)),
+        }
+    }
+
+    #[test]
+    fn walk_error_line_words_a_missing_path_like_find() {
+        let err = io_error_at("gone", std::io::ErrorKind::NotFound.into());
+        assert_eq!(
+            walk_error_line(&err).as_deref(),
+            Some("find: 'gone': No such file or directory")
+        );
+    }
+
+    #[test]
+    fn walk_error_line_keeps_the_os_message_for_other_failures() {
+        let io = std::io::Error::other("disk on fire");
+        let err = io_error_at("dir", io);
+        assert_eq!(
+            walk_error_line(&err).as_deref(),
+            Some("find: 'dir': disk on fire")
+        );
+    }
+
+    #[test]
+    fn walk_error_line_without_a_path_names_only_the_reason() {
+        let err = ignore::Error::Io(std::io::ErrorKind::PermissionDenied.into());
+        assert_eq!(
+            walk_error_line(&err).as_deref(),
+            Some("find: Permission denied")
+        );
+    }
+
+    #[test]
+    fn walk_error_line_skips_errors_that_are_not_io() {
+        let err = ignore::Error::Glob {
+            glob: Some("[".to_string()),
+            err: "unclosed".to_string(),
+        };
+        assert_eq!(walk_error_line(&err), None);
+    }
+
     #[test]
     fn filtered_hint_names_the_count() {
         assert!(filtered_hint(&[]).is_none());
