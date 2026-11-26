@@ -824,7 +824,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^mount(\\s|$)",
+        pattern: r"^mount(\s|$)",
         rtk_cmd: "rtk mount",
         rewrite_prefixes: &["mount"],
         category: "System",
@@ -832,14 +832,14 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^umount(\\s|$)",
+        pattern: r"^umount(\s|$)",
         rtk_cmd: "rtk umount",
         rewrite_prefixes: &["umount"],
         category: "System",
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^udisksctl\\s+(mount|unmount)(\\s|$)",
+        pattern: r"^udisksctl\s+(mount|unmount)(\s|$)",
         rtk_cmd: "rtk udisksctl",
         rewrite_prefixes: &["udisksctl"],
         category: "System",
