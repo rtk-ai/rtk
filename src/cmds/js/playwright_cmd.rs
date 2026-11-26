@@ -314,7 +314,16 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         }
     };
 
-    let hint = crate::core::tee::tee_and_hint(&raw, "playwright", result.exit_code);
+    // Successful Tier-3 passthrough can still hide output behind the char cap.
+    // Force a recovery hint in that case; tee_and_hint intentionally skips
+    // successful commands in the default recall mode.
+    let hint = if result.exit_code == 0
+        && filtered.contains("[RTK:PASSTHROUGH] Output truncated")
+    {
+        crate::core::tee::force_tee_hint(&raw, "playwright")
+    } else {
+        crate::core::tee::tee_and_hint(&raw, "playwright", result.exit_code)
+    };
     let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
 
     let tracked = with_args("playwright", &display_args(args));
