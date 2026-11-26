@@ -127,7 +127,7 @@ fn padded_json_and_build_failures_keep_existing_summaries() {
 }
 
 const CORE: &str = include_str!("fixtures/go_test_pipe/core.jsonl");
-const CORE_SUMMARY: &str = "Go test: 3 passed in 2 packages";
+const CORE_SUMMARY: &str = "Go test: 3 passed, 1 benchmark in 2 packages\n\ncases\n  BenchmarkLogged-9   \t       1\t     98158 ns/op";
 
 #[test]
 fn captured_core_events_are_consumed_not_returned_raw() {
@@ -219,9 +219,10 @@ fn captured_cold_cache_stderr_survives_next_to_the_summary() {
     assert!(downloads.contains("go: downloading golang.org/x/text v0.21.0\n"));
     assert!(downloads.contains("go: downloading golang.org/x/sync v0.10.0\n"));
     for auto in [false, true] {
+        // This capture runs no benchmark, so its summary has no rows.
         assert_eq!(
             pipe_mode(input, auto),
-            format!("{CORE_SUMMARY}\n{downloads}")
+            format!("Go test: 3 passed in 2 packages\n{downloads}")
         );
     }
 }
@@ -291,9 +292,65 @@ fn captured_legacy_benchmark_pins_all_six_auxiliary_lifecycle_actions() {
     assert!(core.contains("[no test files]"));
     assert!(bench.contains("captured benchmark log"));
     for auto in [false, true] {
-        assert_eq!(pipe_mode(core, auto), CORE_SUMMARY);
-        // Benchmark counts are unchanged: the existing reducer counts tests only.
-        assert_eq!(pipe_mode(bench, auto), "Go test: No tests found");
+        assert_eq!(
+            pipe_mode(core, auto),
+            "Go test: 3 passed, 1 benchmark in 2 packages\n\ncases\n  BenchmarkLogged-9   \t       1\t     69545 ns/op"
+        );
+        // Quiet (`-v=false`) mode: the row is split across two events and
+        // the `--- BENCH:` log block is dropped.
+        assert_eq!(
+            pipe_mode(bench, auto),
+            "Go test: 0 passed, 1 benchmark in 1 packages\n\ncases\n  BenchmarkLogged-9   \t       1\t     21532 ns/op"
+        );
+    }
+}
+
+/// `capture_bench.sh`: the same run, chatty and quiet. Go sends no `pass` for a
+/// benchmark, the `BenchmarkSub` parent prints no row, and `BenchmarkSkip`
+/// prints none either, so both streams count exactly their result rows. In the
+/// chatty run `BenchmarkSub/n=1` was too fast for the timer, so Go printed its
+/// row with no measurement.
+#[test]
+fn captured_benchmark_run_counts_its_rows_in_chatty_and_quiet_mode() {
+    let chatty = include_str!("fixtures/go_test_pipe/bench_chatty.jsonl");
+    let quiet = include_str!("fixtures/go_test_pipe/bench_quiet.jsonl");
+    assert!(chatty.contains(
+        r#""Action":"skip","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSkip""#
+    ));
+    // Quiet mode: stdout the benchmark writes lands between the row's halves.
+    assert!(quiet.contains(r#""Output":"BenchmarkPrint-12    \t"}"#));
+    assert!(quiet.contains(r#""Output":"warming cache\n"}"#));
+    for auto in [false, true] {
+        assert_eq!(
+            pipe_mode(chatty, auto),
+            "Go test: 1 passed, 4 benchmarks in 1 packages\n\nbench\n  \
+             BenchmarkX-12        \t       2\t       100.0 ns/op\n  \
+             BenchmarkSub/n=0-12  \t       2\t        50.00 ns/op\n  \
+             BenchmarkSub/n=1-12  \t       2\n  \
+             BenchmarkPrint-12    \t       2\t      7800 ns/op"
+        );
+        assert_eq!(
+            pipe_mode(quiet, auto),
+            "Go test: 0 passed, 4 benchmarks in 1 packages\n\nbench\n  \
+             BenchmarkX-12        \t       2\t        50.00 ns/op\n  \
+             BenchmarkSub/n=0-12  \t       2\t        50.00 ns/op\n  \
+             BenchmarkSub/n=1-12  \t       2\t        50.00 ns/op\n  \
+             BenchmarkPrint-12    \t       2\t      5300 ns/op"
+        );
+    }
+}
+
+/// `-fuzz` with `-bench`: the rows sit under the fuzzed package's heading.
+#[test]
+fn captured_fuzz_with_benchmark_keeps_one_package_heading() {
+    let fuzz = include_str!("fixtures/go_test_pipe/bench_fuzz.jsonl");
+    for auto in [false, true] {
+        assert_eq!(
+            pipe_mode(fuzz, auto),
+            "Go test: 1 passed, 1 fuzz in 1 packages\nfz\n  \
+             fuzz: elapsed: 0s, execs: 20 (636/sec), new interesting: 0 (total: 1)\n  \
+             BenchmarkEcho-12    \t       2\t       450.0 ns/op"
+        );
     }
 }
 

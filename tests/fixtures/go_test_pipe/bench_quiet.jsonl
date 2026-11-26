@@ -1,0 +1,17 @@
+{"Time":"2026-11-26T11:00:50.7574743+05:30","Action":"start","Package":"example.com/rtk-pipe-fixture/bench"}
+{"Time":"2026-11-26T11:00:50.8705848+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"goos: windows\n"}
+{"Time":"2026-11-26T11:00:50.8705848+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"goarch: arm64\n"}
+{"Time":"2026-11-26T11:00:50.8705848+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"pkg: example.com/rtk-pipe-fixture/bench\n"}
+{"Time":"2026-11-26T11:00:50.8705848+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"BenchmarkX-12        \t"}
+{"Time":"2026-11-26T11:00:50.8705848+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"       2\t        50.00 ns/op\n"}
+{"Time":"2026-11-26T11:00:50.8716703+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"BenchmarkSub/n=0-12  \t"}
+{"Time":"2026-11-26T11:00:50.8716703+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"       2\t        50.00 ns/op\n"}
+{"Time":"2026-11-26T11:00:50.8721895+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"BenchmarkSub/n=1-12  \t"}
+{"Time":"2026-11-26T11:00:50.8721895+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"       2\t        50.00 ns/op\n"}
+{"Time":"2026-11-26T11:00:50.8727056+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"warming cache\n"}
+{"Time":"2026-11-26T11:00:50.8727056+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"BenchmarkPrint-12    \t"}
+{"Time":"2026-11-26T11:00:50.8732202+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"warming cache\n"}
+{"Time":"2026-11-26T11:00:50.8732202+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"       2\t      5300 ns/op\n"}
+{"Time":"2026-11-26T11:00:50.8732202+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"PASS\n","OutputType":"frame"}
+{"Time":"2026-11-26T11:00:50.875377+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"ok  \texample.com/rtk-pipe-fixture/bench\t0.117s\n"}
+{"Time":"2026-11-26T11:00:50.875377+05:30","Action":"pass","Package":"example.com/rtk-pipe-fixture/bench","Elapsed":0.118}

@@ -1,0 +1,41 @@
+{"Time":"2026-11-26T11:00:49.3676523+05:30","Action":"start","Package":"example.com/rtk-pipe-fixture/bench"}
+{"Time":"2026-11-26T11:00:50.2491622+05:30","Action":"run","Package":"example.com/rtk-pipe-fixture/bench","Test":"TestPass"}
+{"Time":"2026-11-26T11:00:50.2496811+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"TestPass","Output":"=== RUN   TestPass\n","OutputType":"frame"}
+{"Time":"2026-11-26T11:00:50.2496811+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"TestPass","Output":"--- PASS: TestPass (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-11-26T11:00:50.2496811+05:30","Action":"pass","Package":"example.com/rtk-pipe-fixture/bench","Test":"TestPass","Elapsed":0}
+{"Time":"2026-11-26T11:00:50.2501935+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"goos: windows\n"}
+{"Time":"2026-11-26T11:00:50.2501935+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"goarch: arm64\n"}
+{"Time":"2026-11-26T11:00:50.2501935+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"pkg: example.com/rtk-pipe-fixture/bench\n"}
+{"Time":"2026-11-26T11:00:50.2501935+05:30","Action":"run","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkX"}
+{"Time":"2026-11-26T11:00:50.2501935+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkX","Output":"=== RUN   BenchmarkX\n","OutputType":"frame"}
+{"Time":"2026-11-26T11:00:50.2501935+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkX","Output":"BenchmarkX\n"}
+{"Time":"2026-11-26T11:00:50.2508149+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkX","Output":"BenchmarkX-12        \t"}
+{"Time":"2026-11-26T11:00:50.2508149+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkX","Output":"       2\t       100.0 ns/op\n"}
+{"Time":"2026-11-26T11:00:50.2508149+05:30","Action":"run","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSub"}
+{"Time":"2026-11-26T11:00:50.2508149+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSub","Output":"=== RUN   BenchmarkSub\n","OutputType":"frame"}
+{"Time":"2026-11-26T11:00:50.2508149+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSub","Output":"BenchmarkSub\n"}
+{"Time":"2026-11-26T11:00:50.2508149+05:30","Action":"run","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSub/n=0"}
+{"Time":"2026-11-26T11:00:50.2508149+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSub/n=0","Output":"=== RUN   BenchmarkSub/n=0\n","OutputType":"frame"}
+{"Time":"2026-11-26T11:00:50.2508149+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSub/n=0","Output":"BenchmarkSub/n=0\n"}
+{"Time":"2026-11-26T11:00:50.2513214+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSub/n=0","Output":"BenchmarkSub/n=0-12  \t"}
+{"Time":"2026-11-26T11:00:50.2513214+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSub/n=0","Output":"       2\t        50.00 ns/op\n"}
+{"Time":"2026-11-26T11:00:50.2513214+05:30","Action":"run","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSub/n=1"}
+{"Time":"2026-11-26T11:00:50.2513214+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSub/n=1","Output":"=== RUN   BenchmarkSub/n=1\n","OutputType":"frame"}
+{"Time":"2026-11-26T11:00:50.2513214+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSub/n=1","Output":"BenchmarkSub/n=1\n"}
+{"Time":"2026-11-26T11:00:50.2518335+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSub/n=1","Output":"BenchmarkSub/n=1-12  \t"}
+{"Time":"2026-11-26T11:00:50.2518335+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSub/n=1","Output":"       2\n"}
+{"Time":"2026-11-26T11:00:50.2518335+05:30","Action":"run","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSkip"}
+{"Time":"2026-11-26T11:00:50.2518335+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSkip","Output":"=== RUN   BenchmarkSkip\n","OutputType":"frame"}
+{"Time":"2026-11-26T11:00:50.2518335+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSkip","Output":"BenchmarkSkip\n"}
+{"Time":"2026-11-26T11:00:50.2523448+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSkip","Output":"    bench_test.go:26: captured benchmark skip\n"}
+{"Time":"2026-11-26T11:00:50.2523448+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSkip","Output":"--- SKIP: BenchmarkSkip\n","OutputType":"frame"}
+{"Time":"2026-11-26T11:00:50.2523448+05:30","Action":"skip","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkSkip"}
+{"Time":"2026-11-26T11:00:50.2523448+05:30","Action":"run","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkPrint"}
+{"Time":"2026-11-26T11:00:50.2523448+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkPrint","Output":"=== RUN   BenchmarkPrint\n","OutputType":"frame"}
+{"Time":"2026-11-26T11:00:50.2523448+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkPrint","Output":"BenchmarkPrint\n"}
+{"Time":"2026-11-26T11:00:50.2523448+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkPrint","Output":"warming cache\n"}
+{"Time":"2026-11-26T11:00:50.2523448+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkPrint","Output":"warming cache\n"}
+{"Time":"2026-11-26T11:00:50.2528647+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Test":"BenchmarkPrint","Output":"BenchmarkPrint-12    \t       2\t      7800 ns/op\n"}
+{"Time":"2026-11-26T11:00:50.2528647+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"PASS\n","OutputType":"frame"}
+{"Time":"2026-11-26T11:00:50.2546781+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/bench","Output":"ok  \texample.com/rtk-pipe-fixture/bench\t0.887s\n"}
+{"Time":"2026-11-26T11:00:50.2546781+05:30","Action":"pass","Package":"example.com/rtk-pipe-fixture/bench","Elapsed":0.887}
