@@ -363,6 +363,19 @@ fn format_dependency_listing(state: &DependencyState, cap: bool) -> String {
     lines.join("\n")
 }
 
+/// Append a recovery hint only when the displayed passthrough was truncated.
+/// The full raw output is saved separately by \`force_tee_hint\`.
+fn append_recovery_hint(shown: &mut String, hint: Option<String>) {
+    if shown.contains("[RTK:PASSTHROUGH] Output truncated") {
+        if let Some(hint) = hint {
+            if !shown.ends_with('\n') {
+                shown.push('\n');
+            }
+            shown.push_str(&hint);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum PnpmCommand {
     List { depth: usize },
@@ -437,7 +450,13 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
         // combined stdout+stderr this arm recovered from, and record it as
         // a failure — not token savings — instead of feeding it into the
         // savings timer.
-        let shown = never_worse(&combined, &filtered);
+        let mut shown = never_worse(&combined, &filtered).to_string();
+        let hint = if shown.contains("[RTK:PASSTHROUGH] Output truncated") {
+            crate::core::tee::force_tee_hint(&combined, "pnpm_list")
+        } else {
+            None
+        };
+        append_recovery_hint(&mut shown, hint);
         println!("{}", shown);
         tracking::record_parse_failure_silent(
             &cmd_label,
@@ -510,7 +529,13 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
     } else {
         filtered.clone()
     };
-    let shown = never_worse(&combined, &display);
+    let mut shown = never_worse(&combined, &display).to_string();
+    let hint = if shown.contains("[RTK:PASSTHROUGH] Output truncated") {
+        crate::core::tee::force_tee_hint(&combined, "pnpm_outdated")
+    } else {
+        None
+    };
+    append_recovery_hint(&mut shown, hint);
     println!("{}", shown);
 
     if tier == 3 {
@@ -1027,6 +1052,20 @@ mod tests {
     // against the combined stdout+stderr, mirroring exactly what each
     // `run_*`'s `ParseResult::Passthrough` arm does — so the content-loss
     // fix is verified without needing a process or a database.
+
+    #[test]
+    fn test_recovery_hint_is_appended_to_truncated_passthrough() {
+        let mut shown = "output\n[RTK:PASSTHROUGH] Output truncated".to_string();
+        append_recovery_hint(&mut shown, Some("[full output: rtk recall abc]".to_string()));
+        assert!(shown.ends_with("[full output: rtk recall abc]"));
+    }
+
+    #[test]
+    fn test_recovery_hint_is_not_appended_without_truncation() {
+        let mut shown = "short passthrough".to_string();
+        append_recovery_hint(&mut shown, Some("[full output: rtk recall abc]".to_string()));
+        assert_eq!(shown, "short passthrough");
+    }
 
     #[test]
     fn test_pnpm_list_passthrough_includes_stderr_when_stdout_empty() {
