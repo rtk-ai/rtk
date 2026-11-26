@@ -245,6 +245,9 @@ pub fn prune_ccr_cache(path: &str, ttl_secs: u64) -> Result<usize, String> {
     if ttl_secs == 0 || matches!(path.trim(), "" | "off" | ":memory:") {
         return Ok(0);
     }
+    // Best-effort, like the store open: a fresh profile has no data directory
+    // yet, and the open below reports the real error if this fails.
+    let _ = crate::config::ensure_database_directory(path);
     let conn = rusqlite::Connection::open(path).map_err(|e| format!("open for prune: {e}"))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))
         .map_err(|e| format!("busy_timeout: {e}"))?;
@@ -269,6 +272,25 @@ pub fn prune_ccr_cache(path: &str, ttl_secs: u64) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The boot prune runs before the ICM store opens, so it is the first thing
+    /// to touch the data directory on a fresh profile.
+    #[test]
+    fn prune_tolerates_a_missing_database_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root
+            .path()
+            .join("rtk")
+            .join("llm-proxy")
+            .join("rtk-proxy-memory.db");
+        let path = nested.to_str().unwrap();
+
+        assert_eq!(prune_ccr_cache(path, 86_400).unwrap(), 0);
+        assert!(
+            nested.is_file(),
+            "prune should leave an empty database behind"
+        );
+    }
 
     #[tokio::test]
     async fn put_get_exact_round_trips() {
