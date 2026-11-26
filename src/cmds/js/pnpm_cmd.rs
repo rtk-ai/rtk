@@ -364,7 +364,7 @@ fn format_dependency_listing(state: &DependencyState, cap: bool) -> String {
 }
 
 /// Append a recovery hint only when the displayed passthrough was truncated.
-/// The full raw output is saved separately by \`force_tee_hint\`.
+/// The full raw output is saved separately by `force_tee_hint`.
 fn append_recovery_hint(shown: &mut String, hint: Option<String>) {
     if shown.contains("[RTK:PASSTHROUGH] Output truncated") {
         if let Some(hint) = hint {
