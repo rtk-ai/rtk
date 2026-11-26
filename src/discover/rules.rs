@@ -824,6 +824,28 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^mount(\\s|$)",
+        rtk_cmd: "rtk mount",
+        rewrite_prefixes: &["mount"],
+        category: "System",
+        savings_pct: 35.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^umount(\\s|$)",
+        rtk_cmd: "rtk umount",
+        rewrite_prefixes: &["umount"],
+        category: "System",
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^udisksctl\\s+(mount|unmount)(\\s|$)",
+        rtk_cmd: "rtk udisksctl",
+        rewrite_prefixes: &["udisksctl"],
+        category: "System",
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^df(\s|$)",
         rtk_cmd: "rtk df",
         pipeline_safety: PipelineSafety::ProducerOnly,
