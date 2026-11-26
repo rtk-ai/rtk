@@ -396,8 +396,34 @@ fn is_unsupported_parse_flag_stderr(stderr: &str) -> bool {
 
 /// `#5192` fallback: engine rejected our parse aids, so re-run the agent's argv
 /// verbatim instead of surfacing an error the raw command never had.
+/// A flag RTK injected (parse aids or `--line-buffered`) was rejected before the
+/// engine read anything. Stdin passthrough inherits stdio, so this is the only
+/// signal available for deciding whether a verbatim retry is warranted (#5199).
+fn engine_flag_rejected(exit_code: i32, stderr: &str) -> bool {
+    exit_code == 2 && is_unsupported_parse_flag_stderr(stderr)
+}
+
 fn engine_failed(exit_code: i32, stderr: &str, stdout_empty: bool) -> bool {
-    exit_code == 2 && stdout_empty && is_unsupported_parse_flag_stderr(stderr)
+    stdout_empty && engine_flag_rejected(exit_code, stderr)
+}
+
+/// Run a stdin passthrough with stderr captured so a genuine late error is not
+/// mistaken for an unsupported flag. stdout stays inherited: the live output
+/// must reach the agent exactly as the raw command would produce it.
+fn passthrough_stdin_capturing_stderr(cmd: &mut Command) -> Result<(i32, String)> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().context("search failed")?;
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        pipe.read_to_string(&mut stderr).context("search failed")?;
+    }
+    let status = child.wait().context("search failed")?;
+    Ok((stream::status_to_exit_code(status), stderr))
 }
 
 /// Run real grep so matches and the savings baseline match the agent's command;
@@ -598,21 +624,27 @@ fn passthrough<T: AsRef<str>>(
     cmd.child_args(passthrough_args(args, line_buffered));
 
     if stream_stdin {
-        let mut exit_code =
-            stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
-                .context("search failed")?
-                .exit_code;
-        if line_buffered && exit_code >= 2 {
-            // BusyBox grep has no --line-buffered. Passthrough inherits stdio,
-            // so stderr cannot be classified here; an engine error with the
-            // live-output flag means rerun the agent's argv verbatim (#5199).
-            let mut plain = resolved_command(engine.bin());
-            plain.child_args(passthrough_args(args, false));
-            exit_code =
+        let exit_code = if line_buffered {
+            let (code, stderr) = passthrough_stdin_capturing_stderr(&mut cmd)?;
+            if !stderr.is_empty() {
+                eprint!("{}", stderr);
+            }
+            if engine_flag_rejected(code, &stderr) {
+                // BusyBox grep has no --line-buffered: rerun the agent's argv
+                // verbatim. A genuine error after matches must NOT re-run (#5199).
+                let mut plain = resolved_command(engine.bin());
+                plain.child_args(passthrough_args(args, false));
                 stream::run_streaming(&mut plain, StdinMode::Inherit, FilterMode::Passthrough)
                     .context("search failed")?
-                    .exit_code;
-        }
+                    .exit_code
+            } else {
+                code
+            }
+        } else {
+            stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
+                .context("search failed")?
+                .exit_code
+        };
         timer.track_passthrough(real_cmd, &tracking::passthrough_label(real_cmd));
         return Ok(exit_code);
     }
@@ -2409,6 +2441,14 @@ mod tests {
         assert!(!engine_failed(2, busybox, false));
         assert!(!engine_failed(2, "grep: dir/x: Permission denied", true));
         assert!(!engine_failed(127, busybox, true));
+        // Stdin passthrough inherits stdout, so its retry decision uses only
+        // the flag-rejection signature (#5199).
+        assert!(engine_flag_rejected(2, busybox));
+        assert!(!engine_flag_rejected(
+            2,
+            "grep: missing.txt: No such file or directory"
+        ));
+        assert!(!engine_flag_rejected(0, busybox));
     }
 
     // --- has_context_flag ---

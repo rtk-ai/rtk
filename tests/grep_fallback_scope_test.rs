@@ -4,8 +4,9 @@
 //! already found (otherwise the whole search runs twice and filtered output
 //! is replaced by raw).
 
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 mod common;
 
@@ -98,5 +99,100 @@ fn unsupported_parse_flag_still_falls_back() {
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("hello world"),
         "fallback must show the match"
+    );
+}
+
+/// Piped-stdin variants: `-o` routes straight to passthrough, where the
+/// `--line-buffered` retry must fire only for a flag rejection.
+fn install_stdin_grep(bin_dir: &std::path::Path, script: &str) {
+    let grep_path = bin_dir.join("grep");
+    std::fs::write(&grep_path, script).unwrap();
+    let mut perms = std::fs::metadata(&grep_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&grep_path, perms).unwrap();
+}
+
+fn run_piped(bin_dir: &std::path::Path, needle: &str) -> std::process::Output {
+    let mut child = rtk_with_fake_grep(bin_dir)
+        .args(["grep", "-o", needle, "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn rtk");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{needle}\n").as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn stdin_flag_rejection_retries_verbatim() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin_dir = dir.path().join("bin");
+    std::fs::create_dir(&bin_dir).unwrap();
+    install_stdin_grep(
+        &bin_dir,
+        "#!/bin/sh\n\
+         for arg in \"$@\"; do\n\
+           case \"$arg\" in\n\
+             --line-buffered)\n\
+               echo '/bin/grep: unrecognized option: line-buffered' >&2\n\
+               exit 2\n\
+               ;;\n\
+           esac\n\
+         done\n\
+         cat >/dev/null\n\
+         printf 'needle\\n'\n\
+         exit 0\n",
+    );
+
+    let out = run_piped(&bin_dir, "needle");
+    assert!(
+        out.status.success(),
+        "retry without --line-buffered must succeed: {:?}, stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.matches("needle").count(),
+        1,
+        "match must be printed once: {stdout:?}"
+    );
+}
+
+#[test]
+fn stdin_genuine_late_error_is_not_re_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin_dir = dir.path().join("bin");
+    std::fs::create_dir(&bin_dir).unwrap();
+    install_stdin_grep(
+        &bin_dir,
+        "#!/bin/sh\n\
+         cat >/dev/null\n\
+         printf 'needle\\n'\n\
+         echo 'grep: missing.txt: No such file or directory' >&2\n\
+         exit 2\n",
+    );
+
+    let out = run_piped(&bin_dir, "needle");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "genuine error must surface as-is"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.matches("needle").count(),
+        1,
+        "stdin search must not run twice: {stdout:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("No such file or directory"),
+        "original engine error must remain visible"
     );
 }
