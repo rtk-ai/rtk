@@ -51,13 +51,10 @@ impl HookSandbox {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        match trust {
-            Some(trust) => {
-                command.env("GEMINI_CLI_TRUST_WORKSPACE", trust);
-            }
-            None => {
-                command.env_remove("GEMINI_CLI_TRUST_WORKSPACE");
-            }
+        // `rtk_command()` starts from an empty environment, so leaving the
+        // trust env unset needs no `env_remove`.
+        if let Some(trust) = trust {
+            command.env("GEMINI_CLI_TRUST_WORKSPACE", trust);
         }
         let mut child = command.spawn().expect("spawn hook");
         child
@@ -329,6 +326,14 @@ fn gemini_global_settings_fail_closed_on_read_and_parse_errors() {
         valid["hookSpecificOutput"]["tool_input"]["command"],
         "rtk git push origin main"
     );
+    // The trust env trusts the workspace despite folderTrust, so the project
+    // file's allow applies.
+    let valid_with_trust = sandbox.gemini_with_trust("git push origin main");
+    assert_eq!(valid_with_trust["decision"], "allow");
+    assert_eq!(
+        valid_with_trust["hookSpecificOutput"]["tool_input"]["command"],
+        "rtk git push origin main"
+    );
 
     fs::write(&global, r#"{"security":{"folderTrust":{"enabled":true},}}"#)
         .expect("write malformed global Gemini settings");
@@ -338,8 +343,10 @@ fn gemini_global_settings_fail_closed_on_read_and_parse_errors() {
         malformed["hookSpecificOutput"]["tool_input"]["command"],
         "rtk git push origin main"
     );
+    // With the trust env, the global file cannot change the trust outcome, so
+    // an unparseable one does not drop the project's rules either.
     let malformed_with_trust = sandbox.gemini_with_trust("git push origin main");
-    assert_eq!(malformed_with_trust["decision"], "ask_user");
+    assert_eq!(malformed_with_trust["decision"], "allow");
     assert_eq!(
         malformed_with_trust["hookSpecificOutput"]["tool_input"]["command"],
         "rtk git push origin main"
@@ -362,7 +369,7 @@ fn gemini_global_settings_fail_closed_on_read_and_parse_errors() {
         "rtk git push origin main"
     );
     let unreadable_with_trust = sandbox.gemini_with_trust("git push origin main");
-    assert_eq!(unreadable_with_trust["decision"], "ask_user");
+    assert_eq!(unreadable_with_trust["decision"], "allow");
     assert_eq!(
         unreadable_with_trust["hookSpecificOutput"]["tool_input"]["command"],
         "rtk git push origin main"

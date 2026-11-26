@@ -589,7 +589,9 @@ fn load_cursor_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
 // only via GEMINI_CLI_TRUST_WORKSPACE here (dialog-only trust is treated as
 // untrusted → global, which is safe: never more permissive than the host).
 // An unreadable or unparseable global file hides whether folderTrust is on, so
-// it yields no rules at all rather than letting the project file's apply.
+// without the trust env it yields no rules at all rather than letting the
+// project file's apply. The env trusts the workspace whatever the global file
+// says, so with it set an unreadable global file changes nothing.
 fn gemini_settings() -> Option<Value> {
     gemini_settings_from(
         global_config(GEMINI_DIR, SETTINGS_JSON),
@@ -606,7 +608,8 @@ fn gemini_settings_from(
     let global_value = match &global {
         JsonRead::Parsed(value) => Some(value),
         JsonRead::Missing => None,
-        JsonRead::Error => return None,
+        JsonRead::Error if !trusted_by_env => return None,
+        JsonRead::Error => None,
     };
     let trusted = trusted_by_env
         || !global_value
@@ -2127,17 +2130,21 @@ mod tests {
             gemini_git_push_verdict(GeminiGlobal::Content(folder_trust_on), false),
             PermissionVerdict::Default
         );
-        // Unparseable or unreadable global file: folder trust is unknown, so
-        // the project file's allow must not apply, even with the trust env.
-        for trusted_by_env in [false, true] {
+        // Unparseable or unreadable global file: without the trust env, folder
+        // trust is unknown, so the project file's allow must not apply. With
+        // the env, the workspace is trusted whatever the global file says.
+        for (trusted_by_env, expected) in [
+            (false, PermissionVerdict::Default),
+            (true, PermissionVerdict::Allow),
+        ] {
             assert_eq!(
                 gemini_git_push_verdict(GeminiGlobal::Content(trailing_comma), trusted_by_env),
-                PermissionVerdict::Default,
+                expected,
                 "malformed global settings, trust env {trusted_by_env}"
             );
             assert_eq!(
                 gemini_git_push_verdict(GeminiGlobal::Unreadable, trusted_by_env),
-                PermissionVerdict::Default,
+                expected,
                 "unreadable global settings, trust env {trusted_by_env}"
             );
         }
