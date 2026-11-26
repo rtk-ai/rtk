@@ -1,0 +1,6 @@
+Error: ERR_PNPM_PACKAGE_MANIFEST_SERIALIZATION_ERROR
+
+  × initialize the state
+  ╰─▶ Failed to parse /app4/package.json: key must be a string at line 1
+      column 17
+

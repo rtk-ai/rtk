@@ -132,15 +132,6 @@ pub(crate) fn wrap(script: &str) -> String {
     )
 }
 
-/// True for a command [`wrap`] produced.
-///
-/// The Claude hook asks about a wrap explicitly rather than leaving the
-/// decision to the host: what the host would check is the `rtk run` command,
-/// not the script's own (`hooks::hook_cmd::process_claude_payload_from_decision`).
-pub(crate) fn is_wrapped(cmd: &str) -> bool {
-    cmd.starts_with("rtk run --shell fish -c '")
-}
-
 /// True for fish's `(cmd)` command substitution, which the shared lexer reads
 /// as a POSIX subshell and therefore does not refuse.
 fn contains_fish_substitution(cmd: &str) -> bool {

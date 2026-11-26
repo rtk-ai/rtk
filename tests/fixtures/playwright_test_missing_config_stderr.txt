@@ -1,0 +1,6 @@
+Error: /app/nope.config.js does not exist
+    at resolveConfigFile (/app/node_modules/.pnpm/playwright@1.56.1/node_modules/playwright/lib/common/configLoader.js:321:11)
+    at resolveConfigLocation (/app/node_modules/.pnpm/playwright@1.56.1/node_modules/playwright/lib/common/configLoader.js:302:30)
+    at loadConfigFromFile (/app/node_modules/.pnpm/playwright@1.56.1/node_modules/playwright/lib/common/configLoader.js:331:27)
+    at runTests (/app/node_modules/.pnpm/playwright@1.56.1/node_modules/playwright/lib/program.js:206:67)
+    at async i.<anonymous> (/app/node_modules/.pnpm/playwright@1.56.1/node_modules/playwright/lib/program.js:71:7)

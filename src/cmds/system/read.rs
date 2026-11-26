@@ -59,15 +59,19 @@ pub fn run(
     // Read file content
     let bytes =
         fs::read(file).with_context(|| format!("Failed to read file: {}", file.display()))?;
-    if level == FilterLevel::None
-        && !line_numbers
-        && let Some(window) = byte_line_window(&bytes, head_lines, tail_lines)
-    {
+    if let Some(window) = raw_byte_window(
+        &bytes,
+        level,
+        max_lines,
+        head_lines,
+        tail_lines,
+        line_numbers,
+    ) {
         io::stdout()
             .lock()
             .write_all(window)
-            .context("Failed to write line window")?;
-        // A user-requested window is the baseline too: see `tracking_baseline`.
+            .context("Failed to write raw bytes")?;
+        // A plain or windowed raw read is the baseline too: see `tracking_baseline`.
         let window = String::from_utf8_lossy(window);
         timer.track(&cat_label(file), "rtk read", &window, &window);
         return Ok(());
@@ -159,14 +163,18 @@ pub fn run_stdin(
         .lock()
         .read_to_end(&mut bytes)
         .context("Failed to read from stdin")?;
-    if level == FilterLevel::None
-        && !line_numbers
-        && let Some(window) = byte_line_window(&bytes, head_lines, tail_lines)
-    {
+    if let Some(window) = raw_byte_window(
+        &bytes,
+        level,
+        max_lines,
+        head_lines,
+        tail_lines,
+        line_numbers,
+    ) {
         io::stdout()
             .lock()
             .write_all(window)
-            .context("Failed to write line window")?;
+            .context("Failed to write raw bytes")?;
         let window = String::from_utf8_lossy(window);
         timer.track("cat - (stdin)", "rtk read -", &window, &window);
         return Ok(());
@@ -396,6 +404,26 @@ fn tail_window(content: &[u8], n: usize) -> &[u8] {
         }
     }
     content
+}
+
+/// The slice to write out verbatim, or `None` when a later step needs a `&str`:
+/// a filter level, line numbers, or `--max-lines` (counted on filtered text).
+/// Head and tail windows slice on byte offsets, so they stay here, and so does a
+/// plain read — that is what lets `rtk read` handle a file or a stdin stream that
+/// is not valid UTF-8.
+fn raw_byte_window(
+    content: &[u8],
+    level: FilterLevel,
+    max_lines: Option<usize>,
+    head_lines: Option<usize>,
+    tail_lines: Option<usize>,
+    line_numbers: bool,
+) -> Option<&[u8]> {
+    if level != FilterLevel::None || line_numbers {
+        return None;
+    }
+    byte_line_window(content, head_lines, tail_lines)
+        .or_else(|| max_lines.is_none().then_some(content))
 }
 
 fn byte_line_window(
@@ -764,6 +792,44 @@ fn main() {{
         let output = apply_line_window(input, Some(2), None, None);
         assert!(output.starts_with("a\n"));
         assert!(output.contains("more lines"));
+    }
+
+    #[test]
+    fn test_raw_byte_window_passes_a_plain_read_through() {
+        let input: &[u8] = b"alpha\nbravo\n";
+        assert_eq!(
+            raw_byte_window(input, FilterLevel::None, None, None, None, false),
+            Some(input)
+        );
+    }
+
+    #[test]
+    fn test_raw_byte_window_declines_when_decoding_is_needed() {
+        let input: &[u8] = b"alpha\nbravo\n";
+        for (level, max_lines, line_numbers) in [
+            (FilterLevel::Minimal, None, false),
+            (FilterLevel::Aggressive, None, false),
+            (FilterLevel::None, None, true),
+            (FilterLevel::None, Some(1), false),
+        ] {
+            assert_eq!(
+                raw_byte_window(input, level, max_lines, None, None, line_numbers),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn test_raw_byte_window_keeps_line_windows() {
+        let input: &[u8] = b"alpha\nbravo\ncharlie\n";
+        assert_eq!(
+            raw_byte_window(input, FilterLevel::None, None, Some(1), None, false),
+            Some(&b"alpha\n"[..])
+        );
+        assert_eq!(
+            raw_byte_window(input, FilterLevel::None, None, None, Some(1), false),
+            Some(&b"charlie\n"[..])
+        );
     }
 
     #[test]

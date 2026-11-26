@@ -5,6 +5,8 @@
 //! net accounting. The files never enter the agent's context — that is the
 //! saving.
 
+use crate::core::arg_tokenizer::{Dialect, Flag, Grammar, TokenKind, ValueSpec, tokenize_grammar};
+use crate::core::http;
 use crate::core::pipeline_config;
 use crate::core::shell::{Launch, shell_command};
 use crate::core::tracking::{Tracker, estimate_tokens};
@@ -73,23 +75,23 @@ struct TaskArgs {
     command: Option<Vec<String>>,
 }
 
-fn parse_args(args: &[String]) -> Result<TaskArgs> {
-    use crate::core::arg_tokenizer::{Dialect, TokenKind, ValueSpec, tokenize_grammar};
+/// `rtk task`'s own options, each taking a value.
+const TASK_FLAGS: &[Flag] = &[
+    Flag::long("question").takes(ValueSpec::value()),
+    Flag::long("reference").takes(ValueSpec::value()),
+    Flag::long("spec").takes(ValueSpec::value()),
+    Flag::long("target").takes(ValueSpec::value()),
+];
 
+/// Posix: a literal `--` ends option parsing, and everything after it is the
+/// command, verbatim.
+const TASK_GRAMMAR: Grammar = Grammar::new(Dialect::Posix, &[TASK_FLAGS]);
+
+fn parse_args(args: &[String]) -> Result<TaskArgs> {
     // Classify through the tokenizer rather than a literal `arg == "--flag"`
     // scan (house rule), so the attached form `--question=why` works, not only
-    // the separate `--question why`. Posix dialect: a literal `--` ends option
-    // parsing, and everything after it is the command, verbatim.
-    let tokens = tokenize_grammar(
-        args,
-        &|kind, name| match (kind, name) {
-            (TokenKind::Long, "question" | "spec" | "target" | "reference") => {
-                Some(ValueSpec::value())
-            }
-            _ => None,
-        },
-        Dialect::Posix,
-    );
+    // the separate `--question why`.
+    let tokens = tokenize_grammar(args, &TASK_GRAMMAR);
 
     let mut parsed = TaskArgs {
         intent: TaskIntent::default(),
@@ -381,24 +383,28 @@ fn post_json(
     headers: &[(&str, &str)],
     body: &serde_json::Value,
     limit: std::time::Duration,
+    via_daemon: bool,
 ) -> Result<serde_json::Value> {
-    let mut req = ureq::post(url)
-        .timeout(limit)
-        .set("Content-Type", "application/json");
+    let mut req = if via_daemon {
+        http::direct_global_timeout(ureq::post(url), limit)
+    } else {
+        http::global_timeout(ureq::post(url), limit)
+    };
     for (key, value) in headers {
-        req = req.set(key, value);
+        req = req.header(*key, *value);
     }
-    let response = req.send_string(&body.to_string()).map_err(|e| match e {
-        ureq::Error::Status(code, response) => {
-            let detail = response.into_string().unwrap_or_default();
-            anyhow::anyhow!("worker call failed ({code}): {detail}")
-        }
-        other => anyhow::anyhow!("worker call failed: {other}"),
-    })?;
-    let text = response
-        .into_string()
-        .context("worker response read failed")?;
-    serde_json::from_str(&text).context("worker response was not JSON")
+    let mut response = req
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .send_json(body)
+        .map_err(|e| anyhow::anyhow!("worker call failed: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let detail = http::read_text_lossy(&mut response, http::MAX_BODY).unwrap_or_default();
+        anyhow::bail!("worker call failed ({}): {detail}", status.as_u16());
+    }
+    http::read_json(&mut response).context("worker response was not readable JSON")
 }
 
 /// The dialects the local daemon speaks. A `google` worker has no route
@@ -544,6 +550,7 @@ fn call_anthropic(
         &headers,
         &body,
         timeout(upstream),
+        via_daemon,
     )?;
     let text = response["content"]
         .as_array()
@@ -592,6 +599,7 @@ fn call_openai(
         &headers,
         &body,
         timeout(upstream),
+        via_daemon,
     )?;
     let text = response["choices"][0]["message"]["content"]
         .as_str()
@@ -626,6 +634,7 @@ fn call_google(
         &[("x-goog-api-key", &key)],
         &body,
         timeout(upstream),
+        false,
     )?;
     let text = response["candidates"][0]["content"]["parts"]
         .as_array()
@@ -649,6 +658,19 @@ fn call_google(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::arg_tokenizer::assert_takes_value_table;
+
+    #[test]
+    fn task_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &TASK_GRAMMAR,
+            &[(
+                TokenKind::Long,
+                &["question", "reference", "spec", "target"],
+                Some(ValueSpec::value()),
+            )],
+        );
+    }
 
     #[test]
     fn args_parse_flags_and_paths() {
@@ -1009,6 +1031,9 @@ pub fn answer_call(task_name: &str, facts: &rtk_engine::pipeline::Facts) -> Opti
 /// agent runs instead — the task, wrapping the original command.
 pub fn swap_command(task_name: &str, command: &str) -> Option<String> {
     let resolved = resolve_task(task_name)?;
+    if resolved.task.kind != "digest" {
+        return None;
+    }
     let question = task_question(&resolved).unwrap_or_else(|| IN_HOOK_QUESTION.to_string());
     Some(format!(
         "rtk {task_name} --question {} -- sh -c {}",
@@ -1108,6 +1133,74 @@ mod borrowed_credential {
             base_url: base.map(String::from),
             ..UpstreamDef::default()
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_call_through_the_daemon_ignores_the_proxy_environment() {
+        use crate::core::http::test_server::{refused_port, serve_once};
+
+        let (port, server) = serve_once(r#"{"content":[{"text":"done"}]}"#);
+        let proxy = format!("http://127.0.0.1:{}", refused_port());
+        // `0x7f.1` is 127.0.0.1 in the inet_aton shorthand glibc and musl resolve,
+        // standing in for a daemon bound to this machine's LAN address.
+        let url = format!("http://0x7f.1:{port}/v1/messages");
+        let result = temp_env::with_vars(
+            [
+                ("ALL_PROXY", Some(proxy.as_str())),
+                ("NO_PROXY", None),
+                ("no_proxy", None),
+            ],
+            || {
+                post_json(
+                    &url,
+                    &[],
+                    &serde_json::json!({}),
+                    std::time::Duration::from_secs(5),
+                    true,
+                )
+            },
+        );
+        let response = result.expect("the daemon is reached directly");
+        assert_eq!(response["content"][0]["text"], "done");
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn a_worker_error_reply_carries_its_status_and_body() {
+        use crate::core::http::test_server::serve_once_with_status;
+
+        let (port, server) = serve_once_with_status("401 Unauthorized", r#"{"error":"bad key"}"#);
+        let err = post_json(
+            &format!("http://127.0.0.1:{port}/v1/messages"),
+            &[],
+            &serde_json::json!({}),
+            std::time::Duration::from_secs(5),
+            false,
+        )
+        .expect_err("a 401 is an error");
+        server.join().expect("server");
+        assert_eq!(
+            err.to_string(),
+            r#"worker call failed (401): {"error":"bad key"}"#
+        );
+    }
+
+    #[test]
+    fn a_worker_reply_that_is_not_json_is_an_error() {
+        use crate::core::http::test_server::serve_once;
+
+        let (port, server) = serve_once("<html>gateway</html>");
+        let err = post_json(
+            &format!("http://127.0.0.1:{port}/v1/messages"),
+            &[],
+            &serde_json::json!({}),
+            std::time::Duration::from_secs(5),
+            false,
+        )
+        .expect_err("HTML is not a worker reply");
+        server.join().expect("server");
+        assert_eq!(err.to_string(), "worker response was not readable JSON");
     }
 
     #[test]

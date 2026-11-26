@@ -1,0 +1,30 @@
+{
+  "@playwright/test": {
+    "current": "1.56.1",
+    "latest": "1.65.1",
+    "wanted": "1.56.1",
+    "isDeprecated": false,
+    "dependencyType": "devDependencies"
+  },
+  "lodash": {
+    "current": "4.17.0",
+    "latest": "4.18.1",
+    "wanted": "4.17.0",
+    "isDeprecated": false,
+    "dependencyType": "dependencies"
+  },
+  "jest": {
+    "current": "29.7.0",
+    "latest": "30.5.2",
+    "wanted": "29.7.0",
+    "isDeprecated": false,
+    "dependencyType": "devDependencies"
+  },
+  "vitest": {
+    "current": "3.2.4",
+    "latest": "5.1.1",
+    "wanted": "3.2.4",
+    "isDeprecated": false,
+    "dependencyType": "devDependencies"
+  }
+}

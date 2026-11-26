@@ -1,0 +1,25 @@
+* [0;1mlegacyPackages.x86_64-linux.bat-extras.batgrep[0m (2024.08.24-unstable-2025-02-22)
+  Quickly search through and highlight files using [32;1mripgrep[0m
+
+* [0;1mlegacyPackages.x86_64-linux.grip-grab[0m (0.6.7)
+  Fast, more lightweight [32;1mripgrep[0m alternative for daily use cases
+
+* [0;1mlegacyPackages.x86_64-linux.repgrep[0m (0.17.1)
+  Interactive replacer for [32;1mripgrep[0m that makes it easy to find and replace across files on the command line
+
+* [0;1mlegacyPackages.x86_64-linux.[32;1mripgrep[0;1m[0m (15.2.0)
+  Utility that combines the usability of The Silver Searcher with the raw speed of grep
+
+* [0;1mlegacyPackages.x86_64-linux.[32;1mripgrep[0;1m-all[0m (0.10.10)
+  [32;1mRipgrep[0m, but also search in PDFs, E-Books, Office documents, zip, tar.gz, and more
+
+* [0;1mlegacyPackages.x86_64-linux.ripwire[0m (0.6.10)
+  The [32;1mripgrep[0m of AI context: a zero-dependency C++23 CLI + MCP server giving coding agents a ranked, deterministic map of any repo, blast radius, tests-to-run and quality deltas. Signatures at 80% fewer bytes than bodies; ~5% of a grep-and-read pass's tokens
+
+* [0;1mlegacyPackages.x86_64-linux.vgrep[0m (2.8.0)
+  User-friendly pager for grep/git-grep/[32;1mripgrep[0m
+
+* [0;1mlegacyPackages.x86_64-linux.vimPlugins.blink-[32;1mripgrep[0;1m-nvim[0m (2.2.7)
+
+* [0;1mlegacyPackages.x86_64-linux.yaziPlugins.yafg[0m (0-unstable-2026-10-05)
+  Fuzzy find and grep plugin for Yazi file manager with interactive [32;1mripgrep[0m and fzf search
