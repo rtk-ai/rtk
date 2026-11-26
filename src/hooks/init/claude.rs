@@ -1228,6 +1228,74 @@ mod tests {
     }
 
     #[test]
+    fn shell_syntax_glued_to_rtk_path_is_not_an_rtk_hook() {
+        for command in [
+            "#/usr/local/bin/rtk hook claude",
+            "(/usr/local/bin/rtk hook claude",
+            ")/usr/local/bin/rtk hook claude",
+            "`/usr/local/bin/rtk hook claude",
+            "my-audit$(/usr/local/bin/rtk hook claude",
+            "{/usr/local/bin/rtk hook claude",
+            "!/usr/local/bin/rtk hook claude",
+            "*/usr/local/bin/rtk hook claude",
+            "$'\\'';my-audit;\\'/usr/local/bin/rtk hook claude",
+            "${HOME:-/usr}/.local/bin/rtk hook claude",
+            "/usr/local/bin/rtk hook claude # note\nmy-audit",
+            "/usr/local/bin/rtk hook claude # note \\\nmy-audit",
+            "/usr/local/bin/rtk hook claude\\\n;my-audit",
+            "/usr/local/bin/rtk hook claude\\\n#note",
+            "$1/rtk hook claude",
+            "$@/rtk hook claude",
+            "\"$(my-audit)/usr/local/bin/rtk\" hook claude",
+            "\"`my-audit`/usr/local/bin/rtk\" hook claude",
+            "\"$(my-audit)\"/usr/local/bin/rtk hook claude",
+            "\"${X:-$(my-audit)}/usr/local/bin/rtk\" hook claude",
+            "\"${HOME:-/usr}/.local/bin/rtk\" hook claude",
+            "\"$((1+1))/rtk\" hook claude",
+        ] {
+            assert!(
+                !is_claude_hook_command(command),
+                "user command was claimed as RTK-owned: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn trailing_comment_and_line_continuation_keep_rtk_hook() {
+        for command in [
+            "/usr/local/bin/rtk hook claude # note",
+            "/usr/local/bin/rtk hook claude #",
+            "/usr/local/bin/rtk hook claude # it's mine",
+            "# note\n/usr/local/bin/rtk hook claude",
+            "/usr/local/bin/rtk hook claude\\\n",
+            "/usr/local/bin/rtk \\\nhook claude",
+            "/opt/a#b/rtk hook claude",
+            "$HOME/.local/bin/rtk hook claude",
+        ] {
+            assert!(
+                is_claude_hook_command(command),
+                "RTK hook command was not recognised: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_variables_and_literals_keep_rtk_hook() {
+        for command in [
+            "\"$HOME/.local/bin/rtk\" hook claude",
+            "\"${HOME}/.local/bin/rtk\" hook claude",
+            "'$(my-audit)/rtk' hook claude",
+            "\"\\$(my-audit)/rtk\" hook claude",
+            "\"/opt/it's/rtk\" hook claude",
+        ] {
+            assert!(
+                is_claude_hook_command(command),
+                "RTK hook command was not recognised: {command:?}"
+            );
+        }
+    }
+
+    #[test]
     fn install_and_uninstall_preserve_compound_user_hook() {
         let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |dir| {

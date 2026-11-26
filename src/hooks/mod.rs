@@ -29,7 +29,19 @@ fn is_rtk_binary(binary: &str) -> bool {
     matches!(binary_name, "rtk" | "rtk.exe")
 }
 
+/// Claims an entry only when it is literally `<path>/rtk hook <agent>`. Words
+/// may hold literal text and `$NAME` / `${NAME}`, quoted or not; any other
+/// shell syntax (`(`, backticks, `$(`, `*`, `?`, `!`, ANSI-C quoting...)
+/// makes it refuse.
+/// Refusing costs a duplicate RTK entry on install, while a wrong claim lets
+/// uninstall delete the user's own hook, so the matcher lists what it accepts
+/// rather than what it rejects.
 fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
+    if crate::discover::lexer::ansi_c_quote_defeats_lexer(command) {
+        return false;
+    }
+    let command = strip_comments_and_line_continuations(command);
+    let command = command.as_str();
     let mut tokens = crate::discover::lexer::tokenize_with_newlines(command);
     // Ignore only literal LF operator tokens at the command's boundaries.
     // The lexer also reports the CR of a CRLF pair as an LF operator; checking
@@ -49,13 +61,7 @@ fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
     }) {
         tokens.pop();
     }
-    if tokens.iter().any(|token| match token.kind {
-        crate::discover::lexer::TokenKind::Operator
-        | crate::discover::lexer::TokenKind::Pipe(_)
-        | crate::discover::lexer::TokenKind::Redirect => true,
-        crate::discover::lexer::TokenKind::Shellism => token.value == "&",
-        _ => false,
-    }) {
+    if has_shell_syntax(&tokens) {
         return false;
     }
 
@@ -65,6 +71,114 @@ fn is_rtk_hook_command(command: &str, agent: &str) -> bool {
     };
 
     is_rtk_binary(parsed_binary) && hook == "hook" && target == agent
+}
+
+/// Drops what bash removes before it splits words: a backslash-newline pair
+/// outside single quotes, and a comment that an unquoted `#` opens at the start
+/// of a word, up to the end of its line. A backslash inside a comment does not
+/// continue it.
+fn strip_comments_and_line_continuations(command: &str) -> String {
+    let mut stripped = String::with_capacity(command.len());
+    let mut chars = command.chars().peekable();
+    let mut quote = None;
+    let mut word_start = true;
+    while let Some(c) = chars.next() {
+        if c == '\\' && quote != Some('\'') {
+            match chars.next() {
+                Some('\n') => {}
+                Some(escaped) => {
+                    stripped.push(c);
+                    stripped.push(escaped);
+                    word_start = false;
+                }
+                None => stripped.push(c),
+            }
+            continue;
+        }
+        if c == '#' && quote.is_none() && word_start {
+            while chars.next_if(|&next| next != '\n').is_some() {}
+            continue;
+        }
+        word_start = quote.is_none() && crate::discover::lexer::is_word_boundary_whitespace(c);
+        quote = crate::discover::lexer::advance_quote_state(quote, c);
+        stripped.push(c);
+    }
+    stripped
+}
+
+fn has_shell_syntax(tokens: &[crate::discover::lexer::ParsedToken]) -> bool {
+    use crate::discover::lexer::TokenKind;
+
+    let mut i = 0;
+    while let Some(token) = tokens.get(i) {
+        match token.kind {
+            TokenKind::Arg if has_expansion_in_double_quotes(&token.value) => return true,
+            TokenKind::Arg => i += 1,
+            TokenKind::Shellism if is_braced_variable(&tokens[i..]) => i += 4,
+            _ => return true,
+        }
+    }
+    false
+}
+
+/// The lexer returns a double-quoted span as one word, but bash still expands
+/// `$` and backticks inside it, so the same rule applies there.
+fn has_expansion_in_double_quotes(word: &str) -> bool {
+    let mut chars = word.chars().peekable();
+    let mut quote = None;
+    while let Some(c) = chars.next() {
+        if c == '\\' && quote != Some('\'') {
+            chars.next();
+            continue;
+        }
+        if quote == Some('"') && (c == '`' || (c == '$' && !skip_variable_name(&mut chars))) {
+            return true;
+        }
+        quote = crate::discover::lexer::advance_quote_state(quote, c);
+    }
+    false
+}
+
+/// Consumes `NAME` or `{NAME}` after a `$`; false when neither follows.
+fn skip_variable_name(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+    let braced = chars.next_if_eq(&'{').is_some();
+    if chars
+        .next_if(|c| c.is_ascii_alphabetic() || *c == '_')
+        .is_none()
+    {
+        return false;
+    }
+    while chars
+        .next_if(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .is_some()
+    {}
+    !braced || chars.next_if_eq(&'}').is_some()
+}
+
+/// `${NAME}` arrives as four adjacent tokens: `$`, `{`, the name and `}`.
+fn is_braced_variable(tokens: &[crate::discover::lexer::ParsedToken]) -> bool {
+    use crate::discover::lexer::TokenKind;
+
+    let [dollar, open, name, close, ..] = tokens else {
+        return false;
+    };
+    let mut name_chars = name.value.chars();
+    let is_name = name_chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name_chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+
+    dollar.kind == TokenKind::Shellism
+        && dollar.value == "$"
+        && open.kind == TokenKind::Shellism
+        && open.value == "{"
+        && open.offset == dollar.offset + 1
+        && name.kind == TokenKind::Arg
+        && name.offset == open.offset + 1
+        && is_name
+        && close.kind == TokenKind::Shellism
+        && close.value == "}"
+        && close.offset == name.offset + name.value.len()
 }
 
 pub fn is_claude_hook_command(command: &str) -> bool {

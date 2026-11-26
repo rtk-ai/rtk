@@ -67,6 +67,8 @@ Controls how `rtk init` modifies agent settings files:
 
 All file operations use atomic writes (tempfile + rename) to prevent corruption on crash. Settings files are backed up to `.bak` before modification. All operations are idempotent -- running `rtk init` multiple times is safe.
 
+Install and uninstall treat a settings entry as RTK's own only when its command is literally `<path>/rtk hook <agent>`, with an optional trailing `#` comment or line continuation. Words may hold literal text and `$NAME` / `${NAME}`, inside double quotes or not; any other shell syntax (separators, redirects, `(`, backticks, `$(`, `*`, `?`, `!`, ANSI-C quoting) makes the matcher leave the entry alone. A missed match only adds a second RTK entry, while a wrong one would let uninstall delete the user's hook.
+
 ## Permission Model
 
 RTK enforces a permission precedence that matches Claude Code's least-privilege default:
