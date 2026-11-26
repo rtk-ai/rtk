@@ -58,6 +58,44 @@ rtk gain  # Must show the savings dashboard (not "command not found")
 winget install rtk-ai.rtk
 ```
 
+### Windows on ARM (Snapdragon, ARM64)
+
+The Windows release ships `x86_64-pc-windows-msvc` binaries, so on an ARM64 device `winget`
+installs an x64 build that Windows runs under emulation. It works, but every `rtk` invocation
+pays the emulation cost.
+
+To get a native arm64 binary, build from an arm64 toolchain on the device itself (no
+cross-compilation is involved: rustup's host target on Windows ARM64 *is*
+`aarch64-pc-windows-msvc`, and the bundled SQLite compiles with the ARM64 C++ tools):
+
+```powershell
+# Once: the ARM64 C++ build tools (skip if Visual Studio already has them)
+winget install --id Microsoft.VisualStudio.2022.BuildTools -e `
+  --override "--add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --quiet --wait"
+
+cargo install --git https://github.com/rtk-ai/rtk rtk
+```
+
+Verify it is the native build, not the emulated one (the C++ tools brought `dumpbin` along):
+
+```powershell
+dumpbin /headers (Get-Command rtk).Source | Select-String 'machine \('
+# AA64 machine (ARM64) -> native; 8664 machine (x64) -> emulated
+```
+
+Measured on a Snapdragon X Elite (X1E78100), `rtk 1.2.1`: `rtk rewrite 'git status'` takes
+**65 ms** natively versus **93 ms** for the emulated x64 winget build (median of 25
+`spawnSync` runs). Command output is identical between the two builds, so an emulated install
+is a fine fallback when the ARM64 build tools are not an option.
+
+The daemon (`rtk-proxy`) builds for the same target from its own workspace:
+
+```powershell
+git clone --depth 1 https://github.com/rtk-ai/rtk
+cd rtk\proxy
+cargo build --release
+```
+
 ### Alternative: Manual Installation
 
 ```bash
