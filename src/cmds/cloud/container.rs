@@ -4,9 +4,10 @@ use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::display_args;
 use crate::core::stream::exec_capture;
+use crate::core::toml_filter::{self, Lossiness};
 use crate::core::tracking;
 use crate::core::truncate::{CAP_INVENTORY, CAP_LIST, CAP_WARNINGS};
-use crate::core::utils::resolved_command;
+use crate::core::utils::{ChildArgExt, resolved_command};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::ffi::OsString;
@@ -698,7 +699,57 @@ fn compact_ports(ports: &str) -> String {
 }
 
 pub fn run_docker_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
-    crate::core::runner::run_passthrough("docker", args, verbose)
+    let filter = if toml_filter::toml_disabled() {
+        None
+    } else {
+        args.iter()
+            .map(|arg| arg.to_str())
+            .collect::<Option<Vec<_>>>()
+            .and_then(|args| {
+                toml_filter::find_matching_filter(&format!("docker {}", args.join(" ")))
+            })
+    };
+    let Some(filter) = filter else {
+        return runner::run_passthrough("docker", args, verbose);
+    };
+
+    if verbose > 0 {
+        eprintln!("docker TOML filter: {}", filter.name);
+    }
+    let mut cmd = resolved_command("docker");
+    cmd.child_args(args);
+    let args_display = tracking::args_display(args);
+    let label = format!("docker {args_display}");
+    runner::run_filtered_with_exit(
+        cmd,
+        "docker",
+        &args_display,
+        |raw, exit_code| {
+            let (filtered, loss) = toml_filter::apply_filter_with_info(filter, raw);
+            let hint = if exit_code != 0 {
+                crate::core::tee::tee_and_hint(raw, &label, exit_code)
+            } else {
+                match &loss {
+                    Lossiness::None => None,
+                    Lossiness::Tail {
+                        tee_payload,
+                        tail_offset,
+                    } => crate::core::tee::force_tee_tail_hint(tee_payload, &label, *tail_offset),
+                    Lossiness::Whole => crate::core::tee::force_tee_hint(raw, &label),
+                }
+            };
+            if loss != Lossiness::None && hint.is_none() {
+                raw.to_string()
+            } else {
+                runner::with_hint(&filtered, hint.as_deref()).into_owned()
+            }
+        },
+        RunOptions {
+            filter_stdout_only: !filter.filter_stderr,
+            inherit_stdin: true,
+            ..Default::default()
+        },
+    )
 }
 
 /// Run `docker compose ps` (or `docker compose ps -a`) with compact output
