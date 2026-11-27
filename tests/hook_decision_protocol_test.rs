@@ -409,6 +409,42 @@ mod recall_tracking {
         );
     }
 
+    /// OpenCode's hook counts a read its own rules do not deny, including
+    /// under rules RTK cannot judge: the command is then left as typed, and
+    /// still runs.
+    #[test]
+    fn opencode_hook_records_a_tee_read_unless_denied() {
+        for (file, body, recorded) in [
+            // A comment RTK's JSON reader cannot parse.
+            (
+                "opencode.jsonc",
+                "// team rules\n{\"permission\":{\"bash\":{\"tail *\":\"ask\"}}}",
+                true,
+            ),
+            (
+                "opencode.json",
+                r#"{"permission":{"bash":{"tail *":"deny"}}}"#,
+                false,
+            ),
+        ] {
+            let sb = Sandbox::bare();
+            let config = sb.home.join(file);
+            std::fs::write(&config, body).expect("write opencode config");
+            let config = config.to_string_lossy().into_owned();
+            let cmd = format!("tail -n +52 {}", sb.tee_log());
+            let (code, stdout, _) = sb.run_with_env(
+                &["hook", "opencode", "--", &cmd],
+                &[("OPENCODE_CONFIG", &config)],
+            );
+            assert_eq!(
+                (code, stdout.trim()),
+                (0, "{}"),
+                "{file}: the command must be left as typed"
+            );
+            assert_eq!(sb.recorded_a_recall(), recorded, "{file}");
+        }
+    }
+
     /// A command that reads nothing from the tee directory records nothing.
     #[test]
     fn unrelated_command_records_nothing() {
