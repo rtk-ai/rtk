@@ -402,7 +402,8 @@ pip_cmd.rs        JSON PARSING          JSON API          70-85%
     {"name": "...", "version": "...", "requires": [...]}
     → Extract key fields only
 
-  Auto-detect uv: If uv exists, use uv pip instead
+  Prefer pip when it is on PATH. Fall back to uv pip only when pip is absent
+  and uv is available; report that substitution on stderr.
 ```
 
 #### Shared Infrastructure
