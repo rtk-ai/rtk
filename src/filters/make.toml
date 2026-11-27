@@ -6,7 +6,8 @@ strip_lines_matching = [
   "^\\s*$",
   "^Nothing to be done",
 ]
-# make stops at the first failure, so the error and `make: ***` are at the end of the output.
+# Keep the end: a recipe that reports on stdout (a test runner, a script) prints its failure
+# summary last. Compiler errors and `make: ***` go to stderr, which is not filtered.
 tail_lines = 50
 on_empty = "make: ok"
 

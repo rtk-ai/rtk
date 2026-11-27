@@ -1579,6 +1579,7 @@ make[1]: Leaving directory '/home/user/project/docs'
         let filters = make_filters(BUILTIN_TOML);
         let filter = find_filter_in("make", &filters).expect("make built-in");
         // Last 120 lines of a failing Buildroot build: kernel module install, then a compile error.
+        // Captured with stdout and stderr merged; in `rtk make` the error lines arrive on stderr.
         let input = include_str!("../../tests/fixtures/make_buildroot_fail_compile_raw.txt");
 
         let out = apply_filter(filter, input);
@@ -1589,6 +1590,29 @@ make[1]: Leaving directory '/home/user/project/docs'
         assert!(
             !out.contains("l2tp_ip.ko.xz"),
             "the head of the build is dropped"
+        );
+    }
+
+    #[test]
+    fn test_make_keeps_the_failure_summary_a_recipe_prints_on_stdout() {
+        let filters = make_filters(BUILTIN_TOML);
+        let filter = find_filter_in("make test", &filters).expect("make built-in");
+        // Stdout of a failing `make test` running `pytest -v`: 122 lines, 9 of them blank.
+        let input = include_str!("../../tests/fixtures/make_pytest_fail_stdout_raw.txt");
+
+        let out = apply_filter(filter, input);
+
+        assert!(
+            out.starts_with("... (63 lines omitted)\n"),
+            "the last 50 lines are kept and the cut is marked: {out}"
+        );
+        assert_eq!(out.lines().count(), 51, "50 kept lines plus the marker");
+        assert!(out.contains("FAILED test_fail.py::test_lookup - KeyError: 'missing'"));
+        assert!(out.contains("FAILED test_fail.py::test_math - assert 45 == 46"));
+        assert!(out.contains("2 failed, 80 passed"));
+        assert!(
+            !out.contains("python3 -m pytest"),
+            "the head of the run is dropped"
         );
     }
 
