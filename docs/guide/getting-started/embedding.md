@@ -61,7 +61,7 @@ The exit-code contract says nothing about the shape of the rewritten command. Mo
 |---------|----------------------|
 | `cat foo.txt` | `rtk read foo.txt` |
 | `head -n 5 foo.txt` | `rtk read foo.txt --head-lines 5` |
-| `python -m pytest -x` | `rtk pytest -x` |
+| `python -m pytest -x` | `rtk pytest --python python -- -x` |
 | `npm run lint` | `rtk lint` |
 | `yadm status` | `rtk git status` |
 

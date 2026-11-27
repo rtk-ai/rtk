@@ -905,6 +905,9 @@ enum Commands {
 
     /// Pytest test runner with compact output
     Pytest {
+        /// Run pytest with this Python interpreter (preserves a selected venv)
+        #[arg(long, value_name = "INTERPRETER")]
+        python: Option<String>,
         /// Pytest arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -3581,7 +3584,9 @@ fn run_cli() -> Result<i32> {
 
         Commands::Sqlfluff { args } => sqlfluff_cmd::run(&args, cli.verbose)?,
 
-        Commands::Pytest { args } => pytest_cmd::run(&args, cli.verbose)?,
+        Commands::Pytest { python, args } => {
+            pytest_cmd::run(&args, cli.verbose, python.as_deref())?
+        }
 
         Commands::Mypy { args } => mypy_cmd::run(&args, cli.verbose)?,
 
@@ -4787,6 +4792,28 @@ mod tests {
                 assert_eq!(args, vec!["echo", "hello"]);
             }
             _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_pytest_interpreter_keeps_forwarded_options_separate() {
+        let cli = try_parse_cli_from([
+            "rtk",
+            "pytest",
+            "--python",
+            r"C:\test venv\python.exe",
+            "--",
+            "--python",
+            "plugin-value",
+            "-q",
+        ])
+        .expect("explicit interpreter and pytest arguments must parse");
+        match cli.command {
+            Commands::Pytest { python, args } => {
+                assert_eq!(python.as_deref(), Some(r"C:\test venv\python.exe"));
+                assert_eq!(args, ["--python", "plugin-value", "-q"]);
+            }
+            _ => panic!("expected pytest"),
         }
     }
 
