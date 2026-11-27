@@ -1,0 +1,26 @@
+[filters.pyright]
+description = "Compact pyright output — diagnostics and summary only"
+match_command = "^pyright(\\s|$)"
+strip_ansi = true
+keep_lines_matching = [
+  "(?i)\\berror\\b",
+  "(?i)\\bwarning\\b",
+  "^\\s*\\d+ errors?,",
+]
+max_lines = 80
+truncate_lines_at = 160
+
+[[tests.pyright]]
+name = "keeps diagnostics and summary"
+input = """
+/path/to/project
+  /path/to/file.py:10:5 - error: "x" is not defined (reportUndefinedVariable)
+  /path/to/file.py:20:9 - warning: "y" is unused (reportUnusedVariable)
+1 error, 1 warning, 0 informations
+"""
+expected = "  /path/to/file.py:10:5 - error: \"x\" is not defined (reportUndefinedVariable)\n  /path/to/file.py:20:9 - warning: \"y\" is unused (reportUnusedVariable)\n1 error, 1 warning, 0 informations"
+
+[[tests.pyright]]
+name = "empty input passes through"
+input = ""
+expected = ""
