@@ -5,6 +5,13 @@
 ## Specifics
 
 - `pytest_cmd.rs` uses a state machine text parser (no JSON available from pytest)
+  - Failure windows count every diagnostic `E` line, including blank separators
+    and diff headings beginning with `=`. Up to four nonblank lines are shown
+    (the first two and last two for longer reports); the elision marker counts
+    all remaining diagnostic lines, including omitted blank separators.
+  - Blank lines separate traceback diagnostics from `--showlocals` output, so a
+    local named `E` does not consume the error budget even when its alignment
+    matches an indented diff heading.
 - `ruff_cmd.rs` uses JSON for check mode (`--output-format=json`) and text filtering for format mode
 - `sqlfluff_cmd.rs` injects `--format json` for lint mode and groups violations by rule and file; other subcommands pass through capped
 - Ruff and SQLFluff list identical descriptions once beside a visible top rule.
