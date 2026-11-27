@@ -880,9 +880,13 @@ fn detach(command: &mut Command) {
 fn detach(_command: &mut Command) {}
 
 pub fn stop(name: &str) -> Result<bool> {
-    let Some(found) = installed(name) else {
-        return Ok(false);
-    };
+    match installed(name) {
+        Some(found) => stop_installed(name, &found),
+        None => Ok(false),
+    }
+}
+
+fn stop_installed(name: &str, found: &Installed) -> Result<bool> {
     let Some(pid) = read_pid(&found.dir).filter(|pid| runs(*pid, &found.def)) else {
         let _ = std::fs::remove_file(found.dir.join(PID));
         return Ok(false);
@@ -1053,14 +1057,25 @@ pub fn remove_all(dry_run: bool) -> Result<Vec<PathBuf>> {
             continue;
         };
         if !dry_run {
-            if let Err(e) = stop(&name) {
-                eprintln!(
-                    "  [warn] {e:#}; its files stay in {} until it stops",
-                    dir.display()
-                );
-                continue;
+            let found = installed(&name);
+            if let Some(found) = &found {
+                if let Err(e) = stop_installed(&name, found) {
+                    eprintln!(
+                        "  [warn] {e:#}; its files stay in {} until it stops",
+                        dir.display()
+                    );
+                    continue;
+                }
+                let _ = std::fs::remove_file(dir.join(MARKER));
+                let _ = stop_installed(&name, found);
             }
-            remove_inside_root(&dir)?;
+            if remove_inside_root(&dir).is_err() {
+                std::thread::sleep(Duration::from_millis(300));
+                if let Some(found) = &found {
+                    let _ = stop_installed(&name, found);
+                }
+                remove_inside_root(&dir)?;
+            }
         }
         removed.push(dir);
     }

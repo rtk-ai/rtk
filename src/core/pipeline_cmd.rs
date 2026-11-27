@@ -873,7 +873,39 @@ fn add_pipeline(
             if let Some((src, sha)) = &pin {
                 crate::core::pipeline_remote::record_install(&name, src, sha.as_deref(), &toml);
             }
-            return Ok(Added::Live);
+            let needs = crate::core::pipeline_needs::of(&loaded.resolved, &name);
+            if needs.is_empty() {
+                return Ok(Added::Live);
+            }
+            let review = match review {
+                Some(review) => review,
+                None if consent == crate::core::pipeline_needs::Consent::NoTerminal => {
+                    crate::core::deps::Review::Unreviewed
+                }
+                None => catalog_review(pin.as_ref()),
+            };
+            let settled = crate::core::pipeline_needs::settle(
+                &needs,
+                &name,
+                &review,
+                consent,
+                &format!("{name} stays installed without it"),
+            )?;
+            if settled == crate::core::pipeline_needs::Settled::Met {
+                return Ok(Added::Live);
+            }
+            crate::core::pipeline_needs::alert(
+                &name,
+                &settled,
+                "stays installed, but parts of it cannot run",
+                &crate::core::pipeline_needs::running_now(""),
+                rerun,
+            );
+            return Ok(if settled.exit_code() == 0 {
+                Added::Declined
+            } else {
+                Added::Unmet
+            });
         }
         let mut lines = vec![format!(
             "`{name}` is already installed — what you install REPLACES the live version."
