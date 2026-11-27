@@ -1,0 +1,22 @@
+{"Time":"2026-11-24T14:05:48.362761956Z","Action":"run","Package":"example.com/panicfixture","Test":"TestCompleted"}
+{"Time":"2026-11-24T14:05:48.362859957Z","Action":"output","Package":"example.com/panicfixture","Test":"TestCompleted","Output":"=== RUN   TestCompleted\n"}
+{"Time":"2026-11-24T14:05:48.362873529Z","Action":"output","Package":"example.com/panicfixture","Test":"TestCompleted","Output":"    panic_test.go:3: completed test chatter\n"}
+{"Time":"2026-11-24T14:05:48.362878092Z","Action":"output","Package":"example.com/panicfixture","Test":"TestCompleted","Output":"--- PASS: TestCompleted (0.00s)\n"}
+{"Time":"2026-11-24T14:05:48.362879886Z","Action":"pass","Package":"example.com/panicfixture","Test":"TestCompleted","Elapsed":0}
+{"Time":"2026-11-24T14:05:48.362882942Z","Action":"run","Package":"example.com/panicfixture","Test":"TestSkipped"}
+{"Time":"2026-11-24T14:05:48.362884348Z","Action":"output","Package":"example.com/panicfixture","Test":"TestSkipped","Output":"=== RUN   TestSkipped\n"}
+{"Time":"2026-11-24T14:05:48.362885953Z","Action":"output","Package":"example.com/panicfixture","Test":"TestSkipped","Output":"    panic_test.go:4: skipped test chatter\n"}
+{"Time":"2026-11-24T14:05:48.362887714Z","Action":"output","Package":"example.com/panicfixture","Test":"TestSkipped","Output":"--- SKIP: TestSkipped (0.00s)\n"}
+{"Time":"2026-11-24T14:05:48.362890409Z","Action":"skip","Package":"example.com/panicfixture","Test":"TestSkipped","Elapsed":0}
+{"Time":"2026-11-24T14:05:48.36289165Z","Action":"run","Package":"example.com/panicfixture","Test":"TestCrash"}
+{"Time":"2026-11-24T14:05:48.362896317Z","Action":"output","Package":"example.com/panicfixture","Test":"TestCrash","Output":"=== RUN   TestCrash\n"}
+{"Time":"2026-11-24T14:05:48.362897932Z","Action":"output","Package":"example.com/panicfixture","Test":"TestCrash","Output":"    panic_test.go:6: diagnostic before crash\n"}
+{"Time":"2026-11-24T14:05:48.365103289Z","Action":"output","Package":"example.com/panicfixture","Test":"TestCrash","Output":"panic: async test crash\n"}
+{"Time":"2026-11-24T14:05:48.365127322Z","Action":"output","Package":"example.com/panicfixture","Test":"TestCrash","Output":"\n"}
+{"Time":"2026-11-24T14:05:48.365130339Z","Action":"output","Package":"example.com/panicfixture","Test":"TestCrash","Output":"goroutine 21 [running]:\n"}
+{"Time":"2026-11-24T14:05:48.36513212Z","Action":"output","Package":"example.com/panicfixture","Test":"TestCrash","Output":"example.com/panicfixture.TestCrash.func1()\n"}
+{"Time":"2026-11-24T14:05:48.365133874Z","Action":"output","Package":"example.com/panicfixture","Test":"TestCrash","Output":"\t/validation/go-panic-data/panic_test.go:7 +0x27\n"}
+{"Time":"2026-11-24T14:05:48.365136385Z","Action":"output","Package":"example.com/panicfixture","Test":"TestCrash","Output":"created by example.com/panicfixture.TestCrash\n"}
+{"Time":"2026-11-24T14:05:48.365138093Z","Action":"output","Package":"example.com/panicfixture","Test":"TestCrash","Output":"\t/validation/go-panic-data/panic_test.go:7 +0x52\n"}
+{"Time":"2026-11-24T14:05:48.365472575Z","Action":"output","Package":"example.com/panicfixture","Output":"FAIL\texample.com/panicfixture\t0.004s\n"}
+{"Time":"2026-11-24T14:05:48.365505938Z","Action":"fail","Package":"example.com/panicfixture","Elapsed":0.004}
