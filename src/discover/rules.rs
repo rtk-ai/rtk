@@ -899,6 +899,14 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^cmake\b",
+        rtk_cmd: "rtk cmake",
+        rewrite_prefixes: &["cmake"],
+        category: "Build",
+        savings_pct: 65.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^make\b",
         rtk_cmd: "rtk make",
         rewrite_prefixes: &["make"],

@@ -136,6 +136,7 @@ The part 85k developers starred. Built by 200+ contributors, written against rea
 | Operation | What the agent reads |
 |-----------|----------------------|
 | `cargo test` / `npm test` / `pytest` / `go test` | Failures only, with their assertion; passing tests collapsed to a count |
+| `cmake --build` / `cmake -S … -B …` | Target summaries and compiler diagnostics, without repetitive build/check progress |
 | `git status` / `git diff` / `git log` | Compact status, reduced diff context, one line per commit |
 | `git add/commit/push` | A confirmation line instead of progress output |
 | `ls` / `tree` / `grep` / `rg` | Trees with counts, matches grouped by file, long lines cut |

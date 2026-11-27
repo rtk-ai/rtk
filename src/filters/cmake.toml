@@ -1,0 +1,79 @@
+[filters.cmake]
+description = "CMake targets and diagnostics without build/check progress"
+match_command = '^cmake\b'
+strip_ansi = true
+strip_lines_matching = [
+  '^\[\s*(?:\d+%|\d+/\d+)\]\s+Building (?:C|CXX|Fortran|ASM|CUDA) object ',
+  '^(?:g?make|mingw32-make)(?:\[\d+\])?: (?:Entering|Leaving) directory ',
+  '^(?:Scanning dependencies|Consolidate compiler generated dependencies) of target ',
+  '^Dependencies file ".+" is newer than depends file ".+"\.$',
+  '^-- Detecting (?:C|CXX) (?:compiler ABI info|compile features)(?: - done)?$',
+  '^-- Check for working (?:C|CXX) compiler: .+ - (?:skipped|works)$',
+  '^-- Performing Test \S+(?: - Success)?$',
+  '^-- Looking for \S+$',
+]
+
+[[tests.cmake]]
+name = "remove Make and Ninja progress, retain target summaries"
+input = """
+[ 50%] Building CXX object CMakeFiles/app.dir/main.cpp.o
+[1/2] Building CXX object CMakeFiles/app.dir/main.cpp.o
+Scanning dependencies of target app
+gmake[1]: Entering directory '/work/build'
+[100%] Linking CXX executable app
+[100%] Built target app
+gmake[1]: Leaving directory '/work/build'
+"""
+expected = """
+[100%] Linking CXX executable app
+[100%] Built target app
+"""
+
+[[tests.cmake]]
+name = "keep compiler invocation, errors and make failure"
+input = """
+[ 50%] Building CXX object CMakeFiles/app.dir/main.cpp.o
+/usr/bin/c++ -Wall -c main.cpp
+main.cpp:1: error: missing declaration
+  1 | missing
+    | ^~~~~~~
+gmake[2]: *** [build.make:10: main.cpp.o] Error 1
+"""
+expected = """
+/usr/bin/c++ -Wall -c main.cpp
+main.cpp:1: error: missing declaration
+  1 | missing
+    | ^~~~~~~
+gmake[2]: *** [build.make:10: main.cpp.o] Error 1
+"""
+
+[[tests.cmake]]
+name = "keep configure results, warnings and failed checks"
+input = """
+-- The CXX compiler identification is GNU 12.2.0
+-- Performing Test HAS_FEATURE
+-- Performing Test HAS_FEATURE - Success
+-- Performing Test MISSING_FEATURE - Failed
+-- Looking for pthread_create
+-- Looking for pthread_create - found
+CMake Warning at CMakeLists.txt:4 (message):
+  Optional package unavailable
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /work/build
+"""
+expected = """
+-- The CXX compiler identification is GNU 12.2.0
+-- Performing Test MISSING_FEATURE - Failed
+-- Looking for pthread_create - found
+CMake Warning at CMakeLists.txt:4 (message):
+  Optional package unavailable
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /work/build
+"""
+
+[[tests.cmake]]
+name = "empty output stays empty"
+input = ""
+expected = ""

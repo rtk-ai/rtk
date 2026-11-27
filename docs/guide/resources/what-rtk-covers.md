@@ -121,6 +121,8 @@ listing into `head`, `tail`, or `cat`.
 | Command | What changes |
 |---------|--------------|
 | `make` | Errors and warnings highlighted, noise stripped |
+| `cmake --build build` | Target summaries and compiler diagnostics, without object-build progress or directory chatter |
+| `cmake -S . -B build` | Configure results, warnings and failed checks, without repetitive successful probes |
 
 ## Files and Search
 

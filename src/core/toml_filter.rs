@@ -1529,6 +1529,55 @@ max_lines = 999
     }
 
     #[test]
+    fn test_cmake_captured_builds_preserve_diagnostics_and_reduce_noise() {
+        let filters = make_filters(BUILTIN_TOML);
+        let filter = find_filter_in("cmake --build build", &filters).expect("cmake built-in");
+        for (name, input, signal) in [
+            (
+                "configure",
+                include_str!("../../tests/fixtures/cmake_configure_raw.txt"),
+                "Project feature summary: C++ compilation available",
+            ),
+            (
+                "make",
+                include_str!("../../tests/fixtures/cmake_build_raw.txt"),
+                "Built target sample",
+            ),
+            (
+                "ninja",
+                include_str!("../../tests/fixtures/cmake_ninja_build_raw.txt"),
+                "Linking CXX static library libsample.a",
+            ),
+            (
+                "failed",
+                include_str!("../../tests/fixtures/cmake_failed_build_raw.txt"),
+                "error: 'missing_symbol' was not declared",
+            ),
+        ] {
+            let output = apply_filter(filter, input);
+            assert!(output.contains(signal), "{name}: {output}");
+            assert!(!output.contains("Building CXX object"), "{name}: {output}");
+            assert!(!output.contains("Entering directory"), "{name}: {output}");
+            let savings = 100.0 * (1.0 - output.len() as f64 / input.len() as f64);
+            assert!(
+                savings >= 60.0,
+                "{name}: expected >=60% savings, got {savings:.1}%"
+            );
+            if name == "make" || name == "ninja" {
+                assert!(
+                    output.contains("warning: #warning CMake fixture warning must remain visible")
+                );
+                assert!(output.contains("1 | #warning CMake fixture warning must remain visible"));
+            }
+            if name == "failed" {
+                assert!(output.contains("/usr/bin/c++   -Wall -Wextra"));
+                assert!(output.contains("1 | int part8() { return missing_symbol; }"));
+                assert!(output.contains("gmake[2]: *** [CMakeFiles/sample.dir/build.make:174: CMakeFiles/sample.dir/part8.cpp.o] Error 1"));
+            }
+        }
+    }
+
+    #[test]
     fn test_make_savings_above_60pct() {
         let filters = make_filters(BUILTIN_TOML);
         let filter = find_filter_in("make all", &filters).expect("make built-in");
@@ -2135,6 +2184,7 @@ match_command = "^make\\b"
         let expected = [
             "ansible-playbook",
             "brew-install",
+            "cmake",
             "composer-install",
             "df",
             "dotnet-build",
@@ -2192,8 +2242,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            62,
-            "Expected exactly 62 built-in filters, got {}. \
+            63,
+            "Expected exactly 63 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -2301,11 +2351,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 62 existing filters still present + 1 new = 63
+        // All existing built-in filters remain present alongside the new one.
         assert_eq!(
             filters.len(),
-            63,
-            "Expected 63 filters after concat (62 built-in + 1 new)"
+            make_filters(BUILTIN_TOML).len() + 1,
+            "Expected one additional filter after concat"
         );
 
         // New filter is discoverable
