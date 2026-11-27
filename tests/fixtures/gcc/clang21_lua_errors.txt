@@ -1,0 +1,101 @@
+ldo.c:119:29: error: no member named 'topp' in 'struct lua_State'
+  119 |     setobjs2s(L, oldtop, L->topp.p - 1);  /* move it to 'oldtop' */
+      |                          ~  ^
+ldo.c:121:6: error: no member named 'topp' in 'struct lua_State'
+  121 |   L->topp.p = oldtop + 1;  /* top goes back to old top plus error object */
+      |   ~  ^
+ldo.c:136:40: error: no member named 'topp' in 'struct lua_State'
+  136 |       setobjs2s(L, mainth->top.p++, L->topp.p - 1);  /* copy error obj. */
+      |                                     ~  ^
+ldo.c:217:21: error: no member named 'topp' in 'struct lua_State'
+  217 |   setsvalue2s(L, L->topp.p, msg);
+      |                  ~  ^
+ldo.c:218:6: error: no member named 'topp' in 'struct lua_State'
+  218 |   L->topp.p++;  /* assume EXTRA_STACK */
+      |   ~  ^
+ldo.c:235:28: error: no member named 'topp' in 'struct lua_State'
+  235 |   if (L->stack_last.p - L->topp.p >= BASIC_STACK_SIZE)
+      |                         ~  ^
+ldo.c:263:6: error: no member named 'topp' in 'struct lua_State'
+  263 |   L->topp.offset = savestack(L, L->top.p);
+      |   ~  ^
+ldo.c:281:6: error: no member named 'topp' in 'struct lua_State'
+  281 |   L->topp.p = restorestack(L, L->top.offset);
+      |   ~  ^
+ldo.c:374:30: error: no member named 'topp' in 'struct lua_State'
+  374 |     int needed = cast_int(L->topp.p - L->stack.p) + n;
+      |                           ~  ^
+ldo.c:398:18: error: no member named 'topp' in 'struct lua_State'
+  398 |   StkId lim = L->topp.p;
+      |               ~  ^
+ldo.c:446:37: error: no member named 'topp' in 'struct lua_State'
+  446 |     ptrdiff_t top = savestack(L, L->topp.p);  /* preserve original 'top' */
+      |                                  ~  ^
+ldo.c:454:25: error: no member named 'topp' in 'struct lua_State'
+  454 |     if (isLua(ci) && L->topp.p < ci->top.p)
+      |                      ~  ^
+ldo.c:455:10: error: no member named 'topp' in 'struct lua_State'
+  455 |       L->topp.p = ci->top.p;  /* protect entire activation register */
+      |       ~  ^
+ldo.c:457:24: error: no member named 'topp' in 'struct lua_State'
+  457 |     if (ci->top.p < L->topp.p + LUA_MINSTACK)
+      |                     ~  ^
+ldo.c:458:22: error: no member named 'topp' in 'struct lua_State'
+  458 |       ci->top.p = L->topp.p + LUA_MINSTACK;
+      |                   ~  ^
+ldo.c:467:8: error: no member named 'topp' in 'struct lua_State'
+  467 |     L->topp.p = restorestack(L, top);
+      |     ~  ^
+ldo.c:498:25: error: no member named 'topp' in 'struct lua_State'
+  498 |     StkId firstres = L->topp.p - nres;  /* index of first result */
+      |                      ~  ^
+ldo.c:531:15: error: no member named 'topp' in 'struct lua_State'
+  531 |   for (p = L->topp.p; p > func; p--)  /* open space for metamethod */
+      |            ~  ^
+ldo.c:533:6: error: no member named 'topp' in 'struct lua_State'
+  533 |   L->topp.p++;  /* stack space pre-allocated by the caller */
+      |   ~  ^
+fatal error: too many errors emitted, stopping now [-ferror-limit=]
+20 errors generated.
+lstrlib.c:154:7: error: call to undeclared library function 'memcpy' with type 'void *(void *, const void *, unsigned long)'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+  154 |       memcpy(p, s, len * sizeof(char)); p += len;
+      |       ^
+lstrlib.c:154:7: note: include the header <string.h> or explicitly provide a declaration for 'memcpy'
+lstrlib.c:566:7: error: call to undeclared library function 'memcmp' with type 'int (const void *, const void *, unsigned long)'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+  566 |       memcmp(ms->capture[l].init, s, len) == 0)
+      |       ^
+lstrlib.c:566:7: note: include the header <string.h> or explicitly provide a declaration for 'memcmp'
+lstrlib.c:683:44: error: call to undeclared library function 'memchr' with type 'void *(const void *, int, unsigned long)'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+  683 |     while (l1 > 0 && (init = (const char *)memchr(s1, *s2, l1)) != NULL) {
+      |                                            ^
+lstrlib.c:683:44: note: include the header <string.h> or explicitly provide a declaration for 'memchr'
+lstrlib.c:752:9: error: call to undeclared library function 'strpbrk' with type 'char *(const char *, const char *)'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+  752 |     if (strpbrk(p + upto, SPECIALS))
+      |         ^
+lstrlib.c:752:9: note: include the header <string.h> or explicitly provide a declaration for 'strpbrk'
+lstrlib.c:754:13: error: call to undeclared library function 'strlen' with type 'unsigned long (const char *)'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+  754 |     upto += strlen(p + upto) + 1;  /* may have more after \0 */
+      |             ^
+lstrlib.c:754:13: note: include the header <string.h> or explicitly provide a declaration for 'strlen'
+lstrlib.c:1238:11: error: call to undeclared library function 'strspn' with type 'unsigned long (const char *, const char *)'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+ 1238 |   spec += strspn(spec, flags);  /* skip flags */
+      |           ^
+lstrlib.c:1238:11: note: include the header <string.h> or explicitly provide a declaration for 'strspn'
+lstrlib.c:1277:3: error: call to undeclared library function 'strcpy' with type 'char *(char *, const char *)'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+ 1277 |   strcpy(form + l - 1, lenmod);
+      |   ^
+lstrlib.c:1277:3: note: include the header <string.h> or explicitly provide a declaration for 'strcpy'
+lstrlib.c:1367:17: error: call to undeclared library function 'strchr' with type 'char *(const char *, int)'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+ 1367 |             if (strchr(form, '.') == NULL && l >= 100) {
+      |                 ^
+lstrlib.c:1367:17: note: include the header <string.h> or explicitly provide a declaration for 'strchr'
+lstrlib.c:1686:11: error: call to undeclared library function 'memset' with type 'void *(void *, int, unsigned long)'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+ 1686 |           memset(buff, LUAL_PACKPADBYTE, psize);
+      |           ^
+lstrlib.c:1686:11: note: include the header <string.h> or explicitly provide a declaration for 'memset'
+9 errors generated.
+ltable.c:587:7: error: call to undeclared library function 'memcpy' with type 'void *(void *, const void *, unsigned long)'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+  587 |       memcpy(np - tomove, op - tomove, tomoveb);
+      |       ^
+ltable.c:587:7: note: include the header <string.h> or explicitly provide a declaration for 'memcpy'
+1 error generated.
