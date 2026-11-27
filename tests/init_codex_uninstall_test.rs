@@ -98,15 +98,12 @@ fn test_codex_uninstall_exit_codes() {
         "a refused dry-run still writes nothing"
     );
 
-    // Case 3: hooks.json.bak symlinked outside project -> exit 2
+    // Case 3: hooks.json.bak symlinked outside project -> the link is replaced, exit 0
     fs::remove_file(proj.join(".codex")).expect("rm symlink");
     fs::create_dir_all(proj.join(".codex")).expect("mkdir .codex");
     fs::write(proj.join(".codex").join("hooks.json"), hooks_content).expect("hooks.json");
-    symlink(
-        out.join("stolen.json"),
-        proj.join(".codex").join("hooks.json.bak"),
-    )
-    .expect("symlink bak");
+    let backup = proj.join(".codex").join("hooks.json.bak");
+    symlink(out.join("stolen.json"), &backup).expect("symlink bak");
 
     let bak_output = rtk(&proj)
         .args(["init", "--codex", "--uninstall"])
@@ -114,21 +111,26 @@ fn test_codex_uninstall_exit_codes() {
         .expect("run rtk bak");
     assert_eq!(
         bak_output.status.code(),
-        Some(2),
-        "Expected exit code 2 when hooks.json.bak is symlinked outside project"
-    );
-    assert!(
-        String::from_utf8_lossy(&bak_output.stdout).contains("hooks.json.bak resolves to"),
-        "stdout should explain the refused backup: {bak_output:?}"
+        Some(0),
+        "Expected exit code 0 when hooks.json.bak is a link out of the project: {bak_output:?}"
     );
     assert!(
         !out.join("stolen.json").exists(),
         "nothing is written through the backup symlink"
     );
+    assert!(
+        fs::symlink_metadata(&backup).expect("lstat bak").is_file(),
+        "the backup link is replaced by a file inside the project"
+    );
     assert_eq!(
-        fs::read_to_string(proj.join(".codex").join("hooks.json")).expect("hooks.json"),
-        hooks_content,
-        "and the hook is left registered rather than rewritten unsafely"
+        fs::read_to_string(&backup).expect("read bak"),
+        hooks_content
+    );
+    assert!(
+        !fs::read_to_string(proj.join(".codex").join("hooks.json"))
+            .expect("hooks.json")
+            .contains("rtk hook codex"),
+        "and the hook is removed"
     );
 
     // Case 4: any other uninstall failure -> exit 1
