@@ -119,7 +119,9 @@ normal permission decision, also when the rewrite drops a leading line
 continuation; the hook does not infer wrap ownership from the resulting string.
 
 **It is offered only on `rtk hook claude`** (`DenyRules` and
-`check_claude_hook_command` in `permissions.rs`), and only when every Claude Code
+`check_claude_hook_command` in `permissions.rs`), only outside a Claude Code
+managed worktree (`.claude/worktrees/<name>`, where the worktree guard refuses
+any `rtk` command whose text mentions `fish`), and only when every Claude Code
 settings file RTK reads parsed and none of them has a deny rule. Once the
 script reaches a fish, RTK's own view of it stops describing what runs: fish
 starts a command where the bash-shaped segmenter does not look — the condition
