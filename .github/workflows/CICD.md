@@ -4,6 +4,11 @@
 
 Trigger: pull_request to develop or master
 
+Semgrep scans the checked-out PR merge against its first parent (`HEAD^1`),
+the exact base tree included in that merge. An older event payload must not
+blame the PR for findings inherited from the base branch. ERROR findings block;
+WARNING findings remain advisory.
+
 ```
                           ┌──────────────────┐
                           │    PR opened      │
