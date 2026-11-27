@@ -3026,7 +3026,7 @@ mod read {
     use crate::core::arg_tokenizer::{self, Token};
     use std::ops::Deref;
 
-    /// `git log`'s and `git show`'s arguments, read with [`LOG_GRAMMAR`].
+    /// `git log`, `git show`, and `git stash list` arguments, read with [`LOG_GRAMMAR`].
     pub(super) struct LogTokens<'a>(Vec<Token<'a>>);
 
     /// `git diff`'s arguments, read with [`DIFF_GRAMMAR`].
@@ -4395,6 +4395,28 @@ fn tokenize_stash_show_args(args: &[String]) -> Vec<Token<'_>> {
     arg_tokenizer::tokenize_grammar(args, &STASH_SHOW_GRAMMAR)
 }
 
+/// `git stash list`'s own `parse_options` consumes the first literal `--` before passing the
+/// remaining arguments to `git log` (even when `--` follows an unknown option like `--grep`),
+/// so strip that first `--` before tokenizing with [`LOG_GRAMMAR`].
+fn stash_list_log_args(args: &[String]) -> Vec<String> {
+    let mut out = args.to_vec();
+    if let Some(pos) = out.iter().position(|a| a == "--") {
+        out.remove(pos);
+    }
+    out
+}
+
+/// True if `git stash list`'s `<log-options>` change the output shape or format away from the
+/// default `stash@{N}: <summary>` lines that [`filter_stash_list`] expects.
+fn stash_list_wants_raw(tokens: &LogTokens<'_>) -> bool {
+    chosen_log_format(tokens).is_some()
+        || tokens.iter().any(|t| {
+            log_wants_raw_shape(t, tokens)
+                || t.is_one_of(SHOW_RAW_SHAPES)
+                || matches!(t.flag(), Some(&LOG_SIZE | &SHOW_SIGNATURE | &OUTPUT))
+        })
+}
+
 /// True if `-p`/`--patch` is one of `git stash show`'s options.
 fn stash_show_wants_patch(tokens: &[Token<'_>]) -> bool {
     tokens.iter().any(|t| t.is(&PATCH))
@@ -4414,27 +4436,49 @@ fn run_stash(
 
     match subcommand {
         Some("list") => {
+            let log_args = stash_list_log_args(args);
+            let tokens = tokenize_log_args(&log_args);
+            if stash_list_wants_raw(&tokens) {
+                let mut passthrough_args = Vec::with_capacity(args.len() + 2);
+                passthrough_args.push(OsString::from("stash"));
+                passthrough_args.push(OsString::from("list"));
+                passthrough_args.extend(args.iter().map(OsString::from));
+                return run_passthrough(&passthrough_args, global_args, verbose);
+            }
+
+            let tracked = with_args("git stash list", &display_args(args));
             let mut cmd = git_cmd(global_args);
             cmd.args(["stash", "list"]);
+            cmd.args(args);
             let result = exec_capture(&mut cmd).context("Failed to run git stash list")?;
 
-            if result.stdout.trim().is_empty() {
-                if !result.success() && !result.stderr.trim().is_empty() {
-                    eprintln!("{}", result.stderr.trim());
+            if !result.success() {
+                if !result.stdout.is_empty() {
+                    print!("{}", result.stdout);
                 }
-                timer.track("git stash list", "rtk git stash list", &result.stdout, "");
+                if !result.stderr.trim().is_empty() {
+                    eprint!("{}", result.stderr);
+                }
+                timer.track(
+                    &tracked,
+                    &format!("rtk {tracked}"),
+                    &result.stdout,
+                    &result.stdout,
+                );
                 return Ok(result.exit_code);
             }
 
+            if !result.stderr.trim().is_empty() {
+                eprint!("{}", result.stderr);
+            }
+            if result.stdout.trim().is_empty() {
+                timer.track(&tracked, &format!("rtk {tracked}"), &result.stdout, "");
+                return Ok(0);
+            }
+
             let filtered = filter_stash_list(&result.stdout);
-            let filtered = never_worse(&result.stdout, &filtered).to_string();
-            println!("{}", filtered);
-            timer.track(
-                "git stash list",
-                "rtk git stash list",
-                &result.stdout,
-                &filtered,
-            );
+            let shown = runner::emit_guarded(&filtered, None, &result.stdout);
+            timer.track(&tracked, &format!("rtk {tracked}"), &result.stdout, &shown);
         }
         Some("show") => {
             let tokens = tokenize_stash_show_args(args);
@@ -6574,6 +6618,63 @@ mod tests {
             "expected >=40% savings, got {:.1}%",
             savings
         );
+    }
+
+    #[test]
+    fn test_stash_list_wants_raw_respects_log_grammar() {
+        let raw = |args: &[&str]| {
+            let log_args = stash_list_log_args(&owned(args));
+            stash_list_wants_raw(&tokenize_log_args(&log_args))
+        };
+
+        for filtered in [
+            &[][..],
+            &["-1"],
+            &["-n", "2"],
+            &["--max-count=1"],
+            &["--max-count", "1"],
+            &["--skip=1"],
+            &["--skip", "1"],
+            &["--grep=stash-2"],
+            &["--grep", "-p"],
+            &["--grep", "--", "stash-2"],
+            &["--grep", "--", "-p"],
+            &["--reverse"],
+            &["--date=relative"],
+            &["--", "--", "-p"],
+            &["--rtk-invalid"],
+        ] {
+            assert!(
+                !raw(filtered),
+                "expected filtered path for git stash list {filtered:?}"
+            );
+        }
+
+        for passthrough in [
+            &["--format=%gd|%s"][..],
+            &["--pretty=fuller"],
+            &["--pretty"],
+            &["--oneline"],
+            &["-p"],
+            &["-u"],
+            &["--patch"],
+            &["--stat"],
+            &["--numstat"],
+            &["--name-only"],
+            &["--name-status"],
+            &["-z"],
+            &["--log-size"],
+            &["--show-signature"],
+            &["--output=stash.txt"],
+            &["--", "-p"],
+            &["--", "-z"],
+            &["--", "--format=%gd"],
+        ] {
+            assert!(
+                raw(passthrough),
+                "expected raw passthrough for git stash list {passthrough:?}"
+            );
+        }
     }
 
     #[test]
