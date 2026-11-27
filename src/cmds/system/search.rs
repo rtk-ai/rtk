@@ -462,6 +462,31 @@ fn unparsed_signal(stdout: &str) -> usize {
         .count()
 }
 
+fn is_unsupported_parse_flag_stderr(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("unrecognized option")
+        || lower.contains("invalid option")
+        || lower.contains("illegal option")
+}
+
+fn grep_supports_flags(flags: &[&str]) -> bool {
+    let mut cmd = resolved_command(Engine::Grep.bin());
+    for f in flags {
+        cmd.child_arg(f);
+    }
+    cmd.child_args(["-q", ""]);
+    let Ok(out) = cmd.stdin(std::process::Stdio::null()).output() else {
+        return true;
+    };
+    if out.status.code() == Some(2) {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if is_unsupported_parse_flag_stderr(&stderr) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Run real grep so matches and the savings baseline match the agent's command;
 /// rg is the fallback when grep is absent, rejects a flag, or `--type` is used.
 /// The search engine the agent actually invoked. RTK runs this binary verbatim
@@ -695,7 +720,10 @@ fn passthrough<T: AsRef<str>>(
     fold_file_list: bool,
 ) -> Result<i32> {
     let mut cmd = resolved_command(engine.bin());
-    if stream_stdin && !std::io::stdout().is_terminal() {
+    if stream_stdin
+        && !std::io::stdout().is_terminal()
+        && (engine != Engine::Grep || grep_supports_flags(&["--line-buffered"]))
+    {
         // Keep passthrough output live when stdout is piped.
         cmd.child_arg("--line-buffered");
     }
@@ -874,6 +902,11 @@ pub fn run(
     }
 
     if reads_piped_stdin {
+        if engine == Engine::Grep
+            && !grep_supports_flags(&["-n", "-H", "-I", "--null", "--line-buffered"])
+        {
+            return passthrough(&timer, engine, args, &real_cmd, true, false);
+        }
         return run_streaming_search(
             &timer,
             engine,
@@ -894,6 +927,16 @@ pub fn run(
     // Unparseable shape re-runs verbatim below (with its own stderr), so handle it
     // before surfacing this run's stderr (#2333).
     if unparsed_signal(&raw_output) > 0 {
+        return passthrough(&timer, engine, args, &real_cmd, false, false);
+    }
+
+    // BusyBox/non-GNU grep rejects RTK's injected parse aids (`--null`, `-I`) with
+    // exit 2 and no stdout; fall back to the agent's original command verbatim (#5192).
+    if engine == Engine::Grep
+        && exit_code == 2
+        && raw_output.trim().is_empty()
+        && is_unsupported_parse_flag_stderr(&result.stderr)
+    {
         return passthrough(&timer, engine, args, &real_cmd, false, false);
     }
 
@@ -2548,6 +2591,22 @@ mod tests {
         assert!(f(&["--before-context=2"]));
         assert!(f(&["--context=1"]));
         assert!(!f(&["--color", "auto"]));
+    }
+
+    #[test]
+    fn test_is_unsupported_parse_flag_stderr() {
+        assert!(is_unsupported_parse_flag_stderr(
+            "/bin/grep: unrecognized option: null\nBusyBox v1.36.1"
+        ));
+        assert!(is_unsupported_parse_flag_stderr(
+            "grep: invalid option -- 'I'"
+        ));
+        assert!(is_unsupported_parse_flag_stderr(
+            "grep: illegal option -- I"
+        ));
+        assert!(!is_unsupported_parse_flag_stderr(
+            "grep: missing.txt: No such file or directory"
+        ));
     }
 
     #[test]
