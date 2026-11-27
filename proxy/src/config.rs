@@ -58,6 +58,27 @@ pub fn adopt_stray_db(canonical: &str) -> Option<std::path::PathBuf> {
     adopt_from(&std::path::PathBuf::from(dest.file_name()?), dest)
 }
 
+/// Create the directory a database file lives in, so the first run against a
+/// fresh profile works.
+///
+/// SQLite creates the file but never its parent, and the default database
+/// paths sit under `<config>/rtk/llm-proxy/`, which a machine that has never
+/// run the daemon does not have yet. Opening the usage store or pruning the
+/// CCR cache before that directory exists fails with "unable to open database
+/// file" and silently disables recording until the next start.
+pub(crate) fn ensure_database_directory(path: &str) -> std::io::Result<()> {
+    if matches!(path.trim(), "" | "off" | ":memory:") {
+        return Ok(());
+    }
+    let Some(parent) = std::path::Path::new(path).parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(parent)
+}
+
 fn adopt_from(stray: &std::path::Path, dest: &std::path::Path) -> Option<std::path::PathBuf> {
     if stray == dest || !stray.is_file() || dest.exists() {
         return None;

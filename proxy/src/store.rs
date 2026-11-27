@@ -186,6 +186,9 @@ impl Store {
         let conn = if path == ":memory:" {
             Connection::open_in_memory()?
         } else {
+            // A daemon started on a machine that never ran it has no data
+            // directory yet; SQLite creates the file but not the folder.
+            crate::config::ensure_database_directory(path)?;
             Connection::open(path)?
         };
         conn.execute_batch(SCHEMA)?;
@@ -684,6 +687,25 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A daemon started on a machine that has never run it has no
+    /// `<config>/rtk/llm-proxy` directory; opening the usage store there used to
+    /// fail and silently disable recording until the next start.
+    #[test]
+    fn open_creates_a_missing_database_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root
+            .path()
+            .join("rtk")
+            .join("llm-proxy")
+            .join("rtk-proxy.db");
+        let path = nested.to_str().unwrap();
+
+        let store = Store::open(path).expect("first run against a fresh profile must open");
+
+        assert!(nested.is_file(), "database file should exist at {path}");
+        assert!(store.all_settings_sync().is_empty());
+    }
 
     async fn rec(s: &Store, session: &str, ts: &str, read: i64, created: i64) {
         s.record(UsageRow {
