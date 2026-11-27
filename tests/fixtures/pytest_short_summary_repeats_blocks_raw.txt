@@ -1,0 +1,71 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.4, pytest-9.2.0, pluggy-1.7.0
+rootdir: /home/user/project
+collected 7 items
+
+test_dup.py .FFF.EFE                                                     [100%]
+
+==================================== ERRORS ====================================
+_________________________ ERROR at setup of test_query _________________________
+
+    @pytest.fixture
+    def db():
+>       raise ConnectionError("db down")
+E       ConnectionError: db down
+
+test_dup.py:6: ConnectionError
+______________________ ERROR at teardown of test_cleanup _______________________
+
+    @pytest.fixture
+    def tmp():
+        yield
+>       raise OSError("cleanup failed")
+E       OSError: cleanup failed
+
+test_dup.py:12: OSError
+=================================== FAILURES ===================================
+___________________________________ test_bad ___________________________________
+
+    def test_bad():
+>       assert 1 == 2
+E       assert 1 == 2
+
+test_dup.py:20: AssertionError
+_____________________________ TestCart.test_total ______________________________
+
+self = <test_dup.TestCart object at 0x7f0000000000>
+
+    def test_total(self):
+>       assert sum([1, 2]) == 4
+E       assert 3 == 4
+E        +  where 3 = sum([1, 2])
+
+test_dup.py:25: AssertionError
+_________________________________ test_even[1] _________________________________
+
+n = 1
+
+    @pytest.mark.parametrize("n", [1, 2])
+    def test_even(n):
+>       assert n % 2 == 0
+E       assert (1 % 2) == 0
+
+test_dup.py:30: AssertionError
+_________________________________ test_cleanup _________________________________
+
+tmp = None
+
+    def test_cleanup(tmp):
+>       assert False, "wrong"
+E       AssertionError: wrong
+E       assert False
+
+test_dup.py:38: AssertionError
+=========================== short test summary info ============================
+FAILED test_dup.py::test_bad - assert 1 == 2
+FAILED test_dup.py::TestCart::test_total - assert 3 == 4
+FAILED test_dup.py::test_even[1] - assert (1 % 2) == 0
+FAILED test_dup.py::test_cleanup - AssertionError: wrong
+ERROR test_dup.py::test_query - ConnectionError: db down
+ERROR test_dup.py::test_cleanup - OSError: cleanup failed
+==================== 4 failed, 2 passed, 2 errors in 0.04s =====================
