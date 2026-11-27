@@ -43,6 +43,8 @@ async function rewriteCommand(
   cmd: string,
   signal?: AbortSignal
 ): Promise<string | null> {
+  // Node cannot pass a literal NUL in argv; leave it for the host to handle.
+  if (cmd.includes("\0")) return null
   const result = await pi.exec("rtk", ["rewrite", cmd], {
     timeout: REWRITE_TIMEOUT_MS,
     signal,
