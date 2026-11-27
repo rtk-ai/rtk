@@ -522,6 +522,8 @@ enum SchemaVersion {
     InitialRecheck = 3,
     /// Invocation IDs on command rows and measured recall output.
     RecallAccounting = 4,
+    /// `parse_failures.project_path` and its index, so a failure is tied to the project it happened in.
+    ParseFailuresProject = 5,
     // New schema changes go directly above this line.
     Next,
 }
@@ -552,6 +554,10 @@ const MIGRATIONS: &[(SchemaVersion, Migration)] = &[
     (SchemaVersion::EngineTables, migrate_engine_tables),
     (SchemaVersion::InitialRecheck, migrate_initial),
     (SchemaVersion::RecallAccounting, migrate_recall_accounting),
+    (
+        SchemaVersion::ParseFailuresProject,
+        migrate_parse_failures_project,
+    ),
 ];
 
 const _: () = {
@@ -660,6 +666,19 @@ fn migrate_initial(conn: &Connection) -> Result<()> {
     )
     .context("Failed to index hook_decisions by timestamp")?;
 
+    Ok(())
+}
+
+/// Records which project a parse failure happened in. Without it a failure can only be
+/// joined to other telemetry by bare timestamp, which is ambiguous when sessions run
+/// concurrently. Existing rows take the column default (`''`).
+fn migrate_parse_failures_project(conn: &Connection) -> Result<()> {
+    db::add_column_if_missing(conn, "parse_failures", "project_path", "TEXT DEFAULT ''")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pf_project_path_timestamp ON parse_failures(project_path, timestamp)",
+        [],
+    )
+    .context("Failed to index parse_failures by project")?;
     Ok(())
 }
 
@@ -1278,20 +1297,41 @@ impl Tracker {
     }
 
     /// Record a parse failure for analytics.
+    ///
+    /// Captures the current working directory in `project_path`, the same way
+    /// [`record`](Self::record) does, so failures and successes can be compared
+    /// within one project.
     pub fn record_parse_failure(
         &self,
         raw_command: &str,
         error_message: &str,
         fallback_succeeded: bool,
     ) -> Result<()> {
+        self.record_parse_failure_in(
+            &current_project_path_string(),
+            raw_command,
+            error_message,
+            fallback_succeeded,
+        )
+    }
+
+    /// [`record_parse_failure`](Self::record_parse_failure) for an explicit project.
+    pub(crate) fn record_parse_failure_in(
+        &self,
+        project_path: &str,
+        raw_command: &str,
+        error_message: &str,
+        fallback_succeeded: bool,
+    ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO parse_failures (timestamp, raw_command, error_message, fallback_succeeded)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO parse_failures (timestamp, raw_command, error_message, fallback_succeeded, project_path)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 Utc::now().to_rfc3339(),
                 raw_command,
                 error_message,
                 fallback_succeeded as i32,
+                project_path,
             ],
         )
         .inspect_err(|e| warn_if_missing_table("record_parse_failure", e))?;
@@ -1437,15 +1477,27 @@ impl Tracker {
         }))
     }
 
-    /// Get parse failure summary for `rtk gain --failures`.
-    pub fn get_parse_failure_summary(&self) -> Result<ParseFailureSummary> {
-        let total: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM parse_failures", [], |row| row.get(0))?;
+    /// Get parse failure summary filtered by project path.
+    ///
+    /// When `project_path` is `Some`, matches the exact working directory or any
+    /// subdirectory — the same scoping rule the `commands` queries use.
+    pub fn get_parse_failure_summary_filtered(
+        &self,
+        project_path: Option<&str>,
+    ) -> Result<ParseFailureSummary> {
+        let (project_exact, project_glob) = project_filter_params(project_path);
+        let total: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM parse_failures
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)",
+            params![project_exact, project_glob],
+            |row| row.get(0),
+        )?;
 
         let succeeded: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM parse_failures WHERE fallback_succeeded = 1",
-            [],
+            "SELECT COUNT(*) FROM parse_failures
+             WHERE fallback_succeeded = 1
+               AND (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)",
+            params![project_exact, project_glob],
             |row| row.get(0),
         )?;
 
@@ -1459,30 +1511,34 @@ impl Tracker {
         let mut stmt = self.conn.prepare(
             "SELECT raw_command, COUNT(*) as cnt
              FROM parse_failures
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY raw_command
              ORDER BY cnt DESC
              LIMIT 10",
         )?;
         let top_commands = stmt
-            .query_map([], |row| {
+            .query_map(params![project_exact, project_glob], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
         // Recent 10
         let mut stmt = self.conn.prepare(
-            "SELECT timestamp, raw_command, error_message, fallback_succeeded
+            "SELECT timestamp, raw_command, error_message, fallback_succeeded, project_path
              FROM parse_failures
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              ORDER BY timestamp DESC
              LIMIT 10",
         )?;
         let recent = stmt
-            .query_map([], |row| {
+            .query_map(params![project_exact, project_glob], |row| {
                 Ok(ParseFailureRecord {
                     timestamp: row.get(0)?,
                     raw_command: row.get(1)?,
                     error_message: row.get(2)?,
                     fallback_succeeded: row.get::<_, i32>(3)? != 0,
+                    // Pre-migration rows and standalone invocations carry ''
+                    project_path: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -2343,6 +2399,8 @@ pub struct ParseFailureRecord {
     #[allow(dead_code)]
     pub error_message: String,
     pub fallback_succeeded: bool,
+    /// Working directory the failure happened in ('' if unknown / pre-migration)
+    pub project_path: String,
 }
 
 /// Aggregated parse failure summary.
@@ -4409,7 +4467,7 @@ mod tests {
             .expect("Failed to record parse failure");
 
         let summary = tracker
-            .get_parse_failure_summary()
+            .get_parse_failure_summary_filtered(None)
             .expect("Failed to get summary");
 
         assert!(summary.total >= 1);
@@ -4433,7 +4491,7 @@ mod tests {
             .record_parse_failure("cmd_fail", "err", false)
             .unwrap();
 
-        let summary = tracker.get_parse_failure_summary().unwrap();
+        let summary = tracker.get_parse_failure_summary_filtered(None).unwrap();
         // Isolated DB, so the rate is now exact: 2/3 successes ≈ 66.7%.
         assert!((summary.recovery_rate - 66.7).abs() < 0.1);
     }
@@ -4716,6 +4774,196 @@ mod tests {
         );
     }
 
+    // 14. record_parse_failure stamps the current working directory
+    #[test]
+    fn test_parse_failure_records_project_path() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+
+        tracker
+            .record_parse_failure("git -C /path status", "unrecognized subcommand", false)
+            .expect("Failed to record parse failure");
+
+        let stored: String = tracker
+            .conn
+            .query_row("SELECT project_path FROM parse_failures", [], |row| {
+                row.get(0)
+            })
+            .expect("Failed to read project_path");
+
+        assert_eq!(
+            stored,
+            current_project_path_string(),
+            "parse failure should be stamped with the cwd, like commands are"
+        );
+        assert!(
+            !stored.is_empty(),
+            "cwd is resolvable in the test harness, so project_path must not be empty"
+        );
+    }
+
+    // 15. Project filter scopes failures to a project and its subdirectories
+    #[test]
+    fn test_parse_failure_summary_filtered_by_project() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+        let sep = std::path::MAIN_SEPARATOR;
+        let root = format!("{sep}work{sep}alpha");
+        let sub = format!("{root}{sep}crates{sep}inner");
+        let other = format!("{sep}work{sep}beta");
+
+        // Insert directly: record_parse_failure always uses the real cwd.
+        for (cmd, path, ok) in [
+            ("cmd_root", root.as_str(), 1),
+            ("cmd_sub", sub.as_str(), 0),
+            ("cmd_other", other.as_str(), 0),
+        ] {
+            tracker
+                .conn
+                .execute(
+                    "INSERT INTO parse_failures (timestamp, raw_command, error_message, fallback_succeeded, project_path)
+                     VALUES (?1, ?2, 'err', ?3, ?4)",
+                    params![Utc::now().to_rfc3339(), cmd, ok, path],
+                )
+                .expect("Failed to insert parse failure");
+        }
+
+        let scoped = tracker
+            .get_parse_failure_summary_filtered(Some(&root))
+            .expect("Failed to get scoped summary");
+        assert_eq!(
+            scoped.total, 2,
+            "exact match plus subdirectory, excluding the sibling project"
+        );
+        assert_eq!(
+            scoped.recovery_rate, 50.0,
+            "1 of the 2 scoped rows recovered"
+        );
+        assert!(
+            !scoped.recent.iter().any(|r| r.raw_command == "cmd_other"),
+            "a sibling project must not leak into a scoped view"
+        );
+        assert!(
+            scoped.recent.iter().all(|r| !r.project_path.is_empty()),
+            "project_path should round-trip onto the record"
+        );
+
+        let global = tracker
+            .get_parse_failure_summary_filtered(None)
+            .expect("Failed to get global summary");
+        assert_eq!(global.total, 3, "unscoped view sees every project");
+    }
+
+    // 15b. Every scoped query filters by project: recovered rows and a repeated command
+    // in a sibling project must change neither the scoped recovery rate nor top_commands.
+    #[test]
+    fn test_parse_failure_scoped_queries_ignore_sibling_project() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+        let sep = std::path::MAIN_SEPARATOR;
+        let alpha = format!("{sep}work{sep}alpha");
+        let beta = format!("{sep}work{sep}beta");
+        for (path, cmd, ok) in [
+            (&alpha, "cmd_alpha", true),
+            (&alpha, "cmd_alpha_bad", false),
+            (&beta, "cmd_other", true),
+            (&beta, "cmd_other", true),
+        ] {
+            tracker
+                .record_parse_failure_in(path, cmd, "err", ok)
+                .expect("record should succeed");
+        }
+
+        let scoped = tracker
+            .get_parse_failure_summary_filtered(Some(&alpha))
+            .expect("scoped summary");
+        assert_eq!(scoped.total, 2);
+        assert_eq!(
+            scoped.recovery_rate, 50.0,
+            "sibling's recovered rows must not count"
+        );
+        assert!(
+            scoped.top_commands.iter().all(|(c, _)| c != "cmd_other"),
+            "sibling's repeated command must not appear in top_commands"
+        );
+        assert_eq!(scoped.top_commands.len(), 2);
+
+        let global = tracker
+            .get_parse_failure_summary_filtered(None)
+            .expect("global summary");
+        assert_eq!(global.total, 4);
+        assert_eq!(global.top_commands[0], ("cmd_other".to_string(), 2));
+    }
+
+    // 16. A database stamped at the previous version gains parse_failures.project_path
+    // on the first gated open, and its existing rows read ''.
+    #[test]
+    fn test_upgrade_from_recall_accounting_adds_parse_failures_project_path() {
+        let tmp = test_isolation::tempdir();
+        let db_path = tmp.path().join("history.db");
+        {
+            let conn = Connection::open(&db_path).expect("open should succeed");
+            seed_schema(&conn, SchemaVersion::RecallAccounting);
+            conn.execute(
+                "INSERT INTO parse_failures (timestamp, raw_command, error_message)
+                 VALUES ('2026-01-01T00:00:00Z', 'legacy cmd', 'err')",
+                [],
+            )
+            .expect("legacy row should insert");
+            let has_column: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('parse_failures') WHERE name = 'project_path')",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("pragma_table_info should be readable");
+            assert!(!has_column, "the seeded database predates the column");
+        }
+
+        let conn = upgrade_through_tracker(&db_path);
+        assert_eq!(
+            user_version(&conn),
+            SchemaVersion::ParseFailuresProject as i64
+        );
+        let legacy: String = conn
+            .query_row(
+                "SELECT project_path FROM parse_failures WHERE raw_command = 'legacy cmd'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("project_path column missing after the upgrade");
+        assert_eq!(
+            legacy, "",
+            "pre-migration rows backfill to the empty string"
+        );
+        let index_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'idx_pf_project_path_timestamp')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("sqlite_master should be readable");
+        assert!(index_exists, "the project index must be created too");
+    }
+
+    // 16b. A fresh database has the column, and replaying every step (`rtk init`)
+    // leaves the data alone.
+    #[test]
+    fn test_fresh_database_has_parse_failures_project_path_and_replay_is_idempotent() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+        tracker
+            .record_parse_failure("cmd", "err", true)
+            .expect("record should succeed");
+        run_schema_migrations(&tracker.conn.conn, MigrationMode::Always)
+            .expect("replaying every step must succeed");
+        let count: i64 = tracker
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM parse_failures WHERE project_path != ''",
+                [],
+                |row| row.get(0),
+            )
+            .expect("project_path should be readable");
+        assert_eq!(count, 1, "replay must not disturb stamped rows");
+    }
+
     #[test]
     fn test_reset_all_clears_both_tables() {
         let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
@@ -4748,7 +4996,7 @@ mod tests {
         );
 
         let failures = tracker
-            .get_parse_failure_summary()
+            .get_parse_failure_summary_filtered(None)
             .expect("Failed to get failure summary");
         assert_eq!(
             failures.total, 0,
