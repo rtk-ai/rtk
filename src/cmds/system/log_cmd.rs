@@ -67,18 +67,15 @@ fn analyze_logs(content: &str) -> String {
     let mut result = Vec::new();
     let mut error_counts: HashMap<String, usize> = HashMap::new();
     let mut warn_counts: HashMap<String, usize> = HashMap::new();
-    let mut info_counts: HashMap<String, usize> = HashMap::new();
+    let mut total_info = 0usize;
     let mut unique_errors: Vec<String> = Vec::new();
     let mut unique_warnings: Vec<String> = Vec::new();
-
-    // Use module-level LazyLock regexes for normalization
 
     for line in content.lines() {
         let line_lower = line.to_lowercase();
 
-        // Normalize for deduplication
         let normalized =
-            normalize_log_line(line, &TIMESTAMP_RE, &UUID_RE, &HEX_RE, &NUM_RE, &PATH_RE);
+            || normalize_log_line(line, &TIMESTAMP_RE, &UUID_RE, &HEX_RE, &NUM_RE, &PATH_RE);
 
         // Categorize. The error bucket also covers severity labels above ERROR
         // (CRITICAL, FATAL, ALERT, EMERGENCY, SEVERE, PANIC) — these are the most
@@ -92,26 +89,25 @@ fn analyze_logs(content: &str) -> String {
             || line_lower.contains("emerg")
             || line_lower.contains("severe")
         {
-            let count = error_counts.entry(normalized.clone()).or_insert(0);
+            let count = error_counts.entry(normalized()).or_insert(0);
             if *count == 0 {
                 unique_errors.push(line.to_string());
             }
             *count += 1;
         } else if line_lower.contains("warn") || line_lower.contains("notice") {
-            let count = warn_counts.entry(normalized.clone()).or_insert(0);
+            let count = warn_counts.entry(normalized()).or_insert(0);
             if *count == 0 {
                 unique_warnings.push(line.to_string());
             }
             *count += 1;
         } else if line_lower.contains("info") {
-            *info_counts.entry(normalized).or_insert(0) += 1;
+            total_info += 1;
         }
     }
 
     // Summary
     let total_errors: usize = error_counts.values().sum();
     let total_warnings: usize = warn_counts.values().sum();
-    let total_info: usize = info_counts.values().sum();
 
     result.push("Log Summary".to_string());
     result.push(format!(
@@ -233,6 +229,16 @@ fn normalize_log_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_info_lines_without_grouping_them_or_overriding_higher_severity() {
+        let summary = analyze_logs(
+            "INFO alpha\nINFO alpha\ninfo beta\ndebug only\nINFO WARN retry\nINFO ERROR failed",
+        );
+        assert!(summary.contains("[info] 3 info messages"));
+        assert!(summary.contains("[warn] 1 warnings (1 unique)"));
+        assert!(summary.contains("[error] 1 errors (1 unique)"));
+    }
 
     #[test]
     fn test_analyze_logs() {
