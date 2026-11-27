@@ -1,7 +1,7 @@
 //! Shows users how many tokens RTK has saved them over time.
 
 use crate::core::display_helpers::{format_duration, print_period_table};
-use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
+use crate::core::tracking::{DayStats, MonthStats, ParseFailureSummary, Tracker, WeekStats};
 use crate::core::user_dirs;
 use crate::core::utils::{format_tokens, truncate};
 use crate::hooks::hook_check;
@@ -710,7 +710,7 @@ pub fn run(
     let tracker = tracker_for_report("Failed to initialize tracking database")?;
 
     if failures {
-        return show_failures(&tracker);
+        return show_failures(&tracker, project_scope.as_deref());
     }
 
     // A bare `rtk gain` auto-launches the live dashboard once the llm-proxy
@@ -1580,7 +1580,30 @@ fn resolve_project_scope(project: bool) -> Result<Option<String>> {
     Ok(Some(canonical.to_string_lossy().to_string()))
 }
 
-/// Shorten long absolute paths for display. // added
+/// Where a failure row happened, relative to what the view is already showing.
+///
+/// Unscoped, the full project path: the last component alone cannot tell
+/// `projA/sub` from `proj1/sub`. Scoped, the subdirectory below the scope, and
+/// nothing for a row at the scope root. Rows recorded before `project_path`
+/// existed carry `''` and have no location.
+fn failure_location(project_path: &str, project_scope: Option<&str>) -> Option<String> {
+    if project_path.is_empty() {
+        return None;
+    }
+    let Some(scope) = project_scope else {
+        return Some(project_path.to_string());
+    };
+    if project_path == scope {
+        return None;
+    }
+    let below = project_path
+        .strip_prefix(scope)
+        .map(|rest| rest.trim_start_matches(['/', '\\']))
+        .filter(|rest| !rest.is_empty());
+    Some(below.unwrap_or(project_path).to_string())
+}
+
+/// Shorten long absolute paths for display.
 fn shorten_path(path: &str) -> String {
     let path_buf = PathBuf::from(path);
     let comps: Vec<String> = path_buf
@@ -1866,50 +1889,84 @@ fn check_rtk_disabled_bypass() -> Option<String> {
     }
 }
 
-fn show_failures(tracker: &Tracker) -> Result<()> {
+fn show_failures(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
     let summary = tracker
-        .get_parse_failure_summary()
+        .get_parse_failure_summary_filtered(project_scope)
         .context("Failed to load parse failure data")?;
+    print!("{}", render_failures(&summary, project_scope));
+    Ok(())
+}
+
+/// The `rtk gain --failures` report, scoped to `project_scope` when given.
+fn render_failures(summary: &ParseFailureSummary, project_scope: Option<&str>) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
 
     if summary.total == 0 {
-        println!("No parse failures recorded.");
-        println!("This means all commands parsed successfully (or fallback hasn't triggered yet).");
-        return Ok(());
+        if project_scope.is_some() {
+            out.push_str("No parse failures recorded for this project.\n");
+        } else {
+            out.push_str("No parse failures recorded.\n");
+            out.push_str(
+                "This means all commands parsed successfully (or fallback hasn't triggered yet).\n",
+            );
+        }
+        return out;
     }
 
-    println!("{}", styled("RTK Parse Failures", true));
-    println!("{}", "═".repeat(60));
-    println!();
+    let title = if project_scope.is_some() {
+        "RTK Parse Failures (Project Scope)"
+    } else {
+        "RTK Parse Failures"
+    };
+    let _ = writeln!(out, "{}", styled(title, true));
+    let _ = writeln!(out, "{}", "═".repeat(60));
+    if let Some(scope) = project_scope {
+        let _ = writeln!(out, "Scope: {}", shorten_path(scope));
+    }
+    out.push('\n');
 
-    print_kpi("Total failures", summary.total.to_string());
-    print_kpi("Recovery rate", format!("{:.1}%", summary.recovery_rate));
-    println!();
+    let _ = writeln!(out, "{:<18} {}", "Total failures:", summary.total);
+    let _ = writeln!(
+        out,
+        "{:<18} {:.1}%",
+        "Recovery rate:", summary.recovery_rate
+    );
+    out.push('\n');
 
     if !summary.top_commands.is_empty() {
-        println!("{}", styled("Top Commands (by frequency)", true));
-        println!("{}", "─".repeat(60));
+        let _ = writeln!(out, "{}", styled("Top Commands (by frequency)", true));
+        let _ = writeln!(out, "{}", "─".repeat(60));
         for (cmd, count) in &summary.top_commands {
-            let cmd_display = truncate(cmd, 50);
-            println!("  {:>4}x  {}", count, cmd_display);
+            let _ = writeln!(out, "  {:>4}x  {}", count, truncate(cmd, 50));
         }
-        println!();
+        out.push('\n');
     }
 
     if !summary.recent.is_empty() {
-        println!("{}", styled("Recent Failures (last 10)", true));
-        println!("{}", "─".repeat(60));
+        let _ = writeln!(out, "{}", styled("Recent Failures (last 10)", true));
+        let _ = writeln!(out, "{}", "─".repeat(60));
         for rec in &summary.recent {
             // ISSUE #2787: floor to the previous char boundary so the prefix
             // never exceeds 16 bytes and never lands mid-character
             let ts_short = &rec.timestamp[..rec.timestamp.floor_char_boundary(16)];
             let status = if rec.fallback_succeeded { "ok" } else { "FAIL" };
-            let cmd_display = truncate(&rec.raw_command, 40);
-            println!("  {} [{}] {}", ts_short, status, cmd_display);
+            let location = failure_location(&rec.project_path, project_scope)
+                .map(|l| format!("  ({l})"))
+                .unwrap_or_default();
+            let _ = writeln!(
+                out,
+                "  {} [{}] {}{}",
+                ts_short,
+                status,
+                truncate(&rec.raw_command, 40),
+                location
+            );
         }
-        println!();
+        out.push('\n');
     }
 
-    Ok(())
+    out
 }
 
 /// Prompt the user to confirm a destructive reset operation.
@@ -2162,5 +2219,100 @@ mod tests {
         assert_eq!(command_time_label("rtk proxy git log -20", 4_003), "-");
         assert_eq!(command_time_label("rtk git zz (passthrough)", 3_002), "-");
         assert_eq!(command_time_label("rtk grep", 0), "0ms");
+    }
+
+    #[test]
+    fn test_failure_location() {
+        let sep = std::path::MAIN_SEPARATOR;
+        let scope = format!("{sep}w{sep}a");
+        let sub = format!("{scope}{sep}sub");
+        // Unscoped: the full path, so `a/sub` and `b/sub` stay distinct
+        assert_eq!(failure_location(&sub, None), Some(sub.clone()));
+        // Scoped: nothing at the scope root, the subdirectory below it otherwise
+        assert_eq!(failure_location(&scope, Some(&scope)), None);
+        assert_eq!(
+            failure_location(&sub, Some(&scope)),
+            Some("sub".to_string())
+        );
+        // Pre-migration rows carry '' and get no location in either view
+        assert_eq!(failure_location("", None), None);
+        assert_eq!(failure_location("", Some(&scope)), None);
+    }
+
+    /// Records `<root>/a`, `<root>/a/sub` and `<root>/b/sub` and returns the tracker.
+    fn failure_fixture() -> (Tracker, String, String, String) {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+        let sep = std::path::MAIN_SEPARATOR;
+        let a = format!("{sep}w{sep}a");
+        let a_sub = format!("{a}{sep}sub");
+        let b_sub = format!("{sep}w{sep}b{sep}sub");
+        for (path, cmd) in [(&a, "cmd_a"), (&a_sub, "cmd_a_sub"), (&b_sub, "cmd_b_sub")] {
+            tracker
+                .record_parse_failure_in(path, cmd, "err", false)
+                .expect("record should succeed");
+        }
+        (tracker, a, a_sub, b_sub)
+    }
+
+    #[test]
+    fn test_render_failures_unscoped_labels_are_distinct() {
+        let (tracker, a, a_sub, b_sub) = failure_fixture();
+        let summary = tracker
+            .get_parse_failure_summary_filtered(None)
+            .expect("summary");
+        let out = render_failures(&summary, None);
+        assert!(
+            out.contains(
+                "RTK Parse Failures
+"
+            ),
+            "unscoped title: {out}"
+        );
+        assert!(!out.contains("Scope:"), "unscoped has no Scope line: {out}");
+        for path in [&a, &a_sub, &b_sub] {
+            assert!(
+                out.contains(&format!("({path})")),
+                "missing label {path}: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_render_failures_scoped_view() {
+        let (tracker, a, _a_sub, _b_sub) = failure_fixture();
+        let summary = tracker
+            .get_parse_failure_summary_filtered(Some(&a))
+            .expect("summary");
+        let out = render_failures(&summary, Some(&a));
+        assert!(out.contains("RTK Parse Failures (Project Scope)"), "{out}");
+        assert!(out.contains(&format!("Scope: {a}")), "{out}");
+        assert!(out.contains("cmd_a_sub") && out.contains("(sub)"), "{out}");
+        assert!(!out.contains("cmd_b_sub"), "sibling must not appear: {out}");
+        let root_row = out
+            .lines()
+            .find(|l| l.contains("cmd_a ") || l.ends_with("cmd_a"))
+            .expect("root row present");
+        assert!(
+            !root_row.contains('('),
+            "a row at the scope root has no label: {root_row}"
+        );
+    }
+
+    #[test]
+    fn test_render_failures_empty() {
+        let (tracker, _a, _a_sub, _b_sub) = failure_fixture();
+        let nowhere = std::path::MAIN_SEPARATOR.to_string() + "nowhere";
+        let summary = tracker
+            .get_parse_failure_summary_filtered(Some(&nowhere))
+            .expect("summary");
+        assert_eq!(
+            render_failures(&summary, Some(&nowhere)),
+            "No parse failures recorded for this project.\n"
+        );
+        let none = Tracker::new_in_memory().expect("in-memory tracker");
+        let summary = none
+            .get_parse_failure_summary_filtered(None)
+            .expect("summary");
+        assert!(render_failures(&summary, None).starts_with("No parse failures recorded.\n"));
     }
 }
