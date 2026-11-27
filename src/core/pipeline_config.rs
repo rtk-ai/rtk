@@ -76,6 +76,18 @@ pub struct LoadedPipeline {
     pub has_user_files: bool,
 }
 
+impl Clone for LoadedPipeline {
+    fn clone(&self) -> Self {
+        Self {
+            resolved: self.resolved.clone(),
+            diagnostics: self.diagnostics.clone(),
+            fell_back: self.fell_back,
+            dropped: self.dropped.clone(),
+            has_user_files: self.has_user_files,
+        }
+    }
+}
+
 /// User-scope config root. `RTK_CONFIG_DIR` overrides the platform default —
 /// the pipeline-load analogue of `RTK_DB_PATH`, so tests (and unusual
 /// deployments) can pin the load away from the developer's own pipelines.
@@ -156,6 +168,25 @@ pub fn any_user_pipeline_files() -> bool {
     !load_paths().is_empty()
 }
 
+/// Cached pipeline for the hook hot path. A hook process handles one call,
+/// so we can cache the loaded pipeline per process to avoid re-reading and
+/// re-parsing the same TOML files multiple times per invocation.
+/// Disabled in tests to ensure isolation between test cases.
+#[cfg(not(test))]
+static HOOK_PIPELINE_CACHE: std::sync::Mutex<Option<LoadedPipeline>> = std::sync::Mutex::new(None);
+
+#[cfg(not(test))]
+pub fn load() -> LoadedPipeline {
+    let mut cache = HOOK_PIPELINE_CACHE.lock().unwrap();
+    if let Some(cached) = cache.as_ref() {
+        return cached.clone();
+    }
+    let loaded = load_with_ctx(&hook_ctx());
+    *cache = Some(loaded.clone());
+    loaded
+}
+
+#[cfg(test)]
 pub fn load() -> LoadedPipeline {
     load_with_ctx(&hook_ctx())
 }
