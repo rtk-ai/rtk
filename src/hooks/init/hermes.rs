@@ -172,7 +172,7 @@ fn rewrite_hermes_config(existing: &str, add_rtk: bool) -> String {
     }
 
     let mut lines = split_yaml_lines(existing);
-    let Some(plugins_idx) = find_yaml_key_line(&lines, "plugins", 0, None) else {
+    let Some(plugins_idx) = find_yaml_key_line(&lines, "plugins", 0, None, Some(0)) else {
         return if add_rtk {
             append_hermes_plugins_block(existing)
         } else {
@@ -182,11 +182,14 @@ fn rewrite_hermes_config(existing: &str, add_rtk: bool) -> String {
 
     let plugins_indent = yaml_indent(&lines[plugins_idx]);
     let plugins_end = yaml_block_end(&lines, plugins_idx, plugins_indent);
+    let child_indent =
+        hermes_plugins_child_indent(&lines, plugins_idx, plugins_end, plugins_indent);
     let Some(enabled_idx) = find_yaml_key_line(
         &lines,
         "enabled",
         plugins_idx + 1,
         Some((plugins_end, plugins_indent)),
+        Some(child_indent),
     ) else {
         if add_rtk {
             let (enabled_indent, item_indent) =
@@ -245,19 +248,27 @@ fn append_hermes_plugins_block(existing: &str) -> String {
     patched
 }
 
+/// `exact_indent` pins the key to one column so a same-named key nested deeper
+/// (or a `plugins:` that is itself a child of another key) is never matched.
 fn find_yaml_key_line(
     lines: &[String],
     key: &str,
     start: usize,
     block: Option<(usize, usize)>,
+    exact_indent: Option<usize>,
 ) -> Option<usize> {
     let end = block.map_or(lines.len(), |(end, _)| end);
     let min_indent = block.map(|(_, indent)| indent);
+    let in_scalar = yaml_block_scalar_mask(lines);
 
     lines[start..end]
         .iter()
         .enumerate()
         .find_map(|(offset, line)| {
+            if in_scalar[start + offset] {
+                return None;
+            }
+
             let raw = yaml_line_without_ending(line);
             let trimmed = raw.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -268,9 +279,78 @@ fn find_yaml_key_line(
                 return None;
             }
 
+            if exact_indent.is_some_and(|indent| yaml_indent(line) != indent) {
+                return None;
+            }
+
             let is_key = trimmed == format!("{key}:") || trimmed.starts_with(&format!("{key}:"));
             is_key.then_some(start + offset)
         })
+}
+
+/// Marks the body lines of `|` / `>` block scalars: their text is data, not keys.
+// shortcut: a `- key: |` header is measured from the key column; flow-style or
+// multi-line quoted scalars are not tracked, upgrade if a real config needs it.
+fn yaml_block_scalar_mask(lines: &[String]) -> Vec<bool> {
+    let mut mask = vec![false; lines.len()];
+    let mut header_indent: Option<usize> = None;
+
+    for (idx, line) in lines.iter().enumerate() {
+        let raw = yaml_line_without_ending(line);
+        let trimmed = raw.trim();
+        if let Some(indent) = header_indent {
+            if trimmed.is_empty() || yaml_indent(line) > indent {
+                mask[idx] = true;
+                continue;
+            }
+            header_indent = None;
+        }
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if opens_block_scalar(trimmed) {
+            let dash = if trimmed.starts_with("- ") { 2 } else { 0 };
+            header_indent = Some(yaml_indent(line) + dash);
+        }
+    }
+
+    mask
+}
+
+fn opens_block_scalar(trimmed: &str) -> bool {
+    let value = trimmed
+        .split_once(" #")
+        .map_or(trimmed, |(v, _)| v)
+        .trim_end();
+    let Some((head, indicator)) = value.rsplit_once(char::is_whitespace) else {
+        return false;
+    };
+    let head = head.trim_end();
+    let mut chars = indicator.chars();
+    let style = chars.next();
+    (matches!(style, Some('|' | '>')))
+        && chars.all(|c| matches!(c, '+' | '-' | '0'..='9'))
+        && (head.ends_with(':') || head.ends_with('-'))
+}
+
+fn hermes_plugins_child_indent(
+    lines: &[String],
+    plugins_idx: usize,
+    plugins_end: usize,
+    plugins_indent: usize,
+) -> usize {
+    let in_scalar = yaml_block_scalar_mask(lines);
+    (plugins_idx + 1..plugins_end)
+        .filter(|&i| !in_scalar[i])
+        .filter_map(|i| {
+            let raw = yaml_line_without_ending(&lines[i]);
+            let trimmed = raw.trim();
+            let indent = yaml_indent(&lines[i]);
+            (!trimmed.is_empty() && !trimmed.starts_with('#') && indent > plugins_indent)
+                .then_some(indent)
+        })
+        .min()
+        .unwrap_or(plugins_indent + 2)
 }
 
 fn yaml_block_end(lines: &[String], start: usize, parent_indent: usize) -> usize {
@@ -1035,6 +1115,67 @@ mod tests {
         assert_eq!(patched.matches("rtk-rewrite").count(), 0);
     }
 
+    #[test]
+    fn test_hermes_config_patch_ignores_nested_enabled_key() {
+        let existing = "plugins:\n  some-plugin:\n    enabled: true\n  enabled:\n    - other\n";
+        let patched = patch_hermes_config(existing);
+
+        assert_eq!(
+            patched,
+            "plugins:\n  some-plugin:\n    enabled: true\n  enabled:\n    - other\n    - rtk-rewrite\n"
+        );
+    }
+
+    #[test]
+    fn test_hermes_config_patch_adds_enabled_beside_nested_enabled_key() {
+        let existing = "plugins:\n  some-plugin:\n    enabled: true\n";
+        let patched = patch_hermes_config(existing);
+
+        assert_eq!(
+            patched,
+            "plugins:\n  some-plugin:\n    enabled: true\n  enabled:\n    - rtk-rewrite\n"
+        );
+    }
+
+    #[test]
+    fn test_hermes_config_patch_skips_plugins_text_in_block_scalar() {
+        let existing = "system_prompt: |\n  plugins:\n    enabled:\n      - keep\nplugins:\n  enabled:\n    - other\n";
+        let patched = patch_hermes_config(existing);
+
+        assert_eq!(
+            patched,
+            "system_prompt: |\n  plugins:\n    enabled:\n      - keep\nplugins:\n  enabled:\n    - other\n    - rtk-rewrite\n"
+        );
+    }
+
+    #[test]
+    fn test_hermes_config_patch_appends_when_plugins_only_in_block_scalar() {
+        let existing = "prompt: >-\n  plugins:\n    enabled: []\n";
+        let patched = patch_hermes_config(existing);
+
+        assert_eq!(
+            patched,
+            "prompt: >-\n  plugins:\n    enabled: []\nplugins:\n  enabled:\n    - rtk-rewrite\n"
+        );
+    }
+
+    #[test]
+    fn test_hermes_config_unpatch_leaves_block_scalar_text_alone() {
+        let existing = "prompt: |\n  plugins:\n    enabled:\n      - rtk-rewrite\n";
+
+        assert_eq!(unpatch_hermes_config(existing), existing);
+    }
+
+    #[test]
+    fn test_hermes_config_patch_ignores_indented_plugins_key() {
+        let existing = "agent:\n  plugins:\n    enabled:\n      - keep\n";
+        let patched = patch_hermes_config(existing);
+
+        assert_eq!(
+            patched,
+            "agent:\n  plugins:\n    enabled:\n      - keep\nplugins:\n  enabled:\n    - rtk-rewrite\n"
+        );
+    }
     #[test]
     fn test_resolve_hermes_home_prefers_hermes_home() {
         let hermes_home = OsString::from("~/custom hermes home");
