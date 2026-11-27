@@ -1,6 +1,6 @@
 /// Token-efficient formatting trait for canonical types
 use super::types::*;
-use crate::core::truncate::CAP_INVENTORY;
+use crate::core::truncate::{CAP_ERRORS, CAP_INVENTORY};
 
 const MAX_DEPS_LISTING: usize = CAP_INVENTORY;
 
@@ -58,15 +58,25 @@ impl TokenFormatter for TestResult {
 
         if !self.failures.is_empty() {
             lines.push(String::new());
-            for (idx, failure) in self.failures.iter().enumerate().take(5) {
-                lines.push(format!("{}. {}", idx + 1, failure.test_name));
-                for line in failure.error_message.lines() {
-                    lines.push(format!("   {}", line));
+            for (idx, failure) in self.failures.iter().enumerate() {
+                lines.push(format!(
+                    "{}. {} ({})",
+                    idx + 1,
+                    failure.test_name,
+                    failure.file_path
+                ));
+                if idx < CAP_ERRORS {
+                    for line in failure.error_message.lines() {
+                        lines.push(format!("   {}", line));
+                    }
                 }
             }
 
-            if self.failures.len() > 5 {
-                lines.push(format!("\n... +{} more failures", self.failures.len() - 5));
+            if self.failures.len() > CAP_ERRORS {
+                lines.push(format!(
+                    "\n... error details omitted for {} failures",
+                    self.failures.len() - CAP_ERRORS
+                ));
             }
         }
 
@@ -228,6 +238,32 @@ mod tests {
             duration_ms: Some(1500),
             failures,
         }
+    }
+
+    #[test]
+    fn compact_summary_names_every_failed_test() {
+        let failures = (1..=49)
+            .map(|index| TestFailure {
+                file_path: format!("tests/failure_{index:02}.test.ts"),
+                ..make_failure(&format!("failure_{index:02}"), "assertion failed")
+            })
+            .collect();
+        let result = make_result(3, failures);
+        let shown = result.format_compact();
+        for index in 1..=49 {
+            assert!(
+                shown.contains(&format!(
+                    "{index}. failure_{index:02} (tests/failure_{index:02}.test.ts)"
+                )),
+                "{shown}"
+            );
+        }
+        assert!(shown.contains("PASS (3) FAIL (49)"));
+        assert_eq!(shown.matches("assertion failed").count(), CAP_ERRORS);
+        assert!(shown.contains(&format!(
+            "error details omitted for {} failures",
+            49 - CAP_ERRORS
+        )));
     }
 
     fn make_dep(name: &str, version: &str, latest: Option<&str>) -> Dependency {
