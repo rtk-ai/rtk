@@ -293,11 +293,19 @@ fn opencode_configs() -> Vec<Value> {
             configs.push(v);
         }
     } else if let Some(dir) = global_opencode_dir() {
-        configs.extend(read_first_config(&dir));
+        configs.extend(read_config_files(&dir));
     }
 
     if let Some(root) = project_root_with_config() {
-        configs.extend(read_first_config(&root));
+        // OpenCode loads all direct ancestor files before project directories,
+        // each from the outermost ancestor inward.
+        let roots: Vec<_> = user_dirs::ancestors(&root).collect();
+        for dir in roots.iter().rev() {
+            configs.extend(read_config_files(dir));
+        }
+        for dir in roots.iter().rev() {
+            configs.extend(read_first_config(dir));
+        }
     }
 
     configs
@@ -382,16 +390,28 @@ const PROJECT_OPENCODE_SUBDIR: &str = ".opencode";
 fn project_root_with_config() -> Option<PathBuf> {
     let start = user_dirs::current_dir().ok()?;
     user_dirs::ancestors(&start)
-        .find(|dir| CONFIG_NAMES.iter().any(|name| dir.join(name).is_file()))
+        .find(|dir| {
+            CONFIG_NAMES.iter().any(|name| {
+                dir.join(name).is_file()
+                    || dir.join(PROJECT_OPENCODE_SUBDIR).join(name).is_file()
+            })
+        })
         .map(Path::to_path_buf)
 }
 
 const CONFIG_NAMES: [&str; 2] = ["opencode.json", "opencode.jsonc"];
 
-fn read_first_config(dir: &Path) -> Option<Value> {
+// Project directory sources rank above every direct ancestor source.
+fn read_first_config(dir: &Path) -> Vec<Value> {
+    read_config_files(&dir.join(PROJECT_OPENCODE_SUBDIR))
+}
+
+fn read_config_files(dir: &Path) -> Vec<Value> {
+    // OpenCode loads json first, then jsonc; both may carry permissions.
     CONFIG_NAMES
         .iter()
-        .find_map(|name| read_config(&dir.join(name)))
+        .filter_map(|name| read_config(&dir.join(name)))
+        .collect()
 }
 
 fn read_config(path: &Path) -> Option<Value> {
@@ -632,6 +652,50 @@ mod tests {
             let rules = load_opencode_rules(None);
             assert_eq!(rules, vec![rule("*", Action::Deny)]);
         });
+    }
+
+    #[test]
+    fn project_directory_permissions_load_after_direct_ancestor_configs() {
+        for effect in ["deny", "ask"] {
+            for name in CONFIG_NAMES {
+                let tmp = test_isolation::tempdir();
+                let root = tmp.path().join("project");
+                let sub = root.join("src").join("deep");
+                std::fs::create_dir_all(&sub).expect("create subdirectory");
+                write_json(
+                    &sub.join("opencode.json"),
+                    r#"{ "permissions": [{ "action": "shell", "resource": "*", "effect": "allow" }] }"#,
+                );
+                write_json(
+                    &root.join(PROJECT_OPENCODE_SUBDIR).join(name),
+                    &format!(r#"{{ "permissions": [{{ "action": "shell", "resource": "git diff", "effect": "{effect}" }}] }}"#),
+                );
+                test_isolation::with_root(&tmp.path().join("home"), || {
+                    let _entered = test_isolation::enter(&sub);
+                    let rules = load_opencode_rules(None);
+                    assert_eq!(
+                        evaluate("git diff", &rules),
+                        Action::parse(effect),
+                        "project directory must outrank a nearer direct allow"
+                    );
+                    assert_eq!(evaluate("rtk git diff", &rules), Some(Action::Allow));
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn project_directory_jsonc_loads_after_json() {
+        let tmp = test_isolation::tempdir();
+        let root = tmp.path().join("project");
+        write_json(&root.join(PROJECT_OPENCODE_SUBDIR).join("opencode.json"),
+            r#"{ "permission": { "bash": "allow" } }"#);
+        write_json(&root.join(PROJECT_OPENCODE_SUBDIR).join("opencode.jsonc"),
+            r#"{ "permission": { "bash": "deny" } }"#);
+        assert_eq!(
+            rules_from_configs(&read_first_config(&root), None),
+            vec![rule("*", Action::Allow), rule("*", Action::Deny)]
+        );
     }
 
     #[test]
