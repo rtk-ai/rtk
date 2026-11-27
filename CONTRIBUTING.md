@@ -96,7 +96,7 @@ RTK also provides an engine with pipelines and a daemon, allowing you to build b
 - Commands with no text output: nothing to compress
 - Others features not related to a LLM-proxy like RTK
 
-RTK Open Source should not conflicts with [RTK Pro](pro.rtk-ai.app) features, example of features not accepted in RTK Open Source:
+RTK Open Source should not conflicts with [RTK Pro](https://pro.rtk-ai.app) features, example of features not accepted in RTK Open Source:
 
 - Secret redaction, PII masking (conflict with RTK Pro Shield)
 - Blocking dangerous commands or action (conflict with RTK Pro Policies)
