@@ -196,32 +196,43 @@ pub fn generate_device_hash() -> String {
 
 fn get_or_create_salt() -> String {
     CACHED_SALT
-        .get_or_init(|| {
-            let salt_path = salt_file_path();
+        .get_or_init(|| get_or_create_salt_at(&salt_file_path()))
+        .clone()
+}
 
-            if let Ok(contents) = std::fs::read_to_string(&salt_path) {
+fn get_or_create_salt_at(salt_path: &Path) -> String {
+    if let Ok(contents) = std::fs::read_to_string(salt_path) {
+        let trimmed = contents.trim().to_string();
+        if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+            return trimmed;
+        }
+    }
+
+    let salt = random_salt();
+    if let Some(parent) = salt_path.parent() {
+        let _ = crate::core::utils::create_private_dir(parent);
+    }
+    match crate::core::utils::open_private(
+        std::fs::OpenOptions::new().write(true).create_new(true),
+        salt_path,
+    ) {
+        Ok(mut f) => {
+            let _ = f.write_all(salt.as_bytes());
+            salt
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Another process won the create race: adopt its salt instead of
+            // truncating it, which would orphan the hash already sent upstream.
+            if let Ok(contents) = std::fs::read_to_string(salt_path) {
                 let trimmed = contents.trim().to_string();
                 if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
                     return trimmed;
                 }
             }
-
-            let salt = random_salt();
-            if let Some(parent) = salt_path.parent() {
-                let _ = crate::core::utils::create_private_dir(parent);
-            }
-            if let Ok(mut f) = crate::core::utils::open_private(
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true),
-                &salt_path,
-            ) {
-                let _ = f.write_all(salt.as_bytes());
-            }
             salt
-        })
-        .clone()
+        }
+        Err(_) => salt,
+    }
 }
 
 fn random_salt() -> String {
@@ -678,6 +689,28 @@ mod tests {
         assert_eq!(s1, s2);
         assert_eq!(s1.len(), 64);
         assert!(s1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn existing_salt_is_adopted_without_truncation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let salt_path = dir.path().join(".device_salt");
+
+        let winner_salt = "1111111111111111111111111111111111111111111111111111111111111111";
+        std::fs::write(&salt_path, winner_salt).expect("winning process wrote salt");
+
+        let adopted = get_or_create_salt_at(&salt_path);
+
+        assert_eq!(
+            adopted, winner_salt,
+            "concurrent process must adopt the winner's salt"
+        );
+        let on_disk = std::fs::read_to_string(&salt_path).expect("read salt");
+        assert_eq!(
+            on_disk.trim(),
+            winner_salt,
+            "existing salt must not be truncated or overwritten"
+        );
     }
 
     #[test]
