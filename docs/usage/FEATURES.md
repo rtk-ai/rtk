@@ -885,6 +885,13 @@ Unrecognized subcommands are passed directly to pnpm (passthrough).
 rtk npm [args...]    # e.g. rtk npm run build
 ```
 
+`npm test` (including the `npm t` and `npm tst` aliases) is also recognized by
+the rewrite hook. It runs the original npm lifecycle, preserving pretest,
+posttest, forwarded arguments and exit status. Bare invocations omit passing
+rows from recognized Jest, Vitest and Mocha text output while keeping failure
+details and summaries. Extra arguments retain the usual light npm filtering,
+so explicit reporter or verbosity choices keep their detailed output.
+
 Filters npm boilerplate (progress bars, headers, etc.).
 
 ---
