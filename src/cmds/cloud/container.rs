@@ -376,7 +376,8 @@ fn format_kubectl_pods(json: &Value) -> String {
     let Some(pods) = json["items"].as_array().filter(|a| !a.is_empty()) else {
         return "No pods found\n".to_string();
     };
-    let (mut running, mut pending, mut failed, mut restarts_total) = (0, 0, 0, 0i64);
+    let (mut running, mut not_ready, mut pending, mut failed, mut restarts_total) =
+        (0, 0, 0, 0, 0i64);
     let mut issues: Vec<String> = Vec::new();
 
     for pod in pods {
@@ -384,17 +385,44 @@ fn format_kubectl_pods(json: &Value) -> String {
         let name = pod["metadata"]["name"].as_str().unwrap_or("-");
         let phase = pod["status"]["phase"].as_str().unwrap_or("Unknown");
 
-        if let Some(containers) = pod["status"]["containerStatuses"].as_array() {
+        let containers = pod["status"]["containerStatuses"].as_array();
+        let mut restarts = 0i64;
+        let mut ready = 0usize;
+        let mut waiting_reason: Option<&str> = None;
+        if let Some(containers) = containers {
             for c in containers {
-                restarts_total += c["restartCount"].as_i64().unwrap_or(0);
+                restarts += c["restartCount"].as_i64().unwrap_or(0);
+                if c["ready"].as_bool().unwrap_or(false) {
+                    ready += 1;
+                }
+                if waiting_reason.is_none() {
+                    waiting_reason = c["state"]["waiting"]["reason"].as_str();
+                }
             }
         }
+        restarts_total += restarts;
+        let total = containers.map(|c| c.len()).unwrap_or(0);
 
         match phase {
+            // A pod keeps phase Running while a container crash-loops or has not
+            // become ready, which is the usual failure during a rollout. Name it
+            // with its ready count, restarts and waiting reason so the summary
+            // does not read as healthy.
+            "Running" if total > 0 && ready < total => {
+                not_ready += 1;
+                let reason = waiting_reason.unwrap_or("NotReady");
+                issues.push(format!(
+                    "{}/{} Running {}/{} {} {}",
+                    ns, name, ready, total, restarts, reason
+                ));
+            }
             "Running" => running += 1,
             "Pending" => {
                 pending += 1;
-                issues.push(format!("{}/{} Pending", ns, name));
+                match waiting_reason {
+                    Some(reason) => issues.push(format!("{}/{} Pending {}", ns, name, reason)),
+                    None => issues.push(format!("{}/{} Pending", ns, name)),
+                }
             }
             "Failed" | "Error" => {
                 failed += 1;
@@ -418,6 +446,9 @@ fn format_kubectl_pods(json: &Value) -> String {
     let mut parts = Vec::new();
     if running > 0 {
         parts.push(format!("{}", running));
+    }
+    if not_ready > 0 {
+        parts.push(format!("{} not ready", not_ready));
     }
     if pending > 0 {
         parts.push(format!("{} pending", pending));
@@ -1048,6 +1079,50 @@ api-1  | Connected to database";
     }
 
     // ── oc support ────────────────────────────────────────
+
+    #[test]
+    fn test_format_kubectl_pods_names_running_pods_that_are_not_ready() {
+        let input = serde_json::json!({"items": [
+            {"metadata": {"namespace": "kube-system", "name": "coredns-abc"},
+             "status": {"phase": "Running", "containerStatuses": [
+                 {"ready": true, "restartCount": 0, "state": {"running": {}}}]}},
+            {"metadata": {"namespace": "kube-system", "name": "aws-node-x2"},
+             "status": {"phase": "Running", "containerStatuses": [
+                 {"ready": true, "restartCount": 0, "state": {"running": {}}},
+                 {"ready": false, "restartCount": 7, "state": {"waiting": {"reason": "CrashLoopBackOff"}}}]}},
+            {"metadata": {"namespace": "ns-a", "name": "web-0"},
+             "status": {"phase": "Running", "containerStatuses": [
+                 {"ready": false, "restartCount": 21, "state": {"waiting": {"reason": "CrashLoopBackOff"}}},
+                 {"ready": false, "restartCount": 21, "state": {"waiting": {"reason": "CrashLoopBackOff"}}}]}},
+            {"metadata": {"namespace": "ns-a", "name": "metrics-xyz"},
+             "status": {"phase": "Pending", "containerStatuses": [
+                 {"ready": false, "restartCount": 0, "state": {"waiting": {"reason": "ImagePullBackOff"}}}]}},
+            {"metadata": {"namespace": "ns-c", "name": "web-1"},
+             "status": {"phase": "Failed", "containerStatuses": [
+                 {"ready": false, "restartCount": 3, "state": {"terminated": {"reason": "Error"}}}]}}
+        ]});
+
+        let output = format_kubectl_pods(&input);
+
+        assert!(
+            output.starts_with("5 pods: 1, 2 not ready, 1 pending, 1 [x], 52 restarts\n"),
+            "{output}"
+        );
+        assert!(
+            output.contains("kube-system/aws-node-x2 Running 1/2 7 CrashLoopBackOff\n"),
+            "{output}"
+        );
+        assert!(
+            output.contains("ns-a/web-0 Running 0/2 42 CrashLoopBackOff\n"),
+            "{output}"
+        );
+        assert!(
+            output.contains("ns-a/metrics-xyz Pending ImagePullBackOff\n"),
+            "{output}"
+        );
+        assert!(output.contains("ns-c/web-1 Failed\n"), "{output}");
+        assert!(!output.contains("coredns-abc"), "{output}");
+    }
 
     #[test]
     fn test_oc_pods_savings() {
