@@ -1880,15 +1880,60 @@ where
     let raw_args: Vec<OsString> = args.into_iter().map(Into::into).collect();
     let matches = rtk_command().try_get_matches_from(&raw_args)?;
     let mut cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches)?;
-    if let Commands::Cargo { args } = &mut cli.command {
-        // A flat trailing-args field preserves -- after its first argument, but clap
-        // consumes a leading --. Restore that separator from the raw OS argv suffix.
-        let start = raw_args.len() - args.len();
-        if start > 0 && raw_args[start - 1] == "--" {
-            args.insert(0, OsString::from("--"));
+    match &mut cli.command {
+        Commands::Mvnd { args }
+        | Commands::Go {
+            command:
+                GoCommands::Test { args } | GoCommands::Build { args } | GoCommands::Vet { args },
         }
+        | Commands::Kubectl {
+            command: KubectlCommands::Get { args },
+        } => restore_leading_separator(args, &raw_args),
+        Commands::Cargo { args }
+        | Commands::Oc {
+            command: OcCommands::Other(args),
+        }
+        | Commands::Sbt {
+            command: SbtCommands::Other(args),
+        }
+        | Commands::Gt {
+            command: GtCommands::Other(args),
+        }
+        | Commands::Bun {
+            command: BunCommands::Other(args),
+        }
+        | Commands::Deno {
+            command: DenoCommands::Other(args),
+        }
+        | Commands::Docker {
+            command:
+                DockerCommands::Compose {
+                    command: ComposeCommands::Other(args),
+                },
+        } => restore_leading_separator(args, &raw_args),
+        _ => {}
     }
     Ok(cli)
+}
+
+/// These passthrough fields are argv suffixes, except that clap can consume
+/// the separator before their first argument. Compare only that boundary:
+/// a separator already in the suffix, or elsewhere in argv, isn't missing.
+fn restore_leading_separator<T: AsRef<std::ffi::OsStr> + From<&'static str>>(
+    args: &mut Vec<T>,
+    raw_args: &[OsString],
+) {
+    let Some(separator) = raw_args.len().checked_sub(args.len() + 1) else {
+        return;
+    };
+    if raw_args[separator] == "--"
+        && raw_args[separator + 1..]
+            .iter()
+            .zip(args.iter())
+            .all(|(raw, parsed)| raw == parsed.as_ref())
+    {
+        args.insert(0, T::from("--"));
+    }
 }
 
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
