@@ -1,0 +1,4 @@
+Package Id       Version           Commands
+----------------------------------------------------------------
+sample.tool      1.2.3             first-command, second-command
+other.tool       2.0.0-beta.1      other-command
