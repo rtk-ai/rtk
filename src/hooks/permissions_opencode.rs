@@ -293,7 +293,7 @@ fn opencode_configs() -> Vec<Value> {
             configs.push(v);
         }
     } else if let Some(dir) = global_opencode_dir() {
-        configs.extend(read_first_config(&dir));
+        configs.extend(merged_global_config(&dir));
     }
 
     if let Some(root) = project_root_with_config() {
@@ -304,7 +304,11 @@ fn opencode_configs() -> Vec<Value> {
 }
 
 fn global_opencode_dir() -> Option<PathBuf> {
-    Some(user_dirs::home()?.join(CONFIG_DIR).join(OPENCODE_SUBDIR))
+    let base = match user_dirs::env_path("XDG_CONFIG_HOME") {
+        Some(xdg) if !xdg.is_empty() => PathBuf::from(xdg),
+        _ => user_dirs::home()?.join(CONFIG_DIR),
+    };
+    Some(base.join(OPENCODE_SUBDIR))
 }
 
 /// Does the agent's markdown file declare permission rules?
@@ -387,6 +391,38 @@ fn project_root_with_config() -> Option<PathBuf> {
 }
 
 const CONFIG_NAMES: [&str; 2] = ["opencode.json", "opencode.jsonc"];
+
+/// OpenCode merges every one of these it finds, in this order.
+const GLOBAL_CONFIG_NAMES: [&str; 3] = ["config.json", "opencode.json", "opencode.jsonc"];
+
+fn merged_global_config(dir: &Path) -> Option<Value> {
+    GLOBAL_CONFIG_NAMES
+        .iter()
+        .filter_map(|name| read_config(&dir.join(name)))
+        .reduce(|mut merged, next| {
+            merge_deep(&mut merged, next);
+            merged
+        })
+}
+
+/// remeda's `mergeDeep`, which OpenCode folds the global files with: a key
+/// repeated in a later file keeps its first position but takes the later value.
+/// Position matters because the last matching rule wins.
+fn merge_deep(target: &mut Value, source: Value) {
+    match (target, source) {
+        (Value::Object(target), Value::Object(source)) => {
+            for (key, value) in source {
+                match target.get_mut(&key) {
+                    Some(existing) => merge_deep(existing, value),
+                    None => {
+                        target.insert(key, value);
+                    }
+                }
+            }
+        }
+        (target, source) => *target = source,
+    }
+}
 
 fn read_first_config(dir: &Path) -> Option<Value> {
     CONFIG_NAMES
@@ -948,6 +984,103 @@ mod tests {
                     "rtk reads OPENCODE_CONFIG instead of the global file"
                 );
             });
+        });
+    }
+
+    #[test]
+    fn xdg_config_home_is_read_instead_of_dot_config() {
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        write_json(
+            &home
+                .join(CONFIG_DIR)
+                .join(OPENCODE_SUBDIR)
+                .join("opencode.json"),
+            r#"{ "permission": { "bash": { "ls *": "allow" } } }"#,
+        );
+        let xdg = tmp.path().join("xdg");
+        write_json(
+            &xdg.join(OPENCODE_SUBDIR).join("opencode.json"),
+            r#"{ "permission": { "bash": { "ls *": "ask" } } }"#,
+        );
+
+        test_isolation::with_root(&home, || {
+            user_env::with_path("XDG_CONFIG_HOME", Some(&xdg), || {
+                let rules = load_opencode_rules(None);
+                assert_eq!(rules, vec![rule("ls *", Action::Ask)]);
+            });
+        });
+    }
+
+    #[test]
+    fn an_unset_or_empty_xdg_config_home_falls_back_to_dot_config() {
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        write_json(
+            &home
+                .join(CONFIG_DIR)
+                .join(OPENCODE_SUBDIR)
+                .join("opencode.json"),
+            r#"{ "permission": { "bash": { "ls *": "ask" } } }"#,
+        );
+
+        test_isolation::with_root(&home, || {
+            user_env::with_path("XDG_CONFIG_HOME", Some(Path::new("")), || {
+                let rules = load_opencode_rules(None);
+                assert_eq!(rules, vec![rule("ls *", Action::Ask)]);
+            });
+            let rules = load_opencode_rules(None);
+            assert_eq!(rules, vec![rule("ls *", Action::Ask)]);
+        });
+    }
+
+    #[test]
+    fn every_global_config_file_is_read_in_opencodes_order() {
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        let dir = home.join(CONFIG_DIR).join(OPENCODE_SUBDIR);
+        write_json(
+            &dir.join("config.json"),
+            r#"{ "permission": { "bash": { "ls *": "ask" } } }"#,
+        );
+        write_json(
+            &dir.join("opencode.json"),
+            r#"{ "permission": { "bash": { "git *": "allow" } } }"#,
+        );
+        write_json(
+            &dir.join("opencode.jsonc"),
+            r#"{ "permission": { "bash": { "ls *": "deny" } } }"#,
+        );
+
+        test_isolation::with_root(&home, || {
+            let rules = load_opencode_rules(None);
+            assert_eq!(
+                rules,
+                vec![rule("ls *", Action::Deny), rule("git *", Action::Allow)]
+            );
+        });
+    }
+
+    #[test]
+    fn a_key_repeated_in_a_later_global_file_keeps_its_first_place() {
+        let tmp = test_isolation::tempdir();
+        let home = tmp.path().join("home");
+        let dir = home.join(CONFIG_DIR).join(OPENCODE_SUBDIR);
+        write_json(
+            &dir.join("opencode.json"),
+            r#"{ "permission": { "bash": { "*": "allow", "ls *": "ask" } } }"#,
+        );
+        write_json(
+            &dir.join("opencode.jsonc"),
+            r#"{ "permission": { "bash": { "*": "allow" } } }"#,
+        );
+
+        test_isolation::with_root(&home, || {
+            let rules = load_opencode_rules(None);
+            assert_eq!(
+                rules,
+                vec![rule("*", Action::Allow), rule("ls *", Action::Ask)]
+            );
         });
     }
 
