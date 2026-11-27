@@ -68,6 +68,12 @@ The permission gate, discover/analytics classification, and rewrite each segment
 
 The classification logic is shared between discover and rewrite — same patterns, same rules, different consumers.
 
+For estimated hook coverage, `permissions::check_command_with_details` keeps
+the attestation result with the verdict and its original command. Discover
+reuses that scan; a shell-wrapper verdict that returned before attestation
+leaves it unknown and is scanned once if needed. Deny/defer and a missing hook
+still short-circuit without an extra scan.
+
 ## Env Prefix Handling
 
 The `ENV_PREFIX` regex strips env variable assignments and `env` from the front of commands. `sudo` is deliberately not stripped, so sudo-prefixed commands stay unclassified and pass through unrewritten. It handles:
