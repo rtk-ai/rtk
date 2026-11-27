@@ -27,6 +27,8 @@ struct PlaywrightStats {
     expected: usize,
     unexpected: usize,
     skipped: usize,
+    #[serde(default)]
+    flaky: usize,
     /// Duration in milliseconds (float in real Playwright output)
     #[serde(default)]
     duration: f64,
@@ -93,16 +95,19 @@ impl OutputParser for PlaywrightParser {
         match serde_json::from_str::<PlaywrightJsonOutput>(input) {
             Ok(json) => {
                 let mut failures = Vec::new();
+                let mut flaky_tests = Vec::new();
                 let mut total = 0;
-                collect_test_results(&json.suites, &mut total, &mut failures);
+                collect_test_results(&json.suites, &mut total, &mut failures, &mut flaky_tests);
 
                 let result = TestResult {
                     total,
                     passed: json.stats.expected,
                     failed: json.stats.unexpected,
                     skipped: json.stats.skipped,
+                    flaky: json.stats.flaky.max(flaky_tests.len()),
                     duration_ms: Some(json.stats.duration as u64),
                     failures,
+                    flaky_tests,
                 };
 
                 ParseResult::Full(result)
@@ -127,6 +132,7 @@ fn collect_test_results(
     suites: &[PlaywrightSuite],
     total: &mut usize,
     failures: &mut Vec<TestFailure>,
+    flaky_tests: &mut Vec<TestFailure>,
 ) {
     for suite in suites {
         let file_path = suite.file.as_deref().unwrap_or(&suite.title);
@@ -140,13 +146,7 @@ fn collect_test_results(
                     .tests
                     .iter()
                     .find(|t| t.status == "unexpected")
-                    .and_then(|t| {
-                        t.results
-                            .iter()
-                            .find(|r| r.status == "failed" || r.status == "timedOut")
-                    })
-                    .and_then(|r| r.errors.first())
-                    .map(|e| e.message.clone())
+                    .and_then(first_attempt_error)
                     .unwrap_or_else(|| "Test failed".to_string());
 
                 failures.push(TestFailure {
@@ -156,11 +156,32 @@ fn collect_test_results(
                     stack_trace: None,
                 });
             }
+
+            for exec in spec.tests.iter().filter(|t| t.status == "flaky") {
+                let error_msg =
+                    first_attempt_error(exec).unwrap_or_else(|| "Passed on retry".to_string());
+
+                flaky_tests.push(TestFailure {
+                    test_name: spec.title.clone(),
+                    file_path: file_path.to_string(),
+                    error_message: error_msg,
+                    stack_trace: None,
+                });
+            }
         }
 
         // Recurse into nested suites (describe blocks)
-        collect_test_results(&suite.suites, total, failures);
+        collect_test_results(&suite.suites, total, failures, flaky_tests);
     }
+}
+
+fn first_attempt_error(exec: &PlaywrightExecution) -> Option<String> {
+    exec.results
+        .iter()
+        .find(|r| matches!(r.status.as_str(), "failed" | "timedOut" | "interrupted"))
+        .and_then(|r| r.errors.first())
+        .map(|e| e.message.clone())
+        .filter(|m| !m.is_empty())
 }
 
 /// Tier 2: Extract test statistics using regex (degraded mode)
@@ -175,6 +196,7 @@ fn extract_playwright_regex(output: &str) -> Option<TestResult> {
     let mut passed = 0;
     let mut failed = 0;
     let mut skipped = 0;
+    let mut flaky = 0;
 
     // Parse summary counts
     for caps in SUMMARY_RE.captures_iter(&clean_output) {
@@ -183,6 +205,7 @@ fn extract_playwright_regex(output: &str) -> Option<TestResult> {
             "passed" => passed = count,
             "failed" => failed = count,
             "skipped" => skipped = count,
+            "flaky" => flaky = count,
             _ => {}
         }
     }
@@ -200,15 +223,17 @@ fn extract_playwright_regex(output: &str) -> Option<TestResult> {
     });
 
     // Only return if we found valid data
-    let total = passed + failed + skipped;
+    let total = passed + failed + skipped + flaky;
     if total > 0 {
         Some(TestResult {
             total,
             passed,
             failed,
             skipped,
+            flaky,
             duration_ms,
             failures: extract_failures_regex(&clean_output),
+            flaky_tests: Vec::new(),
         })
     } else {
         None
@@ -291,6 +316,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mode = FormatMode::from_verbosity(verbose);
     let tier = parse_result.tier();
 
+    let has_flaky = matches!(
+        &parse_result,
+        ParseResult::Full(data) | ParseResult::Degraded(data, _) if data.flaky > 0
+    );
+
     let filtered = match parse_result {
         ParseResult::Full(data) => {
             if verbose > 0 {
@@ -314,7 +344,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         }
     };
 
-    let hint = crate::core::tee::tee_and_hint(&raw, "playwright", result.exit_code);
+    // Flaky runs exit 0, so standard failure-only tee_and_hint would drop the
+    // recall pointer; persist raw JSON so the caller can inspect full retry data.
+    let hint = if has_flaky && result.exit_code == 0 {
+        crate::core::tee::force_tee_hint(&raw, "playwright")
+    } else {
+        crate::core::tee::tee_and_hint(&raw, "playwright", result.exit_code)
+    };
     let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
 
     let tracked = with_args("playwright", &display_args(args));
@@ -553,6 +589,93 @@ mod tests {
         assert!(
             shown.contains("[RTK:TEE]"),
             "tee hint must survive the guard"
+        );
+    }
+
+    #[test]
+    fn test_playwright_parser_json_flaky_surfaces_count_and_first_attempt_error() {
+        // Issue #5142: a test that fails on attempt 0 and passes on retry 1
+        // reports expected=0, unexpected=0, skipped=0, flaky=1 and spec.ok=true.
+        let json = r#"{
+            "config": {},
+            "stats": {
+                "startTime": "2026-11-17T03:00:00.000Z",
+                "expected": 0,
+                "unexpected": 0,
+                "skipped": 0,
+                "flaky": 1,
+                "duration": 970.0
+            },
+            "suites": [
+                {
+                    "title": "zz-flaky.spec.ts",
+                    "file": "tests/e2e/zz-flaky.spec.ts",
+                    "specs": [
+                        {
+                            "title": "flaky on first attempt",
+                            "ok": true,
+                            "tests": [
+                                {
+                                    "status": "flaky",
+                                    "results": [
+                                        {
+                                            "status": "failed",
+                                            "errors": [{"message": "Error: intentional first-attempt failure"}],
+                                            "duration": 420
+                                        },
+                                        {
+                                            "status": "passed",
+                                            "errors": [],
+                                            "duration": 550
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ],
+                    "suites": []
+                }
+            ],
+            "errors": []
+        }"#;
+
+        let result = PlaywrightParser::parse(json);
+        assert_eq!(result.tier(), 1);
+        let data = result.unwrap();
+        let compact = data.format_compact();
+        assert!(
+            compact.contains("FLAKY (1)"),
+            "flaky count must not be dropped, got:\n{compact}"
+        );
+        assert!(
+            compact.contains("flaky on first attempt"),
+            "flaky test name must be surfaced, got:\n{compact}"
+        );
+        assert!(
+            compact.contains("intentional first-attempt failure"),
+            "first-attempt failure message must be surfaced, got:\n{compact}"
+        );
+    }
+
+    #[test]
+    fn test_playwright_parser_regex_flaky_only_and_mixed() {
+        let flaky_only =
+            "  1 flaky\n    [chromium] › tests/e2e/zz-flaky.spec.ts:4:1 › flaky on first attempt";
+        let result = PlaywrightParser::parse(flaky_only);
+        assert_eq!(result.tier(), 2);
+        let compact = result.unwrap().format_compact();
+        assert!(
+            compact.contains("FLAKY (1)"),
+            "regex tier must surface flaky-only summary, got:\n{compact}"
+        );
+
+        let mixed = "  1 flaky\n  2 passed (3.2s)";
+        let result = PlaywrightParser::parse(mixed);
+        assert_eq!(result.tier(), 2);
+        let compact = result.unwrap().format_compact();
+        assert!(
+            compact.contains("PASS (2)") && compact.contains("FLAKY (1)"),
+            "regex tier must keep both passed and flaky counts, got:\n{compact}"
         );
     }
 }
