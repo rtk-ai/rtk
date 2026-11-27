@@ -903,6 +903,20 @@ Routes to specialized filters:
 
 ---
 
+### `rtk fnm` -- Fast Node Manager
+
+```bash
+rtk fnm use 20
+rtk fnm env          # preserved verbatim for eval
+```
+
+`rtk fnm env` is passed through byte-for-byte because its output is evaluated
+as shell code. Other subcommands drop ANSI escapes and blank lines, and
+`fnm use` keeps only the `Using Node ...` result instead of repeating the
+installed-version table.
+
+---
+
 ### `rtk pip` -- pip / uv
 
 ```bash
