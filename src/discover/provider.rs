@@ -1,5 +1,6 @@
 //! Reads Claude Code session logs from disk and streams their command history.
 
+use crate::core::user_dirs;
 use crate::hooks::init::resolve_claude_dir;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -299,6 +300,180 @@ impl SessionProvider for ClaudeProvider {
             });
         }
 
+        Ok(commands)
+    }
+}
+
+/// Codewhale sessions: one JSON document per session under
+/// `~/.codewhale/sessions/<uuid>.json`. Its `messages[].content[]` blocks use
+/// the same `tool_use` / `tool_result` shape as Claude Code, but the join key
+/// that matters for `hook_decisions` is the tool's `execution_id` — the value
+/// Codewhale hands the hook as `DEEPSEEK_TOOL_CALL_ID`.
+pub struct CodewhaleProvider;
+
+impl CodewhaleProvider {
+    fn sessions_dir() -> Result<PathBuf> {
+        let home = user_dirs::home()
+            .context("could not determine home directory for Codewhale sessions")?;
+        Ok(home.join(".codewhale").join("sessions"))
+    }
+
+    /// `metadata.workspace` from a session document, used for project filtering.
+    fn session_workspace(path: &Path) -> Option<String> {
+        let content = fs::read_to_string(path).ok()?;
+        let doc: serde_json::Value = serde_json::from_str(&content).ok()?;
+        doc.pointer("/metadata/workspace")
+            .and_then(|w| w.as_str())
+            .map(str::to_string)
+    }
+}
+
+impl SessionProvider for CodewhaleProvider {
+    fn discover_sessions(
+        &self,
+        project_filter: Option<&str>,
+        since_days: Option<u64>,
+    ) -> Result<Vec<PathBuf>> {
+        let dir = Self::sessions_dir()?;
+        if !dir.try_exists().unwrap_or(false) {
+            return Ok(Vec::new());
+        }
+        let cutoff = since_days.map(|days| {
+            days.checked_mul(86400)
+                .and_then(|secs| SystemTime::now().checked_sub(Duration::from_secs(secs)))
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+        });
+
+        let mut sessions = Vec::new();
+        for entry in fs::read_dir(&dir)
+            .with_context(|| format!("failed to read {}", dir.display()))?
+            .flatten()
+        {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            // `session_boot_owners.json` and friends share the directory.
+            if path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.starts_with("session_boot"))
+            {
+                continue;
+            }
+            if let Some(cutoff_time) = cutoff
+                && let Ok(meta) = fs::metadata(&path)
+                && let Ok(mtime) = meta.modified()
+                && mtime < cutoff_time
+            {
+                continue;
+            }
+            if let Some(filter) = project_filter
+                && !Self::session_workspace(&path)
+                    .is_some_and(|workspace| dir_matches_filter(&workspace, filter))
+            {
+                continue;
+            }
+            sessions.push(path);
+        }
+        // `read_dir` order is unspecified; sort so repeated runs are stable.
+        sessions.sort();
+        Ok(sessions)
+    }
+
+    fn extract_commands(&self, path: &Path) -> Result<Vec<ExtractedCommand>> {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let doc: serde_json::Value = serde_json::from_str(&content)
+            .with_context(|| format!("failed to parse Codewhale session {}", path.display()))?;
+
+        let session_id = doc
+            .pointer("/metadata/id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // (tool_use id, hook join key, command, sequence). Results are keyed by
+        // the `tool_use` id the `tool_result` block references.
+        let mut pending: Vec<(String, String, String, usize)> = Vec::new();
+        let mut results: HashMap<String, (usize, String, bool)> = HashMap::new();
+        let mut sequence_counter = 0;
+
+        let Some(messages) = doc.get("messages").and_then(|m| m.as_array()) else {
+            return Ok(Vec::new());
+        };
+        for message in messages {
+            let Some(blocks) = message.get("content").and_then(|c| c.as_array()) else {
+                continue;
+            };
+            for block in blocks {
+                match block.get("type").and_then(|t| t.as_str()) {
+                    Some("tool_use") => {
+                        let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        if !matches!(name, "bash" | "Bash" | "exec_shell") {
+                            continue;
+                        }
+                        let Some(command) = block
+                            .pointer("/input/command")
+                            .and_then(|c| c.as_str())
+                            .filter(|c| !c.is_empty())
+                        else {
+                            continue;
+                        };
+                        let id = block
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        // `hook_decisions.tool_use_id` is written from
+                        // `DEEPSEEK_TOOL_CALL_ID`, which is this `execution_id`.
+                        let join_key = block
+                            .get("execution_id")
+                            .and_then(|e| e.as_str())
+                            .filter(|e| !e.is_empty())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| id.clone());
+                        pending.push((id, join_key, command.to_string(), sequence_counter));
+                        sequence_counter += 1;
+                    }
+                    Some("tool_result") => {
+                        let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str()) else {
+                            continue;
+                        };
+                        let output = block.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                        let is_error = block
+                            .get("is_error")
+                            .and_then(|e| e.as_bool())
+                            .unwrap_or(false);
+                        let preview: String = output.chars().take(1000).collect();
+                        results.insert(id.to_string(), (output.len(), preview, is_error));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut commands = Vec::with_capacity(pending.len());
+        for (id, join_key, command, sequence_index) in pending {
+            let (output_len, output_content, is_error) = results
+                .get(&id)
+                .map(|(len, preview, err)| (Some(*len), Some(preview.clone()), *err))
+                .unwrap_or((None, None, false));
+            commands.push(ExtractedCommand {
+                command,
+                output_len,
+                session_id: session_id.clone(),
+                tool_use_id: join_key,
+                output_content,
+                is_error,
+                sequence_index,
+            });
+        }
         Ok(commands)
     }
 }
@@ -615,5 +790,96 @@ mod tests {
         assert_eq!(cmds[0].command, "first");
         assert_eq!(cmds[1].command, "second");
         assert_eq!(cmds[2].command, "third");
+    }
+
+    fn make_codewhale_session(
+        workspace: &str,
+        tool: &str,
+        cmd: &str,
+        exec_id: &str,
+        output: &str,
+    ) -> tempfile::NamedTempFile {
+        let doc = serde_json::json!({
+            "metadata": { "id": "sess_test", "workspace": workspace },
+            "messages": [
+                { "role": "assistant", "content": [
+                    { "type": "tool_use", "id": "call_1", "name": tool,
+                      "input": { "command": cmd }, "execution_id": exec_id }
+                ]},
+                { "role": "user", "content": [
+                    { "type": "tool_result", "tool_use_id": "call_1",
+                      "content": output, "is_error": false }
+                ]}
+            ]
+        });
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(f, "{}", doc).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    #[test]
+    fn test_codewhale_extract_bash_uses_execution_id_as_join_key() {
+        let f = make_codewhale_session(
+            "/home/u/proj",
+            "bash",
+            "git status",
+            "exec-uuid-1",
+            "On branch main",
+        );
+        let cmds = CodewhaleProvider.extract_commands(f.path()).unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].command, "git status");
+        // The join key matches `hook_decisions.tool_use_id` (DEEPSEEK_TOOL_CALL_ID).
+        assert_eq!(cmds[0].tool_use_id, "exec-uuid-1");
+        assert_eq!(cmds[0].session_id, "sess_test");
+        assert_eq!(cmds[0].output_len.unwrap(), "On branch main".len());
+    }
+
+    #[test]
+    fn test_codewhale_extract_ignores_non_shell_tools() {
+        let f = make_codewhale_session("/home/u/proj", "read", "irrelevant", "e", "");
+        let cmds = CodewhaleProvider.extract_commands(f.path()).unwrap();
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn test_codewhale_extract_shell_tool_spellings() {
+        for tool in ["Bash", "exec_shell"] {
+            let f = make_codewhale_session("/home/u/proj", tool, "ls", "e", "a\nb");
+            let cmds = CodewhaleProvider.extract_commands(f.path()).unwrap();
+            assert_eq!(cmds.len(), 1, "tool {tool}");
+            assert_eq!(cmds[0].command, "ls");
+        }
+    }
+
+    #[test]
+    fn test_codewhale_extract_matches_result_by_tool_use_id() {
+        let doc = serde_json::json!({
+            "metadata": { "id": "s" },
+            "messages": [
+                { "role": "assistant", "content": [
+                    { "type": "tool_use", "id": "call_a", "name": "bash",
+                      "input": { "command": "a" }, "execution_id": "exec_a" },
+                    { "type": "tool_use", "id": "call_b", "name": "bash",
+                      "input": { "command": "b" }, "execution_id": "exec_b" }
+                ]},
+                { "role": "user", "content": [
+                    { "type": "tool_result", "tool_use_id": "call_a", "content": "OUTPUT_A" },
+                    { "type": "tool_result", "tool_use_id": "call_b", "content": "OUTPUT_B" }
+                ]}
+            ]
+        });
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(f, "{}", doc).unwrap();
+        f.flush().unwrap();
+
+        let cmds = CodewhaleProvider.extract_commands(f.path()).unwrap();
+        let a = cmds.iter().find(|c| c.command == "a").unwrap();
+        let b = cmds.iter().find(|c| c.command == "b").unwrap();
+        assert_eq!(a.tool_use_id, "exec_a");
+        assert_eq!(a.output_len.unwrap(), "OUTPUT_A".len());
+        assert_eq!(b.tool_use_id, "exec_b");
+        assert_eq!(b.output_len.unwrap(), "OUTPUT_B".len());
     }
 }
