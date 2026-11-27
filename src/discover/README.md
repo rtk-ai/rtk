@@ -21,7 +21,7 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 → [Arg("cargo"), Arg("test"), Redirect("2>&1"), Operator("&&"), Arg("git"), Arg("status")]
 ```
 
-**Compound splitting** — The rewrite engine walks the tokens, splitting on `Operator` (`&&`, `||`, `;`, and the `case` terminators `;;`, `;&`, `;;&`) and typed `Pipe` tokens (`|`, `|&`). For normal pipelines, intermediate stages stay raw. A final stage whose rule's `pipeline_safety` allows it (ordinary `grep` and `rg` invocations) is rewritten; search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. The producer stage is rewritten when its rule's `pipeline_safety` allows it and every downstream stage is a display-only consumer (`cat`, `head`, non-following `tail`) with no file-target redirect (#3171). Stderr pipelines (`|&`) and pipelines containing opaque shell groups remain raw.
+**Compound splitting** — The rewrite engine walks the tokens, splitting on `Operator` (`&&`, `||`, `;`, and the `case` terminators `;;`, `;&`, `;;&`) and typed `Pipe` tokens (`|`, `|&`). For normal pipelines, producer and intermediate stages stay raw so downstream tools receive the native output format. A final stage whose rule's `pipeline_safety` allows it (ordinary `grep` and `rg` invocations) is rewritten; search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. Stderr pipelines (`|&`) and pipelines containing opaque shell groups remain raw.
 
 **Quoted shell wrappers** — An exact `sh -c`, `bash -c`, `zsh -c` or `fish -c` segment whose script is one balanced quoted argument has that script rewritten in place, leaving the shell path, quote delimiters, spacing, suffix arguments and redirects byte-identical (`shell_wrapper.rs`). Recursion is capped at one level, so a wrapper inside a wrapper stays raw. A script carrying a newline, heredoc, `$((`, or any construct the lexer cannot attest defers unchanged. The wrapper names the shell, so the script is attested under *that* shell's grammar (`ShellDialect`): inside `fish -c`, `(cmd)` is substitution and `and`/`or`/`end` are control flow, and either one defers — while the same shapes in a host command string or a POSIX wrapper stay ordinary bash and keep rewriting.
 
@@ -39,7 +39,7 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 - `cat`/`head`/`tail` with `>` or `>>` → skip (write operation, not a read)
 - Command in `hooks.exclude_commands` config → skip
 
-**Result**: `rtk cargo fmt --all && rtk cargo test 2>&1 | tail -20`. Bash handles the `&&` and `|` at execution time — each `rtk` invocation is a separate process.
+**Result**: `rtk cargo fmt --all && cargo test 2>&1 | tail -20`. The standalone command is rewritten, but `cargo test` remains native because `tail` consumes its output as data; Bash handles `&&` and `|`.
 
 ## Shared Lexer Toolkit
 
