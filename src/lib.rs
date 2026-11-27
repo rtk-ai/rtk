@@ -3397,7 +3397,18 @@ fn run_cli() -> Result<i32> {
 
         Commands::Tsc { args } => tsc_cmd::run(None, &args, cli.verbose)?,
 
-        Commands::Next { args } => next_cmd::run(&args, cli.verbose)?,
+        Commands::Next { args } => {
+            let tokens = core::arg_tokenizer::tokenize(&args);
+            let build_args = if let Some(subcommand) = tokens
+                .first()
+                .filter(|token| token.is_free_positional() && token.text == "build")
+            {
+                &args[subcommand.source_index + 1..]
+            } else {
+                &args
+            };
+            next_cmd::run(build_args, cli.verbose)?
+        }
 
         Commands::Ng { args } => ng_cmd::run(&args, cli.verbose)?,
 
