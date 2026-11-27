@@ -7,7 +7,7 @@ use crate::core::arg_tokenizer::{self, Dialect, Flag, Grammar, Token, TokenKind,
 use crate::core::guard::never_worse;
 use crate::core::shell::{display_args, with_args};
 use crate::core::stream::{
-    self, CaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture_stdin,
+    self, CaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture_stdin_content,
     exec_capture_unguarded,
 };
 use crate::core::tracking;
@@ -551,7 +551,7 @@ fn engine_capture<T: AsRef<str>>(
     paths: &[String],
 ) -> Result<CaptureResult> {
     let mut cmd = engine_command(engine, extra_args, patterns, paths, false);
-    exec_capture_stdin(&mut cmd).context("search failed")
+    exec_capture_stdin_content(&mut cmd).context("search failed")
 }
 
 fn engine_command<T: AsRef<str>>(
@@ -712,7 +712,7 @@ fn passthrough<T: AsRef<str>>(
         return Ok(exit_code);
     }
 
-    let result = exec_capture_stdin(&mut cmd).context("search failed")?;
+    let result = exec_capture_stdin_content(&mut cmd).context("search failed")?;
     let cleaned = strip_ansi(&result.stdout);
     let folded = if fold_file_list {
         fold_path_prefix(&cleaned).filter(|f| never_worse(&cleaned, f) == f)

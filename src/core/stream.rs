@@ -778,12 +778,32 @@ fn show_usage_if_asked(cmd: &mut Command) -> Result<()> {
 /// `.output()` keep the diagnostic instead of losing it. The program name is
 /// used as the label so no call site has to pass one.
 fn capture(cmd: &mut Command) -> Result<CaptureResult> {
+    capture_with(cmd, super::utils::decode_process_output)
+}
+
+/// [`capture`] with `stdout` decoded as `decode_stdout` says; stderr, where a tool's
+/// own messages go, always takes the console code page.
+fn capture_with(cmd: &mut Command, decode_stdout: fn(&[u8]) -> String) -> Result<CaptureResult> {
     let raw = capture_raw(cmd)?;
     Ok(CaptureResult {
-        stdout: super::utils::decode_process_output(&raw.stdout),
+        stdout: decode_stdout(&raw.stdout),
         stderr: super::utils::decode_process_output(&raw.stderr),
         exit_code: raw.exit_code,
     })
+}
+
+/// [`exec_capture`] for a command whose stdout is file content (`git diff`, `git show`),
+/// decoded by [`decode_file_content`](super::utils::decode_file_content) (#4822).
+pub fn exec_capture_content(cmd: &mut Command) -> Result<CaptureResult> {
+    cmd.stdin(Stdio::null());
+    show_usage_if_asked(cmd)?;
+    capture_with(cmd, super::utils::decode_file_content)
+}
+
+/// [`exec_capture_stdin`] for a command whose stdout is file content (`grep`, `rg`) (#4822).
+pub fn exec_capture_stdin_content(cmd: &mut Command) -> Result<CaptureResult> {
+    cmd.stdin(Stdio::inherit());
+    capture_with(cmd, super::utils::decode_file_content)
 }
 
 /// Run `cmd` to completion and return its raw bytes plus a signal-aware exit code.
