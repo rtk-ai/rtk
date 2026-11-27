@@ -58,7 +58,8 @@ const DEPENDENCY_KEYS: &[&str] = &[
 ];
 const GUARD_KEYS: &[&str] = &["never_worse", "min_size"];
 const REMOVED_GUARD_KEYS: &[&str] = &["max_recovery_rate"];
-const PIPELINE_KEYS: &[&str] = &["name", "extends", "enabled", "rtk_min"];
+const PIPELINE_KEYS: &[&str] = &["name", "extends", "enabled", "rtk_min", "note"];
+pub const NOTE_MAX: usize = 40;
 const RTK_VERSION: &str = env!("CARGO_PKG_VERSION");
 const TOP_KEYS: &[&str] = &[
     "schema_version",
@@ -218,6 +219,7 @@ pub struct GuardsDef {
 pub struct PipelineFile {
     pub name: Option<String>,
     pub rtk_min: Option<String>,
+    pub note: Option<String>,
     pub extends: Vec<String>,
     pub enabled: bool,
     pub rules: BTreeMap<Position, Vec<RuleDef>>,
@@ -367,6 +369,28 @@ fn parse_pipeline_meta(parser: &mut Parser, value: &toml::Value, file: &mut Pipe
         match key.as_str() {
             "name" => file.name = value.as_str().map(str::to_string),
             "enabled" => file.enabled = value.as_bool().unwrap_or(true),
+            "note" => match value.as_str() {
+                Some(note) => {
+                    let length = note.chars().count();
+                    if length > NOTE_MAX {
+                        let diag = parser.diag(
+                            Code::W029,
+                            format!(
+                                "`note` is {length} characters: the rtk init menu shows the first {NOTE_MAX}"
+                            ),
+                        );
+                        diag.context = Some("[pipeline]".to_string());
+                    }
+                    file.note = Some(note.to_string());
+                }
+                None => {
+                    let diag = parser.diag(
+                        Code::W029,
+                        "`note` must be a string; it is ignored".to_string(),
+                    );
+                    diag.context = Some("[pipeline]".to_string());
+                }
+            },
             "rtk_min" => match value.as_str().filter(|v| version_triple(v).is_some()) {
                 Some(min) => {
                     file.rtk_min = Some(min.to_string());
@@ -1848,5 +1872,32 @@ mod rtk_min_tests {
         let codes: Vec<Code> = parsed.diagnostics.iter().map(|d| d.code).collect();
         assert_eq!(codes, [Code::W027]);
         assert!(parsed.file.expect("still loads").rtk_min.is_none());
+    }
+
+    #[test]
+    fn a_note_is_read_and_a_long_or_bad_one_only_warns() {
+        let parsed = parse(
+            "[pipeline]\nname = \"p\"\nnote = \"needs 2 GB of free RAM\"\n",
+            "p.toml",
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+        assert_eq!(
+            parsed.file.expect("parses").note.as_deref(),
+            Some("needs 2 GB of free RAM")
+        );
+
+        let long = "x".repeat(NOTE_MAX + 1);
+        let parsed = parse(
+            &format!("[pipeline]\nname = \"p\"\nnote = \"{long}\"\n"),
+            "p.toml",
+        );
+        let codes: Vec<Code> = parsed.diagnostics.iter().map(|d| d.code).collect();
+        assert_eq!(codes, [Code::W029]);
+        assert_eq!(parsed.file.expect("still loads").note, Some(long));
+
+        let parsed = parse("[pipeline]\nname = \"p\"\nnote = 3\n", "p.toml");
+        let codes: Vec<Code> = parsed.diagnostics.iter().map(|d| d.code).collect();
+        assert_eq!(codes, [Code::W029]);
+        assert!(parsed.file.expect("still loads").note.is_none());
     }
 }

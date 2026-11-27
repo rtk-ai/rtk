@@ -1818,11 +1818,11 @@ mod tests {
         let entry = |sha: &str| crate::core::pipeline_catalog::Entry {
             id: "acme/rtk-pipeline-probe".to_string(),
             name: "review-probe".to_string(),
-            summary: String::new(),
             result: None,
             requires: Vec::new(),
             sha: Some(sha.to_string()),
             install: format!("rtk pipeline add github:acme/rtk-pipeline-probe@{sha}"),
+            note: None,
         };
         assert_eq!(
             review_of(&origin, &[entry(sha)]),

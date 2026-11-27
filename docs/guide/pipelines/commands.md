@@ -193,7 +193,7 @@ rtk init -g --agent claude --pipeline <name>    # a name from rtk-ai.app/pipelin
 
 A pipeline installed this way goes into your user pipelines folder and applies to every project. That is why `rtk init` run for a single project shows no pipeline menu, and why `--pipeline` installs for your user account even without `-g`.
 
-Init fetches the list from `rtk-ai.app/pipelines/index.json` with a 2-second limit and drops revoked entries. When the site cannot be reached, it uses the newer of two copies: the last list this computer fetched, or the list shipped with your rtk version.
+At the end of a pipeline's line, the menu shows the pipeline's [`note`](./writing-pipelines.md#pipeline), such as the hardware a local model needs; `--pipeline <name>` prints it before installing. A line wider than the terminal is cut with `…`. Init fetches the list from `rtk-ai.app/pipelines/index.json` with a 2-second limit and drops revoked entries. When the site cannot be reached, it uses the newer of two copies: the last list this computer fetched, or the list shipped with your rtk version.
 
 ### What a pipeline needs
 

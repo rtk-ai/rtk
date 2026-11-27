@@ -76,6 +76,7 @@ Errors stop that file from loading; the other files stay active (W025 names the 
 | W026 | a dependency recipe has a key this rtk does not know (a newer recipe format) — the file still loads, and this rtk will not install that dependency |
 | W027 | `[pipeline] rtk_min` asks for a newer rtk than this one, or is not a version — the file still loads |
 | W028 | two loaded files declare the same `[dependency.<name>]` with different recipes — the later file's recipe is used, so the other pipeline runs against a version it did not declare |
+| W029 | `[pipeline] note` is longer than 40 characters, or not a string — the `rtk init` menu shows the first 40 characters; a note that is not a string is ignored |
 
 ## Limits
 

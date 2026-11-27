@@ -22,8 +22,6 @@ pub struct Entry {
     pub id: String,
     pub name: String,
     #[serde(default)]
-    pub summary: String,
-    #[serde(default)]
     pub result: Option<EntryResult>,
     #[serde(default)]
     pub requires: Vec<Requirement>,
@@ -31,6 +29,8 @@ pub struct Entry {
     pub sha: Option<String>,
     #[serde(default)]
     pub install: String,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -92,6 +92,21 @@ impl Entry {
 
     pub fn is_default(&self) -> bool {
         self.name == DEFAULT_PIPELINE
+    }
+
+    pub fn note(&self) -> Option<String> {
+        let max = rtk_engine::pipeline::NOTE_MAX;
+        let text = crate::core::utils::sanitize_for_terminal(self.note.as_deref()?);
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let note = words.join(" ");
+        if note.is_empty() {
+            return None;
+        }
+        if note.chars().count() <= max {
+            return Some(note);
+        }
+        let cut: String = note.chars().take(max - 1).collect();
+        Some(format!("{}…", cut.trim_end()))
     }
 
     pub fn needs(&self) -> String {
@@ -207,7 +222,7 @@ mod tests {
                 "summary":"default","result":{{"value":"−6.2%","unit":"per trial"}},"requires":[],
                 "sha":"{SHA}","install":"rtk pipeline add github:aeppling/rtk-pipeline-default-bash-compress@{SHA}"}},
               {{"id":"aeppling/rtk-pipeline-laya-delegate","name":"laya-delegate","summary":"delegate",
-                "requires":[{{"kind":"local-service","name":"Laya","env":"RTK_LAYA_TOKEN"}},{{"kind":"api-key","name":"Anthropic API key"}}],
+                "note":"local AI\nmodel  ","requires":[{{"kind":"local-service","name":"Laya","env":"RTK_LAYA_TOKEN"}},{{"kind":"api-key","name":"Anthropic API key"}}],
                 "sha":"{SHA}","install":"rtk pipeline add github:aeppling/rtk-pipeline-laya-delegate@{SHA}"}}
             ],"revoked":[{revoked}]}}"#
         )
@@ -226,6 +241,17 @@ mod tests {
         assert_eq!(entries[0].saves().as_deref(), Some("−6.2% cost"));
         assert_eq!(entries[1].needs(), "needs Laya, Anthropic API key");
         assert_eq!(entries[1].saves(), None);
+        assert_eq!(entries[0].note(), None);
+        assert_eq!(entries[1].note().as_deref(), Some("local AI model"));
+    }
+
+    #[test]
+    fn a_note_longer_than_the_limit_is_cut() {
+        let mut entry = parse_entries(&index("")).expect("valid index").remove(1);
+        entry.note = Some(format!("\u{1b}[31m{}", "word ".repeat(20)));
+        let note = entry.note().expect("note");
+        assert_eq!(note.chars().count(), rtk_engine::pipeline::NOTE_MAX);
+        assert!(note.ends_with('…') && !note.contains('\u{1b}'), "{note:?}");
     }
 
     #[test]

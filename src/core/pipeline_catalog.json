@@ -5,6 +5,7 @@
     {
       "id": "aeppling/rtk-pipeline-laya-tiered",
       "name": "laya-tiered",
+      "note": "runs on your CPU, needs 2 GB of free RAM",
       "summary": "Sends file reads and shell commands to a worker model, compresses shell commands output, and briefs your agent.",
       "aim": "cost",
       "result": {
@@ -53,6 +54,7 @@
     {
       "id": "aeppling/rtk-pipeline-laya-delegate",
       "name": "laya-delegate",
+      "note": "runs on your CPU, needs 2 GB of free RAM",
       "summary": "Sends file reads and shell commands to a worker model, and briefs your agent.",
       "aim": "cost",
       "result": {

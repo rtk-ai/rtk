@@ -149,6 +149,21 @@ fn run_menu(
     drop_pending_keys();
     let mut out = std::io::stdout();
     let mut idx = default.min(items.len() - 1);
+    let cols = terminal::size().map_or(0, |(cols, _)| cols);
+    let hints: Vec<String> = items
+        .iter()
+        .map(|(label, hint)| {
+            fit(
+                hint,
+                usize::from(cols).saturating_sub(label.chars().count() + 7),
+            )
+        })
+        .collect();
+    let items: Vec<(&str, &str)> = items
+        .iter()
+        .zip(&hints)
+        .map(|((label, _), hint)| (*label, hint.as_str()))
+        .collect();
     let render = |out: &mut std::io::Stdout, idx: usize| -> Result<()> {
         for (i, (label, hint)) in items.iter().enumerate() {
             if i == idx {
@@ -168,7 +183,11 @@ fn run_menu(
         out.flush().context("flush menu")?;
         Ok(())
     };
-    let lines = items.len() as u16 + 1;
+    let lines = items
+        .iter()
+        .map(|(label, hint)| screen_rows(label.chars().count() + hint.chars().count() + 6, cols))
+        .sum::<u16>()
+        + screen_rows(footer.chars().count(), cols);
     let mut run = || -> Result<Outcome> {
         render(&mut std::io::stdout(), idx)?;
         loop {
@@ -204,6 +223,21 @@ fn run_menu(
         Outcome::Cancelled | Outcome::Interrupted => println!("  ✗ cancelled"),
     }
     Ok(result)
+}
+
+fn fit(hint: &str, room: usize) -> String {
+    if room == 0 || hint.chars().count() <= room {
+        return hint.to_string();
+    }
+    let cut: String = hint.chars().take(room - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
+fn screen_rows(width: usize, cols: u16) -> u16 {
+    if cols == 0 {
+        return 1;
+    }
+    u16::try_from(width.div_ceil(usize::from(cols)).max(1)).unwrap_or(u16::MAX)
 }
 
 fn select_menu_plain(
@@ -429,6 +463,23 @@ fn parse_numbers(answer: &str, len: usize, chosen: &[bool]) -> Option<Vec<usize>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hint_wider_than_the_room_left_is_cut() {
+        assert_eq!(fit("needs Laya", 0), "needs Laya");
+        assert_eq!(fit("needs Laya", 10), "needs Laya");
+        assert_eq!(fit("needs Laya, key", 10), "needs Lay…");
+        assert_eq!(fit("needs Laya, key", 7), "needs…");
+    }
+
+    #[test]
+    fn a_menu_line_wider_than_the_terminal_takes_more_rows() {
+        assert_eq!(screen_rows(0, 80), 1);
+        assert_eq!(screen_rows(80, 80), 1);
+        assert_eq!(screen_rows(81, 80), 2);
+        assert_eq!(screen_rows(250, 80), 4);
+        assert_eq!(screen_rows(250, 0), 1);
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

@@ -323,6 +323,10 @@ pub fn pipeline_step(choice: Option<&str>, patch_mode: PatchMode, ctx: InitConte
                 pipeline_catalog::CATALOG_PAGE
             );
         };
+        if let Some(note) = entry.note() {
+            use colored::Colorize;
+            println!("  {}", format!("! {} · {note}", entry.name).yellow());
+        }
         let consent = if can_ask(patch_mode, ctx) {
             Consent::Ask
         } else if patch_mode == PatchMode::Skip {
@@ -422,25 +426,19 @@ fn pipeline_menu(
             || (e.is_default() && installed.is_empty() && custom.is_empty())
     };
 
-    let width = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
-    let note = match catalog.origin {
-        Origin::Cached => " (copy saved on this computer, the site could not be reached)",
-        Origin::Shipped => " (copy shipped with this rtk, the site could not be reached)",
+    let offline = match catalog.origin {
+        Origin::Cached => {
+            "\n  The site could not be reached: this is the list saved on this computer."
+        }
+        Origin::Shipped => {
+            "\n  The site could not be reached: this is the list shipped with this rtk."
+        }
         Origin::Live | Origin::Missing => "",
     };
-    println!(
-        "  Reviewed pipelines from {}{note}:",
+    let question = format!(
+        "  Which pipeline should RTK run? (reviewed at {},\n  installed pinned to the reviewed commit){offline}",
         pipeline_catalog::CATALOG_PAGE
     );
-    for e in &entries {
-        let summary = if e.is_default() {
-            "RTK's default: compresses shell command output. Nothing to install."
-        } else {
-            e.summary.as_str()
-        };
-        println!("    {:<width$}  {summary}", e.name);
-    }
-    println!();
 
     let mut hints: Vec<String> = Vec::new();
     let mut labels: Vec<String> = Vec::new();
@@ -457,6 +455,9 @@ fn pipeline_menu(
             parts.push(saves);
         }
         parts.push(e.needs());
+        if let Some(note) = e.note() {
+            parts.push(note);
+        }
         labels.push(e.name.clone());
         hints.push(parts.join(" · "));
     }
@@ -476,12 +477,7 @@ fn pipeline_menu(
     } else {
         0
     };
-    let Some(choice) = crate::core::ask::choose(
-        "  Which pipeline should RTK run? (installed pinned to the reviewed commit)",
-        &items,
-        default,
-    )?
-    else {
+    let Some(choice) = crate::core::ask::choose(&question, &items, default)? else {
         println!("  Pipeline unchanged.");
         return Ok(0);
     };
