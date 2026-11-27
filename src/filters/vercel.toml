@@ -1,0 +1,60 @@
+[filters.vercel]
+description = "Compact Vercel CLI deployment, domain, inspection and project output"
+match_command = '^(?:npx\s+)?vercel\b'
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^! Deployment Protection is on for this project',
+  '^Next steps:',
+  '^\s*-\s*Automatically deploy changes',
+  '^\s*vercel git connect',
+  '^\s*-\s*Check the production response:',
+  '^\s*vercel curl',
+  '^\s*-\s*View build logs:',
+  '^\s*vercel inspect',
+  '^\s*-\s*Create a new deployment',
+  '^\s*vercel redeploy',
+  '^\s*Last progress:',
+  '^\s*🔗\s*Linked to',
+  '^\s*🔍\s*Inspect:',
+  '^\s*✅\s*Production:',
+  '^\s*Retrieving project',
+  '^\s*Deploying',
+  '^\s*Uploading'
+]
+truncate_lines_at = 140
+max_lines = 30
+
+[[tests.vercel]]
+name = "vercel deployment output compacting"
+input = """
+Vercel CLI 65.0.0
+  Inspect         https://vercel.com/rpattys-projects/orchardkitchensni/6iio9UP6KcFRY65bzcfBR9audajQ
+  Production      https://orchardkitchensni-3hrmamqq1-rpattys-projects.vercel.app
+▲ Aliased         https://orchardkitchensni.co.uk
+
+✓ Ready in 11s
+
+! Deployment Protection is on for this project (Vercel Authentication). Use `vercel curl` to access it.
+
+Next steps:
+- Automatically deploy changes on every push by connecting Git:
+  vercel git connect
+- Check the production response:
+  vercel curl https://orchardkitchensni.co.uk
+- View build logs:
+  vercel inspect orchardkitchensni-3hrmamqq1-rpattys-projects.vercel.app --logs
+- Create a new deployment from the same source:
+  vercel redeploy orchardkitchensni-3hrmamqq1-rpattys-projects.vercel.app
+
+Last progress: 1s ago
+"""
+expected = "Vercel CLI 65.0.0\n  Inspect         https://vercel.com/rpattys-projects/orchardkitchensni/6iio9UP6KcFRY65bzcfBR9audajQ\n  Production      https://orchardkitchensni-3hrmamqq1-rpattys-projects.vercel.app\n▲ Aliased         https://orchardkitchensni.co.uk\n✓ Ready in 11s"
+
+[[tests.vercel]]
+name = "vercel whoami passthrough"
+input = """
+Vercel CLI 65.0.0
+rpatty
+"""
+expected = "Vercel CLI 65.0.0\nrpatty"

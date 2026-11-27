@@ -1,0 +1,29 @@
+[filters.firebase]
+description = "Compact Firebase CLI deploy, emulator and functions output"
+match_command = '^(?:npx\s+)?firebase\b'
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^\s*=== Deploying to',
+  '^\s*✔\s+Deploy complete!',
+  '^\s*Project Console:'
+]
+truncate_lines_at = 140
+max_lines = 30
+
+[[tests.firebase]]
+name = "firebase deploy output compacting"
+input = """
+=== Deploying to 'my-project'...
+i  deploying hosting
+i  hosting[my-project]: beginning deploy...
+i  hosting[my-project]: found 45 files in public
++  hosting[my-project]: file upload complete
+✔  hosting[my-project]: finalizing version...
+✔  hosting[my-project]: version finalized
+✔  Deploy complete!
+
+Project Console: https://console.firebase.google.com/project/my-project/overview
+Hosting URL: https://my-project.web.app
+"""
+expected = "i  deploying hosting\ni  hosting[my-project]: beginning deploy...\ni  hosting[my-project]: found 45 files in public\n+  hosting[my-project]: file upload complete\n✔  hosting[my-project]: finalizing version...\n✔  hosting[my-project]: version finalized\nHosting URL: https://my-project.web.app"
