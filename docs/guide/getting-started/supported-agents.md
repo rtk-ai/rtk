@@ -30,6 +30,7 @@ Agent runs "cargo test"
 |-------|-----------------|---------------------------|
 | Claude Code | Rust binary (`PreToolUse`, `rtk hook claude`) | Yes |
 | Trae | Rust binary (`PreToolUse`, matcher `RunCommand`) | Yes |
+| WorkBuddy | Rust binary (`PreToolUse`, global installation) | Yes |
 | VS Code Copilot Chat | Rust binary (`PreToolUse`, `rtk hook copilot`) | Yes |
 | GitHub Copilot CLI | Rust binary (`PreToolUse`, `rtk hook copilot`) | Yes |
 | Cursor | Rust binary (`preToolUse`, `rtk hook cursor`) | Yes |
@@ -71,6 +72,10 @@ Restart Claude Code. Verify:
 ```bash
 rtk init --show    # shows hook status
 ```
+
+### WorkBuddy
+
+For WorkBuddy desktop, use `rtk init -g --agent workbuddy --auto-patch` and restart the app. Its native hook preserves input metadata and leaves permission decisions to WorkBuddy. Installation is global-only because its project settings are shared with CodeBuddy. See the [WorkBuddy integration](https://github.com/rtk-ai/rtk/blob/develop/hooks/workbuddy/README.md) for scope and verification limits.
 
 ### Trae
 

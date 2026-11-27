@@ -86,6 +86,10 @@ pub fn claude_matcher(subjects: &[rtk_engine::block::Subject]) -> Option<String>
 }
 /// Native Rust hook command for Trae.
 pub const TRAE_HOOK_COMMAND: &str = "rtk hook trae";
+pub const WORKBUDDY_HOOK_COMMAND: &str = "rtk hook workbuddy";
+pub const WORKBUDDY_DIR: &str = ".workbuddy";
+pub const WORKBUDDY_MATCHER: &str = "Bash|execute_command";
+
 /// Native Rust hook command for Codex CLI.
 pub const CODEX_HOOK_COMMAND: &str = "rtk hook codex";
 /// Native Rust hook command for Cursor (replaces rtk-rewrite.sh).
