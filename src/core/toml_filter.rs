@@ -315,6 +315,7 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "bypass",
     "verify",
     "learn",
+    "rbenv",
 ];
 
 pub fn is_rtk_reserved_command(name: &str) -> bool {

@@ -23,7 +23,7 @@ use cmds::php::{
     ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpt_cmd, phpunit_cmd, pint_cmd,
 };
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, sqlfluff_cmd, uv_cmd};
-use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
+use cmds::ruby::{rake_cmd, rbenv_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
@@ -976,6 +976,13 @@ enum Commands {
     /// Rake/Rails test with compact Minitest output (Ruby)
     Rake {
         /// Rake arguments (e.g., test, test TEST=path/to/test.rb)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Rbenv exec wrapper with compact output for Ruby tools (rspec, rubocop, rake/rails test, bundle)
+    Rbenv {
+        /// Rbenv arguments (e.g., exec bundle exec rspec spec/foo_spec.rb)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -3603,6 +3610,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Rake { args } => rake_cmd::run(&args, cli.verbose)?,
 
+        Commands::Rbenv { args } => rbenv_cmd::run(&args, cli.verbose)?,
+
         Commands::Rubocop { args } => rubocop_cmd::run(&args, cli.verbose)?,
 
         Commands::Rspec { args } => rspec_cmd::run(&args, cli.verbose)?,
@@ -4091,6 +4100,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Pint { .. }
             | Commands::Phpt { .. }
             | Commands::Rake { .. }
+            | Commands::Rbenv { .. }
             | Commands::Rubocop { .. }
             | Commands::Rspec { .. }
             | Commands::Pip { .. }
@@ -4160,6 +4170,14 @@ mod tests {
             &["gradlew", "build"],
             &["mvn", "test"],
             &["mvnd", "test"],
+            &[
+                "rbenv",
+                "exec",
+                "bundle",
+                "exec",
+                "rspec",
+                "spec/foo_spec.rb",
+            ],
         ];
 
         for args in commands {
@@ -4715,6 +4733,7 @@ mod tests {
             "pytest",
             "mypy",
             "rake",
+            "rbenv",
             "rubocop",
             "rspec",
             "pip",

@@ -95,6 +95,7 @@ listing into `head`, `tail`, or `cat`.
 | `rspec` | Failures only |
 | `rubocop` | Offenses grouped by file |
 | `rake test` | Test task output, failures highlighted |
+| `rbenv exec bundle exec rspec` | Runs under rbenv and filters rspec/rubocop/rake/bundle output |
 
 ## .NET
 

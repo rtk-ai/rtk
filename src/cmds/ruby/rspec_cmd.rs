@@ -70,8 +70,17 @@ struct RspecSummary {
 // ── Public entry point ───────────────────────────────────────────────────────
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = ruby_exec("rspec");
+    run_with_command(ruby_exec("rspec"), "rspec", args, verbose)
+}
 
+/// Run RSpec with a caller-supplied command (e.g., `rbenv exec [bundle exec] rspec`)
+/// so wrapper invocations execute the exact Ruby toolchain requested.
+pub fn run_with_command(
+    mut cmd: std::process::Command,
+    tool_name: &str,
+    args: &[String],
+    verbose: u8,
+) -> Result<i32> {
     let has_format = args.iter().any(|a| {
         a == "--format"
             || a == "-f"
@@ -87,12 +96,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     if verbose > 0 {
         let injected = if has_format { "" } else { " --format json" };
-        eprintln!("Running: rspec{} {}", injected, args.join(" "));
+        eprintln!("Running: {}{} {}", tool_name, injected, args.join(" "));
     }
 
     runner::run_filtered(
         cmd,
-        "rspec",
+        tool_name,
         &display_args(args),
         move |stdout| {
             if has_format {

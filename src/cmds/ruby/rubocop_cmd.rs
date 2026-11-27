@@ -52,8 +52,17 @@ struct RubocopSummary {
 // ── Public entry point ───────────────────────────────────────────────────────
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = ruby_exec("rubocop");
+    run_with_command(ruby_exec("rubocop"), "rubocop", args, verbose)
+}
 
+/// Run RuboCop with a caller-supplied command (e.g., `rbenv exec [bundle exec] rubocop`)
+/// so wrapper invocations execute the exact Ruby toolchain requested.
+pub fn run_with_command(
+    mut cmd: std::process::Command,
+    tool_name: &str,
+    args: &[String],
+    verbose: u8,
+) -> Result<i32> {
     let is_autocorrect = args
         .iter()
         .any(|a| a == "-a" || a == "-A" || a == "--auto-correct" || a == "--auto-correct-all");
@@ -69,12 +78,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     cmd.args(args);
 
     if verbose > 0 {
-        eprintln!("Running: rubocop {}", args.join(" "));
+        eprintln!("Running: {} {}", tool_name, args.join(" "));
     }
 
     runner::run_filtered(
         cmd,
-        "rubocop",
+        tool_name,
         &display_args(args),
         move |stdout| {
             if has_format || is_autocorrect {

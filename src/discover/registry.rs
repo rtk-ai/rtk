@@ -79,14 +79,15 @@ static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
 static ENV_WORD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(&format!(r#"^(?:{})"#, env_word())).unwrap());
 
-/// An `env` word or an assignment, with the blanks after it.
+/// An `env` word (with optional POSIX `--` end-of-options marker) or a shell
+/// variable assignment, with the blanks after it.
 fn env_word() -> String {
     let double_quoted = r#""(?:[^"\\]|\\.)*""#;
     let single_quoted = r#"'(?:[^'\\]|\\.)*'"#;
     let unquoted = r#"[^\s]*"#;
     let env_value = format!("(?:{}|{}|{})", double_quoted, single_quoted, unquoted);
-    let env_assign = format!(r#"[A-Z_][A-Z0-9_]*={}"#, env_value);
-    format!(r#"env\s+|{}\s+"#, env_assign)
+    let env_assign = format!(r#"[A-Za-z_][A-Za-z0-9_]*={}"#, env_value);
+    format!(r#"env(?:\s+--)?\s+|{}\s+"#, env_assign)
 }
 // Git global options that appear before the subcommand: -C <path>, -c <key=val>,
 // --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
@@ -1675,11 +1676,27 @@ pub(crate) fn compile_exclude_patterns(patterns: &[String]) -> Vec<ExcludePatter
         .collect()
 }
 
+/// `rbenv exec <cmd>` resolves its target via `rbenv-which`, which only
+/// searches rbenv's managed Ruby version bin directory rather than `PATH`.
+/// Re-prepending `rbenv exec` outside `rtk` (`rbenv exec rtk ...`) therefore
+/// fails at runtime with `rbenv: rtk: command not found`. Supported `rbenv exec`
+/// Ruby commands are rewritten natively as `rtk rbenv exec ...` instead (#5307).
+fn is_rbenv_exec_prefix(prefix: &str) -> bool {
+    let mut words = prefix.split_whitespace();
+    let Some(first) = words.next() else {
+        return false;
+    };
+    let Some(second) = words.next() else {
+        return false;
+    };
+    command_basename(first) == "rbenv" && second == "exec"
+}
+
 pub(crate) fn normalize_transparent_prefixes(prefixes: &[String]) -> Vec<String> {
     let mut normalized: Vec<String> = prefixes
         .iter()
         .map(|prefix| prefix.trim())
-        .filter(|prefix| !prefix.is_empty())
+        .filter(|prefix| !prefix.is_empty() && !is_rbenv_exec_prefix(prefix))
         .map(str::to_string)
         .collect();
 
@@ -2197,6 +2214,15 @@ fn tool_form(cmd_clean: &str, rtk_equivalent: &str) -> String {
     );
     if rtk_equivalent == "rtk cargo" {
         return normalize_cargo_command(&normalized);
+    }
+    if rtk_equivalent == "rtk rbenv"
+        && let Some(after_rbenv) = strip_word_prefix(&normalized, "rbenv")
+        && let Some(inner) = strip_word_prefix(after_rbenv, "exec")
+    {
+        let inner = strip_word_prefix(inner, "bundle")
+            .and_then(|after_bundle| strip_word_prefix(after_bundle, "exec"))
+            .unwrap_or(inner);
+        return inner.strip_prefix("bin/").unwrap_or(inner).to_string();
     }
     RULES
         .iter()
@@ -3101,6 +3127,7 @@ mod tests {
                 "rtk pytest",
                 "rtk quarto",
                 "rtk rake",
+                "rtk rbenv",
                 "rtk rg",
                 "rtk rspec",
                 "rtk rubocop",
@@ -9215,6 +9242,269 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("bash -c 'git status && bash -c \"cargo test\"'", &[]),
             Some("bash -c 'rtk git status && bash -c \"cargo test\"'".into())
+        );
+    }
+
+    // --- #5307: rbenv exec, env prefixes, and grep -rn forms ---
+
+    #[test]
+    fn test_rewrite_rbenv_exec_ruby_tools() {
+        for (input, expected) in [
+            (
+                "rbenv exec bundle exec rspec spec/foo_spec.rb",
+                "rtk rbenv exec bundle exec rspec spec/foo_spec.rb",
+            ),
+            (
+                "rbenv exec rspec spec/foo_spec.rb",
+                "rtk rbenv exec rspec spec/foo_spec.rb",
+            ),
+            (
+                "rbenv exec bin/rspec spec/foo_spec.rb",
+                "rtk rbenv exec bin/rspec spec/foo_spec.rb",
+            ),
+            (
+                "rbenv exec bundle exec rubocop app/",
+                "rtk rbenv exec bundle exec rubocop app/",
+            ),
+            ("rbenv exec rubocop", "rtk rbenv exec rubocop"),
+            (
+                "rbenv exec bundle exec rake test",
+                "rtk rbenv exec bundle exec rake test",
+            ),
+            (
+                "rbenv exec bundle exec rake test:models",
+                "rtk rbenv exec bundle exec rake test:models",
+            ),
+            (
+                "rbenv exec bundle exec rails test test/models/user_test.rb",
+                "rtk rbenv exec bundle exec rails test test/models/user_test.rb",
+            ),
+            ("rbenv exec rake test", "rtk rbenv exec rake test"),
+            ("rbenv exec rails test", "rtk rbenv exec rails test"),
+            ("rbenv exec bin/rails test", "rtk rbenv exec bin/rails test"),
+            ("rbenv exec bundle install", "rtk rbenv exec bundle install"),
+            (
+                "rbenv exec bundle update rails",
+                "rtk rbenv exec bundle update rails",
+            ),
+            (
+                "RBENV_VERSION=3.3.0 rbenv exec bundle exec rspec spec/foo_spec.rb",
+                "RBENV_VERSION=3.3.0 rtk rbenv exec bundle exec rspec spec/foo_spec.rb",
+            ),
+            (
+                "env RAILS_ENV=test rbenv exec bundle exec rspec spec/foo_spec.rb",
+                "env RAILS_ENV=test rtk rbenv exec bundle exec rspec spec/foo_spec.rb",
+            ),
+            (
+                "timeout 60 rbenv exec bundle exec rspec spec/foo_spec.rb",
+                "timeout 60 rtk rbenv exec bundle exec rspec spec/foo_spec.rb",
+            ),
+            (
+                "rbenv exec bundle exec rspec spec/foo_spec.rb 2>&1",
+                "rtk rbenv exec bundle exec rspec spec/foo_spec.rb 2>&1",
+            ),
+            (
+                "rbenv exec bundle exec rspec spec/foo_spec.rb | tail -20",
+                "rtk rbenv exec bundle exec rspec spec/foo_spec.rb | tail -20",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into()),
+                "failed to rewrite: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_rbenv_exec_unsupported_and_unsafe_forms_passthrough() {
+        for input in [
+            "rbenv",
+            "rbenv versions",
+            "rbenv install 3.3.0",
+            "rbenv exec",
+            "rbenv exec ruby -e 'puts 1'",
+            "rbenv exec rails runner 'User.count'",
+            "rbenv exec bundle exec rails console",
+            "rbenv exec bundle exec bundle install",
+            "rbenv exec rake tester",
+            "rbenv exec rspec2 spec/foo_spec.rb",
+            "rbenv exec rubocop-daemon app/",
+            "rbenv exec bundle install-extra",
+            "rbenv exec git status",
+            "rbenv exec rtk rspec spec/foo_spec.rb",
+            "sudo rbenv exec bundle exec rspec spec/foo_spec.rb",
+            "RTK_DISABLED=1 rbenv exec bundle exec rspec spec/foo_spec.rb",
+            "echo hi | rbenv exec bundle exec rspec spec/foo_spec.rb",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                None,
+                "must not rewrite: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_transparent_prefix_rbenv_exec_never_places_rtk_under_rbenv() {
+        // #5307 follow-up: `rbenv exec rtk ...` fails with `rbenv: rtk: command not found`
+        // because rbenv-which only searches rbenv's Ruby version bin directory.
+        let prefixes = vec!["rbenv exec".to_string()];
+        assert_eq!(
+            super::rewrite_command("rbenv exec bundle exec rspec a", &[], &prefixes),
+            Some("rtk rbenv exec bundle exec rspec a".into())
+        );
+        assert_eq!(
+            super::rewrite_command("rbenv exec git status", &[], &prefixes),
+            None
+        );
+
+        let mixed = vec!["direnv exec .".to_string(), "rbenv exec".to_string()];
+        assert_eq!(
+            super::rewrite_command("direnv exec . rbenv exec bundle exec rspec a", &[], &mixed),
+            Some("direnv exec . rtk rbenv exec bundle exec rspec a".into())
+        );
+        assert_eq!(
+            super::rewrite_command("direnv exec . git status", &[], &mixed),
+            Some("direnv exec . rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_exclude_commands_covers_rbenv_exec_inner_tools() {
+        for (excluded, cmd) in [
+            ("rbenv", "rbenv exec bundle exec rspec a"),
+            ("rbenv exec", "rbenv exec bundle exec rspec a"),
+            ("rspec", "rbenv exec bundle exec rspec a"),
+            ("rspec", "rbenv exec rspec a"),
+            ("rspec", "rbenv exec bin/rspec a"),
+            ("rubocop", "rbenv exec bundle exec rubocop app/"),
+            ("rake", "rbenv exec bundle exec rake test"),
+            ("rails", "rbenv exec bundle exec rails test"),
+            ("bundle", "rbenv exec bundle install"),
+        ] {
+            assert!(
+                rewrite_command_no_prefixes(cmd, &[]).is_some(),
+                "control: `{cmd}` must rewrite without exclusions"
+            );
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[excluded.to_string()]),
+                None,
+                "expected `{cmd}` to be excluded by `{excluded}`"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_env_prefix_case_multi_var_and_double_dash() {
+        for (input, expected) in [
+            (
+                "env SOME_VAR=dummy git status",
+                "env SOME_VAR=dummy rtk git status",
+            ),
+            (
+                "env SOME_VAR=dummy bundle exec rspec spec/foo_spec.rb",
+                "env SOME_VAR=dummy rtk rspec spec/foo_spec.rb",
+            ),
+            (
+                r#"env A=1 B="two words" grep -rn foo src"#,
+                r#"env A=1 B="two words" rtk grep -rn foo src"#,
+            ),
+            ("env foo=bar git status", "env foo=bar rtk git status"),
+            (
+                "env http_proxy=http://localhost:8080 curl https://example.com",
+                "env http_proxy=http://localhost:8080 rtk curl https://example.com",
+            ),
+            (
+                "env Some_Var=dummy bundle exec rspec spec/foo_spec.rb",
+                "env Some_Var=dummy rtk rspec spec/foo_spec.rb",
+            ),
+            (
+                "rails_env=test rspec spec/foo_spec.rb",
+                "rails_env=test rtk rspec spec/foo_spec.rb",
+            ),
+            ("env -- git status", "env -- rtk git status"),
+            (
+                "env -- SOME_VAR=dummy git status",
+                "env -- SOME_VAR=dummy rtk git status",
+            ),
+            (
+                "env -- foo=1 bar=2 grep -rn foo src",
+                "env -- foo=1 bar=2 rtk grep -rn foo src",
+            ),
+            (
+                "env -- rbenv exec bundle exec rspec spec/foo_spec.rb",
+                "env -- rtk rbenv exec bundle exec rspec spec/foo_spec.rb",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into()),
+                "failed to rewrite: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_env_prefix_unsafe_flags_and_invalid_forms_passthrough() {
+        for input in [
+            "env",
+            "env --",
+            "env VAR=1",
+            "env -i git status",
+            "env -i -- git status",
+            "env -u FOO git status",
+            "env -C /tmp git status",
+            "env FOO=1 -- git status",
+            "FOO=1 -- git status",
+            "env -- -i git status",
+            "env -- -- git status",
+            "env -- RTK_DISABLED=1 git status",
+            "env -- FOO=1 sudo docker ps",
+            "1foo=bar git status",
+            "foo-bar=1 git status",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                None,
+                "must not rewrite: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_grep_rn_forms_and_pipeline_controls() {
+        for (input, expected) in [
+            ("grep -rn foo src", "rtk grep -rn foo src"),
+            (
+                "grep -rni \"foo bar\" src/",
+                "rtk grep -rni \"foo bar\" src/",
+            ),
+            (
+                "grep -rn --include=\"*.rb\" foo app/ 2>&1",
+                "rtk grep -rn --include=\"*.rb\" foo app/ 2>&1",
+            ),
+            (
+                "grep -rn foo src | head -20",
+                "rtk grep -rn foo src | head -20",
+            ),
+            ("git log | grep -rn foo", "git log | rtk grep -rn foo"),
+            (
+                "env LANG=C grep -rn foo src",
+                "env LANG=C rtk grep -rn foo src",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(input, &[]),
+                Some(expected.into()),
+                "failed to rewrite: {input}"
+            );
+        }
+
+        // Pattern-file grep stays raw inside a pipeline.
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -rnf patterns.txt src | head -5", &[]),
+            None
         );
     }
 }
