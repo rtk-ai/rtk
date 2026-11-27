@@ -812,17 +812,31 @@ fn collect_failed_trailer(lines: &[String], framing_lines: &HashSet<usize>) -> V
 }
 
 fn trim_blank_edges(lines: &mut Vec<String>) {
-    while lines.first().is_some_and(|line| line.trim().is_empty()) {
-        lines.remove(0);
-    }
     while lines.last().is_some_and(|line| line.trim().is_empty()) {
         lines.pop();
     }
+    let leading = lines
+        .iter()
+        .take_while(|line| line.trim().is_empty())
+        .count();
+    lines.drain(..leading);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trims_blank_edges_without_removing_internal_spacing() {
+        let mut lines = [" ", "\t", "first", " ", "second", "", " "]
+            .map(String::from)
+            .to_vec();
+        trim_blank_edges(&mut lines);
+        assert_eq!(lines, ["first", " ", "second"]);
+        let mut blank = vec![String::from(" "); 100];
+        trim_blank_edges(&mut blank);
+        assert!(blank.is_empty());
+    }
 
     #[test]
     fn filters_all_pass_output_to_summary_and_slowest_tests() {
