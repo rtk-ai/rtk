@@ -1,0 +1,40 @@
+{
+  "monthly": [
+    {
+      "agent": "all",
+      "cacheCreationTokens": 29982068,
+      "cacheReadTokens": 2114796815,
+      "inputTokens": 3600572,
+      "metadata": {
+        "agents": [
+          "claude-code"
+        ]
+      },
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 29982068,
+          "cacheReadTokens": 2114796815,
+          "cost": 1292.65595422,
+          "inputTokens": 3600572,
+          "modelName": "claude-opus-5",
+          "outputTokens": 4235011
+        }
+      ],
+      "modelsUsed": [
+        "claude-opus-5"
+      ],
+      "outputTokens": 4235011,
+      "period": "2026-08",
+      "totalCost": 1292.65595422,
+      "totalTokens": 2152614466
+    }
+  ],
+  "totals": {
+    "cacheCreationTokens": 29982068,
+    "cacheReadTokens": 2114796815,
+    "inputTokens": 3600572,
+    "outputTokens": 4235011,
+    "totalCost": 1292.65595422,
+    "totalTokens": 2152614466
+  }
+}
