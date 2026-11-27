@@ -328,11 +328,13 @@ fn git_branch_dash_prefixed_name_after_double_dash_attempts_creation_not_a_silen
 
 #[test]
 fn git_log_malformed_digit_run_propagates_real_git_error() {
-    // "-5x" isn't a valid git log limit; real git rejects it outright ("fatal: '5x': not an
-    // integer", verified against git 2.51). run_log's internal limit-parsing for this
-    // malformed input differs before/after arg_tokenizer (5 vs the old fallback of 10), but
-    // that's never observable here: run_log bails out on the real git failure before ever
-    // reaching the formatting code that would use it.
+    // "-5x" isn't a valid git log limit; real git rejects it outright. The wording is git's
+    // and varies by version ("not an integer" in 2.51, "not a non-negative integer" in
+    // 2.43), so the expected text is whatever this git printed, not a fixed string.
+    // run_log's internal limit-parsing for this malformed input differs before/after
+    // arg_tokenizer (5 vs the old fallback of 10), but that's never observable here: run_log
+    // bails out on the real git failure before ever reaching the formatting code that would
+    // use it.
     let dir = init_git_repo();
 
     let raw = git(dir.path())
@@ -340,13 +342,19 @@ fn git_log_malformed_digit_run_propagates_real_git_error() {
         .output()
         .expect("spawn raw git log");
     assert!(!raw.status.success(), "expected real git to reject -5x");
+    let raw_stderr = String::from_utf8_lossy(&raw.stderr);
+    let git_error = raw_stderr.trim();
+    assert!(
+        git_error.contains("5x"),
+        "expected real git to name the bad limit: {raw_stderr:?}"
+    );
 
     let (_, rtk_stderr, rtk_code) = rtk_output_in_dir(dir.path(), &["git", "log", "-5x"]);
 
     assert_eq!(rtk_code, raw.status.code());
     assert!(
-        rtk_stderr.contains("not an integer"),
-        "rtk should surface git's own error verbatim: {rtk_stderr:?}"
+        rtk_stderr.contains(git_error),
+        "rtk should surface git's own error verbatim: expected {git_error:?} in {rtk_stderr:?}"
     );
 }
 
