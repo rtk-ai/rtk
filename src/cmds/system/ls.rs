@@ -5,14 +5,17 @@ use crate::core::arg_tokenizer::{
     self, Abbreviation, Attachment, Dialect, Flag, Grammar, Token, TokenKind, ValueSpec,
 };
 use crate::core::args_utils;
+use crate::core::child_command::ChildCommand;
 use crate::core::guard::never_worse;
+use crate::core::operand_glob::{self, ChildGlobs};
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::display_args;
 use crate::core::tracking::estimate_tokens;
 use crate::core::truncate::CAP_INVENTORY;
-use crate::core::utils::{ChildArgExt, resolved_command};
+use crate::core::utils::resolved_command;
 use anyhow::Result;
 use regex::Regex;
+use std::collections::HashSet;
 use std::process::Stdio;
 use std::sync::LazyLock;
 
@@ -118,17 +121,18 @@ fn resolve_abbrev(candidates: &[&'static str], name: &str) -> Option<&'static st
     matches.next().is_none().then_some(*first)
 }
 
-/// Which `ls` the child process will be. The two disagree on short-option grammar outright:
-/// GNU's `-I`/`-T`/`-w` take `--ignore`/`--tabsize`/`--width` values, while on BSD all three
-/// are booleans and only `-D` takes one (a strftime format). Reading a BSD operand as a value
-/// moves it ahead of the `--`, which BSD's non-permuting getopt then lists as a file.
+/// Which userland the child process comes from, GNU coreutils or BSD; `wc` reads it too. For
+/// `ls` the two disagree on short-option grammar outright: GNU's `-I`/`-T`/`-w` take
+/// `--ignore`/`--tabsize`/`--width` values, while on BSD all three are booleans and only `-D`
+/// takes one (a strftime format). Reading a BSD operand as a value moves it ahead of the `--`,
+/// which BSD's non-permuting getopt then lists as a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Flavor {
+pub(super) enum Flavor {
     Gnu,
     Bsd,
 }
 
-const HOST_FLAVOR: Flavor = if cfg!(any(
+pub(super) const HOST_FLAVOR: Flavor = if cfg!(any(
     target_os = "macos",
     target_os = "ios",
     target_os = "freebsd",
@@ -193,6 +197,9 @@ struct LsPlan {
     show_all: bool,
     show_long: bool,
     child_args: Vec<String>,
+    /// Where the user's file operands sit in `child_args`, the only arguments the child may be
+    /// left to glob (see `operand_glob::for_child`).
+    operands: std::ops::Range<usize>,
 }
 
 fn plan(args: &[String]) -> LsPlan {
@@ -220,10 +227,12 @@ fn plan_for(args: &[String], flavor: Flavor) -> LsPlan {
             }
     });
 
+    let (child_args, operands) = build_child_args(&tokens);
     LsPlan {
         show_all,
         show_long,
-        child_args: build_child_args(&tokens),
+        child_args,
+        operands,
     }
 }
 
@@ -239,7 +248,7 @@ fn dangling_value_flag(tokens: &[Token<'_>]) -> Option<usize> {
 
 /// Rebuilds the user's options as argv for the child `ls`, re-attaching every flag's value to
 /// the flag rather than letting it drift into the path list.
-fn build_child_args(tokens: &[Token<'_>]) -> Vec<String> {
+fn build_child_args(tokens: &[Token<'_>]) -> (Vec<String>, std::ops::Range<usize>) {
     // RTK asks for its own long listing, so `-l`/`-a`/`--all` from the user are redundant, and
     // the human-readable ones would pre-format the sizes RTK renders itself. Bare spellings
     // only: `--all=x` is an error the child still has to report.
@@ -285,7 +294,8 @@ fn build_child_args(tokens: &[Token<'_>]) -> Vec<String> {
             .filter(|t| t.is_free_positional())
             .map(|t| t.text.to_string()),
     );
-    if child_args.len() == before {
+    let operands = before..child_args.len();
+    if operands.is_empty() {
         child_args.push(".".to_string());
     }
 
@@ -298,28 +308,83 @@ fn build_child_args(tokens: &[Token<'_>]) -> Vec<String> {
         child_args.push(format!("{}{}", dashes, token.text));
     }
 
-    child_args
+    (child_args, operands)
+}
+
+/// The indices of `args`' file operands: the free positionals of `flavor`'s grammar, so a flag's
+/// value such as `-I '*.o'` or `--hide='*~'` still reaches `ls` as the pattern it is.
+fn file_operands(args: &[String], flavor: Flavor) -> HashSet<usize> {
+    arg_tokenizer::tokenize_grammar(args, grammar(flavor))
+        .iter()
+        .filter(|t| t.is_free_positional())
+        .map(|t| t.source_index)
+        .collect()
+}
+
+/// `args` with every file operand glob expanded (see `operand_glob`) and everything else as
+/// written.
+#[cfg(test)]
+fn expand_file_operands(
+    args: &[String],
+    flavor: Flavor,
+    expand: impl Fn(&str) -> Vec<String>,
+) -> Vec<String> {
+    operand_glob::expand_at(args, &file_operands(args, flavor), expand)
+}
+
+/// The child that lists `child_args` for the filtered run.
+fn ls_command(
+    child_args: &[String],
+    operands: &std::ops::Range<usize>,
+    globs: &ChildGlobs,
+) -> ChildCommand {
+    let mut cmd = resolved_command("ls");
+    cmd.env("LC_ALL", "C");
+    for (index, arg) in child_args.iter().enumerate() {
+        if operands.contains(&index) {
+            globs.push_operand(&mut cmd, arg);
+        } else {
+            cmd.arg(arg);
+        }
+    }
+    cmd
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let args = &args_utils::restore_double_dash(args);
+    let typed = &args_utils::restore_double_dash(args);
+    // Expanded once, before either spawn: the filtered listing and `native_listing` must name
+    // the same files. The tracked command stays what the user typed. Past the command-line
+    // limit both get the operands as typed, for `ls` to glob itself.
+    let (args, globs) = operand_glob::for_child(
+        typed,
+        &file_operands(typed, HOST_FLAVOR),
+        |path| operand_glob::expand_operands([path]),
+        |expanded| {
+            let plan = plan(expanded);
+            operand_glob::fits(&ls_command(
+                &plan.child_args,
+                &plan.operands,
+                &ChildGlobs::default(),
+            ))
+        },
+    );
+    let args = &args;
     let LsPlan {
         show_all,
         show_long,
         child_args,
+        operands,
     } = plan(args);
 
-    let mut cmd = resolved_command("ls");
-    cmd.env("LC_ALL", "C");
-    cmd.child_args(&child_args);
+    let cmd = ls_command(&child_args, &operands, &globs);
 
-    let label = if args.is_empty() {
+    let label = if typed.is_empty() {
         ".".to_string()
     } else {
-        display_args(args)
+        display_args(typed)
     };
 
-    let native = native_listing(args);
+    let native = native_listing(args, &globs);
     let listed = native
         .as_ref()
         .filter(|(stdout, succeeded)| *succeeded || !stdout.is_empty())
@@ -338,9 +403,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
-fn native_listing(args: &[String]) -> Option<(String, bool)> {
-    let output = resolved_command("ls")
-        .child_args(args)
+fn native_listing(args: &[String], globs: &ChildGlobs) -> Option<(String, bool)> {
+    let mut cmd = resolved_command("ls");
+    globs.push_all(&mut cmd, args);
+    let output = cmd
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -836,6 +902,63 @@ mod tests {
             &args.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
             flavor,
         )
+    }
+
+    /// Marks each argument `expand_file_operands` hands to the expander.
+    fn marked_operands(args: &[&str], flavor: Flavor) -> Vec<String> {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        expand_file_operands(&args, flavor, |path| vec![format!("<{path}>")])
+    }
+
+    #[test]
+    fn test_only_free_positionals_are_expanded_gnu() {
+        assert_eq!(
+            marked_operands(
+                &[
+                    "-I",
+                    "*.o",
+                    "*.c",
+                    "--hide=*~",
+                    "--ignore",
+                    "*.d",
+                    "--",
+                    "-x*"
+                ],
+                Flavor::Gnu
+            ),
+            [
+                "-I",
+                "*.o",
+                "<*.c>",
+                "--hide=*~",
+                "--ignore",
+                "*.d",
+                "--",
+                "<-x*>"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_only_free_positionals_are_expanded_bsd() {
+        // BSD's `-I` is a boolean, so what follows it is an operand; `-D` takes a format.
+        assert_eq!(
+            marked_operands(&["-I", "*.c", "-D", "%F*", "s*"], Flavor::Bsd),
+            ["-I", "<*.c>", "-D", "%F*", "<s*>"]
+        );
+    }
+
+    #[test]
+    fn test_expanded_operands_reach_the_child_as_paths() {
+        let args: Vec<String> = ["-I", "*.o", "*.c"].iter().map(|a| a.to_string()).collect();
+        let expanded = expand_file_operands(&args, Flavor::Gnu, |path| match path {
+            "*.c" => vec!["a.c".to_string(), "b.c".to_string()],
+            other => vec![other.to_string()],
+        });
+        assert_eq!(
+            plan_for(&expanded, Flavor::Gnu).child_args,
+            ["-l", "-I", "*.o", "--", "a.c", "b.c"]
+        );
     }
 
     #[test]

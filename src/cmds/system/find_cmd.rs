@@ -1,9 +1,9 @@
 //! Filters find results by grouping files by directory.
 
+use crate::core::operand_glob;
 use crate::core::shell::{display_args, with_args};
 use crate::core::tracking;
 use crate::core::truncate::CAP_INVENTORY;
-use crate::core::utils::ChildArgExt;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::collections::{HashMap, HashSet};
@@ -167,15 +167,25 @@ fn dispatch(original: &[String]) -> Result<Dispatch> {
         .iter()
         .position(|t| is_expression_token(t))
         .unwrap_or(rest.len());
-    let paths = rest[..split].to_vec();
+    // Only the starting points are files; the expression's `-name '*.rs'` must reach find as
+    // written, and so must a legacy pattern, which is rewritten into one.
+    let paths = operand_glob::expand_operands(&rest[..split]);
     let expr = rest[split..].to_vec();
 
     if expr.iter().any(|t| VERBATIM_ACTIONS.contains(&t.as_str())) {
-        let verbatim = if legacy {
+        // `args` is `full` less the rtk flags peeled off its end, which go to find as well so it
+        // refuses them; both put the same options and starting points first.
+        let full = if legacy {
             legacy_to_find_syntax(original)
         } else {
             original.to_vec()
         };
+        let verbatim = [
+            options.as_slice(),
+            paths.as_slice(),
+            &full[options.len() + split..],
+        ]
+        .concat();
         return Ok(Dispatch::Verbatim(verbatim));
     }
     if options.is_empty()
@@ -275,17 +285,16 @@ fn run_compress(
     let max_results = max.unwrap_or(CAP_INVENTORY);
     let max_explicit = max.is_some();
     let mut cmd = crate::core::utils::resolved_command("find");
-    cmd.child_args(options).child_args(paths);
+    cmd.args(options).args(paths);
     if !expr.is_empty() {
-        cmd.child_arg("(");
-        cmd.child_args(expr);
-        cmd.child_arg(")");
+        cmd.arg("(");
+        cmd.args(expr);
+        cmd.arg(")");
     }
     if let Some(t) = file_type {
-        cmd.child_arg("-type").child_arg(t);
+        cmd.arg("-type").arg(t);
     }
-    cmd.child_arg("-print0")
-        .stdin(std::process::Stdio::inherit());
+    cmd.arg("-print0").stdin(std::process::Stdio::inherit());
     let output = cmd.output().context("Failed to execute find")?;
     let exit_code = crate::core::utils::exit_code_from_output(&output, "find");
     {
@@ -813,6 +822,25 @@ mod tests {
         {
             Dispatch::Verbatim(a) => assert!(a.ends_with(&args(&["-t", "d"]))),
             _ => panic!("expected verbatim"),
+        }
+    }
+
+    /// A verbatim action keeps every word once, in order: the starting points are rebuilt from
+    /// the expanded list, and the expression after them follows unchanged. `src` is a directory
+    /// in the crate root, where the tests run.
+    #[test]
+    fn a_verbatim_action_reaches_find_with_its_argv_unchanged() {
+        for words in [
+            &["src", "-name", "*.rs", "-exec", "echo", "hit", "{}", ";"][..],
+            &[
+                "-L", "src", "-name", "*.rs", "-exec", "echo", "hit", "{}", ";",
+            ],
+            &["src", "src", "-print"],
+        ] {
+            match dispatch(&args(words)).unwrap() {
+                Dispatch::Verbatim(a) => assert_eq!(a, args(words), "{words:?}"),
+                _ => panic!("{words:?}: expected verbatim"),
+            }
         }
     }
 

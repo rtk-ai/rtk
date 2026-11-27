@@ -1,7 +1,7 @@
+use crate::core::child_command::ChildCommand;
 use crate::core::{user_dirs, user_env};
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
-use std::process::Command;
 
 const GIT_URL: &str = "https://github.com/rtk-ai/rtk";
 
@@ -228,7 +228,7 @@ pub fn run_build() -> Result<i32> {
     std::fs::write(host.join("src").join("main.rs"), main).context("write host main.rs")?;
 
     println!("building a custom rtk with {} plugin(s)...", crates.len());
-    let status = Command::new("cargo")
+    let status = ChildCommand::new("cargo")
         .args(["build", "--release"])
         .current_dir(&host)
         .status()
@@ -238,7 +238,7 @@ pub fn run_build() -> Result<i32> {
     }
 
     println!("installing the custom rtk to ~/.cargo/bin...");
-    let install = Command::new("cargo")
+    let install = ChildCommand::new("cargo")
         .args(["install", "--path", ".", "--force"])
         .current_dir(&host)
         .status()

@@ -46,7 +46,7 @@ Input Validation:
 Shell Execution:
 - Does this code execute shell commands?
 - Are command arguments properly escaped?
-- Is std::process::Command used (safe) or shell=true (dangerous)?
+- Is a ChildCommand built with argument arrays (safe), or a script handed to a shell (dangerous)?
 
 Output Parsing:
 - Does this code parse external command output?
@@ -67,19 +67,21 @@ Hook Integration:
 // 🔴 CRITICAL: Shell injection vulnerability
 let user_input = env::args().nth(1).unwrap();
 let cmd = format!("git log {}", user_input); // DANGEROUS!
-std::process::Command::new("sh")
+resolved_command("sh")
     .arg("-c")
     .arg(&cmd) // Attacker can inject: `; rm -rf /`
-    .spawn();
+    .status()
+    .context("Failed to run sh")?;
 
-// ✅ SAFE: Use Command builder, not shell
-use std::process::Command;
+// ✅ SAFE: Use the ChildCommand builder, not a shell
+use crate::core::utils::resolved_command;
 
 let user_input = env::args().nth(1).unwrap();
-Command::new("git")
-    .arg("log")
-    .arg(&user_input) // Safely passed as argument, not interpreted by shell
-    .spawn();
+resolved_command("git")
+    .args(["log", "--grep"])
+    .arg(&user_input) // A flag's value: not interpreted by a shell, not read as an option
+    .status()
+    .context("Failed to run git")?;
 ```
 
 **Shell Escaping Vulnerability**:
@@ -88,17 +90,19 @@ Command::new("git")
 // 🔴 CRITICAL: No escaping for special chars
 fn execute_raw(cmd: &str, args: &[&str]) -> Result<Output> {
     let full_cmd = format!("{} {}", cmd, args.join(" "));
-    Command::new("sh")
+    resolved_command("sh")
         .arg("-c")
         .arg(&full_cmd) // DANGEROUS: args not escaped
         .output()
+        .context("Failed to run sh")
 }
 
-// ✅ SAFE: Use Command builder, automatic escaping
+// ✅ SAFE: Use the ChildCommand builder, automatic escaping
 fn execute_raw(cmd: &str, args: &[&str]) -> Result<Output> {
-    Command::new(cmd)
-        .args(args) // Safely escaped by Command API
+    resolved_command(cmd)
+        .args(args) // Each argument encoded for the child by ChildCommand
         .output()
+        .with_context(|| format!("Failed to execute {cmd}"))
 }
 ```
 
@@ -235,7 +239,7 @@ fn test_malicious_output_handling() {
 ### Command Injection (🔴 Critical)
 
 - [ ] **No shell=true**: Never use `.arg("-c")` with user input
-- [ ] **Command builder**: Use `std::process::Command` API (not shell strings)
+- [ ] **Command builder**: Use `resolved_command()` / `ChildCommand` (not shell strings, not `std::process::Command`)
 - [ ] **Input validation**: Validate/sanitize before command execution
 - [ ] **Whitelist approach**: Only allow known-safe commands
 
@@ -243,7 +247,8 @@ fn test_malicious_output_handling() {
 ```bash
 # Find dangerous shell execution
 rg "\.arg\(\"-c\"\)" --type rust src/
-rg "std::process::Command::new\(\"sh\"\)" --type rust src/
+rg "\bshell_command\(" --type rust src/   # every script handed to a shell (src/core/shell.rs)
+rg "(ChildCommand::new|resolved_command)\(\"(bash|cmd|powershell|pwsh|sh|zsh)\"\)" --type rust src/
 rg "format!.*\{.*Command" --type rust src/
 ```
 
@@ -398,15 +403,15 @@ fn escape_for_shell(arg: &str) -> String {
 
 ### Secure Command Execution
 
-**Always use Command builder**:
+**Always use the ChildCommand builder** (`clippy.toml` disallows `std::process::Command::new`):
 
 ```rust
-use std::process::Command;
+use crate::core::utils::resolved_command;
 
-// ✅ SAFE: Command builder (no shell)
+// ✅ SAFE: ChildCommand builder (no shell)
 fn execute_git(args: &[&str]) -> Result<Output> {
-    Command::new("git")
-        .args(args) // Safely escaped
+    resolved_command("git")
+        .args(args) // Encoded for the child
         .output()
         .context("Failed to execute git")
 }
@@ -414,10 +419,11 @@ fn execute_git(args: &[&str]) -> Result<Output> {
 // ❌ UNSAFE: Shell string concatenation
 fn execute_git_unsafe(args: &[&str]) -> Result<Output> {
     let cmd = format!("git {}", args.join(" "));
-    Command::new("sh")
+    resolved_command("sh")
         .arg("-c")
         .arg(&cmd) // Shell interprets args!
         .output()
+        .context("Failed to run sh")
 }
 ```
 

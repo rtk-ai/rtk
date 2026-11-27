@@ -118,7 +118,7 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
         (linter == "sqlfluff").then(|| sqlfluff_cmd::plan_for_lint(&effective_args[1..]));
 
     // Python linter use resolved_command() directly (they're on PATH via pip/pipx)
-    // JS linters use package_manager_exec (npx/pnpm exec)
+    // JS linters use tool_exec (tool_exec and exec_runner pick the runner)
     let mut cmd = if is_python_linter(linter) {
         resolved_command(linter)
     } else {

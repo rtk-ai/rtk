@@ -134,13 +134,19 @@ fn filter_line(line: &str) -> bool {
 ```rust
 // ❌ WRONG: Always returns 0 to Claude
 fn run_command(args: &[&str]) -> Result<()> {
-    Command::new("cargo").args(args).status()?;
+    resolved_command("cargo")
+        .args(args)
+        .status()
+        .context("Failed to run cargo")?;
     Ok(()) // Exit code lost
 }
 
 // ✅ CORRECT: Propagate exit code
 fn run_command(args: &[&str]) -> Result<()> {
-    let status = Command::new("cargo").args(args).status()?;
+    let status = resolved_command("cargo")
+        .args(args)
+        .status()
+        .context("Failed to run cargo")?;
     if !status.success() {
         let code = status.code().unwrap_or(1);
         std::process::exit(code);

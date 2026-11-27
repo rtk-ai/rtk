@@ -92,7 +92,7 @@ gh pr diff <PR_NUMBER>
 
 | Pattern | Risk | Example |
 |---------|------|---------|
-| `Command::new("sh")` | Shell injection | Spawns shell with user input |
+| `shell_command(...)`, a shell's `-c` or `/C` script | Shell injection | Hands a shell a script built from user input |
 | `.env("LD_PRELOAD")` | Library hijacking | Preloads malicious shared libraries |
 | `reqwest::`, `std::net::` | Data exfiltration | Unexpected network operations |
 | `unsafe {` | Memory safety | Bypasses Rust's guarantees |
@@ -128,7 +128,11 @@ New dependencies added to `Cargo.toml` must meet these criteria:
 ```rust
 // Shell injection risk
 let user_input = get_arg();
-Command::new("sh").arg("-c").arg(format!("echo {}", user_input)).output();
+let output = resolved_command("sh")
+    .arg("-c")
+    .arg(format!("echo {}", user_input))
+    .output()
+    .context("Failed to run sh")?;
 
 // Panic on invalid input
 let path = std::env::args().nth(1).unwrap();
@@ -139,9 +143,12 @@ const API_KEY: &str = "sk_live_1234567890abcdef";
 
 **✅ DO:**
 ```rust
-// No shell, direct binary execution
+// No shell, direct binary execution, built as a ChildCommand
 let user_input = get_arg();
-Command::new("echo").arg(user_input).output();
+let output = resolved_command("git")
+    .args(["log", "--grep", &user_input])
+    .output()
+    .context("Failed to run git")?;
 
 // Graceful error handling
 let path = std::env::args().nth(1).context("Missing path argument")?;

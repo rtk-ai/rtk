@@ -4,20 +4,21 @@
 //! compresses its output by grouping matches by file, capping, and teeing overflow.
 
 use crate::core::arg_tokenizer::{self, Dialect, Flag, Grammar, Token, TokenKind, ValueSpec};
+use crate::core::child_command::ChildCommand;
 use crate::core::guard::never_worse;
+use crate::core::operand_glob::{self, ChildGlobs};
 use crate::core::shell::{display_args, with_args};
 use crate::core::stream::{
     self, CaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture_stdin,
     exec_capture_unguarded,
 };
 use crate::core::tracking;
-use crate::core::utils::{ChildArgExt, resolved_command, strip_ansi};
+use crate::core::utils::{resolved_command, strip_ansi};
 use crate::core::{args_utils, config};
 use anyhow::{Context, Result};
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
-use std::process::Command;
 use std::sync::LazyLock;
 
 /// True if stdin is something the engine actually reads: a regular file, FIFO or socket --
@@ -144,13 +145,16 @@ const RG_FLAGS: &[Flag] = &[
     WITH_FILENAME,
 ];
 
+/// rg's `--files`: list the files rg would search, every positional a path.
+const RG_FILES: Flag = Flag::long("files");
+
 /// grep's file-list flags: every output line is one plain path (see [`is_bare_file_list`]).
 const GREP_FILE_LISTS: &[Flag] = &[FILES_WITH_MATCHES, Flag::pair("L", "files-without-match")];
 
 /// rg's file-list flags; `--files` lists what rg would search, with no pattern. rg's
 /// `--files-without-match` has no short spelling: rg's `-L` is `--follow`.
 const RG_FILE_LISTS: &[Flag] = &[
-    Flag::long("files"),
+    RG_FILES,
     FILES_WITH_MATCHES,
     Flag::long("files-without-match"),
 ];
@@ -271,6 +275,47 @@ fn match_block(path: &str, entries: &[(usize, bool, String)]) -> String {
         s.push_str(&format!("{}{}{}{}{}\n", path, sep, line_num, sep, content));
     }
     s
+}
+
+/// `args` with every path operand glob expanded (see `operand_glob::for_child`, which hands
+/// grep the operands as typed when `fits` refuses the expanded list) and everything else as
+/// written. The paths are the free positionals after the pattern, or all of them when
+/// `-e`/`--regexp` or `-f`/`--file` (or rg's `--files`) leaves no positional pattern — the same
+/// reading as [`extract_pattern_path`], so every mode that follows sees the same operands.
+fn expand_path_operands(
+    args: &[String],
+    engine: Engine,
+    expand: impl Fn(&str) -> Vec<String>,
+    fits: impl FnOnce(&[String]) -> bool,
+) -> (Vec<String>, ChildGlobs) {
+    let tokens = tokenize_search_args(args, engine);
+    // Matched through the grammar, as `extract_pattern_path` matches them, so an abbreviation
+    // or another spelling of the same flag reads the same way in both.
+    let no_positional_pattern = tokens
+        .iter()
+        .any(|t| t.is(&REGEXP) || t.is(&FILE) || (engine == Engine::Rg && t.is(&RG_FILES)));
+    let paths: HashSet<usize> = tokens
+        .iter()
+        .filter(|t| t.is_free_positional())
+        .skip(usize::from(!no_positional_pattern))
+        .map(|t| t.source_index)
+        .collect();
+    operand_glob::for_child(args, &paths, expand, fits)
+}
+
+/// Whether `engine`'s child fits on the command line with `args`, the longest form any mode
+/// below sends: every argument, the parse aids, `--line-buffered`, and the `-e` and `--` the
+/// grouping run adds. rg globs nothing itself, so for it there is nothing to fall back to and
+/// the spawn reports the limit instead.
+fn search_fits(engine: Engine, args: &[String]) -> bool {
+    if engine == Engine::Rg {
+        return true;
+    }
+    let mut cmd = resolved_command(engine.bin());
+    cmd.args(engine.parse_flags())
+        .args(["--line-buffered", "-e", "--"])
+        .args(args);
+    operand_glob::fits(&cmd)
 }
 
 /// Extracts `(patterns, paths, flags, has_format_flag, detected)` from the trailing args' tokens,
@@ -549,8 +594,9 @@ fn engine_capture<T: AsRef<str>>(
     extra_args: &[T],
     patterns: &[String],
     paths: &[String],
+    globs: &ChildGlobs,
 ) -> Result<CaptureResult> {
-    let mut cmd = engine_command(engine, extra_args, patterns, paths, false);
+    let mut cmd = engine_command(engine, extra_args, patterns, paths, globs, false);
     exec_capture_stdin(&mut cmd).context("search failed")
 }
 
@@ -559,22 +605,25 @@ fn engine_command<T: AsRef<str>>(
     extra_args: &[T],
     patterns: &[String],
     paths: &[String],
+    globs: &ChildGlobs,
     line_buffered: bool,
-) -> Command {
+) -> ChildCommand {
     let mut cmd = resolved_command(engine.bin());
-    cmd.child_args(engine.parse_flags());
+    cmd.args(engine.parse_flags());
     for a in extra_args {
-        cmd.child_arg(a.as_ref());
+        cmd.arg(a.as_ref());
     }
     if line_buffered {
         // The engine writes through a pipe, so flush each match immediately.
-        cmd.child_arg("--line-buffered");
+        cmd.arg("--line-buffered");
     }
     for p in patterns {
-        cmd.child_args(["-e", p]);
+        cmd.args(["-e", p]);
     }
-    cmd.child_arg("--");
-    cmd.child_args(paths);
+    cmd.arg("--");
+    for path in paths {
+        globs.push_operand(&mut cmd, path);
+    }
     cmd
 }
 
@@ -650,6 +699,7 @@ fn run_streaming_search(
     extra_args: &[String],
     patterns: &[String],
     paths: &[String],
+    globs: &ChildGlobs,
     max_results: usize,
     real_cmd: &str,
     detected_flags: DetectedFlags,
@@ -663,7 +713,7 @@ fn run_streaming_search(
         shown: 0,
         cap_reported: false,
     };
-    let mut cmd = engine_command(engine, extra_args, patterns, paths, true);
+    let mut cmd = engine_command(engine, extra_args, patterns, paths, globs, true);
     let result = stream::run_streaming(
         &mut cmd,
         StdinMode::Inherit,
@@ -690,6 +740,7 @@ fn passthrough<T: AsRef<str>>(
     timer: &tracking::TimedExecution,
     engine: Engine,
     args: &[T],
+    globs: &ChildGlobs,
     real_cmd: &str,
     stream_stdin: bool,
     fold_file_list: bool,
@@ -697,11 +748,9 @@ fn passthrough<T: AsRef<str>>(
     let mut cmd = resolved_command(engine.bin());
     if stream_stdin && !std::io::stdout().is_terminal() {
         // Keep passthrough output live when stdout is piped.
-        cmd.child_arg("--line-buffered");
+        cmd.arg("--line-buffered");
     }
-    for a in args {
-        cmd.child_arg(a.as_ref());
-    }
+    globs.push_all(&mut cmd, args);
 
     if stream_stdin {
         let exit_code =
@@ -817,7 +866,16 @@ pub fn run(
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     // Restored first: every check below classifies these args, and clap ate the boundary.
-    let args = &args_utils::restore_double_dash(args);
+    let typed = &args_utils::restore_double_dash(args);
+    // The child gets the expanded paths; the tracked command stays what the user typed, as for
+    // `ls`, `wc` and `find`.
+    let (args, globs) = expand_path_operands(
+        typed,
+        engine,
+        |path| operand_glob::expand_operands([path]),
+        |expanded| search_fits(engine, expanded),
+    );
+    let (args, globs) = (&args, &globs);
 
     let tokens = tokenize_search_args(args, engine);
     let asks_for_help = asks_for_help(engine, &tokens);
@@ -825,13 +883,13 @@ pub fn run(
         .iter()
         .any(|t| t.value_spec().is_some() && t.value(&tokens).is_none());
     if dangling_value_flag {
-        let real_cmd = with_args(engine.bin(), &display_args(args));
-        return passthrough(&timer, engine, args, &real_cmd, false, false);
+        let real_cmd = with_args(engine.bin(), &display_args(typed));
+        return passthrough(&timer, engine, args, globs, &real_cmd, false, false);
     }
 
     if asks_for_help {
         let mut cmd = resolved_command(engine.bin());
-        cmd.child_args(args);
+        globs.push_all(&mut cmd, args);
         let result = exec_capture_unguarded(&mut cmd).context("search failed")?;
         print!("{}", result.stdout);
         if !result.stderr.is_empty() {
@@ -840,7 +898,7 @@ pub fn run(
         return Ok(result.exit_code);
     }
 
-    let real_cmd = with_args(engine.label(), &display_args(args));
+    let real_cmd = with_args(engine.label(), &display_args(typed));
     let rtk_label = format!("rtk {}", engine.label());
 
     let (patterns, paths, extra_args, extra_args_has_format_flag, detected_flags) =
@@ -849,7 +907,7 @@ pub fn run(
     if patterns.is_empty() {
         // `rg --files` lists paths without a pattern; fold it like `-l`.
         let fold = tokens_are_bare_file_list(engine, &tokens);
-        return passthrough(&timer, engine, args, &real_cmd, false, fold);
+        return passthrough(&timer, engine, args, globs, &real_cmd, false, fold);
     }
 
     let pattern_display = if patterns.len() == 1 {
@@ -870,7 +928,15 @@ pub fn run(
     // format/shape flags (-c/-l/-o/...): already-minimal native output, passthrough.
     if extra_args_has_format_flag {
         let fold = tokens_are_bare_file_list(engine, &tokens);
-        return passthrough(&timer, engine, args, &real_cmd, reads_piped_stdin, fold);
+        return passthrough(
+            &timer,
+            engine,
+            args,
+            globs,
+            &real_cmd,
+            reads_piped_stdin,
+            fold,
+        );
     }
 
     if reads_piped_stdin {
@@ -880,13 +946,14 @@ pub fn run(
             &extra_args,
             &patterns,
             &paths,
+            globs,
             max_results,
             &real_cmd,
             detected_flags,
         );
     }
 
-    let result = engine_capture(engine, &extra_args, &patterns, &paths)?;
+    let result = engine_capture(engine, &extra_args, &patterns, &paths, globs)?;
 
     let exit_code = result.exit_code;
     let raw_output = result.stdout.clone();
@@ -894,7 +961,7 @@ pub fn run(
     // Unparseable shape re-runs verbatim below (with its own stderr), so handle it
     // before surfacing this run's stderr (#2333).
     if unparsed_signal(&raw_output) > 0 {
-        return passthrough(&timer, engine, args, &real_cmd, false, false);
+        return passthrough(&timer, engine, args, globs, &real_cmd, false, false);
     }
 
     if !result.stderr.is_empty() {
@@ -1289,6 +1356,45 @@ mod tests {
         engine: Engine,
     ) -> (Vec<String>, Vec<String>, Vec<String>, bool, DetectedFlags) {
         super::extract_pattern_path(&tokenize_search_args(args, engine), engine)
+    }
+
+    /// Marks each argument `expand_path_operands` hands to the expander.
+    fn marked_paths(engine: Engine, args: &[&str]) -> Vec<String> {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        expand_path_operands(&args, engine, |path| vec![format!("<{path}>")], |_| true).0
+    }
+
+    #[test]
+    fn only_path_operands_are_expanded() {
+        assert_eq!(
+            marked_paths(Engine::Grep, &["-n", "fo*", "*.rs", "src/*"]),
+            ["-n", "fo*", "<*.rs>", "<src/*>"]
+        );
+        assert_eq!(
+            marked_paths(Engine::Grep, &["-e", "a*", "*.rs"]),
+            ["-e", "a*", "<*.rs>"]
+        );
+        assert_eq!(
+            marked_paths(Engine::Grep, &["--include", "*.rs", "x", "*"]),
+            ["--include", "*.rs", "x", "<*>"]
+        );
+        assert_eq!(
+            marked_paths(Engine::Grep, &["-c", "--", "-x*", "*.rs"]),
+            ["-c", "--", "-x*", "<*.rs>"]
+        );
+        assert_eq!(
+            marked_paths(Engine::Rg, &["--files", "src*"]),
+            ["--files", "<src*>"]
+        );
+        // The patterns come from a file, so the first positional is already a path.
+        assert_eq!(
+            marked_paths(Engine::Grep, &["-f", "pats", "*.rs"]),
+            ["-f", "pats", "<*.rs>"]
+        );
+        assert_eq!(
+            marked_paths(Engine::Grep, &["--file=pats", "*.rs"]),
+            ["--file=pats", "<*.rs>"]
+        );
     }
 
     #[test]
