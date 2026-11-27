@@ -313,8 +313,8 @@ fn extract_pattern_path(
                 if is_show_file_token(t) {
                     show_file_flag = Some(true);
                 }
-                if let Some(recurses) = recursion_set_by(engine, t, tokens) {
-                    recursive = recurses;
+                if recursion_set_by(engine, t, tokens) == Some(true) {
+                    recursive = true;
                 }
                 if is_show_line_on_token(t) {
                     show_line_flag = Some(true);
@@ -378,8 +378,8 @@ fn extract_pattern_path(
                     } else if is_show_line_off_token(engine, c) {
                         show_line_flag = Some(false);
                     }
-                    if let Some(recurses) = recursion_set_by(engine, c, tokens) {
-                        recursive = recurses;
+                    if recursion_set_by(engine, c, tokens) == Some(true) {
+                        recursive = true;
                     }
                 }
                 if cluster.iter().any(|c| is_context_token(engine, c)) {
@@ -2294,14 +2294,34 @@ mod tests {
             &["-d", "re"][..],
             &["-d", "=recurse"][..],
             &["-d"][..],
-            &["-r", "-d", "read"][..],
-            &["-rd", "skip"][..],
-            &["-d", "recurse", "-d", "read"][..],
+            &["-d", "read", "-d", "skip"][..],
         ] {
             assert!(!detected(args).recursive, "{args:?} does not recurse");
         }
         // ripgrep's `-d` is `--max-depth`.
         assert!(!detected_for(Engine::Rg, &["-d", "recurse"]).recursive);
+    }
+
+    #[test]
+    fn recursion_keeps_the_filename_default_under_a_later_directory_action() {
+        for args in [
+            &["-r", "-d", "read"][..],
+            &["-r", "-d", "skip"][..],
+            &["-R", "-d", "read"][..],
+            &["-rd", "skip"][..],
+            &["-rnd", "read"][..],
+            &["--recursive", "--directories=read"][..],
+            &["--dereference-recursive", "--directories", "skip"][..],
+            &["-d", "recurse", "-d", "read"][..],
+            &["-d", "recurse", "-d", "skip"][..],
+        ] {
+            let d = detected(args);
+            assert!(d.recursive, "{args:?} keeps the filename default");
+            assert_eq!(d.show_file, None, "{args:?} is not an explicit request");
+        }
+        assert_eq!(detected(&["-r", "-d", "read", "-h"]).show_file, Some(false));
+        assert_eq!(detected(&["-h", "-r", "-d", "read"]).show_file, Some(false));
+        assert!(!detected_for(Engine::Rg, &["-r", "X", "-d", "1"]).recursive);
     }
 
     /// Recursion prefixes the filename for every operand, as BSD grep does: a lone file as well
