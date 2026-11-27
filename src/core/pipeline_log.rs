@@ -104,9 +104,30 @@ std::thread_local! {
     static QUEUE: std::cell::RefCell<Vec<LogEntry>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+#[cfg(test)]
+std::thread_local! {
+    /// Entries `queue` was handed on this test thread, whether or not the log
+    /// is switched on. A test that asserts "this decision was never logged"
+    /// then does not have to write the developer's own log file; per thread
+    /// because libtest gives each test its own.
+    static OFFERED: std::cell::RefCell<Vec<LogEntry>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub fn offered_entries() -> Vec<LogEntry> {
+    OFFERED.with(|q| q.borrow().clone())
+}
+
+#[cfg(test)]
+pub fn clear_offered_entries() {
+    OFFERED.with(|q| q.borrow_mut().clear());
+}
+
 /// Buffer an entry to be written by [`flush`] after the hook's stdout is
 /// flushed — the log must never sit in front of the response.
 pub fn queue(entry: LogEntry) {
+    #[cfg(test)]
+    OFFERED.with(|q| q.borrow_mut().push(entry.clone()));
     if !enabled() {
         return;
     }

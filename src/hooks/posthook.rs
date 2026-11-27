@@ -75,6 +75,14 @@ pub fn run(event: &Value) {
 
 /// Full pipeline behind the fail-open envelope. `None` = emit nothing.
 fn process(event: &Value) -> Option<(String, LoadedPipeline)> {
+    let (config, loaded) = load_context()?;
+    let output = process_with_config(event, &config, &loaded.resolved)?;
+    Some((output, loaded))
+}
+
+/// One config load and one pipeline load per invocation, behind the two
+/// session-wide off switches.
+fn load_context() -> Option<(Config, LoadedPipeline)> {
     if crate::core::user_env::var("RTK_DISABLED").as_deref() == Some("1") {
         return None;
     }
@@ -82,10 +90,290 @@ fn process(event: &Value) -> Option<(String, LoadedPipeline)> {
         return None;
     }
 
-    let config = Config::load().unwrap_or_default();
-    let loaded = pipeline_config::load();
-    let output = process_with_config(event, &config, &loaded.resolved)?;
-    Some((output, loaded))
+    Some((Config::load().unwrap_or_default(), pipeline_config::load()))
+}
+
+/// What a plain-text host (OpenCode's `tool.execute.after`, either API shape)
+/// hands the after path.
+///
+/// `tool`, `args` and `output` are the minimum; `status`, `exit_code`,
+/// `description` and `duration_ms` are the metadata the host already has and
+/// the Claude path gets for free (its event carries `duration_ms` and its shell
+/// response carries the exit code). Each is optional because older OpenCode
+/// versions and non-shell tools do not carry all of them.
+#[derive(Debug, Default, Clone)]
+pub struct AgentToolResult {
+    pub tool: String,
+    pub args: Value,
+    pub output: String,
+    pub status: Option<String>,
+    pub exit_code: Option<i64>,
+    pub description: Option<String>,
+    pub duration_ms: u64,
+    /// The host asked for the versioned stdout envelope (`expect.envelope`).
+    ///
+    /// Opt-in from the request side, because the installed plugin is a snapshot
+    /// written by `rtk init`: a binary upgrade without re-running init hands an
+    /// old plugin this envelope, and an old plugin would put the raw JSON in
+    /// front of the model as tool output. Without the field, stdout stays the
+    /// replacement text.
+    pub expect_envelope: bool,
+}
+
+/// Version of the stdout envelope a plain-text host reads.
+///
+/// `v` is the compatibility handle: a plugin built against another release can
+/// tell this envelope from a bare replacement string, and a stdout that is not
+/// `{"v":1,…}` is read as text (see `hooks/opencode/rtk.ts`).
+const AGENT_TEXT_ENVELOPE_VERSION: u64 = 1;
+
+/// The replacement text, plus the note that must ride beside it.
+///
+/// OpenCode's profile declares `can_append`, but plain stdout cannot carry two
+/// strings — the Read→Edit fidelity guard would be lost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Composed {
+    text: String,
+    /// `Some` for a converted Read output: the model may not use it to build
+    /// `Edit.old_string`, and only an appended note can say so.
+    append: Option<&'static str>,
+}
+
+/// One stdout object for a plain-text host:
+/// `{"v":1,"output":"<replacement>","append":"<note or empty>"}`.
+///
+/// `append` is always present and empty when there is no note, so a host never
+/// has to distinguish "absent" from "nothing to add". Only a host that asked
+/// for it (`expect.envelope`) gets this; see [`stdout_for`].
+fn envelope_for(composed: &Composed) -> String {
+    json!({
+        "v": AGENT_TEXT_ENVELOPE_VERSION,
+        "output": composed.text,
+        "append": composed.append.unwrap_or(""),
+    })
+    .to_string()
+}
+
+/// Bytes the model ends up reading: the replacement, plus the newline and the
+/// note a host appends beside it.
+///
+/// The size decision has to be about this, not about the replacement alone. The
+/// plugin appends `append` and compares the result, so a Read that saves less
+/// than the note costs would otherwise be tracked and stored here and then
+/// dropped there — the model kept the raw output while `rtk gain` claimed a
+/// saving.
+fn rendered_len(text: &str, append: Option<&str>) -> usize {
+    match append {
+        Some(note) => text.len() + 1 + note.len(),
+        None => text.len(),
+    }
+}
+
+/// What a host that does not read the envelope puts in front of the model: one
+/// string, the note on its own line after the replacement.
+fn rendered(composed: &Composed) -> String {
+    match composed.append {
+        Some(note) => format!("{}\n{note}", composed.text),
+        None => composed.text.clone(),
+    }
+}
+
+/// The single stdout string for `result`.
+///
+/// The envelope is opt-in (`expect.envelope` in the request): an installed
+/// plugin is a snapshot from `rtk init`, so a binary that upgraded without init
+/// is talking to a plugin that cannot parse JSON. That plugin gets the
+/// replacement text — note included in the same string — exactly as before the
+/// envelope existed, and the tolerant parser covers the other direction (a new
+/// plugin against an old binary that answers plain text).
+fn stdout_for(result: &AgentToolResult, composed: &Composed) -> String {
+    if result.expect_envelope {
+        envelope_for(composed)
+    } else {
+        rendered(composed)
+    }
+}
+
+/// Entry point for a host that hands RTK plain tool text instead of Claude
+/// Code's event shape — OpenCode's `tool.execute.after`.
+///
+/// Same fail-open envelope as [`run`], with the payload reduced to the tool
+/// name, its arguments, and the text the tool produced. The only stdout write
+/// is the [`envelope_for`] object, and only when the replacement is strictly
+/// smaller in bytes than the input; every early return leaves the host's
+/// original output in place.
+pub fn run_agent_text(agent: &str, result: &AgentToolResult) {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        process_agent_text(agent, result)
+    }));
+    match outcome {
+        Ok(Some((output, loaded))) => {
+            let _ = io::stdout().write_all(output.as_bytes());
+            pipeline_config::write_status(&loaded);
+            pipeline_log::flush();
+        }
+        Ok(None) | Err(_) => pipeline_log::flush(),
+    }
+}
+
+/// Full pipeline behind the plain-text envelope. `None` = emit nothing.
+fn process_agent_text(agent: &str, result: &AgentToolResult) -> Option<(String, LoadedPipeline)> {
+    if result.output.is_empty() {
+        return None;
+    }
+    let (config, loaded) = load_context()?;
+    prime_call_context(result);
+    let composed = agent_text_with_config(agent, result, &config, &loaded.resolved)?;
+    Some((stdout_for(result, &composed), loaded))
+}
+
+/// Feed the host's `description` to the call-context reader the Claude path
+/// fills from its event. A pipeline whose rules read `intent` then sees the
+/// sentence the model wrote for the call instead of nothing; `goal` and
+/// `recent_calls` come from a transcript OpenCode does not hand over, so they
+/// stay absent. `set_source` keeps the first call in the process, which is
+/// this one: a hook process handles exactly one tool result.
+fn prime_call_context(result: &AgentToolResult) {
+    let mut event = json!({ "tool_input": {} });
+    if let Some(description) = &result.description {
+        event["tool_input"]["description"] = json!(description);
+    }
+    crate::core::call_context::set_source(&event);
+}
+
+/// A status the host reports for a call whose result is worth compressing.
+///
+/// OpenCode 2.x sends `completed` for a finished call; anything else (an error,
+/// a cancellation) is passed through, mirroring PostToolUse, which only fires
+/// on success. `None` covers 1.x, which sends no status at all.
+fn is_completed(status: Option<&str>) -> bool {
+    matches!(status, None | Some("") | Some("completed"))
+}
+
+/// Testable core: map tool → subject/format/source, then run the same
+/// `hook.after_tool.<subject>` evaluation and guards as the Claude adapter.
+fn agent_text_with_config(
+    agent: &str,
+    result: &AgentToolResult,
+    config: &Config,
+    pipeline: &Resolved,
+) -> Option<Composed> {
+    let tool_name = result.tool.as_str();
+    let raw = result.output.as_str();
+    if raw.is_empty() || !is_completed(result.status.as_deref()) {
+        return None;
+    }
+    // Size floor first, in the same order as the Claude adapter: a result below
+    // `guards.min_size` must not earn a `rtk gain` row on its way to being
+    // dropped.
+    if raw.len() < pipeline.guards.min_size {
+        return None;
+    }
+    let subject = subject_of_for(agent, tool_name);
+    let source = source_of_args(subject, &result.args);
+    // A shell result with no command has no subject matter: the recall-recovery
+    // gate keys on the command, `is_rtk_command` cannot be judged, and the
+    // tracking row would name nothing. Pass it through.
+    if subject == Subject::Shell && source.is_empty() {
+        return None;
+    }
+    let Some(format) = text_format(tool_name, subject, &source, raw) else {
+        // Unsupported shape for a subject whose output RTK would otherwise
+        // rewrite (e.g. a `glob` result, which is not grep output): the text
+        // passes through, but the zero-saving row keeps coverage visible in
+        // `rtk gain`, exactly as the Claude adapter does for Grep count mode.
+        // Write/Edit results carry no output to compress at all, so they are
+        // not tracked.
+        if !matches!(subject, Subject::Write | Subject::Edit) {
+            track(tool_name, "raw", &source, raw, raw, result.duration_ms);
+        }
+        return None;
+    };
+    // A converted Read output can no longer anchor `Edit.old_string`; the
+    // Claude path says so in `additionalContext`, and `append` is the only
+    // channel a plain-text host has for the same sentence. It is decided here
+    // because the size gate below has to count its bytes.
+    let append = (subject == Subject::Read).then_some(READ_CONVERSION_NOTE);
+    let composed = filter_and_compose(
+        config,
+        pipeline,
+        subject,
+        tool_name,
+        &source,
+        raw,
+        format,
+        result.duration_ms,
+        result.exit_code,
+        append,
+        Gate::Bytes,
+    )?;
+    // `filter_and_compose`'s byte gate already refused anything the host would
+    // not shrink, so this text is the answer.
+    let output = composed;
+    // The row `rtk gain` reads, labelled `rtk posthook <tool> <format>` — the
+    // same label the Claude transport writes. Without it an OpenCode
+    // compression lived only in the session.
+    track(
+        tool_name,
+        format.as_str(),
+        &source,
+        raw,
+        &output,
+        result.duration_ms,
+    );
+    Some(Composed {
+        text: output,
+        append,
+    })
+}
+
+/// Path, URL or command the facts and tracking rows key on, taken from the
+/// host's per-tool arguments. OpenCode spells the read path `filePath`; the
+/// snake_case variants keep this usable for other plugin hosts.
+fn source_of_args(subject: Subject, args: &Value) -> String {
+    let keys: &[&str] = match subject {
+        Subject::Shell => &["command"],
+        Subject::Read => &["filePath", "file_path", "path"],
+        Subject::Search => &["path", "filePath", "file_path"],
+        Subject::Web => &["url"],
+        _ => return String::new(),
+    };
+    keys.iter()
+        .find_map(|key| args.get(*key).and_then(Value::as_str))
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Content format for a host that provides plain text. Mirrors the Claude
+/// adapter's mapping where the shapes correspond; `None` means the host's
+/// output cannot be put back confidently and the text passes through.
+fn text_format(
+    tool_name: &str,
+    subject: Subject,
+    source: &str,
+    raw: &str,
+) -> Option<ContentFormat> {
+    match subject {
+        Subject::Read => Some(if is_lockfile_name(&basename_of(source)) {
+            ContentFormat::Lockfile
+        } else if extension_of(source) == "json" {
+            ContentFormat::Json
+        } else {
+            ContentFormat::Term
+        }),
+        Subject::Shell | Subject::Subagent => Some(ContentFormat::Term),
+        // Search covers both grep and file listings; only grep is `matches`.
+        Subject::Search if tool_name.eq_ignore_ascii_case("grep") => Some(ContentFormat::Matches),
+        Subject::Search => None,
+        Subject::Web => Some(ContentFormat::Web),
+        Subject::Mcp => Some(if serde_json::from_str::<Value>(raw.trim()).is_ok() {
+            ContentFormat::Json
+        } else {
+            ContentFormat::Term
+        }),
+        Subject::Write | Subject::Edit => None,
+        _ => Some(ContentFormat::Term),
+    }
 }
 
 /// The agent whose PostToolUse payload this process is handling.
@@ -147,6 +435,9 @@ fn process_with_config(event: &Value, config: &Config, pipeline: &Resolved) -> O
         &raw,
         format,
         duration_ms,
+        None,
+        None,
+        Gate::Tokens,
     )?;
 
     let (updated, converted) = rebuild(event, tool_name, &composed)?;
@@ -176,6 +467,7 @@ fn facts_for(
     raw: &str,
     duration_ms: u64,
     is_rtk_command: Option<bool>,
+    exit_code: Option<i64>,
 ) -> Facts {
     let mut facts = Facts::new();
     facts.insert("tool".into(), Fact::Str(subject.as_str().to_string()));
@@ -186,6 +478,9 @@ fn facts_for(
     facts.insert("duration_ms".into(), Fact::Num(duration_ms as f64));
     if let Some(value) = is_rtk_command {
         facts.insert("is_rtk_command".into(), Fact::Bool(value));
+    }
+    if let Some(code) = exit_code {
+        facts.insert("exit_code".into(), Fact::Num(code as f64));
     }
     if !source.is_empty() {
         if source.starts_with("http://") || source.starts_with("https://") {
@@ -267,8 +562,17 @@ fn run_selected(
     raw: &str,
     duration_ms: u64,
     is_rtk_command: Option<bool>,
+    exit_code: Option<i64>,
 ) -> Option<Applied> {
-    let mut facts = facts_for(subject, format, source, raw, duration_ms, is_rtk_command);
+    let mut facts = facts_for(
+        subject,
+        format,
+        source,
+        raw,
+        duration_ms,
+        is_rtk_command,
+        exit_code,
+    );
     if subject == Subject::Mcp
         && let Some(rest) = tool_name.strip_prefix("mcp__")
     {
@@ -474,6 +778,24 @@ fn record_recovery(command: &str) {
     }
 }
 
+/// Which size guard the caller wants.
+///
+/// The Claude path keeps the engine's token guard: its host swaps a structured
+/// response back in and `rtk gain` reports tokens. A plain-text host answers in
+/// bytes, so the OpenCode path gates on bytes instead.
+///
+/// The bytes gate also sits earlier: it rejects before `attribute`, `queue_log`
+/// and `apply_terminal` run, and it takes back the recall write the hint made
+/// ([`tee::discard_posthook_recall`]), so a rejected result is never recorded as
+/// a saving and leaves nothing in the recall store. Redaction (`apply_terminal`)
+/// is a terminal step on both paths — in this build the registry registers no
+/// redactor at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    Tokens,
+    Bytes,
+}
+
 /// Chain + recall store + guard for a single content string.
 /// `None` = no matching rule, chain was a no-op, not smaller, or shadow.
 #[allow(clippy::too_many_arguments)]
@@ -486,7 +808,30 @@ fn filter_and_compose(
     raw: &str,
     format: ContentFormat,
     duration_ms: u64,
+    exit_code: Option<i64>,
+    append: Option<&'static str>,
+    gate: Gate,
 ) -> Option<String> {
+    // `is_rtk_command` is only meaningful for shell output. The Claude shell
+    // path computes it in `process_shell`; the plain-text path (OpenCode
+    // `tool.execute.after`) has to compute it here, or the shipped
+    // `term-default` rule (`when = { is_rtk_command = false }`) can never
+    // match and every shell result falls through uncompressed.
+    let is_rtk_command = (subject == Subject::Shell).then(|| RTK_IN_COMMAND.is_match(source));
+
+    // Recall-recovery gate: a command that reads the recall store must see the
+    // raw bytes, else content elided by `cap` could never be read back.
+    // Mirrors the gate in `process_shell`.
+    if subject == Subject::Shell
+        && (source.contains("tee/posthook")
+            || RTK_RECALL_COMMAND.is_match(source)
+            || tee::posthook_recall_dir(config)
+                .is_some_and(|d| source.contains(&d.display().to_string())))
+    {
+        record_recovery(source);
+        return None;
+    }
+
     let applied = run_selected(
         pipeline,
         subject,
@@ -495,7 +840,8 @@ fn filter_and_compose(
         source,
         raw,
         duration_ms,
-        None,
+        is_rtk_command,
+        exit_code,
     )?;
     let filtered = applied.text.clone();
 
@@ -505,17 +851,37 @@ fn filter_and_compose(
         return None;
     }
 
-    // Ordering invariant (emit_guarded pattern): compose filtered + hint
-    // FIRST, then guard — the hint can never push output above raw.
+    // Byte gate, taken on what the model would read (the note costs bytes too)
+    // and before the hint stores the raw output or attribution claims a saving:
+    // a result the host would not accept must not be recorded as one. The
+    // Claude path keeps its token guard below.
+    if gate == Gate::Bytes && rendered_len(&filtered, append) >= raw.len() {
+        return None;
+    }
+
+    // Ordering invariant (emit_guarded pattern): compose filtered + hint, then
+    // guard — the hint can never push output above raw. The receipt is kept
+    // because the hint stores the raw output before its own length is known.
     let slug = format!("{}_{}", tool_name.to_lowercase(), basename_of(source));
-    let hint = tee::posthook_tee_hint(config, raw, &slug);
-    let composed = match hint {
-        Some(h) => format!("{filtered}\n{h}"),
+    let recall_hint = tee::posthook_tee_hint_with_receipt(config, raw, &slug);
+    let composed = match &recall_hint {
+        Some((hint, _)) => format!("{filtered}\n{hint}"),
         None => filtered,
     };
 
-    if estimate_tokens(&composed) > estimate_tokens(raw) {
+    if gate == Gate::Tokens && estimate_tokens(&composed) > estimate_tokens(raw) {
         track(tool_name, format.as_str(), source, raw, raw, duration_ms);
+        return None;
+    }
+    // Same decision in bytes, after the hint: a marginal saving plus the hint
+    // can exceed the raw output, and then nothing is emitted — so nothing is
+    // attributed, logged or tracked, and the store write is taken back out.
+    // Otherwise `rtk recall --list` would keep listing an entry nothing points
+    // at, with the raw (unredacted) bytes still readable through `rtk recall`.
+    if gate == Gate::Bytes && rendered_len(&composed, append) >= raw.len() {
+        if let Some((_, recall)) = &recall_hint {
+            tee::discard_posthook_recall(recall, &config.retriever);
+        }
         return None;
     }
     attribute(&applied, raw, &composed);
@@ -572,6 +938,7 @@ fn process_websearch(
                     source,
                     text,
                     duration_ms,
+                    None,
                     None,
                 ) {
                     Some(applied) => {
@@ -743,6 +1110,7 @@ fn process_shell(
         stdout,
         duration_ms,
         Some(is_rtk_command),
+        None,
     );
     let shadow = applied_stdout.as_ref().map(|a| a.shadow).unwrap_or(false);
     let filtered_stdout = applied_stdout
@@ -761,6 +1129,7 @@ fn process_shell(
             stderr,
             duration_ms,
             Some(is_rtk_command),
+            None,
         )
         .map(|a| a.text)
         .unwrap_or_else(|| stderr.to_string())
@@ -1027,6 +1396,35 @@ fn basename_of(source: &str) -> String {
         .to_string()
 }
 
+/// One row `track` writes: what `rtk gain` aggregates over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrackRow {
+    original_cmd: String,
+    rtk_cmd: String,
+    input_tokens: usize,
+    output_tokens: usize,
+    duration_ms: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Rows `track` wrote on this test thread, in order. `tracker()` is an
+    /// in-memory database built per call, so a test cannot read the real table
+    /// back; the thread-local sink is per test because libtest gives each one
+    /// its own thread.
+    static TRACKED: std::cell::RefCell<Vec<TrackRow>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn tracked_rows() -> Vec<TrackRow> {
+    TRACKED.with(|rows| rows.borrow().clone())
+}
+
+#[cfg(test)]
+fn clear_tracked_rows() {
+    TRACKED.with(|rows| rows.borrow_mut().clear());
+}
+
 /// Record a tracking row without ever crashing (mirrors
 /// `record_parse_failure_silent`). Every posthook code path tracks, including
 /// passthroughs — otherwise gains silently fail (pipe_cmd precedent).
@@ -1038,19 +1436,26 @@ fn track(
     emitted: &str,
     duration_ms: u64,
 ) {
-    let rtk_cmd = format!("rtk posthook {} {}", tool_name.to_lowercase(), format_token);
-    let original_cmd = if source.is_empty() {
-        tool_name.to_string()
-    } else {
-        format!("{tool_name} {source}")
+    let row = TrackRow {
+        original_cmd: if source.is_empty() {
+            tool_name.to_string()
+        } else {
+            format!("{tool_name} {source}")
+        },
+        rtk_cmd: format!("rtk posthook {} {}", tool_name.to_lowercase(), format_token),
+        input_tokens: estimate_tokens(raw),
+        output_tokens: estimate_tokens(emitted),
+        duration_ms,
     };
+    #[cfg(test)]
+    TRACKED.with(|rows| rows.borrow_mut().push(row.clone()));
     if let Ok(tracker) = tracker() {
         let _ = tracker.record(
-            &original_cmd,
-            &rtk_cmd,
-            estimate_tokens(raw),
-            estimate_tokens(emitted),
-            duration_ms,
+            &row.original_cmd,
+            &row.rtk_cmd,
+            row.input_tokens,
+            row.output_tokens,
+            row.duration_ms,
         );
     }
 }
@@ -1058,6 +1463,7 @@ fn track(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::retriever::RecoveryMode;
 
     #[test]
     fn recall_commands_pass_the_recovery_gate() {
@@ -1160,6 +1566,544 @@ mod tests {
                 "{name} must pass through on rtk:default: upgrading is a no-op"
             );
         }
+    }
+
+    fn repeated_output() -> String {
+        std::iter::repeat_n("repeated build line", 400)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A host payload with the fields a shell result carries; metadata fields
+    /// are set per test.
+    fn agent_result(tool: &str, args: &Value, raw: &str) -> AgentToolResult {
+        AgentToolResult {
+            tool: tool.to_string(),
+            args: args.clone(),
+            output: raw.to_string(),
+            ..AgentToolResult::default()
+        }
+    }
+
+    #[test]
+    fn test_agent_text_answers_plain_text_unless_the_host_expects_an_envelope() {
+        // The installed plugin is a snapshot from `rtk init`, so a binary that
+        // upgraded without re-running it must keep answering the way the plugin
+        // there understands. The note rides in the same string, which is what a
+        // host that never asked for the envelope does with the text anyway.
+        let composed = Composed {
+            text: "smaller".to_string(),
+            append: Some("NOTE"),
+        };
+        let mut result = AgentToolResult::default();
+        assert_eq!(stdout_for(&result, &composed), "smaller\nNOTE");
+
+        result.expect_envelope = true;
+        let line = stdout_for(&result, &composed);
+        let envelope: Value = serde_json::from_str(&line).expect("the envelope is JSON");
+        assert_eq!(envelope["v"], 1);
+        assert_eq!(envelope["output"], "smaller");
+        assert_eq!(envelope["append"], "NOTE");
+    }
+
+    #[test]
+    fn test_agent_text_plain_text_stdout_is_the_replacement_itself() {
+        // Nothing about the plain answer is JSON, so an old plugin replaces the
+        // tool output with it verbatim — the pre-envelope behaviour.
+        let composed = Composed {
+            text: "compressed build output".to_string(),
+            append: None,
+        };
+        let line = stdout_for(&AgentToolResult::default(), &composed);
+        assert_eq!(line, "compressed build output");
+        assert!(serde_json::from_str::<Value>(&line).is_err());
+    }
+
+    #[test]
+    fn test_agent_text_read_note_counts_towards_the_size_gate() {
+        // A Read that saves less than the conversion note costs: the plugin
+        // appends the note and would refuse the result, so Rust must refuse it
+        // first — otherwise it tracked the saving and stored the raw output for
+        // an answer the model never saw.
+        for mode in [RecoveryMode::Disabled, RecoveryMode::Sqlite] {
+            clear_tracked_rows();
+            pipeline_log::clear_offered_entries();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let config = recall_config(dir.path(), mode);
+
+            let pipeline =
+                pipeline_from("[[hook.after_tool.read]]\nname = \"ansi\"\nuse = [\"ansi\"]\n");
+            let raw = thin_saving_output(None);
+            assert!(
+                raw.len() > 1 + READ_CONVERSION_NOTE.len(),
+                "premise: the note fits inside the raw output"
+            );
+            let result = agent_result(
+                "read",
+                &serde_json::json!({"filePath": "/tmp/build.log"}),
+                &raw,
+            );
+            assert!(
+                agent_text_with_config("opencode", &result, &config, &pipeline).is_none(),
+                "{mode:?}: the note pushes the result above the raw size"
+            );
+            assert!(tracked_rows().is_empty(), "{mode:?}: no `rtk gain` row");
+            let offered = pipeline_log::offered_entries();
+            assert!(
+                offered.is_empty(),
+                "{mode:?}: no decision-log row: {offered:?}"
+            );
+            assert_eq!(recall_rows(&config), 0, "{mode:?}: recall store");
+        }
+    }
+
+    #[test]
+    fn test_agent_text_envelope_carries_the_read_conversion_note() {
+        // The note the Claude path puts in `additionalContext` has no channel
+        // in plain stdout; the envelope's `append` is that channel.
+        let pipeline =
+            pipeline_from("[[hook.after_tool.read]]\nname = \"squeeze\"\nuse = [\"dedup\"]\n");
+        let raw = repeated_output();
+        let result = agent_result(
+            "read",
+            &serde_json::json!({"filePath": "/tmp/build.log"}),
+            &raw,
+        );
+        let composed = agent_text_with_config("opencode", &result, &test_config(), &pipeline)
+            .expect("read rule must run");
+        assert_eq!(composed.append, Some(READ_CONVERSION_NOTE));
+
+        let envelope: Value =
+            serde_json::from_str(&envelope_for(&composed)).expect("the envelope is JSON");
+        assert_eq!(envelope["v"], 1);
+        assert_eq!(envelope["output"], composed.text);
+        assert_eq!(envelope["append"], READ_CONVERSION_NOTE);
+    }
+
+    #[test]
+    fn test_agent_text_envelope_has_an_empty_append_without_a_note() {
+        let pipeline =
+            pipeline_from("[[hook.after_tool.shell]]\nname = \"squeeze\"\nuse = [\"dedup\"]\n");
+        let composed = agent_text_with_config(
+            "opencode",
+            &agent_result(
+                "bash",
+                &serde_json::json!({"command": "make build"}),
+                &repeated_output(),
+            ),
+            &test_config(),
+            &pipeline,
+        )
+        .expect("shell rule must run");
+        assert_eq!(composed.append, None);
+
+        let envelope: Value =
+            serde_json::from_str(&envelope_for(&composed)).expect("the envelope is JSON");
+        assert_eq!(envelope["v"], 1);
+        // Present and empty, so a host never has to tell "absent" from "none".
+        assert_eq!(envelope["append"], "");
+        assert_eq!(envelope["output"], composed.text);
+    }
+
+    #[test]
+    fn test_agent_text_refuses_a_shell_result_without_a_command() {
+        // No command means no source: the recall-recovery gate cannot fire and
+        // the tracking row would be attributed to nothing, so the result passes
+        // through untouched.
+        let pipeline =
+            pipeline_from("[[hook.after_tool.shell]]\nname = \"squeeze\"\nuse = [\"dedup\"]\n");
+        for args in [
+            serde_json::json!({}),
+            serde_json::json!({"command": ""}),
+            serde_json::json!({"command": 42}),
+        ] {
+            let result = agent_result("shell", &args, &repeated_output());
+            assert!(
+                agent_text_with_config("opencode", &result, &test_config(), &pipeline).is_none(),
+                "{args}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_text_leaves_no_trace_of_a_rejected_result_carrying_a_secret() {
+        // A result the host would not accept must leave nothing behind — the
+        // raw bytes here carry a secret-looking string that redaction would
+        // have replaced, and both recovery stores are reachable afterwards:
+        // `rtk recall` prints the entry, `rtk recall --list` enumerates it, and
+        // the tee directory holds the same bytes as a file.
+        const SECRET: &str = "sk-live-1f8c2d9e4b7a6c3f5d2e1b0a";
+        for mode in [RecoveryMode::Tee, RecoveryMode::Sqlite] {
+            clear_tracked_rows();
+            pipeline_log::clear_offered_entries();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let config = recall_config(dir.path(), mode);
+
+            let raw = thin_saving_output(Some(&format!("AKIAIOSFODNN7EXAMPLE {SECRET}")));
+            let result = agent_result("bash", &serde_json::json!({"command": "make build"}), &raw);
+            assert!(
+                agent_text_with_config("opencode", &result, &config, &thin_saving_pipeline())
+                    .is_none(),
+                "{mode:?}: not smaller than the raw output, so nothing is emitted"
+            );
+            assert!(
+                tracked_rows().is_empty(),
+                "{mode:?}: a rejected result records no row"
+            );
+            let offered = pipeline_log::offered_entries();
+            assert!(offered.is_empty(), "{mode:?}: nothing logged: {offered:?}");
+            assert_eq!(recall_rows(&config), 0, "{mode:?}: recall store entry");
+            assert_eq!(
+                posthook_tee_files(&config),
+                0,
+                "{mode:?}: the raw bytes must not stay in the tee directory"
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_text_tracks_a_compressed_result() {
+        // Before this, an OpenCode compression reached the model but never
+        // `rtk gain`: the plain-text path returned the text without tracking.
+        clear_tracked_rows();
+        let pipeline =
+            pipeline_from("[[hook.after_tool.shell]]\nname = \"squeeze\"\nuse = [\"dedup\"]\n");
+        let raw = repeated_output();
+        let result = agent_result("bash", &serde_json::json!({"command": "make build"}), &raw);
+        assert!(agent_text_with_config("opencode", &result, &test_config(), &pipeline).is_some());
+
+        let rows = tracked_rows();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = &rows[0];
+        assert_eq!(row.rtk_cmd, "rtk posthook bash term");
+        assert_eq!(row.original_cmd, "bash make build");
+        assert!(
+            row.output_tokens < row.input_tokens,
+            "a saving must be recorded: {row:?}"
+        );
+    }
+
+    #[test]
+    fn test_agent_text_tracks_a_shape_it_cannot_rewrite_as_a_passthrough() {
+        // Mirrors the Claude adapter's Grep-count row: nothing is emitted, but
+        // the call still shows up in `rtk gain` with zero savings.
+        clear_tracked_rows();
+        let pipeline =
+            pipeline_from("[[hook.after_tool.search]]\nname = \"squeeze\"\nuse = [\"dedup\"]\n");
+        let result = agent_result(
+            "glob",
+            &serde_json::json!({"pattern": "**/*.rs"}),
+            &repeated_output(),
+        );
+        assert!(agent_text_with_config("opencode", &result, &test_config(), &pipeline).is_none());
+
+        let rows = tracked_rows();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].rtk_cmd, "rtk posthook glob raw");
+        assert_eq!(rows[0].input_tokens, rows[0].output_tokens);
+    }
+
+    /// A pipeline whose chain saves only a few bytes, so the recall hint the
+    /// host would also receive pushes the composed result above the raw size.
+    fn thin_saving_pipeline() -> Resolved {
+        pipeline_from("[[hook.after_tool.shell]]\nname = \"ansi\"\nuse = [\"ansi\"]\n")
+    }
+
+    /// Three long lines carrying an ANSI prefix each: the chain saves ~27 bytes.
+    fn thin_saving_output(secret: Option<&str>) -> String {
+        let body = match secret {
+            Some(secret) => format!("{secret} {}", "x".repeat(300)),
+            None => "x".repeat(300),
+        };
+        format!("\x1b[31m{body}\x1b[0m\n").repeat(3)
+    }
+
+    /// A config that writes the recall store into `dir`, in the given mode.
+    fn recall_config(dir: &std::path::Path, mode: RecoveryMode) -> Config {
+        let mut config = test_config();
+        config.retriever.mode = mode;
+        config.retriever.tee_directory = Some(dir.join("tee"));
+        config.retriever.database_path = Some(dir.join("recall.db"));
+        config
+    }
+
+    /// Rows in the recall store the config points at; 0 when nothing was stored.
+    fn recall_rows(config: &Config) -> i64 {
+        let path = config
+            .retriever
+            .database_path
+            .as_ref()
+            .expect("test config sets a path");
+        let Ok(conn) = rusqlite::Connection::open(path) else {
+            return 0;
+        };
+        conn.query_row("SELECT COUNT(*) FROM recall", [], |row| row.get(0))
+            .unwrap_or(0)
+    }
+
+    /// Files under the posthook tee directory, which a rejected result must
+    /// leave empty.
+    fn posthook_tee_files(config: &Config) -> usize {
+        let dir = tee::posthook_recall_dir(config).expect("tee dir resolves");
+        std::fs::read_dir(dir)
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn test_agent_text_tracks_nothing_when_the_guarded_result_is_rejected() {
+        // A saving smaller than the recall hint appended after it: the composed
+        // result is larger than the raw one, so it must not reach the model.
+        // Every effect of accepting it has to be absent — no `rtk gain` row, no
+        // decision-log line, and nothing left in the recall store or the tee
+        // directory, since `rtk recall --list` enumerates it either way.
+        for mode in [RecoveryMode::Tee, RecoveryMode::Sqlite] {
+            clear_tracked_rows();
+            pipeline_log::clear_offered_entries();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let config = recall_config(dir.path(), mode);
+
+            let result = agent_result(
+                "bash",
+                &serde_json::json!({"command": "make build"}),
+                &thin_saving_output(None),
+            );
+            assert!(
+                agent_text_with_config("opencode", &result, &config, &thin_saving_pipeline())
+                    .is_none(),
+                "{mode:?}: the hint pushes the result above the raw size"
+            );
+
+            let rows = tracked_rows();
+            assert!(rows.is_empty(), "{mode:?}: `rtk gain` recorded {rows:?}");
+            let offered = pipeline_log::offered_entries();
+            assert!(
+                offered.is_empty(),
+                "{mode:?}: the decision log recorded {offered:?}"
+            );
+            assert_eq!(recall_rows(&config), 0, "{mode:?}: `rtk recall --list`");
+            assert_eq!(posthook_tee_files(&config), 0, "{mode:?}: tee directory");
+        }
+    }
+
+    #[test]
+    fn test_agent_text_carries_the_host_exit_code_into_the_facts() {
+        // `exit_code` is a legal `hook.after_tool.shell` condition, and the
+        // host's `metadata.exit` is the only place it can come from on the
+        // OpenCode path.
+        let pipeline = pipeline_from(
+            "[[hook.after_tool.shell]]\nname = \"failed-only\"\nuse = [\"dedup\"]\n\
+             when = { exit_code = 1 }\n",
+        );
+        let raw = repeated_output();
+        let args = serde_json::json!({"command": "make build"});
+        for (exit, want) in [(Some(1), true), (Some(0), false), (None, false)] {
+            let mut result = agent_result("shell", &args, &raw);
+            result.exit_code = exit;
+            assert_eq!(
+                agent_text_with_config("opencode", &result, &test_config(), &pipeline).is_some(),
+                want,
+                "exit_code = {exit:?} must {}match",
+                if want { "" } else { "not " }
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_text_carries_the_host_duration_into_the_facts() {
+        // The plain-text path used to hard-code duration_ms to 0, so a rule
+        // keyed on how long the call took could never fire.
+        let pipeline = pipeline_from(
+            "[[hook.after_tool.shell]]\nname = \"slow-only\"\nuse = [\"dedup\"]\n\
+             when = { duration_ms_gt = 0 }\n",
+        );
+        let raw = repeated_output();
+        let args = serde_json::json!({"command": "make build"});
+        let mut result = agent_result("shell", &args, &raw);
+        result.duration_ms = 12;
+        assert!(
+            agent_text_with_config("opencode", &result, &test_config(), &pipeline).is_some(),
+            "a non-zero duration_ms must reach the facts"
+        );
+        result.duration_ms = 0;
+        assert!(
+            agent_text_with_config("opencode", &result, &test_config(), &pipeline).is_none(),
+            "duration_ms = 0 must not match"
+        );
+    }
+
+    #[test]
+    fn test_agent_text_passes_through_when_no_after_tool_rule_matches() {
+        let raw = repeated_output();
+        assert!(
+            agent_text_with_config(
+                "opencode",
+                &agent_result("bash", &serde_json::json!({"command": "make build"}), &raw),
+                &test_config(),
+                &default_pipeline(),
+            )
+            .is_none(),
+            "rtk:default has no after_tool rules"
+        );
+    }
+
+    #[test]
+    fn test_agent_text_applies_a_matching_after_tool_rule() {
+        let pipeline =
+            pipeline_from("[[hook.after_tool.shell]]\nname = \"squeeze\"\nuse = [\"dedup\"]\n");
+        let raw = repeated_output();
+        let out = agent_text_with_config(
+            "opencode",
+            &agent_result("bash", &serde_json::json!({"command": "make build"}), &raw),
+            &test_config(),
+            &pipeline,
+        )
+        .map(|composed| composed.text)
+        .expect("shell rule must run for an OpenCode bash result");
+        assert!(out.contains("[x400]"), "{out}");
+        assert!(out.len() < raw.len());
+    }
+
+    #[test]
+    fn test_agent_text_maps_the_opencode_tool_vocabulary() {
+        let pipeline =
+            pipeline_from("[[hook.after_tool.read]]\nname = \"squeeze\"\nuse = [\"dedup\"]\n");
+        let raw = repeated_output();
+        assert!(
+            agent_text_with_config(
+                "opencode",
+                &agent_result(
+                    "read",
+                    &serde_json::json!({"filePath": "/tmp/build.log"}),
+                    &raw
+                ),
+                &test_config(),
+                &pipeline,
+            )
+            .is_some(),
+            "read maps to the read subject"
+        );
+        assert!(
+            agent_text_with_config(
+                "opencode",
+                &agent_result("bash", &serde_json::json!({"command": "make build"}), &raw),
+                &test_config(),
+                &pipeline,
+            )
+            .is_none(),
+            "bash is not a read"
+        );
+    }
+
+    #[test]
+    fn test_agent_text_emits_nothing_when_the_result_is_unchanged() {
+        let pipeline =
+            pipeline_from("[[hook.after_tool.shell]]\nname = \"squeeze\"\nuse = [\"dedup\"]\n");
+        let raw = (0..400)
+            .map(|i| format!("unique line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            agent_text_with_config(
+                "opencode",
+                &agent_result("bash", &serde_json::json!({"command": "make build"}), &raw),
+                &test_config(),
+                &pipeline,
+            )
+            .is_none(),
+            "a no-op chain must not replace the output"
+        );
+    }
+
+    /// Reviewer's repro: 600 uniform lines must hit the shipped `term-default`
+    /// rule on the OpenCode after-tool path and come back capped, not verbatim.
+    fn numbered_output(n: usize) -> String {
+        (1..=n)
+            .map(|i| format!("q{i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn test_agent_text_term_default_matches_a_shell_result() {
+        let raw = numbered_output(600);
+        let out = agent_text_with_config(
+            "opencode",
+            &agent_result("shell", &serde_json::json!({"command": "seq"}), &raw),
+            &test_config(),
+            &posthook_pipeline(),
+        )
+        .map(|composed| composed.text)
+        .expect("the shipped term-default rule must match a non-rtk shell result");
+
+        let lines = out.lines().count();
+        assert!(lines < 300, "expected a head+tail cap, got {lines} lines");
+        assert!(out.contains("q1"), "the head must survive");
+        assert!(out.contains("q600"), "the tail must survive");
+        assert!(!out.contains("q350"), "the middle must be elided");
+    }
+
+    #[test]
+    fn test_agent_text_sets_is_rtk_command_for_shell_subjects() {
+        let raw = numbered_output(600);
+        // `term-default` is `when = { is_rtk_command = false }`: a command that
+        // already went through rtk must be skipped, not compressed again.
+        for command in ["rtk seq", "cd x && rtk ls -la"] {
+            assert!(
+                agent_text_with_config(
+                    "opencode",
+                    &agent_result("shell", &serde_json::json!({ "command": command }), &raw),
+                    &test_config(),
+                    &posthook_pipeline(),
+                )
+                .is_none(),
+                "{command} runs rtk already and must pass through"
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_text_skips_compression_for_recall_recovery_commands() {
+        let raw = numbered_output(600);
+        // Reading the recall store back must see the raw bytes, else content
+        // elided by `cap` could never be recovered.
+        for command in [
+            "rtk recall ab12cd34",
+            "cd x && rtk recall ab12cd34 --tail 50",
+            "cat tee/posthook/12_3-4_read",
+        ] {
+            assert!(
+                agent_text_with_config(
+                    "opencode",
+                    &agent_result("shell", &serde_json::json!({ "command": command }), &raw),
+                    &test_config(),
+                    &posthook_pipeline(),
+                )
+                .is_none(),
+                "{command} reads the recall store and must pass through"
+            );
+        }
+    }
+
+    #[test]
+    fn test_agent_text_maps_the_opencode_2x_tool_ids() {
+        for (tool, want) in [
+            ("shell", Subject::Shell),
+            ("bash", Subject::Shell),
+            ("patch", Subject::Edit),
+            ("read", Subject::Read),
+            ("write", Subject::Write),
+            ("edit", Subject::Edit),
+            ("grep", Subject::Search),
+            ("glob", Subject::Search),
+            ("webfetch", Subject::Web),
+            ("websearch", Subject::Web),
+            ("task", Subject::Subagent),
+        ] {
+            assert_eq!(subject_of_for("opencode", tool), want, "{tool}");
+        }
+        // No subject is a todo list; OpenCode's own confirmation is passed on.
+        assert_eq!(subject_of_for("opencode", "todowrite"), Subject::Any);
     }
 
     #[test]
@@ -1738,6 +2682,7 @@ mod tests {
             &raw,
             0,
             Some(false),
+            None,
         )
         .expect("term chain applies");
         assert_eq!(applied.pipeline, "shared-pipe");

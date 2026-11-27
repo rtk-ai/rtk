@@ -60,7 +60,7 @@ Rows are grouped by what works — output compression first, then command rewrit
 | `hook.before_tool.shell` | every agent with a hook |
 | `hook.before_tool.{write,edit,search,web,subagent,mcp,any}` | every agent with a hook |
 | `hook.before_tool.read` | Claude Code |
-| `hook.after_tool.*` | Claude Code |
+| `hook.after_tool.*` | Claude Code, OpenCode |
 | `proxy.request.*` | any agent you can point at the daemon (the last column above) |
 
 A non-shell rule can `deny` or `passthrough`. It cannot rewrite the call — that

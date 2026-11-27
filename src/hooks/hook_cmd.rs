@@ -20,15 +20,23 @@ use crate::core::utils::strip_leading_bom;
 mod claude_pipeline;
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
+// Tool output is the payload, not a command, so it gets Claude Code's
+// after-tool ceiling instead of the 1 MiB pre-tool one.
+#[cfg(feature = "engine")]
+const STDIN_CAP_AFTER_TOOL: usize = 64 * 1_048_576; // 64 MiB
 
 fn read_stdin_limited() -> Result<String> {
+    read_stdin_capped(STDIN_CAP)
+}
+
+fn read_stdin_capped(cap: usize) -> Result<String> {
     let mut input = String::new();
     io::stdin()
-        .take((STDIN_CAP + 1) as u64)
+        .take((cap + 1) as u64)
         .read_to_string(&mut input)
         .context("Failed to read stdin")?;
-    if input.len() > STDIN_CAP {
-        anyhow::bail!("hook stdin exceeds {} byte limit", STDIN_CAP);
+    if input.len() > cap {
+        anyhow::bail!("hook stdin exceeds {cap} byte limit");
     }
     Ok(input)
 }
@@ -1255,6 +1263,116 @@ fn droid_response_from_decision(v: &Value, cmd: &str, decision: HookDecision) ->
 pub fn run_opencode(cmd: &str, agent: Option<&str>) -> Result<()> {
     let _ = writeln!(io::stdout(), "{}", opencode_answer_for(cmd, agent));
     Ok(())
+}
+
+/// Run OpenCode's `tool.execute.after` transport.
+///
+/// Reads `{"tool": ..., "args": {...}, "output": ...}` plus the metadata the
+/// plugin could collect (`status`, `metadata.exit`, `description`,
+/// `duration_ms`) on stdin and writes the replacement text to stdout, or
+/// nothing. Every parse, size or pipeline failure is a silent pass-through:
+/// OpenCode keeps the tool's original output, exactly as Claude Code does when
+/// the posthook emits nothing.
+#[cfg(feature = "engine")]
+pub fn run_opencode_after() -> Result<()> {
+    let Ok(input) = read_stdin_capped(STDIN_CAP_AFTER_TOOL) else {
+        return Ok(());
+    };
+    let Some(result) = opencode_after_payload(strip_leading_bom(&input)) else {
+        return Ok(());
+    };
+    crate::hooks::posthook::run_agent_text("opencode", &result);
+    Ok(())
+}
+
+/// Answer the plugin's registration probe: does this binary's resolved
+/// pipeline actually carry a `hook.after_tool.<subject>` rule?
+///
+/// Without it the plugin registers the after hooks whenever the subcommand
+/// exists, and every tool call spawns a process that finds no rule and prints
+/// nothing. The answer is one object, `{"v":1,"active":true|false}`; a load
+/// that falls back to `rtk:default` (no after_tool rules) answers `false`.
+#[cfg(feature = "engine")]
+pub fn run_opencode_after_probe() -> Result<()> {
+    let loaded = crate::core::pipeline_config::load();
+    let _ = writeln!(io::stdout(), "{}", probe_answer(&loaded));
+    Ok(())
+}
+
+/// The probe's answer for a loaded pipeline: `{"v":1,"active":…}`.
+///
+/// `active` is the resolver's own answer to "which positions can actually
+/// fire" (`events_used`), which already drops disabled rules *and* rules
+/// carrying a pro-only key — an Apache-edition build holds those as inert, so
+/// counting `def.enabled` by hand would answer `active: true` for a rule that
+/// can never run, and the plugin would spawn a process per tool call for
+/// nothing.
+#[cfg(feature = "engine")]
+fn probe_answer(loaded: &crate::core::pipeline_config::LoadedPipeline) -> Value {
+    use rtk_engine::block::Event;
+    use rtk_engine::pipeline::SiteKind;
+
+    let active = loaded
+        .resolved
+        .events_used()
+        .contains(&(SiteKind::Hook, Event::AfterTool));
+    json!({ "v": 1, "active": active })
+}
+
+/// Parse the `tool.execute.after` payload. `None` for anything that is not
+/// the shape the plugin promised — the caller then emits nothing.
+///
+/// Every metadata field is optional: a plugin that predates this payload (or
+/// does not have the number) simply omits it, and the pipeline sees the same
+/// facts it always did.
+#[cfg(feature = "engine")]
+fn opencode_after_payload(input: &str) -> Option<crate::hooks::posthook::AgentToolResult> {
+    use crate::hooks::posthook::AgentToolResult;
+
+    let v: Value = serde_json::from_str(input.trim()).ok()?;
+    let tool = v.get("tool")?.as_str()?;
+    let output = v.get("output")?.as_str()?;
+    if tool.is_empty() || output.is_empty() {
+        return None;
+    }
+    let args = match v.get("args") {
+        Some(args) if args.is_object() => args.clone(),
+        _ => json!({}),
+    };
+    let status = v.get("status").and_then(Value::as_str).map(str::to_string);
+    let exit_code = v
+        .pointer("/metadata/exit")
+        .and_then(Value::as_i64)
+        .or_else(|| v.pointer("/metadata/exitCode").and_then(Value::as_i64));
+    let description = v
+        .get("description")
+        .and_then(Value::as_str)
+        .or_else(|| v.pointer("/metadata/description").and_then(Value::as_str))
+        .map(str::to_string);
+    // Fractional milliseconds are real: `metadata.time { start, end }` reaches
+    // the plugin as float subtraction, so read a float and truncate.
+    let duration_ms = v
+        .get("duration_ms")
+        .and_then(Value::as_f64)
+        .or_else(|| v.get("durationMs").and_then(Value::as_f64))
+        .map(|ms| ms.max(0.0).trunc() as u64)
+        .unwrap_or(0);
+
+    Some(AgentToolResult {
+        tool: tool.to_string(),
+        args,
+        output: output.to_string(),
+        status,
+        exit_code,
+        description,
+        duration_ms,
+        // The envelope is opt-in: a plugin written before it existed sends no
+        // `expect` field and would show the raw JSON as tool output.
+        expect_envelope: v
+            .pointer("/expect/envelope")
+            .and_then(Value::as_u64)
+            .is_some_and(|version| version == 1),
+    })
 }
 
 /// [`opencode_answer`] against the rules OpenCode resolves for `agent`.
@@ -2930,6 +3048,193 @@ mod tests {
                     "an agent file with no rules key keeps the rewrite"
                 );
             });
+        }
+    }
+
+    // --- OpenCode: the `tool.execute.after` transport ---
+    //
+    // The plugin forwards the tool name, its args and the tool's output as
+    // JSON on stdin. Anything else is a pass-through: OpenCode must keep its
+    // original output on every malformed payload.
+
+    #[cfg(feature = "engine")]
+    mod opencode_after {
+        use super::super::opencode_after_payload;
+        use serde_json::json;
+
+        #[test]
+        fn malformed_payloads_are_ignored() {
+            for input in [
+                "",
+                "{",
+                "null",
+                "[]",
+                r#"{"tool":"bash"}"#,
+                r#"{"tool":"bash","output":""}"#,
+                r#"{"tool":"","output":"x"}"#,
+                r#"{"tool":1,"output":"x"}"#,
+                r#"{"tool":"bash","output":3}"#,
+            ] {
+                assert!(opencode_after_payload(input).is_none(), "{input}");
+            }
+        }
+
+        #[test]
+        fn a_valid_payload_carries_tool_args_and_output() {
+            let result = opencode_after_payload(
+                r#"{"tool":"bash","args":{"command":"cargo build"},"output":"x"}"#,
+            )
+            .expect("valid payload");
+            assert_eq!(result.tool, "bash");
+            assert_eq!(result.args, json!({"command": "cargo build"}));
+            assert_eq!(result.output, "x");
+            // Metadata the host did not send stays absent rather than defaulting
+            // to a value a rule would read as real.
+            assert_eq!(result.status, None);
+            assert_eq!(result.exit_code, None);
+            assert_eq!(result.description, None);
+            assert_eq!(result.duration_ms, 0);
+        }
+
+        #[test]
+        fn shell_metadata_is_forwarded() {
+            let result = opencode_after_payload(
+                r#"{"tool":"shell","args":{"command":"make"},
+                    "output":"boom",
+                    "status":"completed",
+                    "metadata":{"exit":3},
+                    "description":"build the crate",
+                    "duration_ms":12}"#,
+            )
+            .expect("valid payload");
+            assert_eq!(result.status.as_deref(), Some("completed"));
+            assert_eq!(result.exit_code, Some(3));
+            assert_eq!(result.description.as_deref(), Some("build the crate"));
+            assert_eq!(result.duration_ms, 12);
+        }
+
+        #[test]
+        fn missing_metadata_defaults_to_nothing() {
+            let result = opencode_after_payload(
+                r#"{"tool":"read","output":"x","metadata":{"truncated":true}}"#,
+            )
+            .expect("valid payload");
+            assert_eq!(result.exit_code, None);
+            assert_eq!(result.duration_ms, 0);
+        }
+
+        #[test]
+        fn fractional_duration_is_truncated() {
+            // `metadata.time { start, end }` reaches the plugin as float
+            // subtraction, so the host can send 35.9.
+            let result =
+                opencode_after_payload(r#"{"tool":"bash","output":"x","duration_ms":35.9}"#)
+                    .expect("valid payload");
+            assert_eq!(result.duration_ms, 35);
+            let negative =
+                opencode_after_payload(r#"{"tool":"bash","output":"x","duration_ms":-2.5}"#)
+                    .expect("valid payload");
+            assert_eq!(negative.duration_ms, 0);
+        }
+
+        #[test]
+        fn the_envelope_is_opt_in_from_the_request() {
+            for (input, want) in [
+                (r#"{"tool":"bash","output":"x"}"#, false),
+                (r#"{"tool":"bash","output":"x","expect":{}}"#, false),
+                (
+                    r#"{"tool":"bash","output":"x","expect":{"envelope":2}}"#,
+                    false,
+                ),
+                (
+                    r#"{"tool":"bash","output":"x","expect":{"envelope":1}}"#,
+                    true,
+                ),
+            ] {
+                let result = opencode_after_payload(input).expect(input);
+                assert_eq!(result.expect_envelope, want, "{input}");
+            }
+        }
+
+        #[test]
+        fn non_object_args_are_dropped() {
+            let result = opencode_after_payload(r#"{"tool":"read","args":[],"output":"x"}"#)
+                .expect("valid payload");
+            assert_eq!(result.args, json!({}));
+        }
+    }
+
+    // --- OpenCode: the registration probe ---
+    //
+    // The plugin asks before it registers the after hooks: a pipeline with no
+    // after-tool rule would otherwise spawn a process on every tool call just
+    // to learn there is nothing to do.
+
+    #[cfg(feature = "engine")]
+    mod opencode_probe {
+        use super::super::probe_answer;
+        use rtk_engine::block::Event;
+        use rtk_engine::pipeline::Position;
+
+        /// The probe's answer for a pipeline body, through the same function the
+        /// subcommand prints.
+        fn active(text: &str) -> bool {
+            let loaded = crate::core::pipeline_config::load_candidate(text, "probe.toml");
+            let answer = probe_answer(&loaded);
+            assert_eq!(answer["v"], 1, "{answer}");
+            answer["active"].as_bool().expect("active is a boolean")
+        }
+
+        #[test]
+        fn a_pipeline_with_an_after_tool_rule_is_active() {
+            for text in [
+                "[[hook.after_tool.shell]]\nname = \"s\"\nuse = [\"dedup\"]\n",
+                "[[hook.after_tool.read]]\nname = \"r\"\nuse = [\"dedup\"]\n",
+                "[[hook.after_tool.any]]\nname = \"a\"\nuse = [\"dedup\"]\n",
+            ] {
+                assert!(active(text), "{text}");
+            }
+        }
+
+        #[test]
+        fn a_pipeline_without_one_is_inactive() {
+            for text in [
+                "",
+                "[pipeline]\nname = \"empty\"\n",
+                // A before-tool rule is not an after-tool rule.
+                "[[hook.before_tool.shell]]\nname = \"b\"\nuse = [\"dedup\"]\n",
+                // A disabled rule stays in the resolved set but never fires, so
+                // counting it would spawn a process for nothing.
+                "[[hook.after_tool.shell]]\nname = \"off\"\nenabled = false\nuse = [\"dedup\"]\n",
+            ] {
+                assert!(!active(text), "{text}");
+            }
+        }
+
+        #[test]
+        fn a_pro_only_rule_is_inert_and_so_inactive() {
+            // `locked` is a pro-edition key: the file still loads, the rule is
+            // marked inert, and the evaluator skips it. Answering `active` here
+            // would spawn a process per tool call for a rule that can never run.
+            let text =
+                "[[hook.after_tool.shell]]\nname = \"pro\"\nuse = [\"dedup\"]\nlocked = true\n";
+            let loaded = crate::core::pipeline_config::load_candidate(text, "probe.toml");
+            let rules = loaded.resolved.rules_at(Position::hook(
+                Event::AfterTool,
+                rtk_engine::block::Subject::Shell,
+            ));
+            assert!(
+                rules.iter().any(|rule| rule.def.pro_inert),
+                "premise: the rule is inert in this edition"
+            );
+            assert!(!active(text));
+        }
+
+        #[test]
+        fn the_default_pipeline_is_inactive() {
+            // `rtk:default` ships no after_tool rules; upgrading must not
+            // register a hook that can never do anything.
+            assert!(!active(""));
         }
     }
 

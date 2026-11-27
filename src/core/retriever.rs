@@ -665,6 +665,35 @@ pub fn trim_family(cfg: &RetrieverConfig, prefix: &str, keep: usize) {
     });
 }
 
+/// Remove one stored entry, and roll back the elision it counted.
+///
+/// The posthook's size gate can only decide whether a compressed result will
+/// reach the model *after* the store write — the recall hint's own length is
+/// part of the comparison it makes. A rejected result must be taken back out:
+/// otherwise `rtk recall --list` keeps listing an entry nothing points at, and
+/// the raw (unredacted) bytes stay readable through `rtk recall`.
+#[cfg(feature = "engine")]
+pub fn discard(cfg: &RetrieverConfig, hash: &str) {
+    let _ = with_open(cfg, |conn| {
+        let command: Option<String> = conn
+            .query_row(
+                "SELECT command FROM recall WHERE hash = ?1",
+                params![hash],
+                |r| r.get(0),
+            )
+            .optional()?;
+        conn.execute("DELETE FROM recall WHERE hash = ?1", params![hash])?;
+        if let Some(command) = command {
+            let _ = conn.execute(
+                "UPDATE recall_stats SET elisions = elisions - 1
+                 WHERE slug = ?1 AND mode = 'sqlite' AND elisions > 0",
+                params![stat_key(&command)],
+            );
+        }
+        Ok(())
+    });
+}
+
 pub fn store(
     cfg: &RetrieverConfig,
     content: &[u8],

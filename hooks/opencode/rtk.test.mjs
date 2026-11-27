@@ -6,9 +6,15 @@ import { tmpdir } from "node:os"
 import { delimiter, dirname, join } from "node:path"
 import RtkOpenCodePlugin, {
   candidateRtkDirs,
+  durationMsOf,
+  hookTimeoutMs,
+  parseAfterEnvelope,
   probeRtkHookOpencode,
+  probeRtkHookOpencodeAfter,
   resolveRtkPath,
   runHookOpencode,
+  runHookOpencodeAfter,
+  tryCompressOutput,
   tryRewriteCommand,
   _resetCachedRtkPath,
 } from "./rtk.ts"
@@ -46,32 +52,95 @@ if (rest[0] === "--help") {
   console.log("rtk-mock")
   if (process.env.MOCK_PROBE_LOG) fs.appendFileSync(process.env.MOCK_PROBE_LOG, "probe\\n")
   // pre-#4349 rtk has no such subcommand and answers like clap does: exit 2
-  process.exit(process.env.MOCK_NO_SUB ? 2 : 0)
-}
-if (sub !== "opencode") process.exit(3)
-
-const agent = rest[0] === "--agent" ? rest[1] : undefined
-const command = agent ? rest[2] : rest[0]
-
-if (process.env.MOCK_ECHO) {
-  console.log(JSON.stringify({ command: JSON.stringify(process.argv.slice(2)) }))
-} else if (command === "ls -la") {
-  console.log(JSON.stringify({ command: "rtk ls -la" }))
-} else if (command === "cd sub && ls -la") {
-  console.log(JSON.stringify({ command: "cd sub && rtk ls -la" }))
-} else if (command === "ls -la && git status") {
-  console.log(JSON.stringify({ command: "rtk ls -la && rtk git status" }))
-} else if (command === "unchanged") {
-  // what the Rust side answers when the rewrite would change the verdict
-  console.log("{}")
-} else if (command === "garbage") {
-  console.log("not json at all")
-} else if (command === "empty") {
+  if (process.env.MOCK_NO_SUB) process.exit(2)
+  // A binary can carry the before subcommand and predate the after one.
+  if (sub === "opencode-after" && process.env.MOCK_NO_AFTER) process.exit(2)
   process.exit(0)
-} else if (command === "fail") {
-  process.exit(2)
-} else if (command === "sleep") {
-  setTimeout(() => process.exit(0), 5000)
+}
+
+// The registration probe: answers whether the resolved pipeline has an
+// after-tool rule. Older binaries do not know the flag (exit 2).
+if (sub === "opencode-after" && rest[0] === "--probe") {
+  // A binary that predates the subcommand answers like clap: exit 2.
+  if (process.env.MOCK_NO_AFTER) process.exit(2)
+  if (process.env.MOCK_PROBE_UNSUPPORTED) process.exit(2)
+  if (process.env.MOCK_PROBE_GARBAGE) {
+    process.stdout.write("not an envelope")
+    process.exit(0)
+  }
+  process.stdout.write(JSON.stringify({ v: 1, active: process.env.MOCK_PROBE_STATE !== "inactive" }))
+  process.exit(0)
+}
+
+if (sub === "opencode-after") {
+  let data = ""
+  process.stdin.setEncoding("utf8")
+  process.stdin.on("data", (chunk) => (data += chunk))
+  process.stdin.on("end", () => {
+    if (process.env.MOCK_AFTER_FAIL) process.exit(2)
+    let payload = null
+    try { payload = JSON.parse(data) } catch {}
+    if (!payload || typeof payload.output !== "string") return
+    if (payload.output === "unchanged") return
+    if (payload.output === "sleep-after") { setTimeout(() => process.exit(0), 5000); return }
+    // The stdout envelope a current binary prints — only when the request
+    // asked for it, exactly like the real binary.
+    const wantsEnvelope = payload.expect && payload.expect.envelope === 1
+    if (process.env.MOCK_AFTER_ENVELOPE && wantsEnvelope) {
+      process.stdout.write(JSON.stringify({
+        v: 1,
+        output: "compressed:" + payload.tool,
+        append: "NOTE: reread before editing",
+      }))
+      return
+    }
+    // An envelope from a version this plugin does not know.
+    if (process.env.MOCK_AFTER_UNKNOWN_V) {
+      process.stdout.write(JSON.stringify({ v: 2, output: "compressed:" + payload.tool }))
+      return
+    }
+    // Echo the metadata the plugin forwarded, so a test can see exactly what
+    // reached the binary in either API shape.
+    if (process.env.MOCK_ECHO_PAYLOAD) {
+      process.stdout.write(JSON.stringify({
+        tool: payload.tool,
+        command: payload.args && payload.args.command,
+        status: payload.status,
+        exit: payload.metadata && payload.metadata.exit,
+        description: payload.description,
+        duration_ms: payload.duration_ms,
+        expect: payload.expect,
+      }))
+      return
+    }
+    process.stdout.write("compressed:" + payload.tool)
+  })
+} else if (sub === "opencode") {
+  const agent = rest[0] === "--agent" ? rest[1] : undefined
+  const command = agent ? rest[2] : rest[0]
+
+  if (process.env.MOCK_ECHO) {
+    console.log(JSON.stringify({ command: JSON.stringify(process.argv.slice(2)) }))
+  } else if (command === "ls -la") {
+    console.log(JSON.stringify({ command: "rtk ls -la" }))
+  } else if (command === "cd sub && ls -la") {
+    console.log(JSON.stringify({ command: "cd sub && rtk ls -la" }))
+  } else if (command === "ls -la && git status") {
+    console.log(JSON.stringify({ command: "rtk ls -la && rtk git status" }))
+  } else if (command === "unchanged") {
+    // what the Rust side answers when the rewrite would change the verdict
+    console.log("{}")
+  } else if (command === "garbage") {
+    console.log("not json at all")
+  } else if (command === "empty") {
+    process.exit(0)
+  } else if (command === "fail") {
+    process.exit(2)
+  } else if (command === "sleep") {
+    setTimeout(() => process.exit(0), 5000)
+  }
+} else {
+  process.exit(3)
 }
 `
 
@@ -88,19 +157,19 @@ const v2Event = (command) => ({
   id: "call_1",
   input: { command },
 })
-const v1Input = { tool: "bash", sessionID: "ses_1", callID: "call_1" }
+const v1Input = { tool: "bash", sessionID: "ses_1", callID: "call_1", args: { command: "make" } }
 const v1Output = (command) => ({ args: { command, description: "list files" } })
 
 async function captureSetup() {
-  const toolHooks = []
+  const names = []
+  const hooks = {}
   const shellHooks = []
-  let toolHook = null
   let shellHook = null
   await RtkOpenCodePlugin.setup({
     tool: {
-      hook(name, callback) {
-        toolHooks.push(name)
-        if (name === "execute.before") toolHook = callback
+      async hook(name, callback) {
+        names.push(name)
+        hooks[name] = callback
       },
     },
     shell: {
@@ -110,7 +179,7 @@ async function captureSetup() {
       },
     },
   })
-  return { names: toolHooks, hook: toolHook, toolHooks, shellHooks, shellHook }
+  return { names, hooks, hook: hooks["execute.before"], shellHooks, shellHook }
 }
 
 async function captureServer() {
@@ -143,9 +212,18 @@ after(() => {
   process.env.USERPROFILE = savedUserProfile
   delete process.env.MOCK_ECHO
   delete process.env.MOCK_NO_SUB
+  delete process.env.MOCK_NO_AFTER
+  delete process.env.MOCK_AFTER_FAIL
+  delete process.env.MOCK_PROBE_STATE
+  delete process.env.MOCK_PROBE_UNSUPPORTED
+  delete process.env.MOCK_PROBE_GARBAGE
+  delete process.env.MOCK_AFTER_ENVELOPE
+  delete process.env.MOCK_AFTER_UNKNOWN_V
+  delete process.env.MOCK_ECHO_PAYLOAD
   delete process.env.MOCK_PROBE_LOG
   delete process.env.RTK_DISABLED
   delete process.env.RTK_BIN
+  delete process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS
   _resetCachedRtkPath()
   rmSync(mockDir, { recursive: true, force: true })
   rmSync(emptyDir, { recursive: true, force: true })
@@ -154,7 +232,7 @@ after(() => {
 test("2.0.22: execute.before mutates event.input.command and create.before appends rtk dir to PATH", async () => {
   assert.equal(RtkOpenCodePlugin.id, "rtk")
   const { names, hook, shellHooks, shellHook } = await captureSetup()
-  assert.deepEqual(names, ["execute.before"])
+  assert.deepEqual(names, ["execute.before", "execute.after"])
   assert.equal(typeof hook, "function")
   assert.deepEqual(shellHooks, ["create.before"])
   assert.equal(typeof shellHook, "function")
@@ -173,10 +251,38 @@ test("2.0.22: execute.before mutates event.input.command and create.before appen
   assert.equal(kept.input.command, "unchanged")
 })
 
+test("2.0.22: execute.after replaces the completed tool result content", async () => {
+  const { hooks } = await captureSetup()
+  const event = {
+    ...v2Event("make"),
+    status: "completed",
+    result: { content: "raw build output that is long", metadata: { exit: 0 } },
+  }
+  await hooks["execute.after"](event)
+  assert.equal(event.result.content, "compressed:shell")
+  assert.deepEqual(event.result.metadata, { exit: 0 })
+
+  // Error results carry no model-visible content to replace.
+  const failed = { ...v2Event("make"), status: "error", error: { message: "boom" } }
+  await hooks["execute.after"](failed)
+  assert.equal(failed.result, undefined)
+
+  // A mixed content array cannot be rebuilt confidently.
+  const mixed = {
+    ...v2Event("make"),
+    status: "completed",
+    result: { content: [{ type: "text", text: "a" }, { type: "file", uri: "file:///a" }] },
+  }
+  await hooks["execute.after"](mixed)
+  assert.deepEqual(mixed.result.content, [
+    { type: "text", text: "a" },
+    { type: "file", uri: "file:///a" },
+  ])
+})
+
 test("1.18.34: tool.execute.before mutates output.args.command and shell.env appends rtk dir to PATH", async () => {
   const { names, hooks } = await captureServer()
-  assert.ok(names.includes("tool.execute.before"))
-  assert.ok(names.includes("shell.env"))
+  assert.deepEqual(names, ["shell.env", "tool.execute.before", "tool.execute.after"])
   assert.equal(typeof hooks["tool.execute.before"], "function")
   assert.equal(typeof hooks["shell.env"], "function")
 
@@ -192,6 +298,176 @@ test("1.18.34: tool.execute.before mutates output.args.command and shell.env app
   const kept = v1Output("unchanged")
   await hooks["tool.execute.before"](v1Input, kept)
   assert.equal(kept.args.command, "unchanged")
+})
+
+test("1.18.34: tool.execute.after replaces output.output", async () => {
+  const { hooks } = await captureServer()
+  const output = { title: "make", output: "raw build output", metadata: { exit: 0 } }
+  await hooks["tool.execute.after"](v1Input, output)
+  assert.equal(output.output, "compressed:bash")
+  assert.deepEqual(output.metadata, { exit: 0 })
+})
+
+test("the after transport fails open on anything unusable", async () => {
+  const { hooks } = await captureServer()
+
+  // No rule matched / output unchanged: the mock emits nothing.
+  const unchanged = { title: "make", output: "unchanged", metadata: {} }
+  await hooks["tool.execute.after"](v1Input, unchanged)
+  assert.equal(unchanged.output, "unchanged")
+
+  // Malformed input shapes never reach the binary.
+  const badTool = { title: "x", output: "raw build output", metadata: {} }
+  await hooks["tool.execute.after"](undefined, badTool)
+  assert.equal(badTool.output, "raw build output")
+
+  const badOutput = { title: "x", output: 42, metadata: {} }
+  await hooks["tool.execute.after"](v1Input, badOutput)
+  assert.equal(badOutput.output, 42)
+
+  try {
+    process.env.MOCK_AFTER_FAIL = "1"
+    _resetCachedRtkPath()
+    const failed = { title: "make", output: "raw build output", metadata: {} }
+    await (await captureServer())["hooks"]["tool.execute.after"](v1Input, failed)
+    assert.equal(failed.output, "raw build output")
+  } finally {
+    delete process.env.MOCK_AFTER_FAIL
+    _resetCachedRtkPath()
+  }
+})
+
+test("the forwarded payload carries the tool metadata for both API shapes", async () => {
+  const raw = "raw build output ".repeat(60)
+  process.env.MOCK_ECHO_PAYLOAD = "1"
+  try {
+    // 2.x: `execute.after` carries `status`, `result.metadata.exit`, the call
+    // description from `input`, and any timing the tool reported.
+    const { hooks } = await captureSetup()
+    const v2 = {
+      ...v2Event("make"),
+      input: { command: "make", description: "build the crate" },
+      status: "completed",
+      result: {
+        content: raw,
+        metadata: { exit: 2, durationMs: 1234 },
+      },
+    }
+    await hooks["execute.after"](v2)
+    const forwarded2 = JSON.parse(v2.result.content)
+    assert.deepEqual(forwarded2, {
+      tool: "shell",
+      command: "make",
+      status: "completed",
+      exit: 2,
+      description: "build the crate",
+      duration_ms: 1234,
+      // The stdout envelope is opt-in from this side.
+      expect: { envelope: 1 },
+    })
+
+    // 1.x: no status field; exit code and description live on the output.
+    const { hooks: v1Hooks } = await captureServer()
+    const v1 = {
+      title: "make",
+      output: raw,
+      metadata: { exit: 1, time: { start: 10, end: 45 } },
+      args: { command: "make", description: "build the crate" },
+    }
+    await v1Hooks["tool.execute.after"](v1Input, v1)
+    const forwarded1 = JSON.parse(v1.output)
+    assert.deepEqual(forwarded1, {
+      tool: "bash",
+      command: "make",
+      exit: 1,
+      description: "build the crate",
+      duration_ms: 35,
+      expect: { envelope: 1 },
+    })
+    // 1.x reports no status, and the plugin must not invent one.
+    assert.equal("status" in forwarded1, false)
+  } finally {
+    delete process.env.MOCK_ECHO_PAYLOAD
+  }
+})
+
+test("durationMsOf reads the shapes a tool may report timing in", () => {
+  assert.equal(durationMsOf({ durationMs: 12 }), 12)
+  assert.equal(durationMsOf({ duration_ms: 7 }), 7)
+  assert.equal(durationMsOf({ time: { start: 100, end: 160 } }), 60)
+  assert.equal(durationMsOf({ time: { end: 5 } }), undefined)
+  assert.equal(durationMsOf({ exit: 0 }), undefined)
+  assert.equal(durationMsOf(null), undefined)
+  assert.equal(durationMsOf("nope"), undefined)
+})
+
+test("the stdout envelope is parsed, its note appended, and unknown versions fall back to text", async () => {
+  const raw = "raw build output ".repeat(40)
+
+  // 1. Current binary: `{"v":1,"output":…,"append":…}`. The note is appended
+  // to the content the model sees, never substituted for it.
+  try {
+    process.env.MOCK_AFTER_ENVELOPE = "1"
+    const { hooks } = await captureServer()
+    const output = { title: "make", output: raw, metadata: {} }
+    await hooks["tool.execute.after"](v1Input, output)
+    assert.equal(output.output, "compressed:bash\nNOTE: reread before editing")
+  } finally {
+    delete process.env.MOCK_AFTER_ENVELOPE
+  }
+
+  // 2. A binary from before the envelope prints the replacement text alone.
+  // It still replaces the output.
+  const legacy = { title: "make", output: raw, metadata: {} }
+  await (await captureServer())["hooks"]["tool.execute.after"](v1Input, legacy)
+  assert.equal(legacy.output, "compressed:bash")
+
+  // 3. An envelope version this plugin does not know is read as raw text, not
+  // parsed. Here that text is larger than the tool's output, so the result is
+  // left exactly as it was; `parseAfterEnvelope` below covers the returned
+  // bytes.
+  try {
+    process.env.MOCK_AFTER_UNKNOWN_V = "1"
+    const unknown = { title: "make", output: "tiny", metadata: {} }
+    await (await captureServer())["hooks"]["tool.execute.after"](v1Input, unknown)
+    assert.equal(unknown.output, "tiny")
+  } finally {
+    delete process.env.MOCK_AFTER_UNKNOWN_V
+  }
+})
+
+test("parseAfterEnvelope keeps the three stdout shapes apart", () => {
+  assert.deepEqual(parseAfterEnvelope('{"v":1,"output":"a","append":"note"}'), {
+    output: "a",
+    append: "note",
+  })
+  // `append` absent or empty: nothing to add, no note.
+  assert.deepEqual(parseAfterEnvelope('{"v":1,"output":"a"}'), { output: "a", append: "" })
+  assert.deepEqual(parseAfterEnvelope('{"v":1,"output":"a","append":""}'), {
+    output: "a",
+    append: "",
+  })
+  // Version skew and plain text both keep the bytes as the replacement text.
+  const future = '{"v":2,"output":"a"}'
+  assert.deepEqual(parseAfterEnvelope(future), { output: future, append: "" })
+  assert.deepEqual(parseAfterEnvelope("plain replacement"), {
+    output: "plain replacement",
+    append: "",
+  })
+  // A v1 object with no usable output is not an envelope either.
+  assert.deepEqual(parseAfterEnvelope('{"v":1}'), { output: '{"v":1}', append: "" })
+})
+
+test("tryCompressOutput accepts only a strictly smaller result", async () => {
+  assert.equal(await tryCompressOutput("bash", { command: "make" }, ""), null)
+  assert.equal(await tryCompressOutput("", {}, "raw build output"), null)
+  assert.equal(await tryCompressOutput("bash", { command: "make" }, 42), null)
+  // Mock answer `compressed:bash` is longer than `short`, so it is refused.
+  assert.equal(await tryCompressOutput("bash", { command: "make" }, "short"), null)
+  assert.equal(
+    await tryCompressOutput("bash", { command: "make" }, "raw build output"),
+    "compressed:bash"
+  )
 })
 
 test("argv is exact and shell-free, and the agent is forwarded", async () => {
@@ -272,6 +548,72 @@ test("the `hook opencode --help` probe is asked once per binary", async () => {
   }
 })
 
+test("a pipeline with no after-tool rule registers no after hook", async () => {
+  // The probe answers `active: false`, so no process is spawned per tool call
+  // for a rule set that cannot match.
+  process.env.MOCK_PROBE_STATE = "inactive"
+  _resetCachedRtkPath()
+  try {
+    assert.deepEqual(await probeRtkHookOpencodeAfter(mockBin()), {
+      capable: true,
+      active: false,
+    })
+    assert.deepEqual((await captureSetup()).names, ["execute.before"])
+    assert.deepEqual((await captureServer()).names, ["shell.env", "tool.execute.before"])
+
+    // An active pipeline still registers both paths.
+    process.env.MOCK_PROBE_STATE = "active"
+    _resetCachedRtkPath()
+    assert.deepEqual((await captureSetup()).names, ["execute.before", "execute.after"])
+    assert.deepEqual((await captureServer()).names, [
+      "shell.env",
+      "tool.execute.before",
+      "tool.execute.after",
+    ])
+  } finally {
+    delete process.env.MOCK_PROBE_STATE
+    _resetCachedRtkPath()
+  }
+})
+
+test("an rtk that does not know --probe still registers the after hook", async () => {
+  // `--probe` exits 2 on a binary from before this flag. Registration is what
+  // every earlier release did, so the plugin falls back to it rather than
+  // turning compression off.
+  for (const unusable of ["MOCK_PROBE_UNSUPPORTED", "MOCK_PROBE_GARBAGE"]) {
+    process.env[unusable] = "1"
+    _resetCachedRtkPath()
+    try {
+      assert.equal(
+        (await probeRtkHookOpencodeAfter(mockBin())).active,
+        true,
+        `${unusable}: registration is the fallback`
+      )
+      assert.deepEqual((await captureSetup()).names, ["execute.before", "execute.after"])
+    } finally {
+      delete process.env[unusable]
+      _resetCachedRtkPath()
+    }
+  }
+})
+
+test("an rtk without `hook opencode-after` keeps rewriting and skips compression", async () => {
+  process.env.MOCK_NO_AFTER = "1"
+  _resetCachedRtkPath()
+  try {
+    assert.equal(await probeRtkHookOpencode(mockBin()), true)
+    assert.deepEqual(await probeRtkHookOpencodeAfter(mockBin()), { capable: false, active: false })
+
+    // The before path still registers; only the after hook is absent.
+    const { names } = await captureSetup()
+    assert.deepEqual(names, ["execute.before"])
+    assert.deepEqual((await captureServer()).names, ["shell.env", "tool.execute.before"])
+  } finally {
+    delete process.env.MOCK_NO_AFTER
+    _resetCachedRtkPath()
+  }
+})
+
 test("RTK_DISABLED=1 passes commands through with a live rtk behind it", async () => {
   delete process.env.RTK_DISABLED
   const { hooks } = await captureServer()
@@ -334,6 +676,70 @@ test("tryRewriteCommand guards the tool name and the command shape", async () =>
   assert.equal(await tryRewriteCommand("shell", "   "), null)
   // lowercased, so the real tool names match
   assert.equal(await tryRewriteCommand("SHELL", "ls -la"), "rtk ls -la")
+})
+
+test("hookTimeoutMs covers a classifier by default and honours the env var", () => {
+  const saved = process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS
+  try {
+    delete process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS
+    // A classifier defaults to 8 s; the budget must not kill it at 3 s as the
+    // old hard-coded value did.
+    assert.equal(hookTimeoutMs(), 15000)
+    assert.ok(hookTimeoutMs() > 8000)
+
+    process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS = "25000"
+    assert.equal(hookTimeoutMs(), 25000)
+
+    // Unusable values fall back to the default instead of disabling the
+    // timeout: an unbounded spawn would hang the tool call.
+    for (const bad of ["", "0", "-5", "abc", "NaN", "Infinity"]) {
+      process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS = bad
+      assert.equal(hookTimeoutMs(), 15000, bad)
+    }
+
+    // Past 2^31-1 a setTimeout fires after ~1 ms instead of after the delay, so
+    // an over-large value has to clamp — not fall back, and never reach the
+    // timer as-is.
+    process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS = "9999999999"
+    assert.equal(hookTimeoutMs(), 2 ** 31 - 1)
+    assert.ok(hookTimeoutMs() <= 2 ** 31 - 1)
+  } finally {
+    if (saved === undefined) delete process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS
+    else process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS = saved
+  }
+})
+
+test("a timed-out hook warns once, never per call", async () => {
+  const warnings = []
+  const realWarn = console.warn
+  console.warn = (message) => warnings.push(String(message))
+  const saved = process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS
+  try {
+    process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS = "100"
+    _resetCachedRtkPath()
+
+    // Both transports, several times: the warning is about the configuration,
+    // not about the particular call.
+    assert.equal(await runHookOpencode(mockBin(), "sleep"), null)
+    assert.equal(await runHookOpencode(mockBin(), "sleep"), null)
+    assert.equal(
+      await runHookOpencodeAfter(
+        mockBin(),
+        JSON.stringify({ tool: "bash", args: {}, output: "sleep-after" })
+      ),
+      null
+    )
+
+    const timeouts = warnings.filter((w) => /timed out/.test(w))
+    assert.equal(timeouts.length, 1, warnings.join("\n"))
+    assert.match(timeouts[0], /RTK_OPENCODE_HOOK_TIMEOUT_MS/)
+    assert.match(timeouts[0], /100 ms/)
+  } finally {
+    console.warn = realWarn
+    if (saved === undefined) delete process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS
+    else process.env.RTK_OPENCODE_HOOK_TIMEOUT_MS = saved
+    _resetCachedRtkPath()
+  }
 })
 
 test("runHookOpencode fails open on anything unusable", async () => {
