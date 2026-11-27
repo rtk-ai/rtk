@@ -264,11 +264,25 @@ mod tests {
             log.push_str(&format!("api-log-line\nrequest served id={id}\n"));
         }
         let result = run_stdin_str(&log);
-        assert!(result.contains("80 unclassified lines"), "{result}");
-        assert_eq!(result.matches("api-log-line").count(), 1);
-        assert!(result.contains("request served id=1\n"));
-        assert!(!result.contains("request served id=40"));
+        assert!(
+            result.ends_with(concat!(
+                "   [other] 80 unclassified lines\n",
+                "      api-log-line\n",
+                "      request served id=1\n",
+                "      request served id=2\n",
+            )),
+            "{result}"
+        );
         assert!(result.len() < log.len());
+    }
+
+    #[test]
+    fn unclassified_examples_are_truncated_only_past_100_characters() {
+        let at_limit = "é".repeat(100);
+        let over_limit = "界".repeat(101);
+        let result = run_stdin_str(&format!("{at_limit}\n{over_limit}\n"));
+        let expected = format!("      {at_limit}\n      {}...\n", "界".repeat(97));
+        assert!(result.ends_with(&expected), "{result}");
     }
 
     #[test]
@@ -277,8 +291,10 @@ mod tests {
         assert!(result.contains("1 info messages"));
         assert!(result.contains("1 warnings"));
         assert!(result.contains("1 errors"));
-        assert!(result.contains("1 unclassified line"));
-        assert!(result.contains("worker stopped"));
+        assert!(
+            result.contains("   [other] 1 unclassified line\n      worker stopped\n"),
+            "{result}"
+        );
         assert!(!run_stdin_str(" \nINFO ready\n").contains("unclassified"));
     }
 
