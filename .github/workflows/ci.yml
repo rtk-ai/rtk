@@ -62,6 +62,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --no-deps
 
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
+
   # ─── Parallel gates (all need code to compile) ───
 
   # `proxy/` is not a workspace member -- a second binary-bearing package
