@@ -11,17 +11,103 @@
 
 use crate::block::Block;
 use crate::method::{Method, MethodCtx, MethodInfo, Outcome};
-use regex::Regex;
-use std::sync::LazyLock;
 
 /// Minimum contiguous base64 chars to elide (~768 decoded bytes).
 const MIN_RUN: usize = 1024;
 
-static BASE64_RUN: LazyLock<Regex> = LazyLock::new(|| {
-    // Optional data-URL prefix captures the mime type for the marker.
-    Regex::new(r"(?:data:([A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+);base64,)?([A-Za-z0-9+/]{1024,}={0,2})")
-        .expect("valid regex")
-});
+/// Byte class of a base64 run: `[A-Za-z0-9+/]`.
+fn is_base64_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'+' || b == b'/'
+}
+
+/// Byte class of a data-URL mime part: `[A-Za-z0-9.+-]`.
+fn is_mime_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-')
+}
+
+/// End of the maximal base64 run starting at `i`.
+fn run_end(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && is_base64_byte(bytes[i]) {
+        i += 1;
+    }
+    i
+}
+
+/// If `data:<type>/<subtype>;base64,` starts at `i`, the end of the mime
+/// type and the end of the whole prefix.
+fn data_url_prefix(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
+    let rest = bytes.get(i..)?;
+    if !rest.starts_with(b"data:") {
+        return None;
+    }
+    let mime_part = |from: usize| {
+        let mut j = from;
+        while j < bytes.len() && is_mime_byte(bytes[j]) {
+            j += 1;
+        }
+        (j > from).then_some(j)
+    };
+    let slash = mime_part(i + 5)?;
+    if bytes.get(slash) != Some(&b'/') {
+        return None;
+    }
+    let mime_end = mime_part(slash + 1)?;
+    if !bytes[mime_end..].starts_with(b";base64,") {
+        return None;
+    }
+    Some((mime_end, mime_end + 8))
+}
+
+/// One base64 match: the whole match range, the mime range (when a data-URL
+/// prefix is present) and where the run (including `=` padding) starts.
+struct Base64Match {
+    start: usize,
+    end: usize,
+    mime: Option<(usize, usize)>,
+    run_start: usize,
+}
+
+/// Leftmost match at or after `pos` of
+/// `(?:data:([A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+);base64,)?([A-Za-z0-9+/]{MIN_RUN,}={0,2})`,
+/// scanned by hand: the counted repetition makes the regex slow.
+fn next_match(bytes: &[u8], mut pos: usize) -> Option<Base64Match> {
+    let finish = |start: usize, mime: Option<(usize, usize)>, run_start: usize, end: usize| {
+        let mut end = end;
+        for _ in 0..2 {
+            if bytes.get(end) == Some(&b'=') {
+                end += 1;
+            }
+        }
+        Base64Match {
+            start,
+            end,
+            mime,
+            run_start,
+        }
+    };
+    while pos < bytes.len() {
+        if !is_base64_byte(bytes[pos]) {
+            pos += 1;
+            continue;
+        }
+        let end = run_end(bytes, pos);
+        if end - pos >= MIN_RUN {
+            return Some(finish(pos, None, pos, end));
+        }
+        // A short run holds no bare match, but a data-URL prefix can start
+        // inside it: `data` is base64 and the `:` after it ends the run.
+        if end - pos >= 4 && &bytes[end - 4..end] == b"data" {
+            if let Some((mime_end, prefix_end)) = data_url_prefix(bytes, end - 4) {
+                let run = run_end(bytes, prefix_end);
+                if run - prefix_end >= MIN_RUN {
+                    return Some(finish(end - 4, Some((end + 1, mime_end)), prefix_end, run));
+                }
+            }
+        }
+        pos = end;
+    }
+    None
+}
 
 pub struct Base64Elide;
 
@@ -44,22 +130,28 @@ impl Method for Base64Elide {
         if input.len() < MIN_RUN {
             return Outcome::Continue(input.to_string());
         }
-        let out = BASE64_RUN.replace_all(input, |caps: &regex::Captures| {
-            let whole = caps.get(0).map(|m| m.as_str()).unwrap_or("");
-            let run = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+        let bytes = input.as_bytes();
+        let mut out = String::with_capacity(input.len());
+        let mut last = 0;
+        while let Some(m) = next_match(bytes, last) {
+            out.push_str(&input[last..m.start]);
+            let run = &input[m.run_start..m.end];
             // The character class also matches a long decimal number or a hex
             // dump, and eliding one corrupts the surrounding JSON (a bare
             // number turns into `[base64 …]`). Only elide a run that is
             // actually base64 by `looks_like_base64`; leave the whole match
             // untouched otherwise, data-URL prefix included.
-            if !looks_like_base64(run) {
-                return whole.to_string();
+            if looks_like_base64(run) {
+                let decoded_kb = (run.len() * 3 / 4) as f64 / 1024.0;
+                let kind = m.mime.map_or("data", |(from, to)| &input[from..to]);
+                out.push_str(&format!("[base64 {kind}, {decoded_kb:.0} KB elided]"));
+            } else {
+                out.push_str(&input[m.start..m.end]);
             }
-            let decoded_kb = (run.len() * 3 / 4) as f64 / 1024.0;
-            let kind = caps.get(1).map(|m| m.as_str()).unwrap_or("data");
-            format!("[base64 {kind}, {decoded_kb:.0} KB elided]")
-        });
-        Outcome::Continue(out.into_owned())
+            last = m.end;
+        }
+        out.push_str(&input[last..]);
+        Outcome::Continue(out)
     }
 }
 
