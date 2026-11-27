@@ -8,8 +8,7 @@
 //! header to count, `log.decorate` and `--graph` disfigure the one that exists, `-z` runs the
 //! walk onto a single line, `--line-prefix` puts something in front of it. On the filtered
 //! path it is the unit the cap is counted in -- commits where RTK chose the format, lines
-//! where the user did -- along with what git prints after a commit that is not another one
-//! and the `--no-merges` RTK adds to the command and must therefore also ask about.
+//! where the user did -- along with what git prints after a commit that is not another one.
 //!
 //! The shapes that narrow a walk by what its commits changed get their own tests, because
 //! those take a different probe: `--skip` is applied before a diff-based filter, so the cap
@@ -1331,47 +1330,65 @@ fn merge_heavy_repo_with_bodies(sides: usize, body: Option<&str>) -> Repo {
 }
 
 #[test]
-fn merges_rtk_drops_are_not_counted_as_a_cut() {
-    // The filtered path adds `--no-merges` of its own, so a cap is measured on the walk it
-    // ran: eleven ordinary commits among merges are more than the cap, ten are not.
-    // Exactly the cap in ordinary commits, nearly twice that overall.
+fn default_log_and_explicit_formats_keep_merge_commits() {
+    let repo = merge_heavy_repo(2);
+    let default = rtk_log(&repo.path, &repo.home, &[]);
+    assert!(default.status.success());
+    let shown = String::from_utf8(default.stdout).expect("UTF-8 log");
+    assert!(shown.contains("merge 1"), "HEAD merge missing: {shown}");
+    assert!(shown.contains("merge 0"), "earlier merge missing: {shown}");
+
+    for args in [
+        vec!["--oneline"],
+        vec!["--format=%h %s"],
+        vec!["--graph", "--oneline"],
+        vec!["--grep=^merge", "--format=%s"],
+        vec!["--first-parent", "--oneline"],
+        vec!["--merges", "--oneline"],
+        vec!["--no-merges", "--oneline"],
+        vec!["--min-parents=1", "--oneline"],
+        vec!["-n", "1", "--oneline"],
+    ] {
+        let mut native_args = vec!["log"];
+        native_args.extend_from_slice(&args);
+        let native = git_stdout(&repo, &native_args);
+        let output = rtk_log(&repo.path, &repo.home, &args);
+        assert!(output.status.success(), "{args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim_end(),
+            native.trim_end(),
+            "{args:?} must select the same history as git"
+        );
+    }
+}
+
+#[test]
+fn merge_selection_is_shared_by_the_render_and_cap_probe() {
     let repo = merge_heavy_repo(9);
     assert_eq!(native_commit_count(&repo, &[]), 19);
     assert_eq!(native_commit_count(&repo, &["--no-merges"]), 10);
     let wide = merge_heavy_repo(10);
     assert_eq!(native_commit_count(&wide, &["--no-merges"]), 11);
 
-    // The default format is fetched one commit past the cap, so the run itself answers.
-    // `--reverse` is not fetched that way, so the probe has to answer about the walk RTK ran,
-    // which means carrying RTK's `--no-merges`.
+    // Default output overfetches; --reverse asks a separate probe. Both must
+    // count the same commits, including any merge selection the caller made.
     for shape in [&[][..], &["--reverse"][..]] {
-        let out = rtk_log(&repo.path, &repo.home, shape);
-        assert!(out.status.success(), "rtk git log {shape:?} failed");
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert_eq!(filtered_entries(&stdout), 10, "{shape:?}: {stdout:?}");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            !stderr.contains("[rtk]"),
-            "{shape:?}: ten commits shown of ten selected: {stderr:?}"
-        );
-
-        let out = rtk_log(&wide.path, &wide.home, shape);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains(NOTICE),
-            "{shape:?}: eleven ordinary commits: {stderr:?}"
-        );
-
-        // A user who asks for merges gets RTK's `--no-merges` withheld, and then the wider
-        // walk is the right one to ask about.
-        let mut merges = vec!["--merges"];
-        merges.extend_from_slice(shape);
-        let out = rtk_log(&wide.path, &wide.home, &merges);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            !stderr.contains("[rtk]"),
-            "{shape:?}: ten merges, cap of ten: {stderr:?}"
-        );
+        for selection in [&[][..], &["--no-merges"][..], &["--merges"][..]] {
+            let args: Vec<_> = selection.iter().chain(shape).copied().collect();
+            for history in [&repo, &wide] {
+                let count = native_commit_count(history, &args);
+                let out = rtk_log(&history.path, &history.home, &args);
+                assert!(out.status.success(), "{args:?}");
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                assert_eq!(
+                    filtered_entries(&stdout),
+                    count.min(10),
+                    "{args:?}: {stdout}"
+                );
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                assert_eq!(stderr.contains(NOTICE), count > 10, "{args:?}: {stderr}");
+            }
+        }
     }
 }
 
@@ -2190,10 +2207,10 @@ fn a_bare_pathspec_on_the_filtered_walk_is_capped_and_says_so() {
 }
 
 #[test]
-fn a_probed_walk_carries_rtks_no_merges_and_the_users_pathspec() {
+fn a_probed_walk_keeps_merges_and_the_users_pathspec() {
     // A user-chosen format leaves RTK unable to count commits in what it printed, so the
     // question goes to git -- and that question has to be asked of the same walk that ran,
-    // with RTK's `--no-merges` on it and in front of the user's pathspec.
+    // with the user's pathspec and native merge selection intact.
     let repo = repo_with(55);
     let out = rtk_log(&repo.path, &repo.home, &["--oneline", "f.txt"]);
     assert!(out.status.success(), "rtk git log --oneline f.txt failed");
@@ -2202,8 +2219,7 @@ fn a_probed_walk_carries_rtks_no_merges_and_the_users_pathspec() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("[rtk] capped at 50 commits"), "{stderr:?}");
 
-    // Merges RTK dropped from the command must be dropped from the question too.
-    let merges = merge_heavy_repo(9);
+    let merges = merge_heavy_repo(4);
     let target = merges.path.join("out.txt");
     let redirect = format!("--output={}", target.to_string_lossy());
     let out = rtk_log(&merges.path, &merges.home, &[&redirect]);
@@ -2211,17 +2227,17 @@ fn a_probed_walk_carries_rtks_no_merges_and_the_users_pathspec() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !stderr.contains("[rtk]"),
-        "ten ordinary commits of nineteen, cap of ten: {stderr:?}"
+        "nine commits including merges, cap of ten: {stderr:?}"
     );
 
-    let wide = merge_heavy_repo(10);
+    let wide = merge_heavy_repo(5);
     let target = wide.path.join("out.txt");
     let redirect = format!("--output={}", target.to_string_lossy());
     let out = rtk_log(&wide.path, &wide.home, &[&redirect]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains(NOTICE),
-        "eleven ordinary commits: {stderr:?}"
+        "eleven commits including merges: {stderr:?}"
     );
 }
 
@@ -2731,7 +2747,7 @@ fn a_boundary_walk_prints_the_render_not_the_raw_run() {
     // comparison, so `--boundary` is fetched with the exact limit.
     let repo = merge_heavy_repo_with_bodies(12, Some("one\ntwo\nthree\nfour"));
     assert_eq!(native_commit_count(&repo, &["--no-merges"]), 13);
-    let out = rtk_log(&repo.path, &repo.home, &["--boundary"]);
+    let out = rtk_log(&repo.path, &repo.home, &["--boundary", "--no-merges"]);
     assert!(out.status.success(), "rtk git log --boundary failed");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains("---END---"), "the raw run: {stdout:?}");
@@ -2749,7 +2765,7 @@ fn a_boundary_walk_prints_the_render_not_the_raw_run() {
     // A cap that took nothing is silent under `--boundary` as well.
     let short = merge_heavy_repo_with_bodies(9, Some("one\ntwo\nthree\nfour"));
     assert_eq!(native_commit_count(&short, &["--no-merges"]), 10);
-    let out = rtk_log(&short.path, &short.home, &["--boundary"]);
+    let out = rtk_log(&short.path, &short.home, &["--boundary", "--no-merges"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("[rtk]"), "{stderr:?}");
 }
@@ -2893,7 +2909,7 @@ fn a_piped_stdin_does_not_change_which_walk_the_cap_is_measured_on() {
     }
 }
 
-/// What `git <global> log -<limit> --no-merges <args>` prints in the format RTK asks for: the
+/// What `git <global> log -<limit> <args>` prints in the format RTK asks for: the
 /// walk the limit alone gives.
 fn limit_alone(repo: &Repo, global: &[&str], args: &[&str], limit: usize) -> String {
     let limit = format!("-{limit}");
@@ -2901,7 +2917,6 @@ fn limit_alone(repo: &Repo, global: &[&str], args: &[&str], limit: usize) -> Str
     all.extend([
         "log",
         limit.as_str(),
-        "--no-merges",
         "--pretty=format:%h %s (%ar) <%an>%n%b%n---END---",
     ]);
     all.extend(args);
@@ -3033,18 +3048,18 @@ fn the_signature_of_the_commit_past_the_cap_is_not_part_of_the_walk() {
 #[test]
 fn the_bar_ahead_of_the_commit_past_the_cap_is_not_part_of_the_walk() {
     // `--show-linear-break` prints a bar ahead of a commit that is not the parent of the one
-    // printed before it, which is every other commit here once `--no-merges` has taken the
+    // printed before it, which is every other commit here once the caller's `--no-merges` takes the
     // merges out. The bar of the commit past the cap is not part of the ten asked for.
     let repo = merge_heavy_repo_with_bodies(12, Some("one\ntwo\nthree\nfour"));
     let long_bar = format!("--show-linear-break={}", "-".repeat(60));
     for flag in ["--show-linear-break", long_bar.as_str()] {
         let (ten, eleven) = (
-            limit_alone_weight(&repo, &[], &[flag], 10),
-            limit_alone_weight(&repo, &[], &[flag], 11),
+            limit_alone_weight(&repo, &[], &[flag, "--no-merges"], 10),
+            limit_alone_weight(&repo, &[], &[flag, "--no-merges"], 11),
         );
         assert!(ten + 4 < eleven, "the eleventh entry must weigh something");
 
-        let (out, tracked) = ledger_input(&repo, &[], &[flag], &[]);
+        let (out, tracked) = ledger_input(&repo, &[], &[flag, "--no-merges"], &[]);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains(NOTICE), "{flag}: {stderr:?}");
         assert!(
@@ -3058,7 +3073,7 @@ fn the_bar_ahead_of_the_commit_past_the_cap_is_not_part_of_the_walk() {
             assert!(stdout.contains("---END---"), "{flag}: {stdout:?}");
             assert_eq!(
                 without_ages(&stdout),
-                without_ages(&limit_alone(&repo, &[], &[flag], 10)),
+                without_ages(&limit_alone(&repo, &[], &[flag, "--no-merges"], 10)),
                 "{flag}"
             );
         }
@@ -3125,9 +3140,13 @@ fn a_graph_over_a_criss_cross_walk_holds_the_limits_own_rows_only() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains(NOTICE), "{revision}: {stderr:?}");
         let stdout = String::from_utf8_lossy(&out.stdout);
+        // Including merges can make the compact render smaller than raw output.
+        // An explicit count takes the same render path without overfetching.
+        let explicit = rtk_log(&repo.path, &repo.home, &["--graph", "-10", &revision]);
+        assert!(explicit.status.success());
         assert_eq!(
             without_ages(&stdout),
-            without_ages(&ten),
+            without_ages(&String::from_utf8_lossy(&explicit.stdout)),
             "{revision}: the walk shown"
         );
         // The relative dates of ten commits tick over together, ten bytes at most.
