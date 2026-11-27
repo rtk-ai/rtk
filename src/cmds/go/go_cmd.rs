@@ -401,11 +401,13 @@ pub(crate) fn is_go_test_json(input: &str) -> bool {
         {
             return false;
         }
-        // Compiler diagnostics can have indented continuation lines. A JSON
-        // record ends the block even if it is indented or contains a file location.
+        // Compiler diagnostics can have indented continuation lines and a bare
+        // `too many errors` trailer after 10 gc errors. A JSON record ends the
+        // block even if it is indented or contains a file location.
         while lines
             .next_if(|(_, raw)| {
                 is_go_build_text_diagnostic(raw)
+                    || raw.trim() == "too many errors"
                     || (raw.starts_with([' ', '\t']) && !raw.trim_start().starts_with('{'))
             })
             .is_some()
@@ -1004,6 +1006,45 @@ mod tests {
         }
         assert!(!is_go_test_json("go: downloading example.com/dep v1.0.0\n"));
         assert!(!is_go_test_json(r#"{"Action":"start"}"#));
+    }
+
+    #[test]
+    fn auto_detection_handles_leading_go_build_diagnostic_blocks() {
+        let event = r#"{"Action":"fail","Package":"example.com/proj","Test":"TestX"}"#;
+        let output_with_go_loc = r#"{"Action":"output","Package":"example.com/proj","Test":"TestX","Output":"x_test.go:12: boom\n"}"#;
+
+        let multi_diag = format!(
+            "# example.com/proj/broken [example.com/proj/broken.test]\nbroken/a.go:1:2: undefined: first\nbroken/b.go:3:4: undefined: second\n{event}\n"
+        );
+        assert!(is_go_test_json(&multi_diag));
+
+        let indented_json = format!(
+            "# example.com/proj/broken [example.com/proj/broken.test]\nbroken/a.go:1:2: undefined: first\n  {event}\n"
+        );
+        assert!(is_go_test_json(&indented_json));
+
+        let json_output_after_diag = format!(
+            "# example.com/proj/broken [example.com/proj/broken.test]\nbroken/a.go:1:2: undefined: first\n{output_with_go_loc}\n"
+        );
+        assert!(is_go_test_json(&json_output_after_diag));
+
+        let header_then_json_with_go_loc = format!("# Notes\n{output_with_go_loc}\n{event}\n");
+        assert!(!is_go_test_json(&header_then_json_with_go_loc));
+
+        let mut too_many = String::from("# p [p.test]\n");
+        for i in 1..=10 {
+            too_many.push_str(&format!("./a.go:{i}:2: undefined: x{i}\n"));
+        }
+        too_many.push_str("too many errors\n");
+        assert!(!is_go_test_json(&too_many));
+        assert!(!is_go_test_json(&format!(
+            "{too_many}unrelated prose\n{event}\n"
+        )));
+        assert!(!is_go_test_json(&format!("too many errors\n{event}\n")));
+
+        too_many.push_str(event);
+        too_many.push('\n');
+        assert!(is_go_test_json(&too_many));
     }
 
     #[test]

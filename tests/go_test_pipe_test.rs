@@ -99,6 +99,56 @@ fn leading_go_build_diagnostics_keep_the_test_summary() {
 }
 
 #[test]
+fn leading_go_build_diagnostics_with_too_many_errors_keep_the_test_summary() {
+    let mut input = String::from("# p [p.test]\n");
+    for i in 1..=10 {
+        input.push_str(&format!("./a.go:{i}:2: undefined: x{i}\n"));
+    }
+    input.push_str("too many errors\n");
+    input.push_str("{\"Action\":\"fail\",\"Package\":\"p\",\"Test\":\"TestX\"}\n");
+    input.push_str("{\"Action\":\"fail\",\"Package\":\"p\"}\n");
+
+    let shown = pipe_mode(&input, true);
+    assert_eq!(shown, pipe(&input));
+    assert!(shown.contains("[FAIL] TestX"), "{shown}");
+    assert!(shown.contains("too many errors\n"), "{shown}");
+}
+
+#[test]
+fn leading_go_build_diagnostics_pin_multiline_and_indented_json_boundaries() {
+    let fail_events = concat!(
+        "{\"Action\":\"fail\",\"Package\":\"example.com/proj/fails\",\"Test\":\"TestX\"}\n",
+        "{\"Action\":\"fail\",\"Package\":\"example.com/proj/fails\"}\n",
+    );
+    let multi_diag = format!(
+        "# example.com/proj/broken [example.com/proj/broken.test]\nbroken/a.go:1:2: undefined: first\nbroken/b.go:3:4: undefined: second\n{fail_events}"
+    );
+    let shown = pipe_mode(&multi_diag, true);
+    assert_eq!(shown, pipe(&multi_diag));
+    assert!(shown.contains("[FAIL] TestX"), "{shown}");
+
+    let indented_json = concat!(
+        "# example.com/proj/broken [example.com/proj/broken.test]\n",
+        "broken/a.go:1:2: undefined: first\n",
+        "  {\"Action\":\"fail\",\"Package\":\"example.com/proj/fails\",\"Test\":\"TestX\"}\n",
+        "  {\"Action\":\"fail\",\"Package\":\"example.com/proj/fails\"}\n",
+    );
+    let shown = pipe_mode(indented_json, true);
+    assert_eq!(shown, pipe(indented_json));
+    assert!(shown.contains("[FAIL] TestX"), "{shown}");
+
+    let output_with_go_loc = concat!(
+        "# example.com/proj/broken [example.com/proj/broken.test]\n",
+        "broken/a.go:1:2: undefined: first\n",
+        "{\"Action\":\"output\",\"Package\":\"example.com/proj/fails\",\"Test\":\"TestX\",\"Output\":\"x_test.go:12: boom\\n\"}\n",
+    );
+    assert_eq!(
+        pipe_mode(output_with_go_loc, true),
+        pipe(output_with_go_loc)
+    );
+}
+
+#[test]
 fn valid_json_events_still_use_the_existing_filter() {
     let pass = "{\"Action\":\"run\",\"Package\":\"example.com/proj\",\"Test\":\"TestOK\"}\n{\"Action\":\"pass\",\"Package\":\"example.com/proj\",\"Test\":\"TestOK\"}\n{\"Action\":\"pass\",\"Package\":\"example.com/proj\"}\n";
     assert_eq!(pipe(pass), "Go test: 1 passed in 1 packages");
