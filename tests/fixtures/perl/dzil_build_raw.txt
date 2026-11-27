@@ -1,0 +1,5 @@
+[DZ] beginning to build Acme-RtkSample
+[DZ] guessing dist's main_module is lib/Acme/RtkSample.pm
+[DZ] writing Acme-RtkSample in Acme-RtkSample-0.01
+[DZ] writing archive to Acme-RtkSample-0.01.tar.gz
+[DZ] built in Acme-RtkSample-0.01

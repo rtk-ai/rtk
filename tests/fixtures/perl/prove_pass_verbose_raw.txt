@@ -1,0 +1,42 @@
+t-pass/00-load.t ....... 
+ok 1 - use Acme::RtkSample;
+ok 2 - use Acme::RtkSample::Util;
+1..2
+ok
+t-pass/01-basic.t ...... 
+# Subtest: arithmetic
+    ok 1 - one plus two
+    ok 2 - zero plus zero
+    ok 3 - negative one plus one
+    1..3
+ok 1 - arithmetic
+# Subtest: classify
+    ok 1 - five is small
+    ok 2 - fifty is medium
+    ok 3 - five hundred is big
+    ok 4 - five thousand is huge
+    ok 5 - letters are nan
+    1..5
+ok 2 - classify
+# Subtest: util
+    ok 1 - trim both sides
+    ok 2 - mask keeps low byte
+    1..2
+ok 3 - util
+1..3
+ok
+t-pass/06-todo-skip.t .. 
+ok 1 - floating point add # TODO rounding not implemented
+ok 2 # skip no network in CI
+ok 3 # skip no network in CI
+ok 4 - plain pass
+1..4
+ok
+All tests successful.
+
+Test Summary Report
+-------------------
+t-pass/06-todo-skip.t (Wstat: 0 Tests: 4 Failed: 0)
+  TODO passed:   1
+Files=3, Tests=9,  0 wallclock secs ( 0.02 usr  0.00 sys +  0.04 cusr  0.01 csys =  0.07 CPU)
+Result: PASS

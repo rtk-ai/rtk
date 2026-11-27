@@ -1,0 +1,5 @@
+ExtUtils::MakeMaker
+strict
+Test2::V0
+Test::More
+warnings

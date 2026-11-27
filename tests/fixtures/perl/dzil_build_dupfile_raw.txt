@@ -1,0 +1,4 @@
+aborting; duplicate files would be produced at /opt/perl5/perl5.44.0/lib/site_perl/5.44.0/Dist/Zilla/App/Command/build.pm line 107.
+[DZ] beginning to build Acme-RtkSample
+[DZ] guessing dist's main_module is lib/Acme/RtkSample.pm
+[DZ] attempt to add Makefile.PL multiple times; added by: filename set by GatherDir (Dist::Zilla::Plugin::GatherDir line 231); encoded_content added by @Basic/GatherDir (Dist::Zilla::Plugin::GatherDir line 232); content set by MakeMaker (Dist::Zilla::Plugin::MakeMaker line 348); content added by @Basic/MakeMaker (Dist::Zilla::Plugin::MakeMaker line 163)

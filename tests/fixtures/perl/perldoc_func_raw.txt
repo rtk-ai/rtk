@@ -1,0 +1,509 @@
+    open FILEHANDLE,MODE,EXPR
+    open FILEHANDLE,MODE,EXPR,LIST
+    open FILEHANDLE,MODE,REFERENCE
+    open FILEHANDLE,EXPR
+    open FILEHANDLE
+            Associates an internal FILEHANDLE with the external file
+            specified by EXPR. That filehandle will subsequently allow you
+            to perform I/O operations on that file, such as reading from it
+            or writing to it.
+
+            Instead of a filename, you may specify an external command (plus
+            an optional argument list) or a scalar reference, in order to
+            open filehandles on commands or in-memory scalars, respectively.
+
+            A thorough reference to "open" follows. For a gentler
+            introduction to the basics of "open", see also the perlopentut
+            manual page.
+
+            Working with files
+                Most often, "open" gets invoked with three arguments: the
+                required FILEHANDLE (usually an empty scalar variable),
+                followed by MODE (usually a literal describing the I/O mode
+                the filehandle will use), and then the filename that the new
+                filehandle will refer to.
+
+                Simple examples
+                    Reading from a file:
+
+                        open(my $fh, "<", "input.txt")
+                            or die "Can't open < input.txt: $!";
+
+                        # Process every line in input.txt
+                        while (my $line = readline($fh)) {
+                            #
+                            # ... do something interesting with $line here ...
+                            #
+                        }
+
+                    or writing to one:
+
+                        open(my $fh, ">", "output.txt")
+                            or die "Can't open > output.txt: $!";
+
+                        print $fh "This line gets printed into output.txt.\n";
+
+                    For a summary of common filehandle operations such as
+                    these, see "Files and I/O" in perlintro.
+
+                About filehandles
+                    The first argument to "open", labeled FILEHANDLE in this
+                    reference, is usually a scalar variable. (Exceptions
+                    exist, described in "Other considerations", below.) If
+                    the call to "open" succeeds, then the expression
+                    provided as FILEHANDLE will get assigned an open
+                    *filehandle*. That filehandle provides an internal
+                    reference to the specified external file, conveniently
+                    stored in a Perl variable, and ready for I/O operations
+                    such as reading and writing.
+
+                About modes
+                    When calling "open" with three or more arguments, the
+                    second argument -- labeled MODE here -- defines the
+                    *open mode*. MODE is usually a literal string comprising
+                    special characters that define the intended I/O role of
+                    the filehandle being created: whether it's read-only, or
+                    read-and-write, and so on.
+
+                    If MODE is "<", the file is opened for input
+                    (read-only). If MODE is ">", the file is opened for
+                    output, with existing files first being truncated
+                    ("clobbered") and nonexisting files newly created. If
+                    MODE is ">>", the file is opened for appending, again
+                    being created if necessary.
+
+                    You can put a "+" in front of the ">" or "<" to indicate
+                    that you want both read and write access to the file;
+                    thus "+<" is almost always preferred for read/write
+                    updates--the "+>" mode would clobber the file first. You
+                    can't usually use either read-write mode for updating
+                    textfiles, since they have variable-length records. See
+                    the -i switch in perlrun for a better approach. The file
+                    is created with permissions of 0666 modified by the
+                    process's "umask" value.
+
+                    These various prefixes correspond to the fopen(3) modes
+                    of "r", "r+", "w", "w+", "a", and "a+".
+
+                    More examples of different modes in action:
+
+                     # Open a file for concatenation
+                     open(my $log, ">>", "/usr/spool/news/twitlog")
+                         or warn "Couldn't open log file; discarding input";
+
+                     # Open a file for reading and writing
+                     open(my $dbase, "+<", "dbase.mine")
+                         or die "Can't open 'dbase.mine' for update: $!";
+
+                Checking the return value
+                    Open returns nonzero on success, the undefined value
+                    otherwise. If the "open" involved a pipe, the return
+                    value happens to be the pid of the subprocess.
+
+                    When opening a file, it's seldom a good idea to continue
+                    if the request failed, so "open" is frequently used with
+                    "die". Even if you want your code to do something other
+                    than "die" on a failed open, you should still always
+                    check the return value from opening a file.
+
+            Specifying I/O layers in MODE
+                You can use the three-argument form of open to specify I/O
+                layers (sometimes referred to as "disciplines") to apply to
+                the new filehandle. These affect how the input and output
+                are processed (see open and PerlIO for more details). For
+                example:
+
+                    # loads PerlIO::encoding automatically
+                    open(my $fh, "<:encoding(UTF-8)", $filename)
+                        || die "Can't open UTF-8 encoded $filename: $!";
+
+                This opens the UTF8-encoded file containing Unicode
+                characters; see perluniintro. Note that if layers are
+                specified in the three-argument form, then default layers
+                stored in "${^OPEN}" (usually set by the open pragma or the
+                switch "-CioD") are ignored. Those layers will also be
+                ignored if you specify a colon with no name following it. In
+                that case the default layer for the operating system (:raw
+                on Unix, :crlf on Windows) is used.
+
+                On some systems (in general, DOS- and Windows-based systems)
+                "binmode" is necessary when you're not working with a text
+                file. For the sake of portability it is a good idea always
+                to use it when appropriate, and never to use it when it
+                isn't appropriate. Also, people can set their I/O to be by
+                default UTF8-encoded Unicode, not bytes.
+
+            Using "undef" for temporary files
+                As a special case the three-argument form with a read/write
+                mode and the third argument being "undef":
+
+                    open(my $tmp, "+>", undef) or die ...
+
+                opens a filehandle to a newly created empty anonymous
+                temporary file. (This happens under any mode, which makes
+                "+>" the only useful and sensible mode to use.) You will
+                need to "seek" to do the reading.
+
+            Opening a filehandle into an in-memory scalar
+                You can open filehandles directly to Perl scalars instead of
+                a file or other resource external to the program. To do so,
+                provide a reference to that scalar as the third argument to
+                "open", like so:
+
+                 open(my $memory, ">", \$var)
+                     or die "Can't open memory file: $!";
+                 print $memory "foo!\n";    # output will appear in $var
+
+                To (re)open "STDOUT" or "STDERR" as an in-memory file, close
+                it first:
+
+                    close STDOUT;
+                    open(STDOUT, ">", \$variable)
+                        or die "Can't open STDOUT: $!";
+
+                The scalars for in-memory files are treated as octet
+                strings: unless the file is being opened with truncation the
+                scalar may not contain any code points over 0xFF.
+
+                Opening in-memory files *can* fail for a variety of reasons.
+                As with any other "open", check the return value for
+                success.
+
+                *Technical note*: This feature works only when Perl is built
+                with PerlIO -- the default, except with older (pre-5.16)
+                Perl installations that were configured to not include it
+                (e.g. via "Configure -Uuseperlio"). You can see whether your
+                Perl was built with PerlIO by running "perl -V:useperlio".
+                If it says 'define', you have PerlIO; otherwise you don't.
+
+                See perliol for detailed info on PerlIO.
+
+            Opening a filehandle into a command
+                If MODE is "|-", then the filename is interpreted as a
+                command to which output is to be piped, and if MODE is "-|",
+                the filename is interpreted as a command that pipes output
+                to us. In the two-argument (and one-argument) form, one
+                should replace dash ("-") with the command. See "Using
+                open() for IPC" in perlipc for more examples of this. (You
+                are not allowed to "open" to a command that pipes both in
+                *and* out, but see IPC::Open2, IPC::Open3, and
+                "Bidirectional Communication with Another Process" in
+                perlipc for alternatives.)
+
+                 open(my $article_fh, "-|", "caesar <$article")  # decrypt
+                                                                 # article
+                     or die "Can't start caesar: $!";
+
+                 open(my $article_fh, "caesar <$article |")      # ditto
+                     or die "Can't start caesar: $!";
+
+                 open(my $out_fh, "|-", "sort >Tmp$$")    # $$ is our process id
+                     or die "Can't start sort: $!";
+
+                In the form of pipe opens taking three or more arguments, if
+                LIST is specified (extra arguments after the command name)
+                then LIST becomes arguments to the command invoked if the
+                platform supports it. The meaning of "open" with more than
+                three arguments for non-pipe modes is not yet defined, but
+                experimental "layers" may give extra LIST arguments meaning.
+
+                If you open a pipe on the command "-" (that is, specify
+                either "|-" or "-|" with the one- or two-argument forms of
+                "open"), an implicit "fork" is done, so "open" returns
+                twice: in the parent process it returns the pid of the child
+                process, and in the child process it returns (a defined) 0.
+                Use defined($pid) or "//" to determine whether the open was
+                successful.
+
+                For example, use either
+
+                   my $child_pid = open(my $from_kid, "-|")
+                        // die "Can't fork: $!";
+
+                or
+
+                   my $child_pid = open(my $to_kid,   "|-")
+                        // die "Can't fork: $!";
+
+                followed by
+
+                    if ($child_pid) {
+                        # am the parent:
+                        # either write $to_kid or else read $from_kid
+                        ...
+                       waitpid $child_pid, 0;
+                    } else {
+                        # am the child; use STDIN/STDOUT normally
+                        ...
+                        exit;
+                    }
+
+                The filehandle behaves normally for the parent, but I/O to
+                that filehandle is piped from/to the STDOUT/STDIN of the
+                child process. In the child process, the filehandle isn't
+                opened--I/O happens from/to the new STDOUT/STDIN. Typically
+                this is used like the normal piped open when you want to
+                exercise more control over just how the pipe command gets
+                executed, such as when running setuid and you don't want to
+                have to scan shell commands for metacharacters.
+
+                The following blocks are more or less equivalent:
+
+                    open(my $fh, "|tr '[a-z]' '[A-Z]'");
+                    open(my $fh, "|-", "tr '[a-z]' '[A-Z]'");
+                    open(my $fh, "|-") || exec 'tr', '[a-z]', '[A-Z]';
+                    open(my $fh, "|-", "tr", '[a-z]', '[A-Z]');
+
+                    open(my $fh, "cat -n '$file'|");
+                    open(my $fh, "-|", "cat -n '$file'");
+                    open(my $fh, "-|") || exec "cat", "-n", $file;
+                    open(my $fh, "-|", "cat", "-n", $file);
+
+                The last two examples in each block show the pipe as "list
+                form", which is not yet supported on all platforms. (If your
+                platform has a real "fork", such as Linux and macOS, you can
+                use the list form; it also works on Windows with Perl 5.22
+                or later.) You would want to use the list form of the pipe
+                so you can pass literal arguments to the command without
+                risk of the shell interpreting any shell metacharacters in
+                them. However, this also bars you from opening pipes to
+                commands that intentionally contain shell metacharacters,
+                such as:
+
+                    open(my $fh, "|cat -n | expand -4 | lpr")
+                        || die "Can't open pipeline to lpr: $!";
+
+                See "Safe Pipe Opens" in perlipc for more examples of this.
+
+            Duping filehandles
+                You may also, in the Bourne shell tradition, specify an EXPR
+                beginning with ">&", in which case the rest of the string is
+                interpreted as the name of a filehandle (or file descriptor,
+                if numeric) to be duped (as in dup(2)) and opened. You may
+                use "&" after ">", ">>", "<", "+>", "+>>", and "+<". The
+                mode you specify should match the mode of the original
+                filehandle. (Duping a filehandle does not take into account
+                any existing contents of IO buffers.) If you use the
+                three-argument form, then you can pass either a number, the
+                name of a filehandle, or the normal "reference to a glob".
+
+                Here is a script that saves, redirects, and restores
+                "STDOUT" and "STDERR" using various methods:
+
+                    #!/usr/bin/perl
+                    open(my $oldout, ">&STDOUT")
+                        or die "Can't dup STDOUT: $!";
+                    open(OLDERR,     ">&", \*STDERR)
+                        or die "Can't dup STDERR: $!";
+
+                    open(STDOUT, '>', "foo.out")
+                        or die "Can't redirect STDOUT: $!";
+                    open(STDERR, ">&STDOUT")
+                        or die "Can't dup STDOUT: $!";
+
+                    select STDERR; $| = 1;  # make unbuffered
+                    select STDOUT; $| = 1;  # make unbuffered
+
+                    print STDOUT "stdout 1\n";  # this works for
+                    print STDERR "stderr 1\n";  # subprocesses too
+
+                    open(STDOUT, ">&", $oldout)
+                        or die "Can't dup \$oldout: $!";
+                    open(STDERR, ">&OLDERR")
+                        or die "Can't dup OLDERR: $!";
+
+                    print STDOUT "stdout 2\n";
+                    print STDERR "stderr 2\n";
+
+                If you specify '<&=X', where "X" is a file descriptor number
+                or a filehandle, then Perl will do an equivalent of C's
+                fdopen(3) of that file descriptor (and not call dup(2));
+                this is more parsimonious of file descriptors. For example:
+
+                    # open for input, reusing the fileno of $fd
+                    open(my $fh, "<&=", $fd)
+
+                or
+
+                    open(my $fh, "<&=$fd")
+
+                or
+
+                    # open for append, using the fileno of $oldfh
+                    open(my $fh, ">>&=", $oldfh)
+
+                Being parsimonious on filehandles is also useful (besides
+                being parsimonious) for example when something is dependent
+                on file descriptors, like for example locking using "flock".
+                If you do just "open(my $A, ">>&", $B)", the filehandle $A
+                will not have the same file descriptor as $B, and therefore
+                flock($A) will not flock($B) nor vice versa. But with
+                "open(my $A, ">>&=", $B)", the filehandles will share the
+                same underlying system file descriptor.
+
+                Note that under Perls older than 5.8.0, Perl uses the
+                standard C library's' fdopen(3) to implement the "="
+                functionality. On many Unix systems, fdopen(3) fails when
+                file descriptors exceed a certain value, typically 255. For
+                Perls 5.8.0 and later, PerlIO is (most often) the default.
+
+            Legacy usage
+                This section describes ways to call "open" outside of best
+                practices; you may encounter these uses in older code. Perl
+                does not consider their use deprecated, exactly, but neither
+                is it recommended in new code, for the sake of clarity and
+                readability.
+
+                Specifying mode and filename as a single argument
+                    In the one- and two-argument forms of the call, the mode
+                    and filename should be concatenated (in that order),
+                    preferably separated by white space. You can--but
+                    shouldn't--omit the mode in these forms when that mode
+                    is "<". It is safe to use the two-argument form of
+                    "open" if the filename argument is a known literal.
+
+                     open(my $dbase, "+<dbase.mine")          # ditto
+                         or die "Can't open 'dbase.mine' for update: $!";
+
+                    In the two-argument (and one-argument) form, opening
+                    "<-" or "-" opens STDIN and opening ">-" opens STDOUT.
+
+                    New code should favor the three-argument form of "open"
+                    over this older form. Declaring the mode and the
+                    filename as two distinct arguments avoids any confusion
+                    between the two.
+
+                Assigning a filehandle to a bareword
+                    An older style is to use a bareword as the filehandle,
+                    as
+
+                        open(FH, "<", "input.txt")
+                           or die "Can't open < input.txt: $!";
+
+                    Then you can use "FH" as the filehandle, in "close FH"
+                    and "<FH>" and so on. Note that it's a global variable,
+                    so this form is not recommended when dealing with
+                    filehandles other than Perl's built-in ones (e.g. STDOUT
+                    and STDIN). In fact, using a bareword for the filehandle
+                    is an error when the "bareword_filehandles" feature has
+                    been disabled. This feature is disabled automatically
+                    when in the scope of "use v5.36.0" or later.
+
+                Calling "open" with one argument via global variables
+                    As a shortcut, a one-argument call takes the filename
+                    from the global scalar variable of the same name as the
+                    bareword filehandle:
+
+                        $ARTICLE = 100;
+                        open(ARTICLE)
+                            or die "Can't find article $ARTICLE: $!\n";
+
+                    Here $ARTICLE must be a global scalar variable in the
+                    same package as the filehandle - not one declared with
+                    "my" or "state".
+
+            Other considerations
+
+                Automatic filehandle closure
+                    The filehandle will be closed when its reference count
+                    reaches zero. If it is a lexically scoped variable
+                    declared with "my", that usually means the end of the
+                    enclosing scope. However, this automatic close does not
+                    check for errors, so it is better to explicitly close
+                    filehandles, especially those used for writing:
+
+                        close($handle)
+                           || warn "close failed: $!";
+
+                Automatic pipe flushing
+                    Perl will attempt to flush all files opened for output
+                    before any operation that may do a fork, but this may
+                    not be supported on some platforms (see perlport). To be
+                    safe, you may need to set $| ($AUTOFLUSH in English) or
+                    call the "autoflush" method of "IO::Handle" on any open
+                    handles.
+
+                    On systems that support a close-on-exec flag on files,
+                    the flag will be set for the newly opened file
+                    descriptor as determined by the value of $^F. See "$^F"
+                    in perlvar.
+
+                    Closing any piped filehandle causes the parent process
+                    to wait for the child to finish, then returns the status
+                    value in $? and "${^CHILD_ERROR_NATIVE}".
+
+                Direct versus by-reference assignment of filehandles
+                    If FILEHANDLE -- the first argument in a call to "open"
+                    -- is an undefined scalar variable (or array or hash
+                    element), a new filehandle is autovivified, meaning that
+                    the variable is assigned a reference to a newly
+                    allocated anonymous filehandle. Otherwise if FILEHANDLE
+                    is an expression, its value is the real filehandle.
+                    (This is considered a symbolic reference, so "use strict
+                    "refs"" should *not* be in effect.)
+
+                Whitespace and special characters in the filename argument
+                    The filename passed to the one- and two-argument forms
+                    of "open" will have leading and trailing whitespace
+                    deleted and normal redirection characters honored. This
+                    property, known as "magic open", can often be used to
+                    good effect. A user could specify a filename of "rsh cat
+                    file |", or you could change certain filenames as
+                    needed:
+
+                        $filename =~ s/(.*\.gz)\s*$/gzip -dc < $1|/;
+                        open(my $fh, $filename)
+                            or die "Can't open $filename: $!";
+
+                    Use the three-argument form to open a file with
+                    arbitrary weird characters in it,
+
+                        open(my $fh, "<", $file)
+                            || die "Can't open $file: $!";
+
+                    otherwise it's necessary to protect any leading and
+                    trailing whitespace:
+
+                        $file =~ s#^(\s)#./$1#;
+                        open(my $fh, "< $file\0")
+                            || die "Can't open $file: $!";
+
+                    (this may not work on some bizarre filesystems). One
+                    should conscientiously choose between the *magic* and
+                    *three-argument* form of "open":
+
+                        open(my $in, $ARGV[0]) || die "Can't open $ARGV[0]: $!";
+
+                    will allow the user to specify an argument of the form
+                    "rsh cat file |", but will not work on a filename that
+                    happens to have a trailing space, while
+
+                        open(my $in, "<", $ARGV[0])
+                            || die "Can't open $ARGV[0]: $!";
+
+                    will have exactly the opposite restrictions. (However,
+                    some shells support the syntax "perl your_program.pl <(
+                    rsh cat file )", which produces a filename that can be
+                    opened normally.)
+
+                Invoking C-style "open"
+                    If you want a "real" C open(2), then you should use the
+                    "sysopen" function, which involves no such magic (but
+                    uses different filemodes than Perl "open", which
+                    corresponds to C fopen(3)). This is another way to
+                    protect your filenames from interpretation. For example:
+
+                        use IO::Handle;
+                        sysopen(my $fh, $path, O_RDWR|O_CREAT|O_EXCL)
+                            or die "Can't open $path: $!";
+                        $fh->autoflush(1);
+                        print $fh "stuff $$\n";
+                        seek($fh, 0, 0);
+                        print "File contains: ", readline($fh);
+
+                    See "seek" for some details about mixing reading and
+                    writing.
+
+                Portability issues
+                    See "open" in perlport.
+

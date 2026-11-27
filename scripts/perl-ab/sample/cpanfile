@@ -1,0 +1,8 @@
+requires 'List::MoreUtils', '0.428';
+requires 'Try::Tiny', '0.31';
+requires 'Acme::Does::Not::Exist::RtkSample', '1.0';
+
+on test => sub {
+    requires 'Test::More', '0.98';
+    requires 'Test2::V0';
+};
