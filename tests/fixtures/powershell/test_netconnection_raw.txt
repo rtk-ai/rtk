@@ -1,0 +1,11 @@
+# rtk fixture note: structure captured from real PowerShell 5.1 output (Test-NetConnection -InformationLevel Detailed), values anonymized (real IPs replaced with RFC 5737 documentation addresses).
+
+ComputerName           : example.com
+RemoteAddress          : 203.0.113.10
+NameResolutionResults  : 203.0.113.10
+                         example.com
+InterfaceAlias         : Ethernet
+SourceAddress          : 192.0.2.5
+NetRoute (NextHop)     : 192.0.2.1
+PingSucceeded          : True
+PingReplyDetails (RTT) : 14 ms

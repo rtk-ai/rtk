@@ -196,6 +196,7 @@ const UNDOCUMENTED: &[&str] = &[
     "pint",
     "pio",
     "poetry",
+    "powershell",
     "pre-commit",
     "prettier",
     "ps",

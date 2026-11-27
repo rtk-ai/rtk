@@ -1,0 +1,163 @@
+# rtk fixture note: real PowerShell 5.1 output (Get-ChildItem), captured against a throwaway scratch directory; path anonymized to C:\Users\dev\workspace, all other content/formatting is authentic.
+
+
+    Directory: C:\Users\dev\workspace
+
+
+Mode          LastWriteTime Length Name        
+----          ------------- ------ ----        
+d-----   7/6/2026   2:17 PM        docs        
+d-----   7/6/2026   2:17 PM        folder-1    
+d-----   7/6/2026   2:17 PM        folder-10   
+d-----   7/6/2026   2:17 PM        folder-11   
+d-----   7/6/2026   2:17 PM        folder-12   
+d-----   7/6/2026   2:17 PM        folder-13   
+d-----   7/6/2026   2:17 PM        folder-14   
+d-----   7/6/2026   2:17 PM        folder-15   
+d-----   7/6/2026   2:17 PM        folder-16   
+d-----   7/6/2026   2:17 PM        folder-17   
+d-----   7/6/2026   2:17 PM        folder-18   
+d-----   7/6/2026   2:17 PM        folder-19   
+d-----   7/6/2026   2:17 PM        folder-2    
+d-----   7/6/2026   2:17 PM        folder-20   
+d-----   7/6/2026   2:17 PM        folder-3    
+d-----   7/6/2026   2:17 PM        folder-4    
+d-----   7/6/2026   2:17 PM        folder-5    
+d-----   7/6/2026   2:17 PM        folder-6    
+d-----   7/6/2026   2:17 PM        folder-7    
+d-----   7/6/2026   2:17 PM        folder-8    
+d-----   7/6/2026   2:17 PM        folder-9    
+d-----   7/6/2026   2:18 PM        logs        
+-a----   7/6/2026   2:17 PM     22 note-1.txt  
+-a----   7/6/2026   2:17 PM     23 note-10.txt 
+-a----   7/6/2026   2:17 PM     24 note-100.txt
+-a----   7/6/2026   2:17 PM     24 note-101.txt
+-a----   7/6/2026   2:17 PM     24 note-102.txt
+-a----   7/6/2026   2:17 PM     24 note-103.txt
+-a----   7/6/2026   2:17 PM     24 note-104.txt
+-a----   7/6/2026   2:17 PM     24 note-105.txt
+-a----   7/6/2026   2:17 PM     24 note-106.txt
+-a----   7/6/2026   2:17 PM     24 note-107.txt
+-a----   7/6/2026   2:17 PM     24 note-108.txt
+-a----   7/6/2026   2:17 PM     24 note-109.txt
+-a----   7/6/2026   2:17 PM     23 note-11.txt 
+-a----   7/6/2026   2:17 PM     24 note-110.txt
+-a----   7/6/2026   2:17 PM     24 note-111.txt
+-a----   7/6/2026   2:17 PM     24 note-112.txt
+-a----   7/6/2026   2:17 PM     24 note-113.txt
+-a----   7/6/2026   2:17 PM     24 note-114.txt
+-a----   7/6/2026   2:17 PM     24 note-115.txt
+-a----   7/6/2026   2:17 PM     24 note-116.txt
+-a----   7/6/2026   2:17 PM     24 note-117.txt
+-a----   7/6/2026   2:17 PM     24 note-118.txt
+-a----   7/6/2026   2:17 PM     24 note-119.txt
+-a----   7/6/2026   2:17 PM     23 note-12.txt 
+-a----   7/6/2026   2:17 PM     24 note-120.txt
+-a----   7/6/2026   2:17 PM     24 note-121.txt
+-a----   7/6/2026   2:17 PM     24 note-122.txt
+-a----   7/6/2026   2:17 PM     24 note-123.txt
+-a----   7/6/2026   2:17 PM     24 note-124.txt
+-a----   7/6/2026   2:17 PM     24 note-125.txt
+-a----   7/6/2026   2:17 PM     24 note-126.txt
+-a----   7/6/2026   2:17 PM     24 note-127.txt
+-a----   7/6/2026   2:17 PM     24 note-128.txt
+-a----   7/6/2026   2:17 PM     24 note-129.txt
+-a----   7/6/2026   2:17 PM     23 note-13.txt 
+-a----   7/6/2026   2:17 PM     24 note-130.txt
+-a----   7/6/2026   2:17 PM     23 note-14.txt 
+-a----   7/6/2026   2:17 PM     23 note-15.txt 
+-a----   7/6/2026   2:17 PM     23 note-16.txt 
+-a----   7/6/2026   2:17 PM     23 note-17.txt 
+-a----   7/6/2026   2:17 PM     23 note-18.txt 
+-a----   7/6/2026   2:17 PM     23 note-19.txt 
+-a----   7/6/2026   2:17 PM     22 note-2.txt  
+-a----   7/6/2026   2:17 PM     23 note-20.txt 
+-a----   7/6/2026   2:17 PM     23 note-21.txt 
+-a----   7/6/2026   2:17 PM     23 note-22.txt 
+-a----   7/6/2026   2:17 PM     23 note-23.txt 
+-a----   7/6/2026   2:17 PM     23 note-24.txt 
+-a----   7/6/2026   2:17 PM     23 note-25.txt 
+-a----   7/6/2026   2:17 PM     23 note-26.txt 
+-a----   7/6/2026   2:17 PM     23 note-27.txt 
+-a----   7/6/2026   2:17 PM     23 note-28.txt 
+-a----   7/6/2026   2:17 PM     23 note-29.txt 
+-a----   7/6/2026   2:17 PM     22 note-3.txt  
+-a----   7/6/2026   2:17 PM     23 note-30.txt 
+-a----   7/6/2026   2:17 PM     23 note-31.txt 
+-a----   7/6/2026   2:17 PM     23 note-32.txt 
+-a----   7/6/2026   2:17 PM     23 note-33.txt 
+-a----   7/6/2026   2:17 PM     23 note-34.txt 
+-a----   7/6/2026   2:17 PM     23 note-35.txt 
+-a----   7/6/2026   2:17 PM     23 note-36.txt 
+-a----   7/6/2026   2:17 PM     23 note-37.txt 
+-a----   7/6/2026   2:17 PM     23 note-38.txt 
+-a----   7/6/2026   2:17 PM     23 note-39.txt 
+-a----   7/6/2026   2:17 PM     22 note-4.txt  
+-a----   7/6/2026   2:17 PM     23 note-40.txt 
+-a----   7/6/2026   2:17 PM     23 note-41.txt 
+-a----   7/6/2026   2:17 PM     23 note-42.txt 
+-a----   7/6/2026   2:17 PM     23 note-43.txt 
+-a----   7/6/2026   2:17 PM     23 note-44.txt 
+-a----   7/6/2026   2:17 PM     23 note-45.txt 
+-a----   7/6/2026   2:17 PM     23 note-46.txt 
+-a----   7/6/2026   2:17 PM     23 note-47.txt 
+-a----   7/6/2026   2:17 PM     23 note-48.txt 
+-a----   7/6/2026   2:17 PM     23 note-49.txt 
+-a----   7/6/2026   2:17 PM     22 note-5.txt  
+-a----   7/6/2026   2:17 PM     23 note-50.txt 
+-a----   7/6/2026   2:17 PM     23 note-51.txt 
+-a----   7/6/2026   2:17 PM     23 note-52.txt 
+-a----   7/6/2026   2:17 PM     23 note-53.txt 
+-a----   7/6/2026   2:17 PM     23 note-54.txt 
+-a----   7/6/2026   2:17 PM     23 note-55.txt 
+-a----   7/6/2026   2:17 PM     23 note-56.txt 
+-a----   7/6/2026   2:17 PM     23 note-57.txt 
+-a----   7/6/2026   2:17 PM     23 note-58.txt 
+-a----   7/6/2026   2:17 PM     23 note-59.txt 
+-a----   7/6/2026   2:17 PM     22 note-6.txt  
+-a----   7/6/2026   2:17 PM     23 note-60.txt 
+-a----   7/6/2026   2:17 PM     23 note-61.txt 
+-a----   7/6/2026   2:17 PM     23 note-62.txt 
+-a----   7/6/2026   2:17 PM     23 note-63.txt 
+-a----   7/6/2026   2:17 PM     23 note-64.txt 
+-a----   7/6/2026   2:17 PM     23 note-65.txt 
+-a----   7/6/2026   2:17 PM     23 note-66.txt 
+-a----   7/6/2026   2:17 PM     23 note-67.txt 
+-a----   7/6/2026   2:17 PM     23 note-68.txt 
+-a----   7/6/2026   2:17 PM     23 note-69.txt 
+-a----   7/6/2026   2:17 PM     22 note-7.txt  
+-a----   7/6/2026   2:17 PM     23 note-70.txt 
+-a----   7/6/2026   2:17 PM     23 note-71.txt 
+-a----   7/6/2026   2:17 PM     23 note-72.txt 
+-a----   7/6/2026   2:17 PM     23 note-73.txt 
+-a----   7/6/2026   2:17 PM     23 note-74.txt 
+-a----   7/6/2026   2:17 PM     23 note-75.txt 
+-a----   7/6/2026   2:17 PM     23 note-76.txt 
+-a----   7/6/2026   2:17 PM     23 note-77.txt 
+-a----   7/6/2026   2:17 PM     23 note-78.txt 
+-a----   7/6/2026   2:17 PM     23 note-79.txt 
+-a----   7/6/2026   2:17 PM     22 note-8.txt  
+-a----   7/6/2026   2:17 PM     23 note-80.txt 
+-a----   7/6/2026   2:17 PM     23 note-81.txt 
+-a----   7/6/2026   2:17 PM     23 note-82.txt 
+-a----   7/6/2026   2:17 PM     23 note-83.txt 
+-a----   7/6/2026   2:17 PM     23 note-84.txt 
+-a----   7/6/2026   2:17 PM     23 note-85.txt 
+-a----   7/6/2026   2:17 PM     23 note-86.txt 
+-a----   7/6/2026   2:17 PM     23 note-87.txt 
+-a----   7/6/2026   2:17 PM     23 note-88.txt 
+-a----   7/6/2026   2:17 PM     23 note-89.txt 
+-a----   7/6/2026   2:17 PM     22 note-9.txt  
+-a----   7/6/2026   2:17 PM     23 note-90.txt 
+-a----   7/6/2026   2:17 PM     23 note-91.txt 
+-a----   7/6/2026   2:17 PM     23 note-92.txt 
+-a----   7/6/2026   2:17 PM     23 note-93.txt 
+-a----   7/6/2026   2:17 PM     23 note-94.txt 
+-a----   7/6/2026   2:17 PM     23 note-95.txt 
+-a----   7/6/2026   2:17 PM     23 note-96.txt 
+-a----   7/6/2026   2:17 PM     23 note-97.txt 
+-a----   7/6/2026   2:17 PM     23 note-98.txt 
+-a----   7/6/2026   2:17 PM     23 note-99.txt 
+
+
+

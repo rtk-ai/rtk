@@ -147,6 +147,21 @@ listing into `head`, `tail`, or `cat`.
 | `terraform plan` | Planned changes summary, resource diffs condensed |
 | `nix search` | One line per package; first 20 shown, the rest counted (a lower bound when nix fails or the output nears 10 MiB) with a recall hint; stderr forwarded (whole on failure or when short); a search with `--json`, `-v`/`--verbose`, `--debug`, `--debugger`, `--log-format` or `--trace-function-calls`, and other `nix` commands, pass through |
 
+## PowerShell (Windows)
+
+The hook rewrites these cmdlets to `rtk powershell <Cmdlet>`, which runs them through `pwsh` (or `powershell.exe` when `pwsh` is not installed). A cmdlet that feeds a pipeline (`Get-Process | Where-Object ...`) is not rewritten, since the next stage expects objects, not text.
+
+| Command | What changes |
+|---------|--------------|
+| `Get-ChildItem`, `Get-Item`, `Get-Process`, `Get-Service` | Header kept, rows capped with a recall hint |
+| `Get-NetAdapter`, `Get-NetTCPConnection`, `Get-Package` | Header kept, rows capped with a recall hint |
+| `Get-WinEvent`, `Get-EventLog` | Wrapped rows folded back into one record, then capped |
+| `Get-Content` | Head and tail of large files |
+| `Select-String`, `Get-Counter` | Lines capped with an overflow note |
+| `Get-ComputerInfo`, `Get-SystemInfo`, `Test-NetConnection` | A handful of key properties |
+| `Get-ItemProperty` | Registry path noise dropped |
+| `Install-Package` | Status and outcome lines only |
+
 ## Global flags
 
 These flags apply to all RTK commands and must come before the subcommand:

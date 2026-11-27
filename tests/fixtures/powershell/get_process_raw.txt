@@ -1,0 +1,204 @@
+# rtk fixture note: structure captured from real PowerShell 5.1 output (Get-Process), values anonymized (process names/PIDs replaced with generic placeholders).
+
+Name                    Id CPU      WorkingSet
+----                    -- ---      ----------
+SampleSvcHost1          10001              114857
+DemoWorker2             10002              219714
+ContosoTray3            10003 3.09375      324571
+PlaceholderUI4          10004              429428
+TestBackground5         10005              534285
+SampleRenderer6         10006 6.09375      639142
+DemoIndexer7            10007              743999
+ExampleAgent8           10008              848856
+SampleSvcHost9          10009 9.09375      953713
+DemoWorker10            10010             1058570
+ContosoTray11           10011             1163427
+PlaceholderUI12         10012 12.09375    1268284
+TestBackground13        10013             1373141
+SampleRenderer14        10014             1477998
+DemoIndexer15           10015 15.09375    1582855
+ExampleAgent16          10016             1687712
+SampleSvcHost17         10017             1792569
+DemoWorker18            10018 18.09375    1897426
+ContosoTray19           10019             2002283
+PlaceholderUI20         10020             2107140
+TestBackground21        10021 21.09375    2211997
+SampleRenderer22        10022             2316854
+DemoIndexer23           10023             2421711
+ExampleAgent24          10024 24.09375    2526568
+SampleSvcHost25         10025             2631425
+DemoWorker26            10026             2736282
+ContosoTray27           10027 27.09375    2841139
+PlaceholderUI28         10028             2945996
+TestBackground29        10029             3050853
+SampleRenderer30        10030 30.09375    3155710
+DemoIndexer31           10031             3260567
+ExampleAgent32          10032             3365424
+SampleSvcHost33         10033 33.09375    3470281
+DemoWorker34            10034             3575138
+ContosoTray35           10035             3679995
+PlaceholderUI36         10036 36.09375    3784852
+TestBackground37        10037             3889709
+SampleRenderer38        10038             3994566
+DemoIndexer39           10039 2.09375     4099423
+ExampleAgent40          10040             4204280
+SampleSvcHost41         10041             4309137
+DemoWorker42            10042 5.09375     4413994
+ContosoTray43           10043             4518851
+PlaceholderUI44         10044             4623708
+TestBackground45        10045 8.09375     4728565
+SampleRenderer46        10046             4833422
+DemoIndexer47           10047             4938279
+ExampleAgent48          10048 11.09375    5043136
+SampleSvcHost49         10049             5147993
+DemoWorker50            10050             5252850
+ContosoTray51           10051 14.09375    5357707
+PlaceholderUI52         10052             5462564
+TestBackground53        10053             5567421
+SampleRenderer54        10054 17.09375    5672278
+DemoIndexer55           10055             5777135
+ExampleAgent56          10056             5881992
+SampleSvcHost57         10057 20.09375    5986849
+DemoWorker58            10058             6091706
+ContosoTray59           10059             6196563
+PlaceholderUI60         10060 23.09375    6301420
+TestBackground61        10061             6406277
+SampleRenderer62        10062             6511134
+DemoIndexer63           10063 26.09375    6615991
+ExampleAgent64          10064             6720848
+SampleSvcHost65         10065             6825705
+DemoWorker66            10066 29.09375    6930562
+ContosoTray67           10067             7035419
+PlaceholderUI68         10068             7140276
+TestBackground69        10069 32.09375    7245133
+SampleRenderer70        10070             7349990
+DemoIndexer71           10071             7454847
+ExampleAgent72          10072 35.09375    7559704
+SampleSvcHost73         10073             7664561
+DemoWorker74            10074             7769418
+ContosoTray75           10075 1.09375     7874275
+PlaceholderUI76         10076             7979132
+TestBackground77        10077             8083989
+SampleRenderer78        10078 4.09375     8188846
+DemoIndexer79           10079             8293703
+ExampleAgent80          10080             8398560
+SampleSvcHost81         10081 7.09375     8503417
+DemoWorker82            10082             8608274
+ContosoTray83           10083             8713131
+PlaceholderUI84         10084 10.09375    8817988
+TestBackground85        10085             8922845
+SampleRenderer86        10086             9027702
+DemoIndexer87           10087 13.09375    9132559
+ExampleAgent88          10088             9237416
+SampleSvcHost89         10089             9342273
+DemoWorker90            10090 16.09375    9447130
+ContosoTray91           10091             9551987
+PlaceholderUI92         10092             9656844
+TestBackground93        10093 19.09375    9761701
+SampleRenderer94        10094             9866558
+DemoIndexer95           10095             9971415
+ExampleAgent96          10096 22.09375   10076272
+SampleSvcHost97         10097            10181129
+DemoWorker98            10098            10285986
+ContosoTray99           10099 25.09375   10390843
+PlaceholderUI100        10100            10495700
+TestBackground101       10101            10600557
+SampleRenderer102       10102 28.09375   10705414
+DemoIndexer103          10103            10810271
+ExampleAgent104         10104            10915128
+SampleSvcHost105        10105 31.09375   11019985
+DemoWorker106           10106            11124842
+ContosoTray107          10107            11229699
+PlaceholderUI108        10108 34.09375   11334556
+TestBackground109       10109            11439413
+SampleRenderer110       10110            11544270
+DemoIndexer111          10111 0.09375    11649127
+ExampleAgent112         10112            11753984
+SampleSvcHost113        10113            11858841
+DemoWorker114           10114 3.09375    11963698
+ContosoTray115          10115            12068555
+PlaceholderUI116        10116            12173412
+TestBackground117       10117 6.09375    12278269
+SampleRenderer118       10118            12383126
+DemoIndexer119          10119            12487983
+ExampleAgent120         10120 9.09375    12592840
+SampleSvcHost121        10121            12697697
+DemoWorker122           10122            12802554
+ContosoTray123          10123 12.09375   12907411
+PlaceholderUI124        10124            13012268
+TestBackground125       10125            13117125
+SampleRenderer126       10126 15.09375   13221982
+DemoIndexer127          10127            13326839
+ExampleAgent128         10128            13431696
+SampleSvcHost129        10129 18.09375   13536553
+DemoWorker130           10130            13641410
+ContosoTray131          10131            13746267
+PlaceholderUI132        10132 21.09375   13851124
+TestBackground133       10133            13955981
+SampleRenderer134       10134            14060838
+DemoIndexer135          10135 24.09375   14165695
+ExampleAgent136         10136            14270552
+SampleSvcHost137        10137            14375409
+DemoWorker138           10138 27.09375   14480266
+ContosoTray139          10139            14585123
+PlaceholderUI140        10140            14689980
+TestBackground141       10141 30.09375   14794837
+SampleRenderer142       10142            14899694
+DemoIndexer143          10143            15004551
+ExampleAgent144         10144 33.09375   15109408
+SampleSvcHost145        10145            15214265
+DemoWorker146           10146            15319122
+ContosoTray147          10147 36.09375   15423979
+PlaceholderUI148        10148            15528836
+TestBackground149       10149            15633693
+SampleRenderer150       10150 2.09375    15738550
+DemoIndexer151          10151            15843407
+ExampleAgent152         10152            15948264
+SampleSvcHost153        10153 5.09375    16053121
+DemoWorker154           10154            16157978
+ContosoTray155          10155            16262835
+PlaceholderUI156        10156 8.09375    16367692
+TestBackground157       10157            16472549
+SampleRenderer158       10158            16577406
+DemoIndexer159          10159 11.09375   16682263
+ExampleAgent160         10160            16787120
+SampleSvcHost161        10161            16891977
+DemoWorker162           10162 14.09375   16996834
+ContosoTray163          10163            17101691
+PlaceholderUI164        10164            17206548
+TestBackground165       10165 17.09375   17311405
+SampleRenderer166       10166            17416262
+DemoIndexer167          10167            17521119
+ExampleAgent168         10168 20.09375   17625976
+SampleSvcHost169        10169            17730833
+DemoWorker170           10170            17835690
+ContosoTray171          10171 23.09375   17940547
+PlaceholderUI172        10172            18045404
+TestBackground173       10173            18150261
+SampleRenderer174       10174 26.09375   18255118
+DemoIndexer175          10175            18359975
+ExampleAgent176         10176            18464832
+SampleSvcHost177        10177 29.09375   18569689
+DemoWorker178           10178            18674546
+ContosoTray179          10179            18779403
+PlaceholderUI180        10180 32.09375   18884260
+TestBackground181       10181            18989117
+SampleRenderer182       10182            19093974
+DemoIndexer183          10183 35.09375   19198831
+ExampleAgent184         10184            19303688
+SampleSvcHost185        10185            19408545
+DemoWorker186           10186 1.09375    19513402
+ContosoTray187          10187            19618259
+PlaceholderUI188        10188            19723116
+TestBackground189       10189 4.09375    19827973
+SampleRenderer190       10190            19932830
+DemoIndexer191          10191            20037687
+ExampleAgent192         10192 7.09375    20142544
+SampleSvcHost193        10193            20247401
+DemoWorker194           10194            20352258
+ContosoTray195          10195 10.09375   20457115
+PlaceholderUI196        10196            20561972
+TestBackground197       10197            20666829
+SampleRenderer198       10198 13.09375   20771686
+DemoIndexer199          10199            20876543
+ExampleAgent200         10200            20981400

@@ -1,0 +1,336 @@
+# rtk fixture note: structure captured from real PowerShell 5.1 output (Get-EventLog with -Wrap), values anonymized (source/message text replaced with generic placeholders). Continuation-line indentation below is authentic -- this is what a wrapped multi-line record looks like.
+
+TimeGenerated          EntryType   Source                               Message
+-------------          ---------   ------                               -------
+4/20/2026 10:01:00 AM Warning     Example Service Placeholder         Sample log entry number 1, short
+4/20/2026 10:02:00 AM Error       Example Service Placeholder         Sample log entry number 2, short
+4/20/2026 10:03:00 AM Information Example Service Placeholder         Sample log entry number 3, short
+                                                                    continuation line one for entry 3
+                                                                    continuation line two for entry 3
+4/20/2026 10:04:00 AM Information Example Service Placeholder         Sample log entry number 4, short
+4/20/2026 10:05:00 AM Warning     Example Service Placeholder         Sample log entry number 5, short
+4/20/2026 10:06:00 AM Error       Example Service Placeholder         Sample log entry number 6, short
+                                                                    continuation line one for entry 6
+                                                                    continuation line two for entry 6
+4/20/2026 10:07:00 AM Information Example Service Placeholder         Sample log entry number 7, short
+4/20/2026 10:08:00 AM Information Example Service Placeholder         Sample log entry number 8, short
+4/20/2026 10:09:00 AM Warning     Example Service Placeholder         Sample log entry number 9, short
+                                                                    continuation line one for entry 9
+                                                                    continuation line two for entry 9
+4/20/2026 10:10:00 AM Error       Example Service Placeholder         Sample log entry number 10, short
+4/20/2026 10:11:00 AM Information Example Service Placeholder         Sample log entry number 11, short
+4/20/2026 10:12:00 AM Information Example Service Placeholder         Sample log entry number 12, short
+                                                                    continuation line one for entry 12
+                                                                    continuation line two for entry 12
+4/20/2026 10:13:00 AM Warning     Example Service Placeholder         Sample log entry number 13, short
+4/20/2026 10:14:00 AM Error       Example Service Placeholder         Sample log entry number 14, short
+4/20/2026 10:15:00 AM Information Example Service Placeholder         Sample log entry number 15, short
+                                                                    continuation line one for entry 15
+                                                                    continuation line two for entry 15
+4/20/2026 10:16:00 AM Information Example Service Placeholder         Sample log entry number 16, short
+4/20/2026 10:17:00 AM Warning     Example Service Placeholder         Sample log entry number 17, short
+4/20/2026 10:18:00 AM Error       Example Service Placeholder         Sample log entry number 18, short
+                                                                    continuation line one for entry 18
+                                                                    continuation line two for entry 18
+4/20/2026 10:19:00 AM Information Example Service Placeholder         Sample log entry number 19, short
+4/20/2026 10:20:00 AM Information Example Service Placeholder         Sample log entry number 20, short
+4/20/2026 10:21:00 AM Warning     Example Service Placeholder         Sample log entry number 21, short
+                                                                    continuation line one for entry 21
+                                                                    continuation line two for entry 21
+4/20/2026 10:22:00 AM Error       Example Service Placeholder         Sample log entry number 22, short
+4/20/2026 10:23:00 AM Information Example Service Placeholder         Sample log entry number 23, short
+4/20/2026 10:24:00 AM Information Example Service Placeholder         Sample log entry number 24, short
+                                                                    continuation line one for entry 24
+                                                                    continuation line two for entry 24
+4/20/2026 10:25:00 AM Warning     Example Service Placeholder         Sample log entry number 25, short
+4/20/2026 10:26:00 AM Error       Example Service Placeholder         Sample log entry number 26, short
+4/20/2026 10:27:00 AM Information Example Service Placeholder         Sample log entry number 27, short
+                                                                    continuation line one for entry 27
+                                                                    continuation line two for entry 27
+4/20/2026 10:28:00 AM Information Example Service Placeholder         Sample log entry number 28, short
+4/20/2026 10:29:00 AM Warning     Example Service Placeholder         Sample log entry number 29, short
+4/20/2026 10:30:00 AM Error       Example Service Placeholder         Sample log entry number 30, short
+                                                                    continuation line one for entry 30
+                                                                    continuation line two for entry 30
+4/20/2026 10:31:00 AM Information Example Service Placeholder         Sample log entry number 31, short
+4/20/2026 10:32:00 AM Information Example Service Placeholder         Sample log entry number 32, short
+4/20/2026 10:33:00 AM Warning     Example Service Placeholder         Sample log entry number 33, short
+                                                                    continuation line one for entry 33
+                                                                    continuation line two for entry 33
+4/20/2026 10:34:00 AM Error       Example Service Placeholder         Sample log entry number 34, short
+4/20/2026 10:35:00 AM Information Example Service Placeholder         Sample log entry number 35, short
+4/20/2026 10:36:00 AM Information Example Service Placeholder         Sample log entry number 36, short
+                                                                    continuation line one for entry 36
+                                                                    continuation line two for entry 36
+4/20/2026 10:37:00 AM Warning     Example Service Placeholder         Sample log entry number 37, short
+4/20/2026 10:38:00 AM Error       Example Service Placeholder         Sample log entry number 38, short
+4/20/2026 10:39:00 AM Information Example Service Placeholder         Sample log entry number 39, short
+                                                                    continuation line one for entry 39
+                                                                    continuation line two for entry 39
+4/20/2026 10:40:00 AM Information Example Service Placeholder         Sample log entry number 40, short
+4/20/2026 10:41:00 AM Warning     Example Service Placeholder         Sample log entry number 41, short
+4/20/2026 10:42:00 AM Error       Example Service Placeholder         Sample log entry number 42, short
+                                                                    continuation line one for entry 42
+                                                                    continuation line two for entry 42
+4/20/2026 10:43:00 AM Information Example Service Placeholder         Sample log entry number 43, short
+4/20/2026 10:44:00 AM Information Example Service Placeholder         Sample log entry number 44, short
+4/20/2026 10:45:00 AM Warning     Example Service Placeholder         Sample log entry number 45, short
+                                                                    continuation line one for entry 45
+                                                                    continuation line two for entry 45
+4/20/2026 10:46:00 AM Error       Example Service Placeholder         Sample log entry number 46, short
+4/20/2026 10:47:00 AM Information Example Service Placeholder         Sample log entry number 47, short
+4/20/2026 10:48:00 AM Information Example Service Placeholder         Sample log entry number 48, short
+                                                                    continuation line one for entry 48
+                                                                    continuation line two for entry 48
+4/20/2026 10:49:00 AM Warning     Example Service Placeholder         Sample log entry number 49, short
+4/20/2026 10:50:00 AM Error       Example Service Placeholder         Sample log entry number 50, short
+4/20/2026 10:51:00 AM Information Example Service Placeholder         Sample log entry number 51, short
+                                                                    continuation line one for entry 51
+                                                                    continuation line two for entry 51
+4/20/2026 10:52:00 AM Information Example Service Placeholder         Sample log entry number 52, short
+4/20/2026 10:53:00 AM Warning     Example Service Placeholder         Sample log entry number 53, short
+4/20/2026 10:54:00 AM Error       Example Service Placeholder         Sample log entry number 54, short
+                                                                    continuation line one for entry 54
+                                                                    continuation line two for entry 54
+4/20/2026 10:55:00 AM Information Example Service Placeholder         Sample log entry number 55, short
+4/20/2026 10:56:00 AM Information Example Service Placeholder         Sample log entry number 56, short
+4/20/2026 10:57:00 AM Warning     Example Service Placeholder         Sample log entry number 57, short
+                                                                    continuation line one for entry 57
+                                                                    continuation line two for entry 57
+4/20/2026 10:58:00 AM Error       Example Service Placeholder         Sample log entry number 58, short
+4/20/2026 10:59:00 AM Information Example Service Placeholder         Sample log entry number 59, short
+4/20/2026 10:00:00 AM Information Example Service Placeholder         Sample log entry number 60, short
+                                                                    continuation line one for entry 60
+                                                                    continuation line two for entry 60
+4/20/2026 10:01:00 AM Warning     Example Service Placeholder         Sample log entry number 61, short
+4/20/2026 10:02:00 AM Error       Example Service Placeholder         Sample log entry number 62, short
+4/20/2026 10:03:00 AM Information Example Service Placeholder         Sample log entry number 63, short
+                                                                    continuation line one for entry 63
+                                                                    continuation line two for entry 63
+4/20/2026 10:04:00 AM Information Example Service Placeholder         Sample log entry number 64, short
+4/20/2026 10:05:00 AM Warning     Example Service Placeholder         Sample log entry number 65, short
+4/20/2026 10:06:00 AM Error       Example Service Placeholder         Sample log entry number 66, short
+                                                                    continuation line one for entry 66
+                                                                    continuation line two for entry 66
+4/20/2026 10:07:00 AM Information Example Service Placeholder         Sample log entry number 67, short
+4/20/2026 10:08:00 AM Information Example Service Placeholder         Sample log entry number 68, short
+4/20/2026 10:09:00 AM Warning     Example Service Placeholder         Sample log entry number 69, short
+                                                                    continuation line one for entry 69
+                                                                    continuation line two for entry 69
+4/20/2026 10:10:00 AM Error       Example Service Placeholder         Sample log entry number 70, short
+4/20/2026 10:11:00 AM Information Example Service Placeholder         Sample log entry number 71, short
+4/20/2026 10:12:00 AM Information Example Service Placeholder         Sample log entry number 72, short
+                                                                    continuation line one for entry 72
+                                                                    continuation line two for entry 72
+4/20/2026 10:13:00 AM Warning     Example Service Placeholder         Sample log entry number 73, short
+4/20/2026 10:14:00 AM Error       Example Service Placeholder         Sample log entry number 74, short
+4/20/2026 10:15:00 AM Information Example Service Placeholder         Sample log entry number 75, short
+                                                                    continuation line one for entry 75
+                                                                    continuation line two for entry 75
+4/20/2026 10:16:00 AM Information Example Service Placeholder         Sample log entry number 76, short
+4/20/2026 10:17:00 AM Warning     Example Service Placeholder         Sample log entry number 77, short
+4/20/2026 10:18:00 AM Error       Example Service Placeholder         Sample log entry number 78, short
+                                                                    continuation line one for entry 78
+                                                                    continuation line two for entry 78
+4/20/2026 10:19:00 AM Information Example Service Placeholder         Sample log entry number 79, short
+4/20/2026 10:20:00 AM Information Example Service Placeholder         Sample log entry number 80, short
+4/20/2026 10:21:00 AM Warning     Example Service Placeholder         Sample log entry number 81, short
+                                                                    continuation line one for entry 81
+                                                                    continuation line two for entry 81
+4/20/2026 10:22:00 AM Error       Example Service Placeholder         Sample log entry number 82, short
+4/20/2026 10:23:00 AM Information Example Service Placeholder         Sample log entry number 83, short
+4/20/2026 10:24:00 AM Information Example Service Placeholder         Sample log entry number 84, short
+                                                                    continuation line one for entry 84
+                                                                    continuation line two for entry 84
+4/20/2026 10:25:00 AM Warning     Example Service Placeholder         Sample log entry number 85, short
+4/20/2026 10:26:00 AM Error       Example Service Placeholder         Sample log entry number 86, short
+4/20/2026 10:27:00 AM Information Example Service Placeholder         Sample log entry number 87, short
+                                                                    continuation line one for entry 87
+                                                                    continuation line two for entry 87
+4/20/2026 10:28:00 AM Information Example Service Placeholder         Sample log entry number 88, short
+4/20/2026 10:29:00 AM Warning     Example Service Placeholder         Sample log entry number 89, short
+4/20/2026 10:30:00 AM Error       Example Service Placeholder         Sample log entry number 90, short
+                                                                    continuation line one for entry 90
+                                                                    continuation line two for entry 90
+4/20/2026 10:31:00 AM Information Example Service Placeholder         Sample log entry number 91, short
+4/20/2026 10:32:00 AM Information Example Service Placeholder         Sample log entry number 92, short
+4/20/2026 10:33:00 AM Warning     Example Service Placeholder         Sample log entry number 93, short
+                                                                    continuation line one for entry 93
+                                                                    continuation line two for entry 93
+4/20/2026 10:34:00 AM Error       Example Service Placeholder         Sample log entry number 94, short
+4/20/2026 10:35:00 AM Information Example Service Placeholder         Sample log entry number 95, short
+4/20/2026 10:36:00 AM Information Example Service Placeholder         Sample log entry number 96, short
+                                                                    continuation line one for entry 96
+                                                                    continuation line two for entry 96
+4/20/2026 10:37:00 AM Warning     Example Service Placeholder         Sample log entry number 97, short
+4/20/2026 10:38:00 AM Error       Example Service Placeholder         Sample log entry number 98, short
+4/20/2026 10:39:00 AM Information Example Service Placeholder         Sample log entry number 99, short
+                                                                    continuation line one for entry 99
+                                                                    continuation line two for entry 99
+4/20/2026 10:40:00 AM Information Example Service Placeholder         Sample log entry number 100, short
+4/20/2026 10:41:00 AM Warning     Example Service Placeholder         Sample log entry number 101, short
+4/20/2026 10:42:00 AM Error       Example Service Placeholder         Sample log entry number 102, short
+                                                                    continuation line one for entry 102
+                                                                    continuation line two for entry 102
+4/20/2026 10:43:00 AM Information Example Service Placeholder         Sample log entry number 103, short
+4/20/2026 10:44:00 AM Information Example Service Placeholder         Sample log entry number 104, short
+4/20/2026 10:45:00 AM Warning     Example Service Placeholder         Sample log entry number 105, short
+                                                                    continuation line one for entry 105
+                                                                    continuation line two for entry 105
+4/20/2026 10:46:00 AM Error       Example Service Placeholder         Sample log entry number 106, short
+4/20/2026 10:47:00 AM Information Example Service Placeholder         Sample log entry number 107, short
+4/20/2026 10:48:00 AM Information Example Service Placeholder         Sample log entry number 108, short
+                                                                    continuation line one for entry 108
+                                                                    continuation line two for entry 108
+4/20/2026 10:49:00 AM Warning     Example Service Placeholder         Sample log entry number 109, short
+4/20/2026 10:50:00 AM Error       Example Service Placeholder         Sample log entry number 110, short
+4/20/2026 10:51:00 AM Information Example Service Placeholder         Sample log entry number 111, short
+                                                                    continuation line one for entry 111
+                                                                    continuation line two for entry 111
+4/20/2026 10:52:00 AM Information Example Service Placeholder         Sample log entry number 112, short
+4/20/2026 10:53:00 AM Warning     Example Service Placeholder         Sample log entry number 113, short
+4/20/2026 10:54:00 AM Error       Example Service Placeholder         Sample log entry number 114, short
+                                                                    continuation line one for entry 114
+                                                                    continuation line two for entry 114
+4/20/2026 10:55:00 AM Information Example Service Placeholder         Sample log entry number 115, short
+4/20/2026 10:56:00 AM Information Example Service Placeholder         Sample log entry number 116, short
+4/20/2026 10:57:00 AM Warning     Example Service Placeholder         Sample log entry number 117, short
+                                                                    continuation line one for entry 117
+                                                                    continuation line two for entry 117
+4/20/2026 10:58:00 AM Error       Example Service Placeholder         Sample log entry number 118, short
+4/20/2026 10:59:00 AM Information Example Service Placeholder         Sample log entry number 119, short
+4/20/2026 10:00:00 AM Information Example Service Placeholder         Sample log entry number 120, short
+                                                                    continuation line one for entry 120
+                                                                    continuation line two for entry 120
+4/20/2026 10:01:00 AM Warning     Example Service Placeholder         Sample log entry number 121, short
+4/20/2026 10:02:00 AM Error       Example Service Placeholder         Sample log entry number 122, short
+4/20/2026 10:03:00 AM Information Example Service Placeholder         Sample log entry number 123, short
+                                                                    continuation line one for entry 123
+                                                                    continuation line two for entry 123
+4/20/2026 10:04:00 AM Information Example Service Placeholder         Sample log entry number 124, short
+4/20/2026 10:05:00 AM Warning     Example Service Placeholder         Sample log entry number 125, short
+4/20/2026 10:06:00 AM Error       Example Service Placeholder         Sample log entry number 126, short
+                                                                    continuation line one for entry 126
+                                                                    continuation line two for entry 126
+4/20/2026 10:07:00 AM Information Example Service Placeholder         Sample log entry number 127, short
+4/20/2026 10:08:00 AM Information Example Service Placeholder         Sample log entry number 128, short
+4/20/2026 10:09:00 AM Warning     Example Service Placeholder         Sample log entry number 129, short
+                                                                    continuation line one for entry 129
+                                                                    continuation line two for entry 129
+4/20/2026 10:10:00 AM Error       Example Service Placeholder         Sample log entry number 130, short
+4/20/2026 10:11:00 AM Information Example Service Placeholder         Sample log entry number 131, short
+4/20/2026 10:12:00 AM Information Example Service Placeholder         Sample log entry number 132, short
+                                                                    continuation line one for entry 132
+                                                                    continuation line two for entry 132
+4/20/2026 10:13:00 AM Warning     Example Service Placeholder         Sample log entry number 133, short
+4/20/2026 10:14:00 AM Error       Example Service Placeholder         Sample log entry number 134, short
+4/20/2026 10:15:00 AM Information Example Service Placeholder         Sample log entry number 135, short
+                                                                    continuation line one for entry 135
+                                                                    continuation line two for entry 135
+4/20/2026 10:16:00 AM Information Example Service Placeholder         Sample log entry number 136, short
+4/20/2026 10:17:00 AM Warning     Example Service Placeholder         Sample log entry number 137, short
+4/20/2026 10:18:00 AM Error       Example Service Placeholder         Sample log entry number 138, short
+                                                                    continuation line one for entry 138
+                                                                    continuation line two for entry 138
+4/20/2026 10:19:00 AM Information Example Service Placeholder         Sample log entry number 139, short
+4/20/2026 10:20:00 AM Information Example Service Placeholder         Sample log entry number 140, short
+4/20/2026 10:21:00 AM Warning     Example Service Placeholder         Sample log entry number 141, short
+                                                                    continuation line one for entry 141
+                                                                    continuation line two for entry 141
+4/20/2026 10:22:00 AM Error       Example Service Placeholder         Sample log entry number 142, short
+4/20/2026 10:23:00 AM Information Example Service Placeholder         Sample log entry number 143, short
+4/20/2026 10:24:00 AM Information Example Service Placeholder         Sample log entry number 144, short
+                                                                    continuation line one for entry 144
+                                                                    continuation line two for entry 144
+4/20/2026 10:25:00 AM Warning     Example Service Placeholder         Sample log entry number 145, short
+4/20/2026 10:26:00 AM Error       Example Service Placeholder         Sample log entry number 146, short
+4/20/2026 10:27:00 AM Information Example Service Placeholder         Sample log entry number 147, short
+                                                                    continuation line one for entry 147
+                                                                    continuation line two for entry 147
+4/20/2026 10:28:00 AM Information Example Service Placeholder         Sample log entry number 148, short
+4/20/2026 10:29:00 AM Warning     Example Service Placeholder         Sample log entry number 149, short
+4/20/2026 10:30:00 AM Error       Example Service Placeholder         Sample log entry number 150, short
+                                                                    continuation line one for entry 150
+                                                                    continuation line two for entry 150
+4/20/2026 10:31:00 AM Information Example Service Placeholder         Sample log entry number 151, short
+4/20/2026 10:32:00 AM Information Example Service Placeholder         Sample log entry number 152, short
+4/20/2026 10:33:00 AM Warning     Example Service Placeholder         Sample log entry number 153, short
+                                                                    continuation line one for entry 153
+                                                                    continuation line two for entry 153
+4/20/2026 10:34:00 AM Error       Example Service Placeholder         Sample log entry number 154, short
+4/20/2026 10:35:00 AM Information Example Service Placeholder         Sample log entry number 155, short
+4/20/2026 10:36:00 AM Information Example Service Placeholder         Sample log entry number 156, short
+                                                                    continuation line one for entry 156
+                                                                    continuation line two for entry 156
+4/20/2026 10:37:00 AM Warning     Example Service Placeholder         Sample log entry number 157, short
+4/20/2026 10:38:00 AM Error       Example Service Placeholder         Sample log entry number 158, short
+4/20/2026 10:39:00 AM Information Example Service Placeholder         Sample log entry number 159, short
+                                                                    continuation line one for entry 159
+                                                                    continuation line two for entry 159
+4/20/2026 10:40:00 AM Information Example Service Placeholder         Sample log entry number 160, short
+4/20/2026 10:41:00 AM Warning     Example Service Placeholder         Sample log entry number 161, short
+4/20/2026 10:42:00 AM Error       Example Service Placeholder         Sample log entry number 162, short
+                                                                    continuation line one for entry 162
+                                                                    continuation line two for entry 162
+4/20/2026 10:43:00 AM Information Example Service Placeholder         Sample log entry number 163, short
+4/20/2026 10:44:00 AM Information Example Service Placeholder         Sample log entry number 164, short
+4/20/2026 10:45:00 AM Warning     Example Service Placeholder         Sample log entry number 165, short
+                                                                    continuation line one for entry 165
+                                                                    continuation line two for entry 165
+4/20/2026 10:46:00 AM Error       Example Service Placeholder         Sample log entry number 166, short
+4/20/2026 10:47:00 AM Information Example Service Placeholder         Sample log entry number 167, short
+4/20/2026 10:48:00 AM Information Example Service Placeholder         Sample log entry number 168, short
+                                                                    continuation line one for entry 168
+                                                                    continuation line two for entry 168
+4/20/2026 10:49:00 AM Warning     Example Service Placeholder         Sample log entry number 169, short
+4/20/2026 10:50:00 AM Error       Example Service Placeholder         Sample log entry number 170, short
+4/20/2026 10:51:00 AM Information Example Service Placeholder         Sample log entry number 171, short
+                                                                    continuation line one for entry 171
+                                                                    continuation line two for entry 171
+4/20/2026 10:52:00 AM Information Example Service Placeholder         Sample log entry number 172, short
+4/20/2026 10:53:00 AM Warning     Example Service Placeholder         Sample log entry number 173, short
+4/20/2026 10:54:00 AM Error       Example Service Placeholder         Sample log entry number 174, short
+                                                                    continuation line one for entry 174
+                                                                    continuation line two for entry 174
+4/20/2026 10:55:00 AM Information Example Service Placeholder         Sample log entry number 175, short
+4/20/2026 10:56:00 AM Information Example Service Placeholder         Sample log entry number 176, short
+4/20/2026 10:57:00 AM Warning     Example Service Placeholder         Sample log entry number 177, short
+                                                                    continuation line one for entry 177
+                                                                    continuation line two for entry 177
+4/20/2026 10:58:00 AM Error       Example Service Placeholder         Sample log entry number 178, short
+4/20/2026 10:59:00 AM Information Example Service Placeholder         Sample log entry number 179, short
+4/20/2026 10:00:00 AM Information Example Service Placeholder         Sample log entry number 180, short
+                                                                    continuation line one for entry 180
+                                                                    continuation line two for entry 180
+4/20/2026 10:01:00 AM Warning     Example Service Placeholder         Sample log entry number 181, short
+4/20/2026 10:02:00 AM Error       Example Service Placeholder         Sample log entry number 182, short
+4/20/2026 10:03:00 AM Information Example Service Placeholder         Sample log entry number 183, short
+                                                                    continuation line one for entry 183
+                                                                    continuation line two for entry 183
+4/20/2026 10:04:00 AM Information Example Service Placeholder         Sample log entry number 184, short
+4/20/2026 10:05:00 AM Warning     Example Service Placeholder         Sample log entry number 185, short
+4/20/2026 10:06:00 AM Error       Example Service Placeholder         Sample log entry number 186, short
+                                                                    continuation line one for entry 186
+                                                                    continuation line two for entry 186
+4/20/2026 10:07:00 AM Information Example Service Placeholder         Sample log entry number 187, short
+4/20/2026 10:08:00 AM Information Example Service Placeholder         Sample log entry number 188, short
+4/20/2026 10:09:00 AM Warning     Example Service Placeholder         Sample log entry number 189, short
+                                                                    continuation line one for entry 189
+                                                                    continuation line two for entry 189
+4/20/2026 10:10:00 AM Error       Example Service Placeholder         Sample log entry number 190, short
+4/20/2026 10:11:00 AM Information Example Service Placeholder         Sample log entry number 191, short
+4/20/2026 10:12:00 AM Information Example Service Placeholder         Sample log entry number 192, short
+                                                                    continuation line one for entry 192
+                                                                    continuation line two for entry 192
+4/20/2026 10:13:00 AM Warning     Example Service Placeholder         Sample log entry number 193, short
+4/20/2026 10:14:00 AM Error       Example Service Placeholder         Sample log entry number 194, short
+4/20/2026 10:15:00 AM Information Example Service Placeholder         Sample log entry number 195, short
+                                                                    continuation line one for entry 195
+                                                                    continuation line two for entry 195
+4/20/2026 10:16:00 AM Information Example Service Placeholder         Sample log entry number 196, short
+4/20/2026 10:17:00 AM Warning     Example Service Placeholder         Sample log entry number 197, short
+4/20/2026 10:18:00 AM Error       Example Service Placeholder         Sample log entry number 198, short
+                                                                    continuation line one for entry 198
+                                                                    continuation line two for entry 198
+4/20/2026 10:19:00 AM Information Example Service Placeholder         Sample log entry number 199, short
+4/20/2026 10:20:00 AM Information Example Service Placeholder         Sample log entry number 200, short

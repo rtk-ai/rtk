@@ -34,6 +34,7 @@ Each subdirectory has its own README with file descriptions, parsing strategies,
 - **[`cloud/`](cloud/README.md)** — aws, docker/kubectl, curl, wget, psql — Docker/Kubectl sub-enums, JSON forced output
 - **[`system/`](system/README.md)** — ls, tree, read, grep, find, wc, env, json, log, deps, summary, format, smart — format_cmd routing, filter levels, language detection
 - **[`ruby/`](ruby/README.md)** — rake/rails test, rspec, rubocop — JSON injection pattern, `ruby_exec()` bundle exec auto-detection
+- **[`powershell/`](powershell/README.md)** — `rtk powershell <Cmdlet>` (Get-ChildItem, Get-Process, Get-Service, Get-WinEvent, ...) — single-file cmdlet dispatch (like `git.rs`), shared table-capping helpers, `pwsh`/`powershell.exe` invocation with cmdlet-name allowlisting and env-var argument passing (no argument value is ever interpolated into the script text)
 
 ## Execution Flow
 

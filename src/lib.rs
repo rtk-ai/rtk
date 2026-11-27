@@ -22,6 +22,7 @@ use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{
     ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpt_cmd, phpunit_cmd, pint_cmd,
 };
+use cmds::powershell::powershell_cmd;
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, sqlfluff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
@@ -969,6 +970,16 @@ enum Commands {
     /// PHP run-tests.php (.phpt) with compact summary and failure diffs
     Phpt {
         /// Arguments forwarded to `php run-tests.php` (e.g., Zend/tests/, -q)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PowerShell cmdlets with token-optimized output (Windows PowerShell 5.1
+    /// via `powershell.exe`, or PowerShell 7+ via `pwsh` when available)
+    Powershell {
+        /// PowerShell cmdlet name (e.g., Get-ChildItem, Get-Process, Get-Service)
+        cmdlet: String,
+        /// Additional arguments passed to the cmdlet
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -3601,6 +3612,12 @@ fn run_cli() -> Result<i32> {
 
         Commands::Phpt { args } => phpt_cmd::run(&args, cli.verbose)?,
 
+        Commands::Powershell { cmdlet, args } => {
+            let mut all_args = vec![cmdlet];
+            all_args.extend(args);
+            powershell_cmd::run(&all_args, cli.verbose)?
+        }
+
         Commands::Rake { args } => rake_cmd::run(&args, cli.verbose)?,
 
         Commands::Rubocop { args } => rubocop_cmd::run(&args, cli.verbose)?,
@@ -4090,6 +4107,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Ecs { .. }
             | Commands::Pint { .. }
             | Commands::Phpt { .. }
+            | Commands::Powershell { .. }
             | Commands::Rake { .. }
             | Commands::Rubocop { .. }
             | Commands::Rspec { .. }
@@ -4733,6 +4751,7 @@ mod tests {
             "ecs",
             "pint",
             "phpt",
+            "powershell",
             "uv",
             "bun",
             "bunx",
