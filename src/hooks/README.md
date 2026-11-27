@@ -193,6 +193,8 @@ commands. For those:
 | Default | No rule matched | 3 | Rewrite + let host tool prompt user |
 | Defer | `permissions.deny` rule matched inside a shell wrapper | 1 | Passthrough — command runs as without RTK |
 
+An allow rule in Claude Code's settings that names no command and spells its wildcard with a colon (`:*`, `*:*`, `::*`, `*:**`) is not loaded: Claude Code does not read it as every command, so it keeps that decision.
+
 A deny or ask rule is matched against each segment as written, without the grammar a split leaves (`{`, `!`, `(`), and past each leading assignment or wrapper in turn (`registry::matching_readings`): `env HUSKY=0 git push` is read as `HUSKY=0 git push` and as `git push`, as Claude Code reads it. A reading need not be what the shell runs (`nohup HUSKY=0 git push` makes nohup look for a program named `HUSKY=0`), so it can only make a verdict stricter. Past 32 prefixes the command behind them is unread, and where a deny or ask rule exists the verdict is at least Ask. An allow rule matches the segment as written only, so a wrapper never inherits the allow of the command it runs.
 
 A delegate that shells out to `rtk rewrite` and applies its own exec policy to
