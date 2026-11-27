@@ -1,0 +1,7 @@
+   Compiling m3 v0.1.0 (/tmp/m3)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.09s
+     Running unittests src/lib.rs (target/debug/deps/m3-705e82944ab1ca90)
+error: test failed, to rerun pass `--lib`
+
+Caused by:
+  process didn't exit successfully: `/tmp/m3/target/debug/deps/m3-705e82944ab1ca90` (signal: 6, SIGABRT: process abort signal)
