@@ -498,6 +498,7 @@ impl AgentPath {
             "cursor" => Some(Self::InProcess(Host::Cursor)),
             "droid" => Some(Self::InProcess(Host::Droid)),
             "gemini" => Some(Self::InProcess(Host::Gemini)),
+            "kiro" => Some(Self::InProcess(Host::Kiro)),
             // OpenClaw applies its own exec policy to whatever the
             // `before_tool_call` hook returns, so RTK asking as well is a
             // second gate on a runtime that never opted into Claude Code's
@@ -524,6 +525,7 @@ impl AgentPath {
         "hermes",
         "kilocode",
         "kimi",
+        "kiro",
         "omp",
         "openclaw",
         "opencode",
