@@ -1,5 +1,6 @@
 //! Filters Go command output — test results, build errors, vet warnings.
 
+use crate::core::arg_tokenizer::{Dialect, TokenKind, ValueSpec, tokenize_grammar};
 use crate::core::guard::never_worse;
 use crate::core::runner;
 use crate::core::shell::{display_args, quote_word};
@@ -47,18 +48,24 @@ struct PackageResult {
     fuzz_summary: Option<String>,
 }
 
-fn forwarded_help(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
-    let mut forwarded = vec![OsString::from(subcommand)];
+fn forwarded_help(
+    prefix: &[OsString],
+    subcommand: &str,
+    args: &[String],
+    verbose: u8,
+) -> Result<i32> {
+    let mut forwarded = prefix.to_vec();
+    forwarded.push(OsString::from(subcommand));
     forwarded.extend(args.iter().map(OsString::from));
     crate::core::runner::run_passthrough("go", &forwarded, verbose)
 }
 
-pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
+pub fn run_test(prefix: &[OsString], args: &[String], verbose: u8) -> Result<i32> {
     if crate::core::runner::requests_help_args("go", args) {
-        return forwarded_help("test", args, verbose);
+        return forwarded_help(prefix, "test", args, verbose);
     }
     let mut cmd = resolved_command("go");
-    cmd.arg("test");
+    cmd.args(prefix).arg("test");
 
     let skip_json = args.iter().any(|a| a == "-json" || a.starts_with("-bench"));
 
@@ -93,12 +100,12 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
-pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
+pub fn run_build(prefix: &[OsString], args: &[String], verbose: u8) -> Result<i32> {
     if crate::core::runner::requests_help_args("go", args) {
-        return forwarded_help("build", args, verbose);
+        return forwarded_help(prefix, "build", args, verbose);
     }
     let mut cmd = resolved_command("go");
-    cmd.arg("build");
+    cmd.args(prefix).arg("build");
 
     for arg in args {
         cmd.arg(arg);
@@ -117,12 +124,12 @@ pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
-pub fn run_vet(args: &[String], verbose: u8) -> Result<i32> {
+pub fn run_vet(prefix: &[OsString], args: &[String], verbose: u8) -> Result<i32> {
     if crate::core::runner::requests_help_args("go", args) {
-        return forwarded_help("vet", args, verbose);
+        return forwarded_help(prefix, "vet", args, verbose);
     }
     let mut cmd = resolved_command("go");
-    cmd.arg("vet");
+    cmd.args(prefix).arg("vet");
 
     for arg in args {
         cmd.arg(arg);
@@ -141,9 +148,47 @@ pub fn run_vet(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
+fn chdir_subcommand(args: &[OsString]) -> Option<usize> {
+    let leading: Vec<_> = args
+        .iter()
+        .take(3)
+        .map(|arg| arg.to_string_lossy())
+        .collect();
+    let tokens = tokenize_grammar(
+        &leading,
+        &|kind, name| (kind == TokenKind::Long && name == "C").then_some(ValueSpec::value()),
+        Dialect::GoFlag,
+    );
+    let flag = tokens.first()?;
+    if flag.kind != TokenKind::Long || flag.text != "C" || flag.value(&tokens)?.is_empty() {
+        return None;
+    }
+    let subcommand_index = flag
+        .linked
+        .map_or(1, |index| tokens[index].source_index + 1);
+    args.get(subcommand_index).map(|_| subcommand_index)
+}
+
 pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         anyhow::bail!("go: no subcommand specified");
+    }
+
+    if let Some(index) = chdir_subcommand(args) {
+        let filtered = match args[index].to_str() {
+            Some("test") => Some(run_test as fn(&[OsString], &[String], u8) -> Result<i32>),
+            Some("build") => Some(run_build),
+            Some("vet") => Some(run_vet),
+            _ => None,
+        };
+        if let Some(run) = filtered
+            && let Some(subcommand_args) = args[index + 1..]
+                .iter()
+                .map(|arg| arg.to_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+        {
+            return run(&args[..index], &subcommand_args, verbose);
+        }
     }
 
     // Intercept: `go tool <known>` invocations for filtered output
@@ -157,11 +202,7 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
 
     let subcommand = args[0].to_string_lossy();
     let mut cmd = resolved_command("go");
-    cmd.arg(&*subcommand);
-
-    for arg in &args[1..] {
-        cmd.arg(arg);
-    }
+    cmd.args(args);
 
     if verbose > 0 {
         eprintln!("Running: go {} ...", subcommand);
