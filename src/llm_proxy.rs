@@ -704,6 +704,30 @@ fn launch_plan(existing: Option<&str>, proxy_url: &str, daemon_up: bool) -> Laun
     }
 }
 
+/// Every address a client of `url` can land on, the one RTK binds first.
+/// `localhost` may resolve to either loopback family, so a listener on `[::1]`
+/// alone still takes the session's requests.
+pub(crate) fn loopback_addrs(url: &str) -> Option<Vec<String>> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let hostport = rest.split('/').next()?;
+    let (host, port) = hostport.rsplit_once(':')?;
+    port.parse::<u16>().ok()?;
+    match host {
+        "localhost" => Some(vec![format!("127.0.0.1:{port}"), format!("[::1]:{port}")]),
+        "127.0.0.1" | "[::1]" => Some(vec![format!("{host}:{port}")]),
+        _ => None,
+    }
+}
+
+fn routes_to_daemon(url: &str, base_url: &str) -> bool {
+    url.trim_end_matches('/') == base_url
+        || loopback_addrs(url)
+            .zip(loopback_addrs(base_url))
+            .is_some_and(|(addrs, ours)| addrs.iter().any(|addr| ours.contains(addr)))
+}
+
 /// Preserve an existing provider route, starting the daemon only when this
 /// agent will use it, and hand over the process. On Unix this `exec`s, so
 /// signals, stdio and the exit code behave exactly as if the agent had been
@@ -720,7 +744,7 @@ pub fn run_agent(agent: &ProxyAgent, args: &[String]) -> Result<i32> {
     let existing = std::env::var(agent.base_url_var).ok();
     let needs_proxy = existing
         .as_deref()
-        .is_none_or(|url| url.is_empty() || url.trim_end_matches('/') == base_url);
+        .is_none_or(|url| url.is_empty() || routes_to_daemon(url, &base_url));
     let daemon_up = needs_proxy
         && match ensure_running(&bind) {
             Ok(_) => true,
@@ -1007,6 +1031,40 @@ mod tests {
             "never launch the agent pointed at a dead proxy"
         );
         assert_eq!(launch_plan(Some(""), ours, false), LaunchPlan::Unproxied);
+    }
+
+    #[test]
+    fn a_route_to_the_daemon_port_needs_the_daemon() {
+        let ours = "http://127.0.0.1:8080";
+        for url in [
+            "http://127.0.0.1:8080",
+            "http://127.0.0.1:8080/",
+            "http://localhost:8080",
+            "http://localhost:8080/",
+            "http://localhost:8080/v1",
+            "https://127.0.0.1:8080",
+        ] {
+            assert!(routes_to_daemon(url, ours), "{url}");
+        }
+        for url in [
+            "http://localhost:8081",
+            "http://127.0.0.1:9090",
+            "http://[::1]:8080",
+            "http://localhost",
+            "https://api.anthropic.com",
+            "https://gateway.example/v1",
+            "http://localhost.example:8080",
+        ] {
+            assert!(!routes_to_daemon(url, ours), "{url}");
+        }
+        assert!(routes_to_daemon(
+            "http://localhost:8080",
+            "http://[::1]:8080"
+        ));
+        assert!(routes_to_daemon(
+            "http://0.0.0.0:8080/",
+            "http://0.0.0.0:8080"
+        ));
     }
 
     #[test]

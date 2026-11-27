@@ -31,6 +31,9 @@ fn the_launcher_only_starts_the_proxy_for_its_own_route() {
         (Some(""), true, ""),
         (Some("http://127.0.0.1:0"), true, ""),
         (Some("http://127.0.0.1:0/"), true, "http://127.0.0.1:0/"),
+        (Some("http://localhost:0"), true, "http://localhost:0"),
+        (Some("http://localhost:0/v1"), true, "http://localhost:0/v1"),
+        (Some("http://localhost:1"), false, "http://localhost:1"),
         (
             Some("https://gateway.example/v1"),
             false,
