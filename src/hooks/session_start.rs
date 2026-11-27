@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 
+use crate::llm_proxy::loopback_addrs;
+
 pub(super) fn run() {
     if let Some(message) = ensure_proxy() {
         let payload = serde_json::json!({ "systemMessage": message });
@@ -77,23 +79,6 @@ fn ensure_proxy_impl(
         Err(e) => Some(format!(
             "rtk: ANTHROPIC_BASE_URL points at {url} but the RTK proxy is not running and could not be started ({e}) — run `rtk llm-proxy start`, or remove env.ANTHROPIC_BASE_URL from settings.json"
         )),
-    }
-}
-
-/// Every address a client of `url` can land on, the one RTK binds first.
-/// `localhost` may resolve to either loopback family, so a listener on `[::1]`
-/// alone still takes the session's requests.
-fn loopback_addrs(url: &str) -> Option<Vec<String>> {
-    let rest = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))?;
-    let hostport = rest.split('/').next()?;
-    let (host, port) = hostport.rsplit_once(':')?;
-    port.parse::<u16>().ok()?;
-    match host {
-        "localhost" => Some(vec![format!("127.0.0.1:{port}"), format!("[::1]:{port}")]),
-        "127.0.0.1" | "[::1]" => Some(vec![format!("{host}:{port}")]),
-        _ => None,
     }
 }
 

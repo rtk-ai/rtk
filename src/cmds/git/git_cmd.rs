@@ -357,7 +357,7 @@ fn run_diff(
 
         if !result.success() {
             if !result.stderr.trim().is_empty() {
-                eprintln!("{}", result.stderr.trim());
+                eprint!("{}", result.stderr);
             }
             timer.track(
                 &tracked,
