@@ -639,10 +639,8 @@ fn sanitize_log_field(s: &str) -> String {
 }
 
 fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> {
-    let home = user_dirs::home()?;
-    let dir = home.join(".local").join("share").join("rtk");
-    crate::core::utils::create_private_dir(&dir).ok()?;
-    let path = dir.join("hook-audit.log");
+    let path = user_dirs::hook_audit_log()?;
+    crate::core::utils::create_private_dir(path.parent()?).ok()?;
     let mut file = crate::core::utils::open_private(
         std::fs::OpenOptions::new().create(true).append(true),
         &path,
@@ -2688,10 +2686,7 @@ mod tests {
 
     /// Where `audit_log` writes under a test's own root.
     fn audit_log_under(root: &std::path::Path) -> std::path::PathBuf {
-        root.join(".local")
-            .join("share")
-            .join("rtk")
-            .join("hook-audit.log")
+        root.join("rtk").join("hook-audit.log")
     }
 
     #[test]

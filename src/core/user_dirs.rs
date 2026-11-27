@@ -44,6 +44,23 @@ pub fn data() -> Option<PathBuf> {
     }
 }
 
+/// Shared location for the native hook writer and `hook-audit` reader.
+/// An explicit audit directory wins over XDG_DATA_HOME, then the platform's
+/// local data directory (LocalAppData on Windows). Relative XDG paths are
+/// ignored, as required by the XDG base directory specification.
+pub fn hook_audit_log() -> Option<PathBuf> {
+    let dir = env_path("RTK_AUDIT_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            env_path("XDG_DATA_HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|path| path.join(constants::RTK_DATA_DIR))
+        })
+        .or_else(data)?;
+    Some(dir.join("hook-audit.log"))
+}
+
 /// rtk's own directory inside the user's configuration directory, holding
 /// `filters.toml` and `config.toml`.
 ///

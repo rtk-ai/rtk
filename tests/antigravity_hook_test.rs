@@ -26,6 +26,7 @@ fn run_antigravity_payload(payload: &str, home: &Path, audit: bool) -> Output {
     let mut child = common::rtk_command()
         .args(["hook", "antigravity"])
         .env("HOME", home)
+        .env("RTK_AUDIT_DIR", home.join("audit"))
         .env("RTK_HOOK_AUDIT", if audit { "1" } else { "0" })
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -107,8 +108,6 @@ fn antigravity_hook_rewrites_bom_prefixed_payloads() {
 }
 
 #[test]
-// dirs::home_dir uses the Windows Known Folder API, so HOME cannot isolate this log.
-#[cfg(unix)]
 fn antigravity_hook_records_successful_rewrite_in_audit_log() {
     let home = tempfile::tempdir().unwrap();
     let output = run_antigravity_hook("git status", home.path(), true);
@@ -119,7 +118,7 @@ fn antigravity_hook_records_successful_rewrite_in_audit_log() {
         "expected an Antigravity rewrite response"
     );
 
-    let audit_path = home.path().join(".local/share/rtk/hook-audit.log");
+    let audit_path = home.path().join("audit/hook-audit.log");
     let audit = std::fs::read_to_string(&audit_path)
         .unwrap_or_else(|error| panic!("missing audit log at {}: {error}", audit_path.display()));
     assert!(
