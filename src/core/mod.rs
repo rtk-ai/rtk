@@ -45,3 +45,6 @@ pub mod truncate;
 pub mod user_dirs;
 pub mod user_env;
 pub mod utils;
+
+#[cfg(windows)]
+mod windows_path;
