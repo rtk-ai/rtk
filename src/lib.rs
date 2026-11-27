@@ -3570,7 +3570,21 @@ fn run_cli() -> Result<i32> {
                         core::utils::exit_code_from_status(&status, "npx prisma")
                     }
                 }
-                "next" => next_cmd::run(&args[1..], cli.verbose)?,
+                "next" => {
+                    let tokens = core::arg_tokenizer::tokenize(&args[1..]);
+                    if let Some(subcommand) = tokens
+                        .first()
+                        .filter(|token| token.is_free_positional() && token.text == "build")
+                    {
+                        next_cmd::run(&args[subcommand.source_index + 2..], cli.verbose)?
+                    } else {
+                        let argv = args
+                            .iter()
+                            .map(std::ffi::OsString::from)
+                            .collect::<Vec<_>>();
+                        core::runner::run_passthrough("npx", &argv, cli.verbose)?
+                    }
+                }
                 "prettier" => prettier_cmd::run(&args[1..], cli.verbose)?,
                 "playwright" => playwright_cmd::run(&args[1..], cli.verbose)?,
                 _ => npm_cmd::exec(&args, cli.verbose, cli.skip_env)?,
