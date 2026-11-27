@@ -962,17 +962,48 @@ pub fn run_test_cmd(
     if verbose > 0 {
         eprintln!("Running tests: {}", display);
     }
-    run_filtered(
+    run_filtered_with_exit(
         cmd,
         tool,
         display,
-        move |raw| extract_test_summary(raw, eco),
+        move |raw, code| {
+            if code == 0
+                && eco == TestEcosystem::Unknown
+                && let Some(summary) = phpunit_success_summary(raw)
+            {
+                return summary;
+            }
+            extract_test_summary(raw, eco)
+        },
         if caller_named_command {
             RunOptions::with_tee(tee_label).unguarded_help()
         } else {
             RunOptions::with_tee(tee_label)
         },
     )
+}
+
+static PHPUNIT_SUCCESS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^OK \(\d+ tests?, \d+ assertions?\)$").unwrap());
+
+fn phpunit_success_summary(output: &str) -> Option<String> {
+    // Make/docker wrappers hide the runner's name. Captured stderr is appended after stdout,
+    // so an earlier setup notice can displace the real result from the generic tail fallback.
+    let cleaned = crate::core::utils::strip_ansi(output);
+    let mut in_phpunit = false;
+    let mut results = Vec::new();
+    for line in cleaned.lines().map(str::trim) {
+        if line.starts_with("PHPUnit ") {
+            in_phpunit = true;
+        } else if in_phpunit && PHPUNIT_SUCCESS.is_match(line) {
+            results.push(line);
+        }
+    }
+    if results.is_empty() {
+        None
+    } else {
+        Some(format!("SUMMARY:\n  {}\n", results.join("\n  ")))
+    }
 }
 
 #[cfg(test)]
@@ -1958,6 +1989,17 @@ mod requests_help_tests {
 #[cfg(test)]
 mod err_test_runner_tests {
     use super::*;
+
+    #[test]
+    fn phpunit_success_requires_a_banner_and_numeric_counts() {
+        assert!(phpunit_success_summary("OK (1 test, 1 assertion)\n").is_none());
+        assert!(phpunit_success_summary("PHPUnit 9.6.7\nOK (not test counts)\n").is_none());
+        assert!(phpunit_success_summary("PHPUnit 9.6.7\nNo tests executed!\n").is_none());
+        assert_eq!(
+            phpunit_success_summary("PHPUnit 9.6.7\nOK (1 test, 1 assertion)\n").as_deref(),
+            Some("SUMMARY:\n  OK (1 test, 1 assertion)\n")
+        );
+    }
 
     #[test]
     fn test_filter_errors() {
