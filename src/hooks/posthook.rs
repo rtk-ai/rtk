@@ -509,12 +509,15 @@ fn filter_and_compose(
     // FIRST, then guard — the hint can never push output above raw.
     let slug = format!("{}_{}", tool_name.to_lowercase(), basename_of(source));
     let hint = tee::posthook_tee_hint(config, raw, &slug);
-    let composed = match hint {
+    let composed = match &hint {
         Some(h) => format!("{filtered}\n{h}"),
         None => filtered,
     };
 
     if estimate_tokens(&composed) > estimate_tokens(raw) {
+        if let Some(h) = &hint {
+            tee::discard_hint_with(&config.retriever, h);
+        }
         track(tool_name, format.as_str(), source, raw, raw, duration_ms);
         return None;
     }
@@ -615,19 +618,22 @@ fn process_websearch(
     // Compose-then-guard: hint rides in the last string element.
     let hint = tee::posthook_tee_hint(config, &raw_concat, "websearch_results");
     if let (Some(h), Some(last)) = (
-        hint,
+        &hint,
         new_results.iter_mut().rev().find_map(|v| match v {
             Value::String(s) => Some(s),
             _ => None,
         }),
     ) {
         last.push('\n');
-        last.push_str(&h);
+        last.push_str(h);
         filtered_concat.push('\n');
         filtered_concat.push_str(last);
     }
 
     if estimate_tokens(&filtered_concat) > estimate_tokens(&raw_concat) {
+        if let Some(h) = &hint {
+            tee::discard_hint_with(&config.retriever, h);
+        }
         track(
             "WebSearch",
             "web",
@@ -793,13 +799,16 @@ fn process_shell(
 
     let slug = format!("bash_{first_word}");
     let hint = tee::posthook_tee_hint(config, &raw_combined, &slug);
-    let composed_stdout = match hint {
+    let composed_stdout = match &hint {
         Some(h) => format!("{filtered_stdout}\n{h}"),
         None => filtered_stdout,
     };
 
     let emitted_combined = combine_streams(&composed_stdout, &filtered_stderr);
     if estimate_tokens(&emitted_combined) > estimate_tokens(&raw_combined) {
+        if let Some(h) = &hint {
+            tee::discard_hint_with(&config.retriever, h);
+        }
         track(
             "Bash",
             "term",
