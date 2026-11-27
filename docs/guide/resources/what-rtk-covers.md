@@ -52,6 +52,7 @@ listing into `head`, `tail`, or `cat`.
 | Command | What changes |
 |---------|--------------|
 | `cargo test` | Failures only, passed tests suppressed |
+| `cargo nextest run` | Failure details and a compact test summary |
 | `cargo build` | Errors and warnings only |
 | `cargo check` | Errors and warnings only |
 | `cargo clippy` | Lint warnings grouped by file |

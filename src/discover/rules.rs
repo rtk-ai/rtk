@@ -92,13 +92,13 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^cargo\s+(build|test|clippy|check|fmt|install)(?:\s|$|[;|&()<>])",
+        pattern: r"^cargo\s+(build|test|clippy|check|fmt|install|nextest\s+run)(?:\s|$|[;|&()<>])",
         rtk_cmd: "rtk cargo",
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &["cargo"],
         category: "Cargo",
         savings_pct: 80.0,
-        subcmd_savings: &[("test", 90.0), ("check", 80.0)],
+        subcmd_savings: &[("test", 90.0), ("check", 80.0), ("nextest run", 90.0)],
         subcmd_status: &[("fmt", RtkStatus::Passthrough)],
     },
     RtkRule {
