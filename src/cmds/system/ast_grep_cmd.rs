@@ -183,9 +183,10 @@ struct Filtered {
 }
 
 /// Groups raw `ast-grep run` plain output by file, keeping at most
-/// `max_per_file` lines per file and `max_total` lines overall. Every line the
-/// caps hold back is counted in a hint, so nothing disappears silently; any
-/// other output shape is returned unchanged.
+/// `max_per_file` consecutive match blocks per file and `max_total` overall.
+/// Plain output has no exact match boundaries, so adjacent matches are kept
+/// together rather than risk cutting through a multiline match. Other output
+/// shapes are returned unchanged.
 fn filter_ast_grep(raw: &str, max_per_file: usize, max_total: usize) -> Filtered {
     if unparsed_signal(raw) > 0 {
         return Filtered {
@@ -220,52 +221,52 @@ fn filter_ast_grep(raw: &str, max_per_file: usize, max_total: usize) -> Filtered
     let mut out = String::new();
     let mut shown_total = 0;
     let mut skipped_files = 0;
+    let mut skipped_blocks = 0;
     let mut skipped_lines = 0;
     let mut hidden_lines = 0;
 
     for file in &order {
         let entries = &by_file[file];
+        let blocks: Vec<_> = entries
+            .chunk_by(|a, b| a.0.checked_add(1) == Some(b.0))
+            .collect();
         if shown_total >= max_total {
             skipped_files += 1;
+            skipped_blocks += blocks.len();
             skipped_lines += entries.len();
             hidden_lines += entries.len();
             continue;
         }
-        let mut shown_here = 0;
-        for (line_num, content) in entries.iter().take(max_per_file) {
-            if shown_total >= max_total {
-                break;
+        let shown_blocks = blocks.len().min(max_per_file).min(max_total - shown_total);
+        let mut shown_lines = 0;
+        for block in blocks.iter().take(shown_blocks) {
+            for (line_num, content) in *block {
+                out.push_str(file);
+                out.push(':');
+                out.push_str(&line_num.to_string());
+                out.push(':');
+                out.push_str(content);
+                out.push('\n');
             }
-            out.push_str(file);
-            out.push(':');
-            out.push_str(&line_num.to_string());
-            out.push(':');
-            out.push_str(content);
-            out.push('\n');
-            shown_total += 1;
-            shown_here += 1;
+            shown_lines += block.len();
         }
-        // `shown_here`, not `max_per_file`: `max_total` can cut a file short of
-        // its own cap, and the hint has to cover every line this loop skipped.
-        // ast-grep prints one line per matched source line and a structural
-        // match spans several, so the unit is lines rather than matches.
-        if entries.len() > shown_here {
-            hidden_lines += entries.len() - shown_here;
+        shown_total += shown_blocks;
+        if blocks.len() > shown_blocks {
+            hidden_lines += entries.len() - shown_lines;
             out.push_str(&format!(
-                "  … {} more match line(s) in {}\n",
-                entries.len() - shown_here,
+                "  … {} more match block(s) ({} lines) in {}\n",
+                blocks.len() - shown_blocks,
+                entries.len() - shown_lines,
                 file
             ));
         }
     }
 
-    // Lines, not just files: a file the total cap skips outright carries match lines too, and
-    // counting only the files left them out of every tally the output carried -- 255 of 387
-    // lines on the module's own fixture, with nothing saying they existed.
+    // Include skipped files in both the block and line counts.
     if skipped_files > 0 {
         out.push_str(&format!(
-            "… {} more match line(s) in {} more file(s) not shown\n",
-            skipped_lines, skipped_files
+            "… {} more match block(s) ({} lines) in {} more file(s) not shown\n",
+            skipped_blocks, skipped_lines, skipped_files
         ));
     }
 
@@ -352,18 +353,43 @@ mod tests {
     }
 
     #[test]
+    fn caps_keep_complete_multiline_match_regions() {
+        // Captured with ast-grep 0.45.3, twelve six-line LazyLock expressions.
+        let raw = include_str!("../../../tests/fixtures/ast_grep_multiline_raw.txt");
+        for (per_file, total) in [(1, 50), (5, 1)] {
+            let out = filter_ast_grep(raw, per_file, total);
+            assert!(out.text.contains("blocks.rs:8:});"), "{}", out.text);
+            assert!(!out.text.contains("VALUE_1:"), "{}", out.text);
+            assert_eq!(out.hidden_lines, 66);
+            assert!(out.text.contains("11 more match block(s)"), "{}", out.text);
+        }
+        let out = filter_ast_grep(raw, DEFAULT_MAX_PER_FILE, DEFAULT_MAX_TOTAL);
+        assert_eq!(out.text.matches("});").count(), 5, "{}", out.text);
+        assert!(out.text.len() * 5 <= raw.len() * 4);
+    }
+
+    #[test]
+    fn adjacent_matches_are_kept_as_one_conservative_region() {
+        let raw = "a.rs:1:first\na.rs:2:second\na.rs:4:third\n";
+        let out = filter_ast_grep(raw, 1, 50);
+        assert!(out.text.contains("a.rs:2:second"), "{}", out.text);
+        assert!(!out.text.contains("a.rs:4:third"), "{}", out.text);
+        assert_eq!(out.hidden_lines, 1);
+    }
+
+    #[test]
     fn test_groups_and_caps_by_file() {
         let input = "\
 src/a.rs:1:fn foo() {}
-src/a.rs:2:fn bar() {}
-src/a.rs:3:fn baz() {}
+src/a.rs:3:fn bar() {}
+src/a.rs:5:fn baz() {}
 src/b.rs:10:fn qux() {}
 ";
         let out = filtered(input, 2, 50);
         assert!(out.contains("src/a.rs:1:"));
-        assert!(out.contains("src/a.rs:2:"));
-        assert!(!out.contains("src/a.rs:3:"));
-        assert!(out.contains("1 more match line(s) in src/a.rs"));
+        assert!(out.contains("src/a.rs:3:"));
+        assert!(!out.contains("src/a.rs:5:"));
+        assert!(out.contains("1 more match block(s) (1 lines) in src/a.rs"));
         assert!(out.contains("src/b.rs:10:"));
     }
 
@@ -399,19 +425,19 @@ warning[no-unwrap]: avoid unwrap
     fn test_total_cap_hints_lines_it_cut() {
         let input = "\
 a.rs:1:one
-a.rs:2:two
-a.rs:3:three
-a.rs:4:four
-a.rs:5:five
+a.rs:3:two
+a.rs:5:three
+a.rs:7:four
+a.rs:9:five
 b.rs:1:six
-b.rs:2:seven
-b.rs:3:eight
+b.rs:3:seven
+b.rs:5:eight
 ";
         let out = filtered(input, 5, 6);
         assert!(out.contains("b.rs:1:six"), "{out}");
-        assert!(!out.contains("b.rs:2:seven"), "{out}");
+        assert!(!out.contains("b.rs:3:seven"), "{out}");
         assert!(
-            out.contains("2 more match line(s) in b.rs"),
+            out.contains("2 more match block(s) (2 lines) in b.rs"),
             "cut lines must be hinted, got: {out}"
         );
     }
@@ -423,7 +449,7 @@ b.rs:3:eight
         let mut input = String::new();
         for file in 'a'..='d' {
             for line in 1..=10 {
-                input.push_str(&format!("{file}.rs:{line}:match\n"));
+                input.push_str(&format!("{file}.rs:{}:match\n", line * 2));
             }
         }
         let out = filter_ast_grep(&input, 5, 10);
@@ -432,7 +458,7 @@ b.rs:3:eight
         // and 10 per skipped one.
         assert!(
             out.text
-                .contains("20 more match line(s) in 2 more file(s) not shown"),
+                .contains("20 more match block(s) (20 lines) in 2 more file(s) not shown"),
             "{}",
             out.text
         );
@@ -454,7 +480,7 @@ b.rs:3:eight
         let mut input = String::new();
         for file in 'a'..='d' {
             for line in 1..=10 {
-                input.push_str(&format!("{file}.rs:{line}:match\n"));
+                input.push_str(&format!("{file}.rs:{}:match\n", line * 2));
             }
         }
         let out = filter_ast_grep(&input, 5, 10);
@@ -703,11 +729,11 @@ b.rs:3:eight
         let output_tokens = count_tokens(&output.text);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
 
-        // Measured at ~84% on this fixture. Pinned well above the 20% release floor so a
-        // change that quietly stops compacting is caught here rather than in a release review.
+        // Keeping complete blocks reduces the old line-capped saving (~84%) to
+        // ~47% on this fixture. Retain a margin above the 20% release floor.
         assert!(
-            savings >= 60.0,
-            "ast-grep filter: expected >=60% savings, got {:.1}% ({} -> {} tokens)",
+            savings >= 40.0,
+            "ast-grep filter: expected >=40% savings, got {:.1}% ({} -> {} tokens)",
             savings,
             input_tokens,
             output_tokens

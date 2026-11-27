@@ -247,7 +247,18 @@ src/ls.rs:25:fn run_tree(...)                src/ls.rs
 rtk ast-grep run -p '<pattern>' [path] [options]
 ```
 
-Groups matches by file, capped at 5 per file and 50 in total; the overflow is replaced by a count note ("N more match line(s) in X" / "N more match line(s) in M more file(s) not shown"), followed by a `[full output: ...]` hint pointing to the complete output, as long as recall is enabled (`[retriever] mode`) and the compaction saves enough to pay for the hint. Otherwise the count note is followed by a fallback (`--json`, a narrower pattern, or `rtk proxy ast-grep`), and the full output is not archived. When the compacted output would end up costing more than the raw one (count notes that cost more than the lines they replace, or a hint or fallback longer than the margin saved), the raw output is printed whole, with no note and no fallback. ast-grep prints one line per source line of a match, and a structural match can span several lines, so the count is in lines, not matches. On a real search in this repository, ~85% reduction.
+Groups consecutive matched source lines into blocks and keeps each block whole,
+up to 5 per file and 50 in total. Adjacent matches stay together because plain
+output does not identify their exact boundaries. A multiline match therefore
+keeps its closing lines even when it exceeds five source lines.
+
+Overflow notes count both the omitted blocks and their source lines, including
+files omitted entirely. A `[full output: ...]` hint points to the complete output
+when recall is enabled (`[retriever] mode`) and compaction saves enough to pay for
+the hint. Otherwise the note suggests `--json`, a narrower pattern, or
+`rtk proxy ast-grep`, without archiving the output. If the compacted output,
+including its recovery guidance, would cost more than the raw output, the raw
+output is printed whole.
 
 Only `run` is filtered: either named explicitly, or implied when no positional argument before `--` names another subcommand. `scan`, `test`, `new`, `lsp`, `outline`, `completions` and `help` pass through unchanged (the ast-grep 0.45.3 subcommands other than `run`): their output does not have this shape, and `lsp` talks over stdin. So do `run --stdin` and `run -i`: the first reads the source on the pipe the capture closes, the second opens a full-screen session (one question per match) that it writes to stdout while reading answers from /dev/tty, so the capture would swallow the whole session, question included, while ast-grep waits for an answer.
 
