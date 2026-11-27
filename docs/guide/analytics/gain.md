@@ -263,6 +263,18 @@ Trimmed in flight: 1.7K removed across the 1 req it touched (per-mechanism ratio
     web-pages:     1.7K
 ```
 
+### Delegation
+
+A pipeline rule that routes a call to the agent's own sub-agents (`action = "route"`) is counted under its name. The default report shows a `Delegated` line, and `--by-rule` and `--pipeline` list each routing rule:
+
+```
+Delegated:        4 calls handed to sub-agents · 3.2K tokens kept out of your context   est.
+
+  delegate-investigation            4 routed        3.2K kept out of 3.5K read by sub-agents (91%) est.
+```
+
+*Kept out* is what the sub-agents read through their tools after the route, minus the reports they handed back. Claude Code tells hooks which calls a sub-agent made, and `rtk init -g` registers the `SubagentStop` hook for a pipeline that routes, so the figure is measured there. Other agents show the routed count only. A judge that runs on your computer, such as a local decision model, is not counted as spend.
+
 ### One pipeline in detail
 
 `--pipeline <NAME>` slices a single pipeline by where its savings actually land: which tool outputs the hooks trimmed, and which methods compressed billed input.

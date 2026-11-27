@@ -11,6 +11,8 @@ pub mod config;
 pub mod constants;
 pub mod db;
 #[cfg(feature = "engine")]
+pub mod delegation;
+#[cfg(feature = "engine")]
 pub mod deps;
 pub mod display_helpers;
 pub mod filter;

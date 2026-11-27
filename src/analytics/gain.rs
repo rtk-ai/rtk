@@ -97,6 +97,10 @@ fn attribution_json(
     if !tasks.is_empty() {
         out.insert("tasks".into(), json!(tasks));
     }
+    let routes = rows("hook", crate::core::tracking::ATTRIBUTION_ROUTE)?;
+    if !routes.is_empty() {
+        out.insert("delegation_routes".into(), json!(routes));
+    }
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::Value::Object(out))?
@@ -180,18 +184,7 @@ pub fn run_attribution(
             return;
         }
         for row in rows {
-            let pct = if row.tokens_in > 0 {
-                row.saved() as f64 / row.tokens_in as f64 * 100.0
-            } else {
-                0.0
-            };
-            println!(
-                "  {:<28} {:>6} calls  {:>10} saved  ({:.0}%)",
-                truncate(&row.name, 28),
-                row.calls,
-                format_tokens(row.saved().max(0) as usize),
-                pct
-            );
+            println!("  {}", saved_line(row));
         }
         println!();
     };
@@ -254,6 +247,18 @@ pub fn run_attribution(
         println!();
     }
 
+    let routes =
+        tracker.attribution_site("hook", crate::core::tracking::ATTRIBUTION_ROUTE, DAYS)?;
+    if !routes.is_empty() && !by_rule {
+        println!(
+            "{}",
+            format!("Delegation — calls handed to your agent's sub-agents (last {DAYS}d)").bold()
+        );
+        for row in &routes {
+            println!("  {}", route_line(row));
+        }
+        println!();
+    }
     let tasks = tracker.attribution_site("task", "task", DAYS)?;
     if !tasks.is_empty() {
         // Context reduction: the corpus WOULD have put `tokens_in` into the
@@ -308,10 +313,21 @@ pub fn run_attribution(
     }
 
     if by_rule {
-        print_rows(
-            &format!("By Rule — hook site (last {DAYS}d)"),
-            &tracker.attribution_site("hook", "rule", DAYS)?,
-        );
+        let routes =
+            tracker.attribution_site("hook", crate::core::tracking::ATTRIBUTION_ROUTE, DAYS)?;
+        let rules = tracker.attribution_site("hook", "rule", DAYS)?;
+        if routes.is_empty() {
+            print_rows(&format!("By Rule — hook site (last {DAYS}d)"), &rules);
+        } else {
+            println!("{}", format!("By Rule — hook site (last {DAYS}d)").bold());
+            for row in &rules {
+                println!("  {}", saved_line(row));
+            }
+            for row in &routes {
+                println!("  {}", route_line(row));
+            }
+            println!();
+        }
         if let Some(proxy) = crate::llm_proxy::read_gain_summary()
             && !proxy.by_rule.is_empty()
         {
@@ -433,10 +449,16 @@ pub fn run_pipeline_detail(name: &str) -> Result<()> {
         .into_iter()
         .filter(|t| t.tokens_in > 0)
         .collect();
+    let routes = routes_of_pipeline(&tracker, name, DAYS);
     let proxy = crate::llm_proxy::savings_by_pipeline()
         .and_then(|rows| rows.into_iter().find(|r| r.name == name));
 
-    if hook_total.is_none() && slices.is_empty() && proxy.is_none() && tasks.is_empty() {
+    if hook_total.is_none()
+        && slices.is_empty()
+        && proxy.is_none()
+        && tasks.is_empty()
+        && routes.is_empty()
+    {
         println!("no recorded savings for pipeline `{name}` (last {DAYS}d hook, all-time proxy)");
         let mut known: Vec<String> = tracker
             .attribution_site("hook", "pipeline", DAYS)?
@@ -497,6 +519,21 @@ pub fn run_pipeline_detail(name: &str) -> Result<()> {
                     "(rows recorded before per-slice tracking count only in the total)".dimmed()
                 );
             }
+        }
+        println!();
+    }
+
+    if !routes.is_empty() {
+        println!(
+            "{}",
+            styled(
+                &format!("Delegation — calls handed to your agent's sub-agents (last {DAYS}d)"),
+                true
+            )
+        );
+        println!("{}", "─".repeat(60));
+        for row in &routes {
+            println!("  {}", route_line(row));
         }
         println!();
     }
@@ -1189,6 +1226,68 @@ pub fn run(
 }
 
 #[cfg(feature = "engine")]
+fn routes_of_pipeline(
+    tracker: &Tracker,
+    pipeline: &str,
+    days: u32,
+) -> Vec<crate::core::tracking::AttributionRow> {
+    let rows = tracker
+        .attribution_site("hook", crate::core::tracking::ATTRIBUTION_ROUTE, days)
+        .unwrap_or_default();
+    if rows.is_empty() {
+        return rows;
+    }
+    let loaded = crate::core::pipeline_config::load();
+    let owns = |rule: &str| {
+        loaded
+            .resolved
+            .rules
+            .values()
+            .flatten()
+            .any(|r| r.name == rule && crate::core::deps::pipeline_name(&r.origin) == pipeline)
+    };
+    rows.into_iter().filter(|row| owns(&row.name)).collect()
+}
+
+#[cfg(not(feature = "engine"))]
+fn routes_of_pipeline(
+    _tracker: &Tracker,
+    _pipeline: &str,
+    _days: u32,
+) -> Vec<crate::core::tracking::AttributionRow> {
+    Vec::new()
+}
+
+fn saved_line(row: &crate::core::tracking::AttributionRow) -> String {
+    let pct = if row.tokens_in > 0 {
+        row.saved() as f64 / row.tokens_in as f64 * 100.0
+    } else {
+        0.0
+    };
+    format!(
+        "{:<28} {:>6} calls  {:>10} saved  ({:.0}%)",
+        truncate(&row.name, 28),
+        row.calls,
+        format_tokens(row.saved().max(0) as usize),
+        pct
+    )
+}
+
+fn route_line(row: &crate::core::tracking::AttributionRow) -> String {
+    let routed = format!("{:<28} {:>6} routed", truncate(&row.name, 28), row.calls);
+    if row.tokens_in <= 0 {
+        return routed;
+    }
+    let kept = (row.tokens_in - row.tokens_out).max(0);
+    format!(
+        "{routed}  {:>10} kept out of {} read by sub-agents ({:.0}%) est.",
+        format_tokens(kept as usize),
+        format_tokens(row.tokens_in as usize),
+        kept as f64 / row.tokens_in as f64 * 100.0
+    )
+}
+
+#[cfg(feature = "engine")]
 fn print_efficiency_ledger(tracker: &Tracker, proxy: Option<&crate::llm_proxy::ProxyGainSummary>) {
     const WINDOW_DAYS: u32 = 30;
     let sum = |kind: &str| -> (i64, i64, i64) {
@@ -1211,22 +1310,12 @@ fn print_efficiency_ledger(tracker: &Tracker, proxy: Option<&crate::llm_proxy::P
             (c + r.calls, i + r.tokens_in, o + r.tokens_out)
         })
     };
-    let directive_tokens: usize = {
-        let loaded = crate::core::pipeline_config::load();
-        loaded
-            .resolved
-            .directives
-            .iter()
-            .filter(|d| d.def.enabled)
-            .filter_map(crate::core::pipeline_config::directive_text)
-            .map(|text| crate::core::tracking::estimate_tokens(&text))
-            .sum()
-    };
+    let (routed, routed_in, routed_out) = sum(crate::core::tracking::ATTRIBUTION_ROUTE);
     let proxy_costs = proxy
         .filter(|p| p.cost_without_usd > 0.0)
         .map(|p| (p.cost_actual_usd, p.cost_without_usd));
 
-    let has_hook_data = comp_in > 0 || llm_spent > 0 || recalls > 0;
+    let has_hook_data = comp_in > 0 || llm_spent > 0 || recalls > 0 || routed > 0;
     if !has_hook_data && proxy_costs.is_none() && shadow_calls == 0 {
         return;
     }
@@ -1252,6 +1341,22 @@ fn print_efficiency_ledger(tracker: &Tracker, proxy: Option<&crate::llm_proxy::P
         );
         notes.push("tokens est. ≈ bytes/4 — ratios reliable, absolutes approximate");
     }
+    if routed > 0 {
+        let kept = (routed_in - routed_out).max(0);
+        let line = if routed_in > 0 {
+            format!(
+                "{routed} {} handed to sub-agents · {} tokens kept out of your context   est.",
+                if routed == 1 { "call" } else { "calls" },
+                format_tokens(kept as usize)
+            )
+        } else {
+            format!(
+                "{routed} {} handed to sub-agents",
+                if routed == 1 { "call" } else { "calls" }
+            )
+        };
+        print_kpi("Delegated", line);
+    }
     if llm_spent > 0 {
         print_kpi(
             "LLM-spend",
@@ -1265,15 +1370,6 @@ fn print_efficiency_ledger(tracker: &Tracker, proxy: Option<&crate::llm_proxy::P
         print_kpi(
             "Recalled",
             format!("{recalls} compressed outputs pulled back in full"),
-        );
-    }
-    if directive_tokens > 0 {
-        print_kpi(
-            "Directives",
-            format!(
-                "+{} tokens standing, every turn   est.",
-                format_tokens(directive_tokens)
-            ),
         );
     }
     match proxy_costs {
@@ -1980,6 +2076,24 @@ mod tests {
         use clap::CommandFactory;
         let has_pipeline = crate::Cli::command().find_subcommand("pipeline").is_some();
         assert_eq!(share_cta_available(), has_pipeline);
+    }
+
+    #[test]
+    fn a_routed_rule_shows_what_its_sub_agents_kept_out() {
+        let row = |calls, tokens_in, tokens_out| crate::core::tracking::AttributionRow {
+            name: "delegate-investigation".to_string(),
+            calls,
+            tokens_in,
+            tokens_out,
+        };
+        let measured = route_line(&row(4, 4000, 500));
+        assert!(measured.contains("4 routed"), "{measured}");
+        assert!(
+            measured.contains("kept out of 4.0K read by sub-agents (88%)"),
+            "{measured}"
+        );
+        let counted = route_line(&row(3, 0, 0));
+        assert!(counted.trim_end().ends_with("3 routed"), "{counted}");
     }
 
     #[cfg(feature = "engine")]

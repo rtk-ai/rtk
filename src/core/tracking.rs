@@ -987,19 +987,51 @@ impl Tracker {
         tokens_in: usize,
         tokens_out: usize,
     ) -> Result<()> {
+        self.record_attribution_counted(site, kind, name, 1, tokens_in, tokens_out)
+    }
+
+    #[cfg(feature = "engine")]
+    pub fn record_attribution_counted(
+        &self,
+        site: &str,
+        kind: &str,
+        name: &str,
+        calls: i64,
+        tokens_in: usize,
+        tokens_out: usize,
+    ) -> Result<()> {
         let day = Utc::now().format("%Y-%m-%d").to_string();
         self.conn
             .execute(
                 "INSERT INTO engine_attribution (day, site, kind, name, calls, tokens_in, tokens_out)
-                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(day, site, kind, name) DO UPDATE SET
-                   calls = calls + 1,
+                   calls = calls + excluded.calls,
                    tokens_in = tokens_in + excluded.tokens_in,
                    tokens_out = tokens_out + excluded.tokens_out",
-                params![day, site, kind, name, tokens_in as i64, tokens_out as i64],
+                params![day, site, kind, name, calls, tokens_in as i64, tokens_out as i64],
             )
             .inspect_err(|e| warn_if_missing_table("record_attribution", e))?;
         Ok(())
+    }
+
+    #[cfg(feature = "engine")]
+    pub fn attribution_name_with_prefix(
+        &self,
+        site: &str,
+        kind: &str,
+        prefix: &str,
+    ) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name FROM engine_attribution
+             WHERE site = ?1 AND kind = ?2 AND substr(name, 1, length(?3)) = ?3
+             ORDER BY day DESC LIMIT 1",
+        )?;
+        let name = stmt
+            .query_map(params![site, kind, prefix], |row| row.get::<_, String>(0))?
+            .next()
+            .transpose()?;
+        Ok(name)
     }
 
     pub fn attribution(&self, kind: &str, days: u32) -> Result<Vec<AttributionRow>> {
@@ -2176,6 +2208,8 @@ pub fn record_parse_failure_silent(raw_command: &str, error_message: &str, succe
 }
 
 pub use rtk_text::{estimate_tokens, estimate_tokens_from_len};
+
+pub const ATTRIBUTION_ROUTE: &str = "route";
 
 /// Helper struct for timing command execution
 /// Helper for timing command execution and tracking results.

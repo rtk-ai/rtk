@@ -309,7 +309,7 @@ Pipeline eval — `squeeze-term` · last 30 days · vs raw, same trajectory
 
 Both lines are measured on the **same** outputs, so the comparison is apples-to-apples. Limits, stated on the report itself: token counts are bytes÷4 estimates; a candidate's classifier- or route-driven rules are excluded (they would need live LLM calls), so eval covers its deterministic transforms.
 
-The continuous counterpart lives in `rtk gain`: a per-mechanism efficiency section (filter+compress, LLM-spend, recalls, directives, proxy bill actual-vs-without) with a confidence tag on every line — `measured` where real provider usage exists, `est.` where it is a size estimate.
+The continuous counterpart lives in `rtk gain`: a per-mechanism efficiency section (filter+compress, delegation, LLM-spend on hosted judges, recalls, proxy bill actual-vs-without) with a confidence tag on every line — `measured` where real provider usage exists, `est.` where it is a size estimate.
 
 ## Related commands
 

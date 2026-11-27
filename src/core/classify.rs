@@ -102,7 +102,7 @@ pub fn insert_classifier_facts(
         if spent > 0
             && let Some(t) = tracker.as_ref()
         {
-            let _ = t.record_attribution("hook", "llm-spend", upstream_name, 0, spent);
+            let _ = t.record_attribution("hook", spend_kind(upstream), upstream_name, 0, spent);
         }
         for (name, def) in &misses {
             let Some(answer) = answers.get(*name) else {
@@ -348,10 +348,44 @@ fn answer_from_json(json: &str) -> Option<Answer> {
     }
 }
 
+fn spend_kind(upstream: &rtk_engine::pipeline::UpstreamDef) -> &'static str {
+    let local = upstream
+        .base_url
+        .as_deref()
+        .and_then(rtk_engine::pipeline::url_authority)
+        .is_some_and(rtk_engine::pipeline::local_listen);
+    if local {
+        "llm-spend-local"
+    } else {
+        "llm-spend"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rtk_engine::pipeline::ClassifierDef;
+
+    #[test]
+    fn a_local_judge_is_not_counted_as_spend() {
+        let upstream = |url: Option<&str>| rtk_engine::pipeline::UpstreamDef {
+            base_url: url.map(str::to_string),
+            ..Default::default()
+        };
+        assert_eq!(
+            spend_kind(&upstream(Some("http://127.0.0.1:41733/v1/systemone"))),
+            "llm-spend-local"
+        );
+        assert_eq!(
+            spend_kind(&upstream(Some("http://localhost:8000"))),
+            "llm-spend-local"
+        );
+        assert_eq!(
+            spend_kind(&upstream(Some("https://api.example.com/v1"))),
+            "llm-spend"
+        );
+        assert_eq!(spend_kind(&upstream(None)), "llm-spend");
+    }
 
     fn intent() -> ClassifierDef {
         let mut def = ClassifierDef {

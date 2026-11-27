@@ -33,7 +33,12 @@ pub(super) fn handle(v: &Value, raw_len: usize) -> Result<bool> {
 
     match v.get("hook_event_name").and_then(|e| e.as_str()) {
         Some(POST_TOOL_USE_KEY) => {
+            crate::core::delegation::observe(v);
             crate::hooks::posthook::run(v);
+            return Ok(true);
+        }
+        Some(crate::hooks::constants::SUBAGENT_STOP_KEY) => {
+            crate::core::delegation::observe(v);
             return Ok(true);
         }
         Some(SESSION_START_KEY) => {
@@ -92,6 +97,9 @@ fn read_gate(v: &Value) -> bool {
         return false;
     };
     deny(&decision.message);
+    if decision.action == "route" {
+        crate::core::delegation::record_route(v, &decision.rule);
+    }
     let target = path.display().to_string();
     audit_log(
         &format!("skip:pipeline_{}", decision.action),
@@ -117,9 +125,14 @@ fn tool_gate(v: &Value) -> bool {
     let input = v.get("tool_input").unwrap_or(&Value::Null);
     let facts = pipeline_config::subject_facts(subject, name, input);
     match pipeline_config::before_tool_decision(subject, &facts) {
-        ShellHookDecision::Deny { message, rule }
-        | ShellHookDecision::Route { message, rule }
-        | ShellHookDecision::Answer { message, rule } => {
+        ShellHookDecision::Route { message, rule } => {
+            deny(&message);
+            crate::core::delegation::record_route(v, &rule);
+            audit_log("skip:pipeline_stop", name, &rule);
+            log(v, subject.as_str(), name, &rule, "route");
+            true
+        }
+        ShellHookDecision::Deny { message, rule } | ShellHookDecision::Answer { message, rule } => {
             deny(&message);
             audit_log("skip:pipeline_stop", name, &rule);
             log(v, subject.as_str(), name, &rule, "deny");
@@ -283,6 +296,9 @@ fn is_assignment(word: &str) -> bool {
 
 fn stop(v: &Value, cmd: &str, message: &str, rule: &str, action: &str) -> bool {
     deny(message);
+    if action == "route" {
+        crate::core::delegation::record_route(v, rule);
+    }
     audit_log("skip:pipeline_stop", cmd, rule);
     log(v, "shell", cmd, rule, action);
     true

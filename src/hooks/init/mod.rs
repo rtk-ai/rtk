@@ -1909,13 +1909,15 @@ pub(super) fn insert_hook_entry(
         .as_array_mut()
         .with_context(|| format!("{event_key} value is not an array"))?;
 
-    event_array.push(serde_json::json!({
-        "matcher": matcher,
-        "hooks": [{
-            "type": "command",
-            "command": hook_command
-        }]
-    }));
+    let hooks = serde_json::json!([{
+        "type": "command",
+        "command": hook_command
+    }]);
+    event_array.push(if matcher.is_empty() {
+        serde_json::json!({ "hooks": hooks })
+    } else {
+        serde_json::json!({ "matcher": matcher, "hooks": hooks })
+    });
     Ok(())
 }
 
