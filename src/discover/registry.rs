@@ -4225,6 +4225,7 @@ mod tests {
             "nix eval --expr 1",
             "nix flake show",
             "nix searchx",
+            "nix -- search nixpkgs jq",
             "nix shell nixpkgs#cargo -c cargo build",
         ] {
             assert_eq!(

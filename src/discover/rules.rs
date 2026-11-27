@@ -1076,7 +1076,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^nix(?:\s+--?\S+)*\s+search(?:\s|$|[;|&()<>])",
+        pattern: r"^nix(?:\s+--?[^\s-]\S*)*\s+search(?:\s|$|[;|&()<>])",
         rtk_cmd: "rtk nix",
         rewrite_prefixes: &["nix"],
         category: "Infra",
