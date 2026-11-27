@@ -3075,6 +3075,7 @@ mod tests {
                 "rtk git",
                 "rtk go",
                 "rtk golangci-lint run",
+                "rtk govulncheck",
                 "rtk grep",
                 "rtk hadolint",
                 "rtk helm",
