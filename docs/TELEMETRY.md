@@ -138,7 +138,7 @@ export RTK_TELEMETRY_DISABLED=1
 
 - **Server-side**: telemetry records are retained for a maximum of **12 months**, then automatically purged (periodic task every 24 hours).
 - **Server-side (erasure log)**: IP addresses in the erasure audit log are **anonymized after 6 months** (GDPR — IP is personal data).
-- **Client-side**: the local SQLite database (`~/.local/share/rtk/tracking.db`) retains data for **90 days** by default (configurable via `tracking.history_days` in `config.toml`). Deleted entirely by `rtk telemetry forget`.
+- **Client-side**: the local SQLite database (`~/.local/share/rtk/history.db`) retains data for **90 days** by default (configurable via `tracking.history_days` in `config.toml`). Deleted entirely by `rtk telemetry forget`.
 
 ## Your Rights (GDPR)
 
@@ -148,7 +148,7 @@ Under the EU General Data Protection Regulation, you have the right to:
 - **Rectification**: since data is anonymous and aggregate, rectification is not applicable.
 - **Erasure** (Art. 17): run `rtk telemetry forget` to delete local data and send an erasure request to the server. Alternatively, email contact@rtk-ai.app with your device hash.
 - **Restriction of processing**: `rtk telemetry disable` stops all data collection immediately.
-- **Portability**: the local SQLite database at `~/.local/share/rtk/tracking.db` contains all locally stored data.
+- **Portability**: the local SQLite database at `~/.local/share/rtk/history.db` contains all locally stored data.
 - **Objection**: `rtk telemetry disable` or `export RTK_TELEMETRY_DISABLED=1`.
 
 ## Erasure Procedure
