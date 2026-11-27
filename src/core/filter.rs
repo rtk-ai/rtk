@@ -158,6 +158,13 @@ pub struct MinimalFilter;
 
 static MULTIPLE_BLANK_LINES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
 
+/// The line-oriented filters cannot distinguish template text, nested `${...}`
+/// expressions, escaped delimiters, and backticks in strings/comments/regexes.
+/// Keep these sources whole until filtering can use JavaScript syntax boundaries.
+fn preserve_js_template_source(content: &str, lang: &Language) -> bool {
+    matches!(lang, Language::JavaScript | Language::TypeScript) && content.contains('`')
+}
+
 /// Advances triple-quoted string state across one line, returning the delimiter
 /// still open at end of line. The two quote kinds are tracked separately so a
 /// `'''` inside a `"""` string is text rather than a close. Outside a string, a
@@ -280,6 +287,9 @@ fn filter_python_minimal(content: &str) -> String {
 
 impl FilterStrategy for MinimalFilter {
     fn filter(&self, content: &str, lang: &Language) -> String {
+        if preserve_js_template_source(content, lang) {
+            return content.to_string();
+        }
         if *lang == Language::Python {
             return filter_python_minimal(content);
         }
@@ -358,6 +368,9 @@ pub struct AggressiveFilter;
 
 impl FilterStrategy for AggressiveFilter {
     fn filter(&self, content: &str, lang: &Language) -> String {
+        if preserve_js_template_source(content, lang) {
+            return content.to_string();
+        }
         // Data formats (JSON, YAML, etc.) must never be code-filtered
         if *lang == Language::Data {
             return MinimalFilter.filter(content, lang);

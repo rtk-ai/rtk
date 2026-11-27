@@ -141,6 +141,11 @@ rtk read - [options]          # Read from stdin
 | `minimal` | Removes comments and excessive blank lines |
 | `aggressive` | Signatures only (removes function bodies) |
 
+JavaScript and TypeScript inputs containing backticks are kept unchanged at both
+filtering levels to preserve template literals, including their blank lines.
+Comments in those inputs are retained too, even if the only backtick is in a
+comment or a quoted string.
+
 **Before / After (aggressive mode):**
 ```
 # cat main.rs (~200 lines)                  # rtk read main.rs -l aggressive (~50 lines)
