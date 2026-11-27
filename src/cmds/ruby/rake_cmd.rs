@@ -53,22 +53,28 @@ fn looks_like_test_path(arg: &str) -> bool {
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let (tool, effective_args) = select_runner(args);
-    let mut cmd = ruby_exec(tool);
-    for arg in &effective_args {
+    run_with_command(ruby_exec(tool), "rake", &effective_args, verbose)
+}
+
+/// Run Rake/Rails tests with a caller-supplied command (e.g., `rbenv exec [bundle exec] rake`)
+/// so wrapper invocations execute the exact Ruby toolchain requested.
+pub fn run_with_command(
+    mut cmd: std::process::Command,
+    tool_name: &str,
+    args: &[String],
+    verbose: u8,
+) -> Result<i32> {
+    for arg in args {
         cmd.arg(arg);
     }
 
     if verbose > 0 {
-        eprintln!(
-            "Running: {} {}",
-            cmd.get_program().to_string_lossy(),
-            effective_args.join(" ")
-        );
+        eprintln!("Running: {} {}", tool_name, args.join(" "));
     }
 
     runner::run_filtered(
         cmd,
-        "rake",
+        tool_name,
         &display_args(args),
         filter_minitest_output,
         runner::RunOptions::with_tee("rake"),

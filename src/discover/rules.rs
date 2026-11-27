@@ -591,6 +591,15 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^rbenv\s+exec\s+(?:(?:bundle\s+exec\s+)?(?:(?:bin/)?(?:rake|rails)\s+test(?:[\s:]|$|[;|&()<>])|(?:bin/)?rspec(?:\s|$)|rubocop(?:\s|$))|bundle\s+(?:install|update)(?:\s|$|[;|&()<>]))",
+        rtk_cmd: "rtk rbenv",
+        pipeline_safety: PipelineSafety::ProducerOnly,
+        rewrite_prefixes: &["rbenv"],
+        category: "Ruby",
+        savings_pct: 75.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^bundle\s+(install|update)\b",
         rtk_cmd: "rtk bundle",
         pipeline_safety: PipelineSafety::ProducerOnly,

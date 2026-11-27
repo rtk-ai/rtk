@@ -2698,4 +2698,36 @@ mod tests {
             PermissionVerdict::Ask
         );
     }
+
+    #[test]
+    fn test_deny_matches_past_lowercase_assignments_and_env_double_dash() {
+        let deny = vec!["git push *".to_string()];
+        for cmd in [
+            "http_proxy=http://127.0.0.1:8080 git push",
+            "env foo=1 git push",
+            "env -- git push",
+            "env -- FOO=1 git push",
+            "env -- foo=1 bar=2 git push",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &[]),
+                PermissionVerdict::Deny,
+                "deny rule did not fire behind env/assignment prefix: {cmd}"
+            );
+        }
+
+        // After an assignment, `--` is the executable name, not env's option terminator.
+        for cmd in [
+            "env FOO=1 -- git push",
+            "FOO=1 -- git push",
+            "1a=b git push",
+            "foo-bar=1 git push",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &[]),
+                PermissionVerdict::Default,
+                "falsely peeled non-assignment / utility `--`: {cmd}"
+            );
+        }
+    }
 }

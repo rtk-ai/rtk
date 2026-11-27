@@ -1,3 +1,4 @@
 pub mod rake_cmd;
+pub mod rbenv_cmd;
 pub mod rspec_cmd;
 pub mod rubocop_cmd;

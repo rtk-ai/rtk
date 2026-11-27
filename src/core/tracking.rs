@@ -766,6 +766,7 @@ const SUBCOMMAND_ROUTERS: &[&str] = &[
     "pulumi",
     "pytest",
     "rake",
+    "rbenv",
     "rspec",
     "rubocop",
     "ruff",
