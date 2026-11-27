@@ -36,6 +36,21 @@ The `~N tokens` figures are **estimated bash output bytes divided by 4**, not to
 
 If commands appear in the missed list after installing RTK, it usually means the hook isn't active for that agent. See [Troubleshooting](../resources/troubleshooting.md#ai-assistant-not-using-rtk) — "AI assistant not using RTK".
 
+### Why commands RTK supports still show as missed
+
+`rtk discover` is a **historical** report: it reads the command transcripts Claude Code already wrote, then asks which of those commands RTK could have compressed. A row under "Commands RTK already handles" means the command has a filter, not that this particular invocation used it.
+
+Common reasons a supported command still appears:
+
+- It ran **before** the hook was installed, or before `rtk init -g` was re-run after an upgrade.
+- It ran with `RTK_DISABLED=1` or through `rtk proxy`, which deliberately bypasses filtering.
+- It came from a tool that does not go through the Bash hook (a subagent, an IDE integration, or a command a tool ran internally).
+- The agent called the command directly instead of letting the hook rewrite it, for example when the hook is project-scoped and the session started in another directory.
+
+`rtk discover` also counts commands from every Claude Code session for the project, not only the current conversation. Old sessions therefore keep contributing to the missed total until they age out of the `--since` window.
+
+To check whether the hook is actually catching commands now, compare with [`rtk session`](#rtk-session--adoption-tracking), which reports per-session RTK coverage. If coverage is high but `discover` still lists old commands, the missed rows are history rather than a live configuration problem.
+
 ## rtk session — adoption tracking
 
 `rtk session` shows RTK adoption across recent Claude Code sessions: how many shell commands ran through RTK vs. raw.
