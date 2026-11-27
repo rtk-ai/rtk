@@ -269,6 +269,10 @@ rg "\.join\(\" \"\)" --type rust src/
 - [ ] **No dynamic evaluation**: No `eval` or `source` of untrusted files
 
 **Hook security checklist**:
+
+These checks catch accidental package mix-ups; they do not authenticate the
+binary or enforce a minimum supported version.
+
 ```bash
 #!/bin/bash
 # rtk-rewrite.sh
@@ -278,20 +282,27 @@ if [ -z "$CLAUDE_CODE_HOOK_BASH_TEMPLATE" ]; then
     exit 1
 fi
 
-# 2. Verify RTK binary exists
-if ! command -v rtk >/dev/null 2>&1; then
+# 2. Resolve once so validation and execution use the same executable
+if ! RTK_BIN=$(command -v rtk); then
+    echo "Warning: RTK executable not found" >&2
     exit 1
 fi
 
-# 3. Use absolute path (prevent PATH hijacking)
-RTK_BIN=$(which rtk)
-
-# 4. Validate RTK version (prevent downgrade attacks)
-if ! "$RTK_BIN" --version | grep -q "rtk 0.16"; then
-    echo "Warning: RTK version mismatch"
+# 3. Validate the version format without pinning a release
+RTK_VERSION_PATTERN='^rtk [0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+if ! RTK_VERSION=$("$RTK_BIN" --version) || [[ ! "$RTK_VERSION" =~ $RTK_VERSION_PATTERN ]]; then
+    echo "Warning: could not verify RTK version (expected rtk X.Y.Z)" >&2
+    exit 1
 fi
 
-# 5. Execute with explicit path
+# 4. Distinguish Token Killer from same-name packages without opening its database
+if ! RTK_GAIN_HELP=$("$RTK_BIN" gain --help) ||
+    [[ ! "$RTK_GAIN_HELP" =~ (^|$'\n')Usage:\ rtk(\.exe)?\ gain([[:space:]]|$) ]]; then
+    echo "Warning: expected Rust Token Killer (rtk-ai/rtk)" >&2
+    exit 1
+fi
+
+# 5. Execute the checked binary
 "$RTK_BIN" "$@"
 ```
 
