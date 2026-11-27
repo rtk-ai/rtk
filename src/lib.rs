@@ -207,7 +207,7 @@ enum Commands {
         #[arg(short, long, conflicts_with_all = ["head_lines", "tail_lines"])]
         max_lines: Option<usize>,
         /// Keep only the first N lines (byte-exact at the default --level none
-        /// with -n off; --level and -n still transform the window)
+        /// with -n and --strip-ansi off; those options transform the window)
         #[arg(long, conflicts_with_all = ["max_lines", "tail_lines"])]
         head_lines: Option<usize>,
         /// Keep only last N lines
@@ -216,6 +216,9 @@ enum Commands {
         /// Show line numbers
         #[arg(short = 'n', long)]
         line_numbers: bool,
+        /// Strip ANSI color and cursor-control sequences from UTF-8 text
+        #[arg(long)]
+        strip_ansi: bool,
     },
 
     /// Generate 2-line technical summary (heuristic-based)
@@ -2565,7 +2568,16 @@ fn run_cli() -> Result<i32> {
             head_lines,
             tail_lines,
             line_numbers,
+            strip_ansi,
         } => {
+            let options = read::ReadOptions {
+                level,
+                max_lines,
+                head_lines,
+                tail_lines,
+                line_numbers,
+                strip_ansi,
+            };
             let mut had_error = false;
             let mut stdin_seen = false;
             for file in &files {
@@ -2575,24 +2587,9 @@ fn run_cli() -> Result<i32> {
                         continue;
                     }
                     stdin_seen = true;
-                    read::run_stdin(
-                        level,
-                        max_lines,
-                        head_lines,
-                        tail_lines,
-                        line_numbers,
-                        cli.verbose,
-                    )
+                    read::run_stdin(&options, cli.verbose)
                 } else {
-                    read::run(
-                        file,
-                        level,
-                        max_lines,
-                        head_lines,
-                        tail_lines,
-                        line_numbers,
-                        cli.verbose,
-                    )
+                    read::run(file, &options, cli.verbose)
                 };
                 if let Err(e) = result {
                     eprintln!("cat: {}: {}", file.display(), e.root_cause());
