@@ -3,16 +3,16 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Deserialize;
+use std::sync::LazyLock;
 
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{package_manager_exec, strip_ansi};
 use crate::parser::{
+    FormatMode, OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
     emit_degradation_warning, emit_passthrough_warning, extract_json_object, truncate_output,
-    truncate_passthrough, FormatMode, OutputParser, ParseResult, TestFailure, TestResult,
-    TokenFormatter,
+    truncate_passthrough,
 };
-use crate::Commands;
 
 /// Vitest JSON output structures (tool-specific format)
 #[derive(Debug, Deserialize)]
@@ -116,17 +116,10 @@ fn extract_failures_from_json(json: &VitestJsonOutput) -> Vec<TestFailure> {
 
 /// Tier 2: Extract test statistics using regex (degraded mode)
 fn extract_stats_regex(output: &str) -> Option<TestResult> {
-    lazy_static::lazy_static! {
-        static ref TEST_FILES_RE: Regex = Regex::new(
-            r"Test Files\s+(?:(\d+)\s+failed\s+\|\s+)?(\d+)\s+passed"
-        ).unwrap();
-        static ref TESTS_RE: Regex = Regex::new(
-            r"Tests\s+(?:(\d+)\s+failed\s+\|\s+)?(\d+)\s+passed"
-        ).unwrap();
-        static ref DURATION_RE: Regex = Regex::new(
-            r"Duration\s+([\d.]+)(ms|s)"
-        ).unwrap();
-    }
+    static TESTS_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"Tests\s+(?:(\d+)\s+failed\s+\|\s+)?(\d+)\s+passed").unwrap());
+    static DURATION_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"Duration\s+([\d.]+)(ms|s)").unwrap());
 
     let clean_output = strip_ansi(output);
 
@@ -205,100 +198,23 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
     failures
 }
 
-pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
-    let mut passthrough_requested = false;
-
-    let (framework, mut cmd) = match command {
-        Commands::Vitest { .. } => {
-            let framework = "vitest";
-            let mut cmd = package_manager_exec(framework);
-            let effective_args = build_vitest_effective_args(args);
-            passthrough_requested = effective_args.passthrough;
-            cmd.args(effective_args.args);
-            (framework, cmd)
-        }
-        Commands::Jest { .. } => {
-            let framework = "jest";
-            let mut cmd = package_manager_exec(framework);
-            cmd
-                // Force non-watch mode
-                .arg("--no-watch")
-                // Enable JSON structured output
-                .arg("--json");
-            (framework, cmd)
-        }
-        _ => unreachable!(),
-    };
-
-    if !matches!(command, Commands::Vitest { .. }) {
-        for arg in args {
-            if arg == "run"
-                || arg.starts_with("--json")
-                || arg.starts_with("--reporter")
-                || arg.starts_with("--watch")
-            {
-                continue;
-            }
-            cmd.arg(arg);
-        }
-    }
-
-    let result = exec_capture(&mut cmd).context(format!("Failed to run {}", framework))?;
-    let combined = result.combined();
-
-    let filtered = format_test_output(
-        framework,
-        &result.stdout,
-        &combined,
-        passthrough_requested,
-        verbose,
-    );
-    let tee_label = format!("{}_run", framework);
-
-    let rendered = render_test_output(&filtered, &combined, &tee_label, result.exit_code);
-    let shown = crate::core::runner::emit_guarded(&rendered, None, &combined);
-
-    timer.track(
-        format!("{} run", framework).as_str(),
-        format!("rtk {} run", framework).as_str(),
-        &combined,
-        &shown,
-    );
-
-    if !result.success() {
-        return Ok(result.exit_code);
-    }
-    Ok(0)
+pub fn run_vitest(args: &[String], verbose: u8) -> Result<i32> {
+    run_framework_test(vitest_invocation(args), verbose)
 }
 
-struct EffectiveVitestArgs {
+pub fn run_jest(args: &[String], verbose: u8) -> Result<i32> {
+    run_framework_test(jest_invocation(args), verbose)
+}
+
+/// What `rtk vitest` or `rtk jest` spawns: the tool, the arguments it gets,
+/// and whether the user's own reporter output is shown instead of parsed.
+struct TestInvocation {
+    framework: &'static str,
     args: Vec<String>,
     passthrough: bool,
 }
 
-struct FormattedTestOutput {
-    text: String,
-    truncated: bool,
-}
-
-impl FormattedTestOutput {
-    fn new(text: String) -> Self {
-        Self {
-            text,
-            truncated: false,
-        }
-    }
-
-    fn truncated(text: String) -> Self {
-        Self {
-            text,
-            truncated: true,
-        }
-    }
-}
-
-fn build_vitest_effective_args(args: &[String]) -> EffectiveVitestArgs {
+fn vitest_invocation(args: &[String]) -> TestInvocation {
     let passthrough = has_explicit_vitest_reporter(args);
     let mut effective = vec!["run".to_string()];
 
@@ -313,9 +229,114 @@ fn build_vitest_effective_args(args: &[String]) -> EffectiveVitestArgs {
         effective.push(arg.clone());
     }
 
-    EffectiveVitestArgs {
+    TestInvocation {
+        framework: "vitest",
         args: effective,
         passthrough,
+    }
+}
+
+fn jest_invocation(args: &[String]) -> TestInvocation {
+    let mut effective = vec![
+        // Force non-watch mode
+        "--no-watch".to_string(),
+        // Enable JSON structured output
+        "--json".to_string(),
+    ];
+    effective.extend(
+        args.iter()
+            .filter(|arg| !should_skip_jest_arg(arg))
+            .cloned(),
+    );
+    TestInvocation {
+        framework: "jest",
+        args: effective,
+        passthrough: false,
+    }
+}
+
+fn should_skip_jest_arg(arg: &str) -> bool {
+    arg == "run"
+        || arg.starts_with("--json")
+        || arg.starts_with("--reporter")
+        || arg.starts_with("--watch")
+}
+
+fn run_framework_test(invocation: TestInvocation, verbose: u8) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+    let framework = invocation.framework;
+    let mut cmd = package_manager_exec(framework);
+    cmd.args(&invocation.args);
+
+    let result = exec_capture(&mut cmd).context(format!("Failed to run {}", framework))?;
+    let combined = result.combined();
+
+    let filtered = format_test_output(
+        framework,
+        &result.stdout,
+        &combined,
+        invocation.passthrough,
+        verbose,
+    );
+    let tee_label = format!("{}_run", framework);
+
+    let rendered = render_test_output(&filtered, &combined, &tee_label, result.exit_code);
+    let shown = crate::core::runner::emit_guarded(&rendered, None, &combined);
+
+    let cmd_label = format!("{} run", framework);
+    if filtered.is_parse_failure {
+        // Genuine Tier-3 parse failure — not token savings — record it as
+        // such instead of feeding it into the savings timer.
+        tracking::record_parse_failure_silent(
+            &cmd_label,
+            "All parsing tiers failed",
+            !shown.trim().is_empty(),
+        );
+        timer.track_passthrough(&cmd_label, &tracking::passthrough_label(&cmd_label));
+    } else {
+        timer.track(
+            cmd_label.as_str(),
+            format!("rtk {} run", framework).as_str(),
+            &combined,
+            &shown,
+        );
+    }
+
+    if !result.success() {
+        return Ok(result.exit_code);
+    }
+    Ok(0)
+}
+
+struct FormattedTestOutput {
+    text: String,
+    truncated: bool,
+    is_parse_failure: bool,
+}
+
+impl FormattedTestOutput {
+    fn new(text: String) -> Self {
+        Self {
+            text,
+            truncated: false,
+            is_parse_failure: false,
+        }
+    }
+
+    fn truncated(text: String) -> Self {
+        Self {
+            text,
+            truncated: true,
+            is_parse_failure: false,
+        }
+    }
+
+    /// Marks this output as originating from a genuine Tier-3 parse failure
+    /// (all parsing tiers failed), as opposed to an explicit user-requested
+    /// passthrough (e.g. `--reporter=verbose`) which is not a failure.
+    fn parse_failure(mut self) -> Self {
+        self.is_parse_failure = true;
+        self
     }
 }
 
@@ -356,7 +377,10 @@ fn format_test_output(
         }
         ParseResult::Passthrough(_) => {
             emit_passthrough_warning(framework, "All parsing tiers failed");
-            format_passthrough_output(stdout)
+            // Build from the combined stdout+stderr, not stdout alone —
+            // otherwise a stderr-only failure (empty/near-empty stdout)
+            // produces no visible output at all.
+            format_passthrough_output(combined).parse_failure()
         }
     }
 }
@@ -410,10 +434,7 @@ where
         tee_hint(raw, tee_label, exit_code)
     };
 
-    match hint {
-        Some(hint) => format!("{}\n{}", filtered.text, hint),
-        None => filtered.text.clone(),
-    }
+    crate::core::runner::with_hint(&filtered.text, hint.as_deref()).into_owned()
 }
 
 #[cfg(test)]
@@ -422,6 +443,43 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn test_vitest_invocation_runs_vitest() {
+        let invocation = vitest_invocation(&args(&["src/a.test.ts"]));
+
+        assert_eq!(invocation.framework, "vitest");
+    }
+
+    #[test]
+    fn test_jest_invocation_runs_jest_once_with_json_output() {
+        let invocation = jest_invocation(&args(&["src/a.test.js"]));
+
+        assert_eq!(invocation.framework, "jest");
+        assert_eq!(
+            invocation.args,
+            args(&["--no-watch", "--json", "src/a.test.js"])
+        );
+        assert!(!invocation.passthrough);
+    }
+
+    #[test]
+    fn test_jest_invocation_drops_run_json_reporter_and_watch_args() {
+        let invocation = jest_invocation(&args(&[
+            "run",
+            "--json",
+            "--reporters=default",
+            "--watch",
+            "-t",
+            "adds",
+            "src/a.test.js",
+        ]));
+
+        assert_eq!(
+            invocation.args,
+            args(&["--no-watch", "--json", "-t", "adds", "src/a.test.js"])
+        );
     }
 
     #[test]
@@ -531,7 +589,7 @@ Scope: all 6 workspace projects
 
     #[test]
     fn test_vitest_effective_args_inject_json_reporter_by_default() {
-        let effective = build_vitest_effective_args(&args(&["run", "constants.test.ts", "--watch"]));
+        let effective = vitest_invocation(&args(&["run", "constants.test.ts", "--watch"]));
 
         assert!(!effective.passthrough);
         assert_eq!(
@@ -542,8 +600,7 @@ Scope: all 6 workspace projects
 
     #[test]
     fn test_vitest_effective_args_preserve_explicit_reporter_equals() {
-        let effective =
-            build_vitest_effective_args(&args(&["constants.test.ts", "--reporter=verbose"]));
+        let effective = vitest_invocation(&args(&["constants.test.ts", "--reporter=verbose"]));
 
         assert!(effective.passthrough);
         assert_eq!(
@@ -554,8 +611,12 @@ Scope: all 6 workspace projects
 
     #[test]
     fn test_vitest_effective_args_preserve_explicit_reporter_value() {
-        let effective =
-            build_vitest_effective_args(&args(&["run", "constants.test.ts", "--reporter", "verbose"]));
+        let effective = vitest_invocation(&args(&[
+            "run",
+            "constants.test.ts",
+            "--reporter",
+            "verbose",
+        ]));
 
         assert!(effective.passthrough);
         assert_eq!(
@@ -608,5 +669,97 @@ Scope: all 6 workspace projects
         assert!(rendered.contains("[RTK:PASSTHROUGH] Output truncated"));
         assert!(rendered.contains("[full output: /tmp/vitest_run.log]"));
         assert!(!rendered.contains("wrong-path.log"));
+    }
+
+    // --- Tier 3 (Passthrough) content-loss + tracking regression tests ---
+
+    #[test]
+    fn test_genuine_parse_failure_with_stdout_marks_parse_failure_and_keeps_content() {
+        let stdout = "random output with no structure that fails all parse tiers";
+        let combined = stdout.to_string();
+
+        let filtered = format_test_output("vitest", stdout, &combined, false, 0);
+
+        assert!(filtered.is_parse_failure);
+        assert!(filtered.text.contains("random output with no structure"));
+    }
+
+    #[test]
+    fn test_genuine_parse_failure_empty_stdout_uses_combined_stderr() {
+        // Regression: previously format_passthrough_output(stdout) was called
+        // with an empty stdout, producing empty/near-empty output even though
+        // stderr (part of `combined`) had real failure content.
+        let stdout = "";
+        let combined = "Error: could not resolve entry module 'src/index.ts'".to_string();
+
+        let filtered = format_test_output("vitest", stdout, &combined, false, 0);
+
+        assert!(filtered.is_parse_failure);
+        assert!(
+            filtered
+                .text
+                .contains("Error: could not resolve entry module")
+        );
+    }
+
+    #[test]
+    fn test_explicit_passthrough_requested_is_not_a_parse_failure() {
+        let output = " ✓ some.test.ts > case\n Tests  1 passed (1)\n";
+
+        let filtered = format_test_output("vitest", output, output, true, 0);
+
+        assert!(!filtered.is_parse_failure);
+        assert!(filtered.text.contains("Tests  1 passed"));
+    }
+
+    #[test]
+    fn test_full_json_parse_is_not_a_parse_failure() {
+        let json = r#"{
+            "numTotalTests": 1,
+            "numPassedTests": 1,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "testResults": [],
+            "startTime": 1000
+        }"#;
+
+        let filtered = format_test_output("vitest", json, json, false, 0);
+
+        assert!(!filtered.is_parse_failure);
+    }
+
+    #[test]
+    fn test_degraded_regex_fallback_is_not_a_parse_failure() {
+        let text = r#"
+ Test Files  1 passed (1)
+      Tests  5 passed (5)
+   Duration  10ms
+        "#;
+
+        let filtered = format_test_output("vitest", text, text, false, 0);
+
+        assert!(!filtered.is_parse_failure);
+    }
+
+    /// The hint goes on the line after the report, reusing the report's own terminator,
+    /// and stands alone when there is no report.
+    #[test]
+    fn test_vitest_hint_joins_without_a_blank_line() {
+        let render = |text: &str| {
+            render_test_output_with_hints(
+                &FormattedTestOutput::new(text.to_string()),
+                "raw",
+                "vitest_run",
+                1,
+                |_, _| None,
+                |_, _, _| Some("[full output: vitest_run.log]".to_string()),
+            )
+        };
+
+        assert_eq!(
+            render("Tests: 1 failed\n"),
+            "Tests: 1 failed\n[full output: vitest_run.log]"
+        );
+        assert_eq!(render(""), "[full output: vitest_run.log]");
     }
 }

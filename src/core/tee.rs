@@ -1,527 +1,363 @@
-//! Raw output recovery -- saves unfiltered output to disk on command failure.
+//! Recovery-hint dispatch — routes to the sqlite store or legacy tee per `[retriever] mode`.
 
-use super::constants::RTK_DATA_DIR;
 use crate::core::config::Config;
-use std::path::PathBuf;
+pub(crate) use crate::core::retriever::MIN_FAILURE_BYTES as MIN_TEE_SIZE;
+use crate::core::retriever::{self, MIN_FAILURE_BYTES, RecoveryMode, RetrieverConfig, Stored};
 
-/// Minimum output size to tee (smaller outputs don't need recovery)
-const MIN_TEE_SIZE: usize = 500;
-
-/// Default max files to keep in tee directory
-const DEFAULT_MAX_FILES: usize = 20;
-
-/// Default max file size (1MB)
-const DEFAULT_MAX_FILE_SIZE: usize = 1_048_576;
-
-/// Sanitize a command slug for use in filenames.
-/// Replaces non-alphanumeric chars (except underscore/hyphen) with underscore,
-/// truncates at 40 chars.
-fn sanitize_slug(slug: &str) -> String {
-    let sanitized: String = slug
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if sanitized.len() > 40 {
-        sanitized[..40].to_string()
-    } else {
-        sanitized
-    }
-}
-
-/// Get the tee directory, respecting config and env overrides.
-fn get_tee_dir(config: &Config) -> Option<PathBuf> {
-    // Env var override
-    if let Ok(dir) = std::env::var("RTK_TEE_DIR") {
-        return Some(PathBuf::from(dir));
-    }
-
-    // Config override
-    if let Some(ref dir) = config.tee.directory {
-        return Some(dir.clone());
-    }
-
-    // Default: ~/.local/share/rtk/tee/
-    dirs::data_local_dir().map(|d| d.join(RTK_DATA_DIR).join("tee"))
-}
-
-/// Rotate old tee files: keep only the last `max_files`, delete oldest.
-fn cleanup_old_files(dir: &std::path::Path, max_files: usize) {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
-        .collect();
-
-    if entries.len() <= max_files {
-        return;
-    }
-
-    // Sort by filename (which starts with epoch timestamp = chronological)
-    entries.sort_by_key(|e| e.file_name());
-
-    let to_remove = entries.len() - max_files;
-    for entry in entries.iter().take(to_remove) {
-        let _ = std::fs::remove_file(entry.path());
-    }
-}
-
-/// Check if tee should be skipped based on config, mode, exit code, and size.
-/// Returns None if should skip, Some(tee_dir) if should proceed.
-fn should_tee(
-    config: &TeeConfig,
-    raw_len: usize,
-    exit_code: i32,
-    tee_dir: Option<PathBuf>,
-) -> Option<PathBuf> {
-    if !config.enabled {
+fn active() -> Option<(RecoveryMode, RetrieverConfig)> {
+    if retriever::recovery_disabled_by_env() {
         return None;
     }
+    match Config::load().ok().map(|c| (c.retriever.mode, c.retriever)) {
+        Some((RecoveryMode::Disabled, _)) | None => None,
+        some => some,
+    }
+}
 
-    match config.mode {
-        TeeMode::Never => return None,
-        TeeMode::Failures => {
+fn store_hint(
+    cfg: &RetrieverConfig,
+    content: &str,
+    slug: &str,
+    exit_code: Option<i32>,
+) -> Option<String> {
+    match retriever::store(cfg, content.as_bytes(), slug, exit_code, 1) {
+        Stored::Saved(s) => Some(format!("[full output: rtk recall {}]", s.hash)),
+        Stored::Unavailable | Stored::Empty => None,
+    }
+}
+
+/// Takes the resolved mode and config so tests never reach `Config::load()`,
+/// mirroring `hooks::rewrite_cmd::evaluate_with_verdict` (#3146).
+fn tee_and_hint_with(
+    mode: RecoveryMode,
+    cfg: &RetrieverConfig,
+    raw: &str,
+    command_slug: &str,
+    exit_code: i32,
+) -> Option<String> {
+    match mode {
+        RecoveryMode::Disabled => None,
+        // Legacy tee semantics, unchanged: `failures` writes on failure only,
+        // `always` also archives successful runs whose output the filter shrank.
+        RecoveryMode::Tee => {
+            if exit_code == 0 && !cfg.tee_on_success {
+                return None;
+            }
+            super::tee_file::tee_and_hint(cfg, raw, command_slug).inspect(|_| {
+                if exit_code != 0 {
+                    retriever::record_tee_elision(cfg, command_slug);
+                }
+            })
+        }
+        RecoveryMode::Sqlite => {
             if exit_code == 0 {
                 return None;
             }
-        }
-        TeeMode::Always => {}
-    }
-
-    if raw_len < MIN_TEE_SIZE {
-        return None;
-    }
-
-    tee_dir
-}
-
-/// Write raw output to a tee file in the given directory.
-/// Returns file path on success.
-fn write_tee_file(
-    raw: &str,
-    command_slug: &str,
-    tee_dir: &std::path::Path,
-    max_file_size: usize,
-    max_files: usize,
-) -> Option<PathBuf> {
-    std::fs::create_dir_all(tee_dir).ok()?;
-
-    let slug = sanitize_slug(command_slug);
-    let epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    let filename = format!("{}_{}.log", epoch, slug);
-    let filepath = tee_dir.join(filename);
-
-    // Truncate at max_file_size (find a safe UTF-8 char boundary)
-    let content = if raw.len() > max_file_size {
-        let boundary = raw
-            .char_indices()
-            .take_while(|(i, _)| *i < max_file_size)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
-        format!(
-            "{}\n\n--- truncated at {} bytes ---",
-            &raw[..boundary],
-            max_file_size
-        )
-    } else {
-        raw.to_string()
-    };
-
-    std::fs::write(&filepath, content).ok()?;
-
-    // Rotate old files
-    cleanup_old_files(tee_dir, max_files);
-
-    Some(filepath)
-}
-
-/// Write raw output to tee file if conditions are met.
-/// Returns file path on success, None if skipped/failed.
-pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf> {
-    // Check RTK_TEE=0 env override (disable)
-    if std::env::var("RTK_TEE").ok().as_deref() == Some("0") {
-        return None;
-    }
-
-    let config = Config::load().ok()?;
-    let tee_dir = get_tee_dir(&config)?;
-
-    let tee_dir = should_tee(&config.tee, raw.len(), exit_code, Some(tee_dir))?;
-
-    write_tee_file(
-        raw,
-        command_slug,
-        &tee_dir,
-        config.tee.max_file_size,
-        config.tee.max_files,
-    )
-}
-
-fn display_path(path: &std::path::Path) -> String {
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(relative) = path.strip_prefix(&home) {
-            return format!("~/{}", relative.display());
+            store_hint(cfg, raw, command_slug, Some(exit_code))
         }
     }
-    path.display().to_string()
 }
 
-fn format_hint(path: &std::path::Path) -> String {
-    format!("[full output: {}]", display_path(path))
-}
-
-/// Convenience: tee + format hint in one call.
-/// Returns hint string if file was written, None if skipped.
 pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<String> {
-    let path = tee_raw(raw, command_slug, exit_code)?;
-    Some(format_hint(&path))
-}
-
-fn force_tee_path(content: &str, command_slug: &str) -> Option<PathBuf> {
-    if std::env::var("RTK_TEE").ok().as_deref() == Some("0") {
+    if raw.len() < MIN_FAILURE_BYTES {
         return None;
     }
+    let (mode, cfg) = active()?;
+    tee_and_hint_with(mode, &cfg, raw, command_slug, exit_code)
+}
 
+pub fn force_tee_hint(content: &str, command_slug: &str) -> Option<String> {
     if content.is_empty() {
         return None;
     }
-
-    let config = Config::load().ok()?;
-
-    if !config.tee.enabled {
-        return None;
+    let (mode, cfg) = active()?;
+    match mode {
+        RecoveryMode::Disabled => None,
+        RecoveryMode::Tee => super::tee_file::force_tee_hint(&cfg, content, command_slug)
+            .inspect(|_| retriever::record_tee_elision(&cfg, command_slug)),
+        RecoveryMode::Sqlite => store_hint(&cfg, content, command_slug, None),
     }
-
-    let tee_dir = get_tee_dir(&config)?;
-    let tee_dir = std::fs::create_dir_all(&tee_dir).ok().and(Some(tee_dir))?;
-
-    write_tee_file(
-        content,
-        command_slug,
-        &tee_dir,
-        config.tee.max_file_size,
-        config.tee.max_files,
-    )
 }
 
-/// Returns `[full output: ~/path]`, or None if tee is disabled/skipped.
-pub fn force_tee_hint(raw: &str, command_slug: &str) -> Option<String> {
-    let path = force_tee_path(raw, command_slug)?;
-    Some(format_hint(&path))
-}
-
-/// Returns `[see remaining: tail -n +{line_offset} ~/path]`, or None if tee is disabled/skipped.
 pub fn force_tee_tail_hint(
     content: &str,
     command_slug: &str,
     line_offset: usize,
 ) -> Option<String> {
-    let path = force_tee_path(content, command_slug)?;
-    Some(format!(
-        "[see remaining: tail -n +{} {}]",
-        line_offset,
-        display_path(&path)
-    ))
-}
-
-/// TeeMode controls when tee writes files.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum TeeMode {
-    #[default]
-    Failures,
-    Always,
-    Never,
-}
-
-/// Configuration for the tee feature.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TeeConfig {
-    pub enabled: bool,
-    pub mode: TeeMode,
-    pub max_files: usize,
-    pub max_file_size: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub directory: Option<PathBuf>,
-}
-
-impl Default for TeeConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            mode: TeeMode::default(),
-            max_files: DEFAULT_MAX_FILES,
-            max_file_size: DEFAULT_MAX_FILE_SIZE,
-            directory: None,
+    if content.is_empty() {
+        return None;
+    }
+    let (mode, cfg) = active()?;
+    match mode {
+        RecoveryMode::Disabled => None,
+        RecoveryMode::Tee => {
+            super::tee_file::force_tee_tail_hint(&cfg, content, command_slug, line_offset)
+                .inspect(|_| retriever::record_tee_elision(&cfg, command_slug))
+        }
+        RecoveryMode::Sqlite => {
+            match retriever::store(&cfg, content.as_bytes(), command_slug, None, line_offset) {
+                Stored::Saved(s) if s.hidden_lines > 0 => Some(format!(
+                    "[+{} hidden: rtk recall {}]",
+                    s.hidden_lines, s.hash
+                )),
+                Stored::Saved(_) | Stored::Unavailable | Stored::Empty => None,
+            }
         }
     }
+}
+
+#[cfg(feature = "engine")]
+/// Posthook recall store subdirectory (own rotation budget: posthook writes
+/// must never evict Bash-failure recovery logs).
+pub const POSTHOOK_SUBDIR: &str = "posthook";
+#[cfg(feature = "engine")]
+/// Rotation budget for the posthook recall store.
+const POSTHOOK_MAX_FILES: usize = 20;
+
+#[cfg(feature = "engine")]
+/// Write raw tool output to `<tee dir>/posthook/` before filtering and return
+/// the recall hint. Millisecond + pid filenames: epoch-second naming silently
+/// overwrites same-second writes (guaranteed at posthook rates), and the pid
+/// disambiguates concurrent hook processes (parallel subagents).
+///
+/// Takes `config` from the caller — the posthook path loads Config exactly
+/// once per invocation. Honors the recovery kill switches like every other
+/// tee write; per-file cap + truncation marker reused unchanged.
+pub fn posthook_tee_hint(config: &Config, raw: &str, command_slug: &str) -> Option<String> {
+    if raw.is_empty() || retriever::recovery_disabled_by_env() {
+        return None;
+    }
+    match config.retriever.mode {
+        RecoveryMode::Disabled => return None,
+        RecoveryMode::Sqlite => return posthook_store_hint(&config.retriever, raw, command_slug),
+        RecoveryMode::Tee => {}
+    }
+
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let dir = super::tee_file::get_tee_dir(&config.retriever)?.join(POSTHOOK_SUBDIR);
+    let slug = super::tee_file::sanitize_slug(command_slug);
+    let epoch_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let filename = format!("{}_{}-{}_{}.log", epoch_ms, std::process::id(), seq, slug);
+    let path = super::tee_file::write_named_tee_file(
+        raw,
+        &filename,
+        &dir,
+        config.retriever.tee_max_file_size,
+        POSTHOOK_MAX_FILES,
+    )?;
+    Some(super::tee_file::format_hint(&path))
+}
+
+#[cfg(feature = "engine")]
+pub const POSTHOOK_RECALL_PREFIX: &str = "posthook:";
+
+#[cfg(feature = "engine")]
+fn posthook_store_hint(cfg: &RetrieverConfig, raw: &str, command_slug: &str) -> Option<String> {
+    let command = format!("{POSTHOOK_RECALL_PREFIX}{command_slug}");
+    let hint = store_hint(cfg, raw, &command, None)?;
+    retriever::trim_family(cfg, POSTHOOK_RECALL_PREFIX, POSTHOOK_MAX_FILES);
+    Some(hint)
+}
+
+#[cfg(feature = "engine")]
+/// Resolved posthook recall directory (for the recall-recovery gate: a
+/// command reading these files must not be post-filtered again).
+pub fn posthook_recall_dir(config: &Config) -> Option<std::path::PathBuf> {
+    super::tee_file::get_tee_dir(&config.retriever).map(|d| d.join(POSTHOOK_SUBDIR))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use crate::core::user_env;
 
+    #[cfg(feature = "engine")]
     #[test]
-    fn test_sanitize_slug() {
-        assert_eq!(sanitize_slug("cargo_test"), "cargo_test");
-        assert_eq!(sanitize_slug("cargo test"), "cargo_test");
-        assert_eq!(sanitize_slug("cargo-test"), "cargo-test");
-        assert_eq!(sanitize_slug("go/test/./pkg"), "go_test___pkg");
-        // Truncate at 40
-        let long = "a".repeat(50);
-        assert_eq!(sanitize_slug(&long).len(), 40);
-    }
-
-    #[test]
-    fn test_should_tee_disabled() {
-        let config = TeeConfig {
-            enabled: false,
-            ..TeeConfig::default()
-        };
-        let dir = PathBuf::from("/tmp/tee");
-        assert!(should_tee(&config, 1000, 1, Some(dir)).is_none());
-    }
-
-    #[test]
-    fn test_should_tee_never_mode() {
-        let config = TeeConfig {
-            mode: TeeMode::Never,
-            ..TeeConfig::default()
-        };
-        let dir = PathBuf::from("/tmp/tee");
-        assert!(should_tee(&config, 1000, 1, Some(dir)).is_none());
-    }
-
-    #[test]
-    fn test_should_tee_skip_small_output() {
-        let config = TeeConfig::default();
-        let dir = PathBuf::from("/tmp/tee");
-        // Below MIN_TEE_SIZE (500)
-        assert!(should_tee(&config, 100, 1, Some(dir)).is_none());
-    }
-
-    #[test]
-    fn test_should_tee_skip_success_in_failures_mode() {
-        let config = TeeConfig::default(); // mode = Failures
-        let dir = PathBuf::from("/tmp/tee");
-        assert!(should_tee(&config, 1000, 0, Some(dir)).is_none());
-    }
-
-    #[test]
-    fn test_should_tee_proceed_on_failure() {
-        let config = TeeConfig::default(); // mode = Failures
-        let dir = PathBuf::from("/tmp/tee");
-        assert!(should_tee(&config, 1000, 1, Some(dir)).is_some());
-    }
-
-    #[test]
-    fn test_should_tee_always_mode_success() {
-        let config = TeeConfig {
-            mode: TeeMode::Always,
-            ..TeeConfig::default()
-        };
-        let dir = PathBuf::from("/tmp/tee");
-        assert!(should_tee(&config, 1000, 0, Some(dir)).is_some());
-    }
-
-    #[test]
-    fn test_write_tee_file_creates_file() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let content = "error: test failed\n".repeat(50);
-        let result = write_tee_file(
-            &content,
-            "cargo_test",
-            tmpdir.path(),
-            DEFAULT_MAX_FILE_SIZE,
-            20,
-        );
-        assert!(result.is_some());
-
-        let path = result.unwrap();
-        assert!(path.exists());
-        let written = fs::read_to_string(&path).unwrap();
-        assert!(written.contains("error: test failed"));
-    }
-
-    #[test]
-    fn test_write_tee_file_truncation() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let big_output = "x".repeat(2000);
-        // Set max_file_size to 1000 bytes
-        let result = write_tee_file(&big_output, "test", tmpdir.path(), 1000, 20);
-        assert!(result.is_some());
-
-        let path = result.unwrap();
-        let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("--- truncated at 1000 bytes ---"));
-        assert!(content.len() < 2000);
-    }
-
-    #[test]
-    fn test_write_tee_file_truncation_utf8_boundary() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        // Create a string where the truncation point falls inside a multi-byte char.
-        // Japanese chars are 3 bytes each in UTF-8.
-        // 332 chars * 3 bytes = 996 bytes, then one more = 999 bytes.
-        // With max_file_size=998, the cut falls mid-character.
-        let japanese = "\u{6F22}".repeat(333); // 999 bytes of 3-byte chars
-        assert_eq!(japanese.len(), 999);
-
-        // Truncate at 998 — falls in the middle of the 333rd character
-        let result = write_tee_file(&japanese, "test_utf8", tmpdir.path(), 998, 20);
-        assert!(result.is_some());
-
-        let path = result.unwrap();
-        let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("--- truncated at 998 bytes ---"));
-        // Should contain 332 full characters (996 bytes), not panic
-        assert!(content.starts_with(&"\u{6F22}".repeat(332)));
-    }
-
-    #[test]
-    fn test_write_tee_file_truncation_emoji() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        // Emoji are 4 bytes each in UTF-8
-        let emojis = "\u{1F600}".repeat(100); // 400 bytes
-        assert_eq!(emojis.len(), 400);
-
-        // Truncate at 201 — falls mid-emoji (4-byte boundary is at 200, 204)
-        let result = write_tee_file(&emojis, "test_emoji", tmpdir.path(), 201, 20);
-        assert!(result.is_some());
-
-        let path = result.unwrap();
-        let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("--- truncated at 201 bytes ---"));
-        // The emoji portion should be exactly 200 bytes (50 emojis),
-        // rounded down from 201 to the nearest char boundary
-        let target = "\u{1F600}".repeat(50);
-        assert!(content.starts_with(&target));
-    }
-
-    #[test]
-    fn test_cleanup_old_files() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let dir = tmpdir.path();
-
-        // Create 25 .log files
+    fn test_posthook_named_writes_rotate_at_budget() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join(POSTHOOK_SUBDIR);
+        let raw = "x".repeat(600);
         for i in 0..25 {
-            let filename = format!("{:010}_{}.log", 1000000 + i, "test");
-            fs::write(dir.join(&filename), "content").unwrap();
+            let filename = format!("{i}_9999-{i}_read_data_json.log");
+            let path = crate::core::tee_file::write_named_tee_file(
+                &raw,
+                &filename,
+                &dir,
+                1_048_576,
+                POSTHOOK_MAX_FILES,
+            )
+            .expect("write succeeds");
+            assert!(path.exists());
         }
-
-        cleanup_old_files(dir, 20);
-
-        let remaining: Vec<_> = fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).collect();
-        assert_eq!(remaining.len(), 20);
-
-        // Oldest 5 should be removed
-        for i in 0..5 {
-            let filename = format!("{:010}_{}.log", 1000000 + i, "test");
-            assert!(!dir.join(&filename).exists());
-        }
-        // Newest 20 should remain
-        for i in 5..25 {
-            let filename = format!("{:010}_{}.log", 1000000 + i, "test");
-            assert!(dir.join(&filename).exists());
-        }
+        let count = std::fs::read_dir(&dir)
+            .expect("posthook dir exists")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "log"))
+            .count();
+        assert_eq!(count, 20, "rotation budget is 20 files");
     }
 
+    #[cfg(feature = "engine")]
     #[test]
-    fn test_format_hint() {
-        let path = PathBuf::from("/tmp/rtk/tee/123_cargo_test.log");
-        let hint = format_hint(&path);
+    fn test_posthook_tee_hint_shape() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.retriever.tee_directory = Some(tmp.path().to_path_buf());
+        config.retriever.mode = RecoveryMode::Tee;
+        let hint = posthook_tee_hint(&config, &"x".repeat(600), "read_data_json")
+            .expect("tee mode writes a file");
         assert!(hint.starts_with("[full output: "));
-        assert!(hint.ends_with(']'));
-        assert!(hint.contains("123_cargo_test.log"));
+        assert!(tmp.path().join(POSTHOOK_SUBDIR).exists());
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_posthook_sqlite_mode_points_at_recall_and_writes_no_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.retriever.mode = RecoveryMode::Sqlite;
+        config.retriever.tee_directory = Some(tmp.path().join("tee"));
+        config.retriever.database_path = Some(tmp.path().join("recall.db"));
+        let hint = posthook_tee_hint(&config, &"x".repeat(600), "bash_cargo")
+            .expect("sqlite mode stores the output");
+        assert!(hint.starts_with("[full output: rtk recall "), "{hint}");
+        assert!(
+            !tmp.path().join("tee").exists(),
+            "sqlite mode must not write tee files"
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_posthook_sqlite_entries_keep_their_own_budget() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.retriever.mode = RecoveryMode::Sqlite;
+        config.retriever.database_path = Some(tmp.path().join("recall.db"));
+        let failure = retriever::store(
+            &config.retriever,
+            b"failure log body",
+            "cargo test",
+            Some(1),
+            1,
+        );
+        assert!(matches!(failure, Stored::Saved(_)));
+        for i in 0..30 {
+            posthook_tee_hint(&config, &format!("{i}{}", "x".repeat(600)), "bash_ls")
+                .expect("stored");
+        }
+        let conn = rusqlite::Connection::open(tmp.path().join("recall.db")).expect("db");
+        let posthook: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM recall WHERE command LIKE 'posthook:%'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        let others: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM recall WHERE command NOT LIKE 'posthook:%'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(posthook, POSTHOOK_MAX_FILES as i64);
+        assert_eq!(
+            others, 1,
+            "posthook writes must never evict a failure recovery"
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_posthook_tee_disabled_mode() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.retriever.tee_directory = Some(tmp.path().to_path_buf());
+        config.retriever.mode = RecoveryMode::Disabled;
+
+        assert!(posthook_tee_hint(&config, &"x".repeat(600), "slug").is_none());
+        assert!(!tmp.path().join(POSTHOOK_SUBDIR).exists());
     }
 
     #[test]
-    fn test_tee_config_default() {
-        let config = TeeConfig::default();
-        assert!(config.enabled);
-        assert_eq!(config.mode, TeeMode::Failures);
-        assert_eq!(config.max_files, 20);
-        assert_eq!(config.max_file_size, 1_048_576);
-        assert!(config.directory.is_none());
+    fn test_disabled_env_emits_nothing() {
+        let big = "x".repeat(1000);
+        let (hint, forced, tail) = user_env::with_vars(&[("RTK_RECALL", Some("0"))], || {
+            (
+                tee_and_hint(&big, "cmd", 1),
+                force_tee_hint(&big, "cmd"),
+                force_tee_tail_hint(&big, "cmd", 5),
+            )
+        });
+        assert!(hint.is_none(), "disabled must never emit tokens");
+        assert!(forced.is_none());
+        assert!(tail.is_none());
     }
 
     #[test]
-    fn test_tee_config_deserialize() {
-        let toml_str = r#"
-enabled = true
-mode = "always"
-max_files = 10
-max_file_size = 524288
-directory = "/tmp/rtk-tee"
-"#;
-        let config: TeeConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.enabled);
-        assert_eq!(config.mode, TeeMode::Always);
-        assert_eq!(config.max_files, 10);
-        assert_eq!(config.max_file_size, 524288);
-        assert_eq!(config.directory, Some(PathBuf::from("/tmp/rtk-tee")));
-
-        // Round-trip
-        let serialized = toml::to_string_pretty(&config).unwrap();
-        let deserialized: TeeConfig = toml::from_str(&serialized).unwrap();
-        assert_eq!(deserialized.mode, TeeMode::Always);
-        assert_eq!(deserialized.max_files, 10);
+    fn test_sqlite_never_stores_a_successful_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RetrieverConfig {
+            database_path: Some(dir.path().join("s.db")),
+            tee_on_success: true,
+            ..RetrieverConfig::default()
+        };
+        let big = "x".repeat(1000);
+        assert!(
+            tee_and_hint_with(RecoveryMode::Sqlite, &cfg, &big, "cmd", 0).is_none(),
+            "the sqlite store only records failures and truncations"
+        );
+        assert!(!dir.path().join("s.db").exists());
     }
 
     #[test]
-    fn test_tee_mode_serde() {
-        // Test all modes via JSON
-        let mode: TeeMode = serde_json::from_str(r#""always""#).unwrap();
-        assert_eq!(mode, TeeMode::Always);
-
-        let mode: TeeMode = serde_json::from_str(r#""failures""#).unwrap();
-        assert_eq!(mode, TeeMode::Failures);
-
-        let mode: TeeMode = serde_json::from_str(r#""never""#).unwrap();
-        assert_eq!(mode, TeeMode::Never);
+    fn test_tee_mode_honors_legacy_always() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = RetrieverConfig {
+            tee_directory: Some(dir.path().to_path_buf()),
+            database_path: Some(dir.path().join("s.db")),
+            ..RetrieverConfig::default()
+        };
+        let big = "x".repeat(1000);
+        assert!(
+            tee_and_hint_with(RecoveryMode::Tee, &base, &big, "cmd", 0).is_none(),
+            "failures-only is the legacy default"
+        );
+        let always = RetrieverConfig {
+            tee_on_success: true,
+            ..base
+        };
+        assert!(
+            tee_and_hint_with(RecoveryMode::Tee, &always, &big, "cmd", 0).is_some(),
+            "legacy always still archives successful runs"
+        );
     }
 
     #[test]
-    fn test_force_tee_hint_skip_empty() {
-        let hint = force_tee_hint("", "test_cmd");
-        assert!(hint.is_none(), "Should skip empty content");
+    fn test_tee_and_hint_skips_success() {
+        let big = "x".repeat(1000);
+        let cfg = RetrieverConfig::default();
+        assert!(tee_and_hint_with(RecoveryMode::Sqlite, &cfg, &big, "cmd", 0).is_none());
     }
 
     #[test]
-    fn test_force_tee_hint_respects_env_disable() {
-        // When RTK_TEE=0, force_tee_hint should return None
-        std::env::set_var("RTK_TEE", "0");
-        let large_output = "x".repeat(1000);
-        let hint = force_tee_hint(&large_output, "test_cmd");
-        std::env::remove_var("RTK_TEE");
-        assert!(hint.is_none(), "Should respect RTK_TEE=0");
+    fn test_tee_and_hint_skips_tiny_failure() {
+        assert!(tee_and_hint("tiny", "cmd", 1).is_none());
     }
 
     #[test]
-    fn test_force_tee_tail_hint_skip_empty() {
-        let hint = force_tee_tail_hint("", "test_cmd", 22);
-        assert!(hint.is_none(), "Should skip empty content");
+    fn test_force_tee_hint_skips_empty() {
+        assert!(force_tee_hint("", "cmd").is_none());
     }
 
     #[test]
-    fn test_force_tee_tail_hint_format() {
-        let path = std::path::PathBuf::from("/tmp/rtk/tee/123_docker_images.log");
-        let display = display_path(&path);
-        let hint = format!("[see remaining: tail -n +{} {}]", 22, display);
-        assert!(hint.starts_with("[see remaining: tail -n +22 "));
-        assert!(hint.ends_with(']'));
-        assert!(hint.contains("123_docker_images.log"));
+    fn test_force_tee_tail_hint_skips_empty() {
+        assert!(force_tee_tail_hint("", "cmd", 5).is_none());
     }
 }

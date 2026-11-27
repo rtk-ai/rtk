@@ -1,0 +1,45 @@
+# rtk:posthook — compress every tool's output after it runs
+#
+# Adds PostToolUse: a tool's output is compressed before the agent reads it,
+# not just before the command runs. Lossy where `cap` fires on a long terminal
+# output; the original stays retrievable with `rtk recall <hash>`.
+#
+# Benchmark: not published.
+
+schema_version = 1
+
+[pipeline]
+name    = "rtk:posthook"
+extends = "rtk:default"
+
+# floor for output that did not come through rtk
+[[hook.after_tool.shell]]
+name = "term-default"
+when = { is_rtk_command = false }
+use  = ["term"]
+
+[[hook.after_tool.read]]
+name = "lockfiles"
+when = { basename_in = ["package-lock.json", "Cargo.lock", "yarn.lock", "pnpm-lock.yaml"] }
+use  = ["lockfile"]
+
+[[hook.after_tool.read]]
+name    = "json-reads"
+enabled = false
+when    = { format = "json" }
+use     = ["json"]
+
+[[hook.after_tool.read]]
+name    = "strip-line-numbers"
+enabled = false
+use     = ["strip-line-numbers"]
+
+# grep output; glob file lists are not matches and pass untouched
+[[hook.after_tool.search]]
+name = "grep-group"
+when = { format = "matches" }
+use  = ["matches"]
+
+[[hook.after_tool.web]]
+name = "web-default"
+use  = ["web"]

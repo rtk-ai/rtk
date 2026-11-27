@@ -1,0 +1,31 @@
+[info] welcome to sbt 1.10.1 (Eclipse Adoptium Java 21.0.2)
+[info] loading settings for project root-build from plugins.sbt ...
+[info] loading project definition from /home/user/cass-reconciliation/project
+[info] loading settings for project root from build.sbt ...
+[info] set current project to cass-reconciliation (in build file:/home/user/cass-reconciliation/)
+[info] Compiling 5 Scala sources to /home/user/cass-reconciliation/target/scala-3.3.7/test-classes ...
+[info] ReconciliationServiceSpec:
+[info] CassReconciliationService
+[info]   - should reconcile matching records
+[info]   - should detect and report mismatches *** FAILED ***
+[info]     Unexpected call: cassandraRepository.findByPartitionKey("partition-abc")
+[info]     com.example.reconciliation.ReconciliationServiceSpec$$anon$1.findByPartitionKey(ReconciliationServiceSpec.scala:67)
+[info]   - should skip already reconciled records
+[info]   - should emit metrics on completion *** FAILED ***
+[info]     Unsatisfied expectation:
+[info]     Expected exactly 1 call to: metricsClient.increment("reconciliation.completed")
+[info]     Actual calls: 0
+[info]   - should handle empty input gracefully
+[info] CassandraRepositorySpec:
+[info] CassandraRepository
+[info]   - should fetch records by partition key
+[info]   - should handle timeout errors
+[info] Run completed in 4 seconds, 891 milliseconds.
+[info] Total number of tests run: 7
+[info] Suites: completed 2, aborted 0
+[info] Tests: succeeded 5, failed 2, canceled 0, ignored 0, pending 0
+[info] *** 2 TESTS FAILED ***
+[error] Failed tests:
+[error]   com.example.reconciliation.ReconciliationServiceSpec
+[error] (Test / test) sbt.TestsFailedException: Tests unsuccessful
+[error] Total time: 7 s, completed Apr 3, 2026 14:25:44

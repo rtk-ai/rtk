@@ -1,13 +1,12 @@
 use crate::core::utils::{composer_tool_paths, resolve_binary, resolved_command};
-use lazy_static::lazy_static;
 use regex::Regex;
 use std::path::Path;
 use std::process::Command;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref ANSI_RE: Regex = Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap();
-    static ref CONTROL_RE: Regex = Regex::new(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]").unwrap();
-}
+static ANSI_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap());
+static CONTROL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]").unwrap());
 
 pub fn php_tool_command(tool: &str) -> Command {
     for local_tool in composer_tool_paths(tool) {

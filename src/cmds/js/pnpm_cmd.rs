@@ -1,7 +1,7 @@
 //! Filters pnpm output — dependency trees, install logs, outdated packages.
 
 use crate::core::guard::never_worse;
-use crate::core::stream::exec_capture;
+use crate::core::stream::{CaptureResult, exec_capture};
 use crate::core::tracking;
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::resolved_command;
@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 
 use crate::parser::{
-    emit_degradation_warning, emit_passthrough_warning, truncate_passthrough, Dependency,
-    DependencyState, FormatMode, OutputParser, ParseResult, TokenFormatter,
+    Dependency, DependencyState, FormatMode, OutputParser, ParseResult, TokenFormatter,
+    emit_degradation_warning, emit_passthrough_warning, truncate_passthrough,
 };
 
 const MAX_LISTING: usize = CAP_LIST;
@@ -286,13 +286,21 @@ fn extract_outdated_text(output: &str) -> Option<DependencyState> {
     }
 }
 
-/// Format a dependency listing with grouped [prod]/[dev] sections.
+/// Format a dependency listing with grouped `[prod]`/`[dev]` sections.
 /// `cap = true` for plain `pnpm list` (both categories present, may truncate).
 /// `cap = false` for `pnpm list --prod` / `pnpm list --dev` (hint targets,
 /// must show every package so the LLM can find what was hidden by the cap).
 fn format_dependency_listing(state: &DependencyState, cap: bool) -> String {
-    let prod: Vec<_> = state.dependencies.iter().filter(|d| !d.dev_dependency).collect();
-    let dev: Vec<_> = state.dependencies.iter().filter(|d| d.dev_dependency).collect();
+    let prod: Vec<_> = state
+        .dependencies
+        .iter()
+        .filter(|d| !d.dev_dependency)
+        .collect();
+    let dev: Vec<_> = state
+        .dependencies
+        .iter()
+        .filter(|d| d.dev_dependency)
+        .collect();
     let total = state.total_packages.max(state.dependencies.len());
 
     let mut lines = vec![format!(
@@ -304,7 +312,11 @@ fn format_dependency_listing(state: &DependencyState, cap: bool) -> String {
 
     if !prod.is_empty() {
         lines.push("[prod]".to_string());
-        let shown = if cap { prod.len().min(MAX_LISTING) } else { prod.len() };
+        let shown = if cap {
+            prod.len().min(MAX_LISTING)
+        } else {
+            prod.len()
+        };
         for dep in prod.iter().take(shown) {
             lines.push(format!("  {} {}", dep.name, dep.current_version));
         }
@@ -325,7 +337,11 @@ fn format_dependency_listing(state: &DependencyState, cap: bool) -> String {
 
     if !dev.is_empty() {
         lines.push("[dev]".to_string());
-        let shown = if cap { dev.len().min(MAX_LISTING) } else { dev.len() };
+        let shown = if cap {
+            dev.len().min(MAX_LISTING)
+        } else {
+            dev.len()
+        };
         for dep in dev.iter().take(shown) {
             lines.push(format!("  {} {}", dep.name, dep.current_version));
         }
@@ -377,15 +393,20 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
     let result = exec_capture(&mut cmd).context("Failed to run pnpm list")?;
 
     if !result.success() {
-        eprint!("{}", result.stderr);
+        // pnpm itself reports list errors on stderr; stdout only carries the
+        // reason when a wrapper in front of pnpm refuses the command (#4858).
+        print_failure(&result, None);
         return Ok(result.exit_code);
     }
+
+    let combined = result.combined();
 
     let is_filtered = args
         .iter()
         .any(|a| matches!(a.as_str(), "--prod" | "-P" | "--dev" | "-D"));
 
     let parse_result = PnpmListParser::parse(&result.stdout);
+    let tier = parse_result.tier();
 
     let filtered = match parse_result {
         ParseResult::Full(data) => {
@@ -400,21 +421,44 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
             }
             format_dependency_listing(&data, !is_filtered)
         }
-        ParseResult::Passthrough(raw) => {
+        ParseResult::Passthrough(_) => {
             emit_passthrough_warning("pnpm list", "All parsing tiers failed");
-            raw
+            // Build from the combined stdout+stderr, not the parser's
+            // stdout-only truncated output — otherwise a stderr-only warning
+            // (e.g. a registry notice) on an otherwise-empty stdout produces
+            // no visible output at all.
+            truncate_passthrough(&combined)
         }
     };
 
-    let shown = never_worse(&result.stdout, &filtered);
-    println!("{}", shown);
-
-    timer.track(
-        &format!("pnpm list --depth={}", depth),
-        &format!("rtk pnpm list --depth={}", depth),
-        &result.stdout,
-        shown,
-    );
+    let cmd_label = format!("pnpm list --depth={}", depth);
+    if tier == 3 {
+        // Tier 3 is a genuine parse failure: guard/display against the
+        // combined stdout+stderr this arm recovered from, and record it as
+        // a failure — not token savings — instead of feeding it into the
+        // savings timer.
+        let shown = never_worse(&combined, &filtered);
+        println!("{}", shown);
+        tracking::record_parse_failure_silent(
+            &cmd_label,
+            "All parsing tiers failed",
+            !shown.trim().is_empty(),
+        );
+        timer.track_passthrough(&cmd_label, &tracking::passthrough_label(&cmd_label));
+    } else {
+        // Tiers 1/2 are unaffected by the passthrough fix: keep guarding
+        // and tracking against stdout alone, as before, so a stderr-only
+        // warning alongside a successful parse doesn't inflate the
+        // reported savings ratio.
+        let shown = never_worse(&result.stdout, &filtered);
+        println!("{}", shown);
+        timer.track(
+            &cmd_label,
+            &format!("rtk pnpm list --depth={}", depth),
+            &result.stdout,
+            shown,
+        );
+    }
 
     Ok(0)
 }
@@ -436,6 +480,7 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
 
     // Parse output using PnpmOutdatedParser
     let parse_result = PnpmOutdatedParser::parse(&result.stdout);
+    let tier = parse_result.tier();
     let mode = FormatMode::from_verbosity(verbose);
 
     let filtered = match parse_result {
@@ -451,9 +496,12 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
             }
             data.format(mode)
         }
-        ParseResult::Passthrough(raw) => {
+        ParseResult::Passthrough(_) => {
             emit_passthrough_warning("pnpm outdated", "All parsing tiers failed");
-            raw
+            // Build from the combined stdout+stderr, not the parser's
+            // stdout-only truncated output — otherwise a real error reported
+            // only on stderr (with malformed/empty JSON on stdout) is lost.
+            truncate_passthrough(&combined)
         }
     };
 
@@ -465,7 +513,21 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
     let shown = never_worse(&combined, &display);
     println!("{}", shown);
 
-    timer.track("pnpm outdated", "rtk pnpm outdated", &combined, shown);
+    if tier == 3 {
+        // Tier 3 is a genuine parse failure, not token savings — record it
+        // as such instead of feeding it into the savings timer.
+        tracking::record_parse_failure_silent(
+            "pnpm outdated",
+            "All parsing tiers failed",
+            !shown.trim().is_empty(),
+        );
+        timer.track_passthrough(
+            "pnpm outdated",
+            &tracking::passthrough_label("pnpm outdated"),
+        );
+    } else {
+        timer.track("pnpm outdated", "rtk pnpm outdated", &combined, shown);
+    }
 
     Ok(0)
 }
@@ -487,7 +549,7 @@ fn run_install(args: &[String], verbose: u8) -> Result<i32> {
     let result = exec_capture(&mut cmd).context("Failed to run pnpm install")?;
 
     if !result.success() {
-        eprint!("{}", result.stderr);
+        print_failure(&result, Some(filter_pnpm_failure));
         return Ok(result.exit_code);
     }
 
@@ -500,6 +562,89 @@ fn run_install(args: &[String], verbose: u8) -> Result<i32> {
     timer.track("pnpm install", "rtk pnpm install", &combined, shown);
 
     Ok(0)
+}
+
+/// Print the output of a failed pnpm run.
+///
+/// stderr alone is enough when pnpm wrote there. When it is empty, the reason
+/// is on stdout (pnpm 9/10 install errors, or a wrapper that refuses the
+/// command), so show stdout, filtered when a filter is given. A filter that
+/// keeps nothing must not hide the failure, so fall back to the raw stdout.
+/// The filter only removes lines, so it cannot make the output longer.
+fn print_failure(result: &CaptureResult, filter: Option<fn(&str) -> String>) {
+    if !result.stderr.trim().is_empty() {
+        eprint!("{}", result.stderr);
+        return;
+    }
+    let shown = match filter {
+        Some(filter) => match filter(&result.stdout) {
+            filtered if filtered.trim().is_empty() => result.stdout.clone(),
+            filtered => filtered,
+        },
+        None => result.stdout.clone(),
+    };
+    print!("{}", shown);
+    if !shown.ends_with('\n') && !shown.is_empty() {
+        println!();
+    }
+}
+
+/// Filter the stdout of a failed pnpm install.
+///
+/// Unlike `filter_pnpm_install`, which keeps a few summary lines of a green
+/// install, this drops only what is known to be noise (progress lines, the
+/// `+++` / `---` bar, pnpm's update notifier) and keeps every other line as
+/// is: failure reasons come in shapes no keyword list covers (`%2F` in a
+/// scoped 404, `ELIFECYCLE`, an indented lockfile mismatch, a script's own
+/// output, `│`-prefixed peer-dependency trees and build logs).
+fn filter_pnpm_failure(output: &str) -> String {
+    let mut result: Vec<&str> = Vec::new();
+    // A `╭ … ╰` frame is held until it closes: it is dropped only when it is
+    // pnpm's update notifier, any other frame is kept as is.
+    let mut frame: Option<Vec<&str>> = None;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(rows) = frame.as_mut() {
+            rows.push(line);
+            if trimmed.starts_with('╰') {
+                let rows = frame.take().unwrap_or_default();
+                if !rows.iter().any(|row| row.contains("Update available")) {
+                    rows.into_iter().for_each(|row| keep_line(&mut result, row));
+                }
+            }
+            continue;
+        }
+        if trimmed.starts_with('╭') {
+            frame = Some(vec![line]);
+            continue;
+        }
+        // "Progress: …", or "../.. | Progress: …" in a workspace
+        let is_progress = trimmed.starts_with("Progress:") || trimmed.contains("| Progress:");
+        let is_bar = !trimmed.is_empty() && trimmed.chars().all(|c| c == '+' || c == '-');
+        if is_progress || is_bar {
+            continue;
+        }
+        keep_line(&mut result, line);
+    }
+    // A frame that never closed is not a notifier we recognise: keep it.
+    frame
+        .into_iter()
+        .flatten()
+        .for_each(|row| keep_line(&mut result, row));
+
+    while result.last().is_some_and(|l| l.trim().is_empty()) {
+        result.pop();
+    }
+    result.join("\n")
+}
+
+/// Push a kept line, collapsing the blank lines left around dropped ones.
+fn keep_line<'a>(result: &mut Vec<&'a str>, line: &'a str) {
+    if line.trim().is_empty() && result.last().is_none_or(|l| l.trim().is_empty()) {
+        return;
+    }
+    result.push(line);
 }
 
 /// Filter pnpm install output - remove progress bars, keep summary
@@ -632,7 +777,10 @@ mod tests {
         assert!(out.contains("[dev]"), "dev section missing");
         assert!(out.contains("react"), "prod package missing");
         assert!(out.contains("eslint"), "dev package missing");
-        assert!(!out.contains("(dev)"), "per-line (dev) marker should be gone");
+        assert!(
+            !out.contains("(dev)"),
+            "per-line (dev) marker should be gone"
+        );
     }
 
     #[test]
@@ -662,16 +810,304 @@ mod tests {
         let state = make_state(&[], &dev);
         let out = format_dependency_listing(&state, false);
         assert!(!out.contains("… +"), "should not truncate when cap=false");
-        assert!(!out.contains("[prod]"), "no prod section for dev-only state");
+        assert!(
+            !out.contains("[prod]"),
+            "no prod section for dev-only state"
+        );
     }
 
     #[test]
     fn test_extract_list_text_tracks_dev_section() {
         let input = "dependencies:\nreact@18.0.0\ndevDependencies:\neslint@8.0.0\n";
         let state = extract_list_text(input).expect("should parse");
-        let react = state.dependencies.iter().find(|d| d.name == "react").unwrap();
-        let eslint = state.dependencies.iter().find(|d| d.name == "eslint").unwrap();
+        let react = state
+            .dependencies
+            .iter()
+            .find(|d| d.name == "react")
+            .unwrap();
+        let eslint = state
+            .dependencies
+            .iter()
+            .find(|d| d.name == "eslint")
+            .unwrap();
         assert!(!react.dev_dependency, "react should be prod");
         assert!(eslint.dev_dependency, "eslint should be dev");
+    }
+
+    // Fixtures: real pnpm 10.34.9 stdout (stderr was empty), paths replaced by /project.
+
+    #[test]
+    fn test_failure_filter_keeps_scoped_404() {
+        let raw = include_str!("../../../tests/fixtures/pnpm_install_fetch_404_scoped_raw.txt");
+        let out = filter_pnpm_failure(raw);
+        assert!(out.contains("ERR_PNPM_FETCH_404"), "got: {out}");
+        assert!(
+            out.contains("@ferr079-nope%2Fpkg-zz: Not Found"),
+            "got: {out}"
+        );
+        assert!(out.contains("@ferr079-nope/pkg-zz is not in the npm registry"));
+        assert!(!out.contains("Progress:"), "got: {out}");
+        assert!(!out.contains("Update available"), "got: {out}");
+        assert!(
+            !out.lines().any(|l| l.trim().starts_with(['╭', '│', '╰'])),
+            "no row of the update box left, got: {out}"
+        );
+    }
+
+    #[test]
+    fn test_failure_filter_scoped_404_exact_output() {
+        // Blank lines between the reason's paragraphs stay single; the ones the
+        // dropped box leaves behind collapse, and none trail.
+        let raw = include_str!("../../../tests/fixtures/pnpm_install_fetch_404_scoped_raw.txt");
+        assert_eq!(
+            filter_pnpm_failure(raw),
+            "\u{2009}ERR_PNPM_FETCH_404\u{2009} GET https://registry.npmjs.org/@ferr079-nope%2Fpkg-zz: Not Found - 404\n\
+             \n\
+             This error happened while installing a direct dependency of /project\n\
+             \n\
+             @ferr079-nope/pkg-zz is not in the npm registry, or you have no permission to fetch it.\n\
+             \n\
+             No authorization header was set for the request."
+        );
+    }
+
+    // Fixtures below: real stdout, stderr empty, CI unset, paths replaced by /project.
+
+    #[test]
+    fn test_failure_filter_keeps_unmet_peer_tree() {
+        // pnpm 9.15.9, strict-peer-dependencies: the update box and the peer tree
+        // both start lines with `│`; only the box may go.
+        let raw = include_str!("../../../tests/fixtures/pnpm_install_peer_deps_unmet_raw.txt");
+        let out = filter_pnpm_failure(raw);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines.contains(&"├─┬ react-dom 18.2.0"), "got: {out}");
+        assert!(
+            lines.contains(&"│ └── ✕ unmet peer react@^18.2.0: found 17.0.2"),
+            "got: {out}"
+        );
+        assert!(
+            lines.contains(&"  └── ✕ unmet peer react@^18.0: found 17.0.2"),
+            "got: {out}"
+        );
+        assert!(!out.contains("Update available"), "got: {out}");
+        assert!(
+            !lines.iter().any(|l| l.trim().starts_with(['╭', '╰'])),
+            "got: {out}"
+        );
+        // The box sat between blank lines at the top: they collapse away.
+        assert!(
+            !out.starts_with('\n') && !out.contains("\n\n\n"),
+            "got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn test_failure_filter_keeps_dependency_build_log() {
+        // pnpm 9.15.9 --reporter=default: a dependency's build output is `│`-prefixed.
+        let raw = include_str!("../../../tests/fixtures/pnpm_install_dep_build_failed_raw.txt");
+        let out = filter_pnpm_failure(raw);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines.contains(&"│ dep stdout line"), "got: {out}");
+        assert!(
+            lines.contains(&"│ gyp ERR! dep native build failed"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("\u{2009}ELIFECYCLE\u{2009} Command failed with exit code 1."),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn test_failure_filter_keeps_boxed_script_error() {
+        // pnpm 10.34.9: pnpm echoes the script command, which holds the same text,
+        // so only a whole-line match proves the printed row survived.
+        let raw = include_str!("../../../tests/fixtures/pnpm_install_boxed_script_error_raw.txt");
+        let out = filter_pnpm_failure(raw);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(
+            lines.contains(&"│ Error: Python 3 not found │"),
+            "got: {out}"
+        );
+        assert!(
+            lines.contains(&"┌───────────────────────────┐"),
+            "got: {out}"
+        );
+        assert!(
+            lines.contains(&"└───────────────────────────┘"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn test_failure_filter_drops_minus_bar() {
+        // pnpm 10.34.9 after a dependency was removed: `Packages: -1` then a `-` bar.
+        let raw = include_str!("../../../tests/fixtures/pnpm_install_removed_dep_failed_raw.txt");
+        let out = filter_pnpm_failure(raw);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(
+            !lines.iter().any(|l| l.trim() == "-"),
+            "no lone `-` bar, got: {out}"
+        );
+        assert!(
+            lines.contains(&"postinstall: config check failed"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("\u{2009}ELIFECYCLE\u{2009} Command failed with exit code 5."),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn test_failure_filter_keeps_a_rounded_frame_without_the_notifier() {
+        // Scripts print `╭ … ╰` frames too (boxen's round style): only pnpm's
+        // update notifier is noise.
+        let raw = "╭──────────────╮\n│ Build failed │\n╰──────────────╯\n";
+        assert_eq!(filter_pnpm_failure(raw), raw.trim_end());
+    }
+
+    #[test]
+    fn test_failure_filter_keeps_an_unclosed_frame() {
+        let raw = "╭──────────────╮\n│ Update available! 1 → 2 │\nERR_PNPM_X boom\n";
+        assert_eq!(filter_pnpm_failure(raw), raw.trim_end());
+    }
+
+    #[test]
+    fn test_failure_filter_keeps_postinstall_reason() {
+        let raw = include_str!("../../../tests/fixtures/pnpm_install_postinstall_failed_raw.txt");
+        let out = filter_pnpm_failure(raw);
+        assert!(
+            out.contains("native build failed: missing libfoo"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("\u{2009}ELIFECYCLE\u{2009} Command failed with exit code 7."),
+            "got: {out}"
+        );
+        assert!(
+            !out.lines().any(|l| l.trim() == "+"),
+            "no lone progress bar, got: {out}"
+        );
+        assert!(!out.contains("Progress:"), "got: {out}");
+    }
+
+    #[test]
+    fn test_failure_filter_keeps_frozen_lockfile_mismatch() {
+        let raw = include_str!("../../../tests/fixtures/pnpm_install_frozen_lockfile_raw.txt");
+        let out = filter_pnpm_failure(raw);
+        assert!(out.contains("ERR_PNPM_OUTDATED_LOCKFILE"), "got: {out}");
+        assert!(
+            out.contains("  - is-number (lockfile: 7.0.0, manifest: ^6.0.0)"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn test_failure_filter_drops_workspace_progress() {
+        let raw = "../.. | Progress: resolved 3, reused 3, downloaded 0, added 0\n\
+                   . | Progress: resolved 3, reused 3, downloaded 0, added 0, done\n\
+                   \u{2009}ERR_PNPM_FETCH_404\u{2009} GET https://registry.npmjs.org/@a%2Fb: Not Found - 404\n";
+        assert_eq!(
+            filter_pnpm_failure(raw),
+            "\u{2009}ERR_PNPM_FETCH_404\u{2009} GET https://registry.npmjs.org/@a%2Fb: Not Found - 404"
+        );
+    }
+
+    #[test]
+    fn test_failure_filter_only_noise_is_empty() {
+        assert_eq!(filter_pnpm_failure("Progress: resolved 1\n+\n\n"), "");
+    }
+
+    // --- Tier 3 (Passthrough) content-loss regression tests ---
+    //
+    // `run_list`/`run_outdated` shell out to a real `pnpm` binary and write
+    // to a real SQLite tracking DB, so they aren't practically unit-testable
+    // here. Instead these tests exercise `truncate_passthrough` directly
+    // against the combined stdout+stderr, mirroring exactly what each
+    // `run_*`'s `ParseResult::Passthrough` arm does — so the content-loss
+    // fix is verified without needing a process or a database.
+
+    #[test]
+    fn test_pnpm_list_passthrough_includes_stderr_when_stdout_empty() {
+        // Regression: the old code passed the parser's stdout-only
+        // truncated output straight through, so a registry warning reported
+        // only on stderr (with empty/near-empty stdout) produced no visible
+        // output at all.
+        let stdout = "";
+        let stderr = "WARN  registry lookup failed, using cached metadata";
+        let combined = format!("{}{}", stdout, stderr);
+
+        assert_eq!(PnpmListParser::parse(stdout).tier(), 3);
+
+        let filtered = truncate_passthrough(&combined);
+        let shown = never_worse(&combined, &filtered);
+        assert!(
+            shown.contains("registry lookup failed"),
+            "stderr content must survive passthrough: got {shown}"
+        );
+    }
+
+    #[test]
+    fn test_pnpm_outdated_passthrough_includes_both_streams() {
+        // Malformed JSON on stdout plus a real error on stderr: the shown
+        // output must include both, not just stdout.
+        let stdout = "{not valid json";
+        let stderr = "Error: ENOENT: no such file or directory, open 'package.json'";
+        let combined = format!("{}{}", stdout, stderr);
+
+        assert_eq!(PnpmOutdatedParser::parse(stdout).tier(), 3);
+
+        let filtered = truncate_passthrough(&combined);
+        let display = if filtered.trim().is_empty() {
+            "All packages up-to-date".to_string()
+        } else {
+            filtered.clone()
+        };
+        let shown = never_worse(&combined, &display);
+
+        assert!(
+            shown.contains("not valid json"),
+            "stdout content lost: got {shown}"
+        );
+        assert!(
+            shown.contains("ENOENT: no such file or directory"),
+            "stderr content lost: got {shown}"
+        );
+    }
+
+    #[test]
+    fn test_pnpm_outdated_empty_both_streams_shows_up_to_date() {
+        // Regression: genuinely empty output on both streams (no outdated
+        // packages, e.g. real `pnpm outdated --format json` prints "{}")
+        // must still fall back to "All packages up-to-date" via the
+        // `filtered.trim().is_empty()` check — this fix must not touch
+        // that empty-display fallback. (The final `never_worse` guard
+        // clamp against the raw combined output is exercised separately by
+        // `guard.rs`'s own tests and is out of scope here.)
+        let stdout = "{}";
+        let stderr = "";
+        let combined = format!("{}{}", stdout, stderr);
+
+        let parse_result = PnpmOutdatedParser::parse(stdout);
+        assert_eq!(
+            parse_result.tier(),
+            1,
+            "\"{{}}\" is valid empty JSON, not Passthrough"
+        );
+
+        let filtered = match parse_result {
+            ParseResult::Full(data) => data.format(FormatMode::from_verbosity(0)),
+            ParseResult::Degraded(data, _) => data.format(FormatMode::from_verbosity(0)),
+            ParseResult::Passthrough(_) => truncate_passthrough(&combined),
+        };
+
+        let display = if filtered.trim().is_empty() {
+            "All packages up-to-date".to_string()
+        } else {
+            filtered.clone()
+        };
+
+        assert_eq!(display, "All packages up-to-date");
     }
 }

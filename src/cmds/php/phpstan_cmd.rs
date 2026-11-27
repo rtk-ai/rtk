@@ -6,6 +6,7 @@
 
 use super::utils::php_tool_command;
 use crate::core::runner;
+use crate::core::shell::display_args;
 use crate::core::utils::exit_code_from_status;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -83,7 +84,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "phpstan",
-        &args.join(" "),
+        &display_args(args),
         move |stdout| {
             if use_text {
                 filter_phpstan_text(stdout)
@@ -322,7 +323,9 @@ mod tests {
             for j in 1..=error_count {
                 messages.push(format!(
                     r#"{{"message": "Error {} in file {}", "line": {}, "ignorable": false}}"#,
-                    j, i, j * 10
+                    j,
+                    i,
+                    j * 10
                 ));
             }
 
@@ -371,8 +374,16 @@ mod tests {
           "errors": []
         }"#;
         let result = filter_phpstan_json(json);
-        assert!(result.starts_with("phpstan: 2 errors in 1 files"), "got: {}", result);
-        assert!(result.contains("Models/User.php (2 errors)"), "got: {}", result);
+        assert!(
+            result.starts_with("phpstan: 2 errors in 1 files"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("Models/User.php (2 errors)"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
@@ -472,7 +483,10 @@ mod tests {
 
 Found 5 errors in 3 files"#;
         let result = filter_phpstan_text(text);
-        assert!(result.starts_with("PHPStan:"), "should have PHPStan: prefix");
+        assert!(
+            result.starts_with("PHPStan:"),
+            "should have PHPStan: prefix"
+        );
         assert!(result.contains("5 errors"), "should contain error count");
         assert!(result.contains("3 files"), "should contain file count");
     }

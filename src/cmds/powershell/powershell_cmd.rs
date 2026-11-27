@@ -44,34 +44,35 @@
 //! recognize.
 
 use crate::core::runner::{self, RunMode, RunOptions};
+use crate::core::shell::display_args;
 use crate::core::truncate::{CAP_INVENTORY, CAP_LIST};
 use crate::core::utils::{join_with_overflow, resolved_command, tool_exists};
 use anyhow::{Context, Result};
-use lazy_static::lazy_static;
 use regex::Regex;
 use std::process::Command;
+use std::sync::LazyLock;
 
-lazy_static! {
-    /// Every real PowerShell cmdlet, function, and alias name matches this
-    /// shape (`Verb-Noun`, or a short alias like `ls`/`gci`). Anything else
-    /// reaching [`run_passthrough`] is untrusted input used as a command
-    /// *token* — quoting a token doesn't make it safely invocable the way
-    /// quoting a data value does, so it's rejected outright rather than
-    /// sanitized. See [`validate_cmdlet_name`].
-    static ref VALID_CMDLET_NAME: Regex = Regex::new(r"^[A-Za-z][A-Za-z0-9-]*$").unwrap();
+/// Every real PowerShell cmdlet, function, and alias name matches this
+/// shape (`Verb-Noun`, or a short alias like `ls`/`gci`). Anything else
+/// reaching [`run_passthrough`] is untrusted input used as a command
+/// *token* — quoting a token doesn't make it safely invocable the way
+/// quoting a data value does, so it's rejected outright rather than
+/// sanitized. See [`validate_cmdlet_name`].
+static VALID_CMDLET_NAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z][A-Za-z0-9-]*$").unwrap());
 
-    /// A parameter-name TOKEN in `-Name` form: a switch (`-Recurse`) or a
-    /// named parameter immediately followed by its value as a separate
-    /// argument (`-Path`, then a value). This shape contains no character
-    /// PowerShell's tokenizer treats specially (no quotes, `$`, backticks,
-    /// `;`, `#`, whitespace, ...), so — unlike a data VALUE — it's safe to
-    /// embed directly in the script text: the allowlist itself is the safety
-    /// property. Anything that doesn't match (including a string merely
-    /// *starting* with `-` followed by special characters) is treated as a
-    /// data value and routed through an environment variable instead. See
-    /// [`build_powershell_script`].
-    static ref SAFE_FLAG_TOKEN: Regex = Regex::new(r"^-[A-Za-z][A-Za-z0-9]*$").unwrap();
-}
+/// A parameter-name TOKEN in `-Name` form: a switch (`-Recurse`) or a
+/// named parameter immediately followed by its value as a separate
+/// argument (`-Path`, then a value). This shape contains no character
+/// PowerShell's tokenizer treats specially (no quotes, `$`, backticks,
+/// `;`, `#`, whitespace, ...), so — unlike a data VALUE — it's safe to
+/// embed directly in the script text: the allowlist itself is the safety
+/// property. Anything that doesn't match (including a string merely
+/// *starting* with `-` followed by special characters) is treated as a
+/// data value and routed through an environment variable instead. See
+/// [`build_powershell_script`].
+static SAFE_FLAG_TOKEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^-[A-Za-z][A-Za-z0-9]*$").unwrap());
 
 // ---------------------------------------------------------------------------
 // Entry point / dispatch
@@ -313,11 +314,11 @@ fn build_powershell_script(cmdlet: &str, raw_args: &[String], pipeline: Option<&
     }
     let mut command = parts.join(" ");
 
-    if let Some(p) = pipeline {
-        if !has_user_pipeline(raw_args) {
-            command.push_str(" | ");
-            command.push_str(p);
-        }
+    if let Some(p) = pipeline
+        && !has_user_pipeline(raw_args)
+    {
+        command.push_str(" | ");
+        command.push_str(p);
     }
 
     command
@@ -355,7 +356,7 @@ fn run_table_cmdlet(
     runner::run_filtered(
         cmd,
         label,
-        &args.join(" "),
+        &display_args(args),
         filter_fn,
         RunOptions::default().early_exit_on_failure(),
     )
@@ -374,7 +375,7 @@ fn run_plain_cmdlet(
     runner::run_filtered(
         cmd,
         label,
-        &args.join(" "),
+        &display_args(args),
         filter_fn,
         RunOptions::default().early_exit_on_failure(),
     )
@@ -395,7 +396,7 @@ fn run_passthrough(cmdlet: &str, args: &[String]) -> Result<i32> {
     let label = if args.is_empty() {
         cmdlet.to_string()
     } else {
-        format!("{} {}", cmdlet, args.join(" "))
+        format!("{} {}", cmdlet, display_args(args))
     };
     runner::run(
         cmd,
@@ -439,12 +440,10 @@ fn group_wrapped_rows(lines: &[&str]) -> Vec<String> {
     let mut rows: Vec<String> = Vec::new();
     for line in lines {
         let is_continuation = line.starts_with(' ') || line.starts_with('\t');
-        if is_continuation {
-            if let Some(last) = rows.last_mut() {
-                last.push('\n');
-                last.push_str(line);
-                continue;
-            }
+        if is_continuation && let Some(last) = rows.last_mut() {
+            last.push('\n');
+            last.push_str(line);
+            continue;
         }
         rows.push((*line).to_string());
     }
@@ -655,8 +654,7 @@ fn filter_get_netadapter(output: &str) -> String {
     )
 }
 
-const NETTCPCONNECTION_PIPELINE: &str =
-    "Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess | Format-Table -AutoSize";
+const NETTCPCONNECTION_PIPELINE: &str = "Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess | Format-Table -AutoSize";
 const MAX_NETTCPCONNECTION_ROWS: usize = CAP_INVENTORY;
 
 fn filter_get_nettcpconnection(output: &str) -> String {
@@ -687,8 +685,7 @@ fn filter_get_package(output: &str) -> String {
     )
 }
 
-const WINEVENT_PIPELINE: &str =
-    "Select-Object TimeCreated,Id,LevelDisplayName,ProviderName,Message | Format-Table -AutoSize -Wrap";
+const WINEVENT_PIPELINE: &str = "Select-Object TimeCreated,Id,LevelDisplayName,ProviderName,Message | Format-Table -AutoSize -Wrap";
 const MAX_WINEVENT_ROWS: usize = CAP_INVENTORY;
 
 fn filter_get_winevent(output: &str) -> String {
@@ -850,7 +847,13 @@ fn filter_test_netconnection(output: &str) -> String {
     filter_keyed_properties(output, NET_CONNECTION_KEEP)
 }
 
-const COMPUTER_INFO_KEEP: &[&str] = &["CsName", "CsDomain", "OsName", "OsVersion", "OsArchitecture"];
+const COMPUTER_INFO_KEEP: &[&str] = &[
+    "CsName",
+    "CsDomain",
+    "OsName",
+    "OsVersion",
+    "OsArchitecture",
+];
 
 fn filter_get_computerinfo(output: &str) -> String {
     filter_keyed_properties(output, COMPUTER_INFO_KEEP)
@@ -1062,15 +1065,15 @@ mod tests {
             "-Recurse".to_string(),
         ];
         let script = build_powershell_script("Get-ChildItem", &args, None);
-        assert_eq!(
-            script,
-            "Get-ChildItem -Path $env:RTK_PS_ARG_1 -Recurse"
-        );
+        assert_eq!(script, "Get-ChildItem -Path $env:RTK_PS_ARG_1 -Recurse");
     }
 
     #[test]
     fn test_build_powershell_script_zero_args() {
-        assert_eq!(build_powershell_script("Get-Process", &[], None), "Get-Process");
+        assert_eq!(
+            build_powershell_script("Get-Process", &[], None),
+            "Get-Process"
+        );
     }
 
     #[test]
@@ -1173,10 +1176,10 @@ TimeCreated           Id LevelDisplayName Message
     fn test_format_capped_table_appends_overflow_note() {
         // RTK_TEE=0 keeps this deterministic: with recovery disabled,
         // `append_recovery_hint` is a no-op and the overflow note is exact.
-        std::env::set_var("RTK_TEE", "0");
         let rows = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let out = format_capped_table(Some("H"), rows, 2, "items", "test-slug", false);
-        std::env::remove_var("RTK_TEE");
+        let out = crate::core::user_env::with_vars(&[("RTK_TEE", Some("0"))], || {
+            format_capped_table(Some("H"), rows, 2, "items", "test-slug", false)
+        });
         assert_eq!(out, "H\na\nb\n\u{2026} +1 more items");
     }
 
@@ -1197,10 +1200,12 @@ TimeCreated           Id LevelDisplayName Message
     fn test_append_recovery_hint_respects_rtk_tee_disable() {
         // Both the tail and block variants must degrade to a no-op (never
         // panic, never fabricate a hint) when recovery is disabled.
-        std::env::set_var("RTK_TEE", "0");
-        let tail = append_recovery_hint("a\nb".to_string(), "a\nb\nc", "test-slug", 2, 3, false);
-        let block = append_recovery_hint("a\nb".to_string(), "a\nb\nc", "test-slug", 2, 3, true);
-        std::env::remove_var("RTK_TEE");
+        let (tail, block) = crate::core::user_env::with_vars(&[("RTK_TEE", Some("0"))], || {
+            (
+                append_recovery_hint("a\nb".to_string(), "a\nb\nc", "test-slug", 2, 3, false),
+                append_recovery_hint("a\nb".to_string(), "a\nb\nc", "test-slug", 2, 3, true),
+            )
+        });
         assert_eq!(tail, "a\nb");
         assert_eq!(block, "a\nb");
     }
@@ -1318,8 +1323,7 @@ TimeCreated           Id LevelDisplayName Message
 
     #[test]
     fn test_filter_get_nettcpconnection() {
-        let raw =
-            include_str!("../../../tests/fixtures/powershell/get_nettcpconnection_raw.txt");
+        let raw = include_str!("../../../tests/fixtures/powershell/get_nettcpconnection_raw.txt");
         let input = strip_fixture_note(raw);
         let output = filter_get_nettcpconnection(&input);
 

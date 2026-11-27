@@ -1,0 +1,22 @@
+Binary files 'g1/bin é.dat' and 'g2/bin é.dat' differ
+diff -ru g1/c.txt g2/c.txt
+--- g1/c.txt	2026-09-06 21:48:04.373795800 -0400
++++ g2/c.txt	2026-09-06 21:48:04.375298700 -0400
+@@ -1,2 +1,2 @@
+ one
+-two
++TWO
+diff -ru g1/café.txt g2/café.txt
+--- g1/café.txt	2026-09-06 21:48:04.375298700 -0400
++++ g2/café.txt	2026-09-06 21:48:04.376302300 -0400
+@@ -1 +1 @@
+-x
++y
+Only in g2/: 'only right.txt'
+Only in g1/: 'only é.txt'
+diff -ru "g1/sp ace.txt" "g2/sp ace.txt"
+--- "g1/sp ace.txt"	2026-09-06 21:48:04.376302300 -0400
++++ "g2/sp ace.txt"	2026-09-06 21:48:04.377300600 -0400
+@@ -1 +1 @@
+-x
++y

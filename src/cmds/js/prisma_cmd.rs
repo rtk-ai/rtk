@@ -195,20 +195,21 @@ fn filter_prisma_generate(output: &str) -> String {
         }
 
         // Extract counts
-        if line.contains("model") && line.contains("generated") {
-            if let Some(num) = extract_number(line) {
-                models = num;
-            }
+        if line.contains("model")
+            && line.contains("generated")
+            && let Some(num) = extract_number(line)
+        {
+            models = num;
         }
-        if line.contains("enum") {
-            if let Some(num) = extract_number(line) {
-                enums = num;
-            }
+        if line.contains("enum")
+            && let Some(num) = extract_number(line)
+        {
+            enums = num;
         }
-        if line.contains("type") {
-            if let Some(num) = extract_number(line) {
-                types = num;
-            }
+        if line.contains("type")
+            && let Some(num) = extract_number(line)
+        {
+            types = num;
         }
 
         // Extract output path
@@ -245,13 +246,14 @@ fn filter_migrate_dev(output: &str) -> String {
 
     for line in output.lines() {
         // Extract migration name
-        if line.contains("migration") && line.contains("_") {
-            if let Some(pos) = line.find("202") {
-                let end = line[pos..]
-                    .find(|c: char| c.is_whitespace())
-                    .unwrap_or(line.len() - pos);
-                migration_name = line[pos..pos + end].to_string();
-            }
+        if line.contains("migration")
+            && line.contains("_")
+            && let Some(pos) = line.find("202")
+        {
+            let end = line[pos..]
+                .find(|c: char| c.is_whitespace())
+                .unwrap_or(line.len() - pos);
+            migration_name = line[pos..pos + end].to_string();
         }
 
         // Count changes
@@ -261,15 +263,15 @@ fn filter_migrate_dev(output: &str) -> String {
         if line.contains("ALTER TABLE") {
             tables_modified += 1;
         }
-        if line.contains("FOREIGN KEY") || line.contains("REFERENCES") {
-            if let Some(table) = extract_table_name(line) {
-                relations.push(table);
-            }
+        if (line.contains("FOREIGN KEY") || line.contains("REFERENCES"))
+            && let Some(table) = extract_table_name(line)
+        {
+            relations.push(table);
         }
-        if line.contains("CREATE INDEX") || line.contains("CREATE UNIQUE INDEX") {
-            if let Some(idx) = extract_index_name(line) {
-                indexes.push(idx);
-            }
+        if (line.contains("CREATE INDEX") || line.contains("CREATE UNIQUE INDEX"))
+            && let Some(idx) = extract_index_name(line)
+        {
+            indexes.push(idx);
         }
 
         if line.contains("applied") || line.contains("✓") {
@@ -314,11 +316,14 @@ fn filter_migrate_status(output: &str) -> String {
     for line in output.lines() {
         if line.contains("applied") {
             applied_count += 1;
-            if latest_migration.is_empty() && line.contains("202") {
-                if let Some(pos) = line.find("202") {
-                    let end = line[pos..].find(|c: char| c.is_whitespace()).unwrap_or(20);
-                    latest_migration = line[pos..pos + end].to_string();
-                }
+            if latest_migration.is_empty()
+                && line.contains("202")
+                && let Some(pos) = line.find("202")
+            {
+                let end = line[pos..]
+                    .find(|c: char| c.is_whitespace())
+                    .unwrap_or(line.len() - pos);
+                latest_migration = line[pos..pos + end].to_string();
             }
         }
         if line.contains("pending") || line.contains("unapplied") {
@@ -460,6 +465,21 @@ import { PrismaClient } from '@prisma/client'
         // Parser may not extract exact counts from this format, just check it doesn't crash
         assert!(!result.contains("Prisma schema loaded"));
         assert!(!result.contains("Start by importing"));
+    }
+
+    #[test]
+    fn test_filter_migrate_status_reads_a_timestamp_at_end_of_line() {
+        // The migration id ran to the end of the line, so there was no whitespace to find and
+        // the hardcoded fallback of 20 sliced past it -- a panic, which aborts in release and
+        // takes the user's whole command output with it.
+        let output = "Migration could not be applied at 2024-01-01T12:00:00";
+        let result = filter_migrate_status(output);
+        assert!(result.contains("2024-01-01T12:00:00"), "{result}");
+
+        // A multibyte character after the id must not split mid-char either.
+        let output = "1 migration applied 20240101_café";
+        let result = filter_migrate_status(output);
+        assert!(result.contains("20240101_café"), "{result}");
     }
 
     #[test]

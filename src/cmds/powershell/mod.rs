@@ -1,1 +1,1 @@
-automod::dir!(pub "src/cmds/powershell");
+pub mod powershell_cmd;

@@ -1,0 +1,28 @@
+diff --git a/y.rs a/y.rs
+deleted file mode 100644
+index 286c5f5..0000000
+--- a/y.rs
++++ /dev/null
+@@ -1 +0,0 @@
+-gone
+diff --git b/has space.txt b/has space.txt
+index e0808fa..df150e3 100644
+--- b/has space.txt	
++++ b/has space.txt	
+@@ -1 +1,2 @@
+ keep me
++and more
+diff --git b/x.rs b/x.rs
+index b95d8a9..b5c0f9a 100644
+--- b/x.rs
++++ b/x.rs
+@@ -1 +1 @@
+-fn old() {}
++fn new() {}
+diff --git b/z.rs b/z.rs
+new file mode 100644
+index 0000000..078b2f6
+--- /dev/null
++++ b/z.rs
+@@ -0,0 +1 @@
++born

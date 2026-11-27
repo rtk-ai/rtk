@@ -1,12 +1,17 @@
 # Core Infrastructure
 
+`stream::exec_capture_stdin_with_relay` is an opt-in buffered capture for filters
+that must preserve both decoded streams without line-ending normalization or
+stderr caps. It uses the existing cancellation relay; callers flush output and
+tracking before calling `stream::die_by_relayed_signal`.
+
 > See also [docs/contributing/TECHNICAL.md](../../docs/contributing/TECHNICAL.md) for the full architecture overview
 
 ## Scope
 
 Domain-agnostic building blocks with **no knowledge of any specific command, hook, or agent**. If a module references "git", "cargo", "claude", or any external tool by name, it does not belong here. Core is a leaf in the dependency graph — it is consumed by all other components but imports from none of them.
 
-Owns: configuration loading, token tracking persistence, TOML filter engine, tee output recovery, display formatting, telemetry, and shared utilities.
+Owns: configuration loading, token tracking persistence, the SQLite open and migrations shared by the tracking and recall databases, TOML filter engine, tee output recovery, display formatting, explicit shell/direct command construction, telemetry, per-request HTTP settings (`http.rs`: timeout, direct connection to this machine), and shared utilities.
 
 Does **not** own: command-specific filtering logic (that's `cmds/`), hook lifecycle management (that's `src/hooks/`), or analytics dashboards (that's `analytics/`).
 
@@ -31,19 +36,43 @@ Three-tier filter lookup (first match wins):
 2. `~/.config/rtk/filters.toml` (user-global)
 3. Built-in filters concatenated by `build.rs` at compile time
 
+## Source File Comment Stripping
+
+`src/core/filter.rs` is a separate engine from the TOML DSL: it filters *source
+files* (used by `rtk read`) rather than command output. At `-l minimal` it
+strips comments using the per-language delimiters in
+`Language::comment_patterns()`.
+
+Python does not use that walk. It has no block comments — `"""` opens a
+*string*, which may be a docstring or an ordinary value — so it gets a
+string-aware path that removes `#` comments and leaves string contents alone.
+Matching `"""` as a block delimiter misread both of these:
+
+```python
+QUERY = """          # contains """ without starting with it
+SELECT 1
+"""
+
+"""Module doc."""    # opens and closes on one line
+```
+
+Docstrings are kept at `minimal`. `aggressive` has no string awareness: it
+keeps a line inside a string when that line looks like an import or a
+signature.
+
 ## Tracking Database Schema
 
 ```sql
 CREATE TABLE commands (
   id INTEGER PRIMARY KEY,
   timestamp TEXT,              -- UTC ISO8601
-  original_cmd TEXT,           -- "ls -la"
-  rtk_cmd TEXT,                -- "rtk ls"
+  original_cmd TEXT,           -- "ls -la"; words quoted only when needed: "grep 'a b' f"
+  rtk_cmd TEXT,                -- "rtk ls", "rtk:toml make all", "rtk:passthrough git tag"
   project_path TEXT,           -- cwd (for project-scoped stats)
-  input_tokens INTEGER,        -- estimated from raw output
-  output_tokens INTEGER,       -- estimated from filtered output
+  input_tokens INTEGER,        -- estimated from raw output (bytes / 4, no tokenizer)
+  output_tokens INTEGER,       -- estimated from filtered output (bytes / 4)
   saved_tokens INTEGER,        -- input - output
-  savings_pct REAL,            -- (saved / input) * 100
+  savings_pct REAL,            -- (saved / input) * 100, i.e. reduction in bash output bytes
   exec_time_ms INTEGER         -- elapsed milliseconds
 );
 
@@ -58,6 +87,16 @@ CREATE TABLE parse_failures (
 
 Project-scoped queries use GLOB patterns (not LIKE) to avoid `_`/`%` wildcard issues in paths.
 
+## Database Versions
+
+`db.rs` opens and migrates both SQLite databases; each keeps its versions enum and its steps (`SchemaVersion` in `tracking.rs`, `RecallSchema` in `retriever.rs`).
+
+- **A schema change** is a new variant above the marker line and its step in `MIGRATIONS`. Two changes adding one at once conflict. A released step never changes the schema it produces, and every step stays idempotent, because `rtk init` replays them all.
+- **A database stamped N** (`PRAGMA user_version`) applies the steps above N, each in its own `IMMEDIATE` transaction. A current database costs one read.
+- **A file's owner** is its `application_id`, `0x5254_4B00 | DbKind`. A file that is another database's is refused.
+- **A step that fails** rolls back and keeps the stamp, and the next open tries again. Meanwhile the database is used as it is: `rtk gain` reports the cause, a query that needs what is missing says so, and `rtk init` warns.
+- **A file that cannot be opened normally** is read without its sidecars first, so one that is not rtk's is refused as it is. Then its owner gets back a directory or a file they cannot use, and a file that only this made readable and that is refused gets its modes back. On a read-only filesystem a WAL-mode file that holds nothing in its `-wal` is read with `immutable=1`.
+
 ## Config Sections
 
 ```toml
@@ -71,12 +110,16 @@ colors = true
 emoji = true
 max_width = 120
 
-[tee]
-enabled = true
-mode = "failures"  # failures | always | never
-max_files = 20
-max_file_size = 1048576
-directory = "/custom/tee/dir"
+[retriever]
+mode = "sqlite"             # sqlite (default) | tee (legacy files) | disabled
+max_entry_bytes = 10485760  # sqlite: 10 MiB per entry
+max_entries = 200           # sqlite: FIFO cap
+retention_days = 30         # sqlite: 0 disables age eviction
+compression = true          # sqlite: gzip blobs (lossless)
+# database_path = "/custom/recall.db"
+tee_max_files = 20          # tee mode: rotation
+tee_max_file_size = 1048576 # tee mode: per-file cap
+# tee_directory = "/custom/tee/dir"
 
 [telemetry]
 enabled = true
@@ -107,21 +150,92 @@ Key functions available to all command modules:
 | `ruby_exec(tool)` | Auto-detect `bundle exec` when `Gemfile` exists |
 | `count_tokens(text)` | Estimate tokens: `ceil(chars / 4.0)` |
 
+## Argument Tokenizer (arg_tokenizer.rs)
+
+Shared classifier for an already-`--`-restored args slice (see `args_utils::restore_double_dash`) into flags, their values, and positionals. `tokenize_grammar(args, &GRAMMAR)` reads it under one tool's `Grammar`: the list of which flags take a value is per-tool, but the token-walking around it isn't. `tokenize(args)` is the structural-only entry point, for a caller asking which arguments are flags and where `--` is; it assumes **no flag takes a value**, so anything reading a value or counting free positionals needs `tokenize_grammar`.
+
+**Use it for anything that decides what an argument is.** A new command filter, a new flag on an existing one, or a fix to how one is detected goes through `tokenize_grammar` — not `starts_with('-')`, not `args.iter().any(|a| a == "--flag")`. Those miss exactly what this module exists for: a flag's own value (`git log --grep -p` searches for the string "-p"), an attached value (`--flag=v`, `/bl:x`), a short cluster (`-rn`), and everything past `--`. Every bug the migration fixed was one of those four.
+
+**A grammar is declared once, as data.** A tool's flags are `const` tables of `Flag`s (`Flag::short("n")`, `Flag::long("grep")`, `Flag::pair("u", "set-upstream-to")`, each `.takes(spec)` when it takes a value and bare when it takes none), and its `Grammar` lists those tables. A getopt `Flag` has at most one short and one long spelling, paired as the tool pairs them, and an atomic one (`Flag::atomic`, see [Dialects](#dialects)) lists every name the tool gives the option; a further spelling the tool does not pair is a `Flag` of its own (git's `-u` beside `-p`/`--patch`, grep's `--silent` beside `-q`/`--quiet`). A grammar declares every flag that takes a value, since those decide how the next argument tokenizes, and every flag of the tool that a handler checks tokens for, booleans included; a boolean takes no value, so declaring one leaves the tokens as they were. `tokenize_grammar` looks each flag token up in the grammar once and keeps the declared `Flag` in `Token::flag`, so code that asks whether a token is a declared flag, or how it takes a value, reads the token: `token.flag()` for the declared `Flag`, `token.value_spec()` for its `ValueSpec`. A check for one flag compares that `Flag` with the flag's `const` (`token.is(&SET_UPSTREAM_TO)` matches `-u` and `--set-upstream-to` alike), and a check for a set of flags looks it up in a slice of those `const`s (`token.is_one_of(LOG_RAW_SHAPES)` for git, `GREP_SHAPES` for grep), so each spelling and each pairing is written once, and a token asked several questions is looked up once. Both compare flags by their spellings, which name one declaration per grammar, and every flag they are asked about must be declared in the grammar the token was read with, exactly as declared: a debug build panics on a flag the grammar does not declare or a copy that differs from the declaration in one field, which would otherwise never match and say nothing, and a release build answers `false`. So a predicate asking for a flag that only some grammars declare either takes tokens whose type names the grammar (git's `LogTokens` and `DiffTokens`) or states which grammar its tokens are read with. Code that branches on which of several flags a token is matches the declared flag against their `const`s instead: `match token.flag() { Some(&SHOW_BRANCH) => …, Some(&SHORT_FORMAT) => …, _ => … }`, or `matches!(token.flag(), Some(&FORMAT | &PRETTY))`. A pattern compares the whole `Flag`, so it must be the `const` the grammar declares, and it skips the debug check, so an arm naming a flag the grammar does not declare never matches: each arm is pinned by a test. A `Short` token only matches a getopt flag's short spelling and a `Long` token only its long one or an atomic flag's names, so `-u` and `--u` never meet. The lookups over tokens (`has_flag`, `double_dash_flag_value`, …) take the grammar the tokens were read with and read its naming rules (exact, ASCII case folded under `NameCase::Folded`, and, under `Abbreviation::UniquePrefix`, a prefix the grammar resolved to a flag spelled with the name looked for, when the typed text abbreviates that name; a whole spelling matches only itself), so the name they look for need not be declared.
+
+Four rules, each of which cost a real bug before it was written down:
+
+- **One grammar per tool and subcommand.** Never reuse a sibling's grammar wholesale because it looks close enough — `-u` means `-p` in `git log` but `--include-untracked` in `git stash show`, and `-T` is `--initial-tab` in grep but `--type-not` in rg. Transcribe from the tool's own `--help` and verify against the real binary; grep and rg share 13 of ~50 value-taking flags, so one merged table is wrong for both. Subcommands whose flags go through the same parser share one grammar (`git log` and `show` read theirs with `LOG_GRAMMAR`), and what distinct grammars share is a table: a subcommand after which every parent flag stays valid lists the parent's table next to its own (golangci-lint's `run` lists the global table), and grammars that differ in one flag list the shared tables and a table each for that flag (`git diff`'s `DIFF_GRAMMAR` lists the revision-walk tables `LOG_GRAMMAR` lists, with `--quiet` alone where `log` and `show` pair it with `-q`, and `git stash show`'s lists them with its own `-u`/`--include-untracked`, where the other two read `-u` as `-p`). Grammars that merely intersect get a table each.
+- **Scope the lookup to the region the tool parses.** Everything past `--` is a pathspec or an argument forwarded to another program — `before_dashdash` gives the tool's own tokens. An MSBuild grammar keeps classifying past the boundary (it forwards rather than ending option parsing), which makes this explicit slice mandatory there, not optional.
+- **Inject before the boundary.** RTK's own flags go at `injection_point`, never appended: dotnet parks anything after `--` in UnparsedTokens and git reads it as a pathspec, so an appended `--verify-no-changes` silently does nothing.
+- **Detect and act with one rule.** Strip or inject using the detected token's `source_index`; re-matching the text lets the two disagree, which deleted a pathspec named `--no-compact` and swallowed a forwarded `--write`.
+
+A flag's value is a `ValueSpec`, not a `bool`: one table per tool, answering every question the tokenizer has about a flag's value rather than one list per question, which is how two lists start drifting apart.
+
+- `ValueSpec::value()` — `--flag=v` or `--flag v`, and a literal `--` is the boundary. The common case.
+- `ValueSpec::attached_only()` — `--flag=v` only, the next argument is never the value (git's `-M`/`-U`/`-C`/`-B` take an optional attached number and nothing else).
+- `ValueSpec::solo_only()` — a `Short` flag takes a separate value only when it is the whole argument: `git log -n 2` does, `git log -pn 2` does not. A `Flag` records the spec per spelling, and a long spelling is always the whole argument, so `Flag::pair("c", "config").takes(ValueSpec::solo_only())` records `solo_only()` for `-c` and `value()` for `--config`; `token.value_spec()` reads that one record. A flag with no short spelling declares `value()`: solo-only there panics in `Flag::takes`, which is a compile error in the `const` that declares the flag.
+- `.claiming_dash_dash()` — lets a literal `--` be this flag's value. A per-tool split, not per-flag: grep and rg let any value-taking flag swallow it, git and cargo reject it whichever flag is asking.
+
+### Dialects
+
+Everything that is not per-flag is per-tool: a grammar is `Grammar::new(dialect, tables)`. `Dialect` is a `Copy` struct of six independent axes, because the tools measured want different combinations of them:
+
+| axis | values | what differs |
+|---|---|---|
+| `single_dash` | `Cluster` / `Atomic` / `AtomicAliasingLong` | what `-abc` is: three short flags, one flag name, or one flag name that is also `--abc` |
+| `attach` | `Equals` / `EqualsOrColon` | which separator attaches a value (`--logger:trx`) |
+| `dash_dash` | `EndsOptions` / `Forwards` / `EndsGlobalOptions` | whether classification stops at `--`, continues because the tail is forwarded to another program, or continues because only the *global* option region ended |
+| `name_case` | `Sensitive` / `Folded` | whether flag lookups fold ASCII case |
+| `slash_flags` | `bool` | whether `/flag` is a switch rather than a path |
+| `abbreviation` | `Never` / `UniquePrefix` | whether a long flag may be typed as a prefix that names it alone (`ls --sor time`), as GNU `getopt_long` reads it |
+
+**The single-dash axis decides how a flag is declared.** Under `Cluster`, `-x` is a `Short` token and `--name` a `Long` one, so flags are getopt flags: `Flag::short`, `Flag::long`, `Flag::pair`. Under `Atomic` and `AtomicAliasingLong`, every name is one whole word read as `Long`, so a flag is `Flag::atomic(&["c", "configuration"])`: all of its names are one flag, and `token.is(&CONFIGURATION)` holds for `-c` and `--configuration` alike. `Grammar::new` refuses any other combination, since such a flag could never match a token as declared; that is a compile error in the `const` that declares the grammar.
+
+**Naming rule.** A preset names a grammar *family* that several tools can share — a parser library, or a real convention — so its name answers "can my tool reuse this?". `Dialect::CommonsCli` is checkable (`ls /usr/share/maven/lib/` ships `commons-cli-1.11.0.jar`); "is my tool Maven?" is not. A single tool's bespoke parser gets **no preset**: its caller composes the axes at its own call site. That rule is what stops this list growing one variant per tool.
+
+- `Dialect::Posix` — git, cargo, rg, golangci-lint. Cluster, `=`, `--` ends options, case-sensitive, no `/flag`.
+- `Dialect::Msbuild` — dotnet. Atomic, `=` or `:`, `--` forwards, case-folded, `/flag`.
+- `Dialect::CommonsCli` — Apache commons-cli. POSIX with `Atomic`: the library's short options are whole multi-character words (`-pl`, `-am`, `-gs`, `-emp`), so `mvn -Bo` is an error, not a cluster. Maven is the first consumer.
+- `Dialect::GoFlag` — Go's `flag` package: atomic single-dash options, and `-run` is the same flag as `--run`.
+
+ls gets no preset either: it is `Posix` with `abbreviation: UniquePrefix`, composed in `ls.rs`. A prefix is resolved against the grammar's declared flags, so an abbreviating grammar declares every long option its tool has, booleans included — a prefix is only unambiguous against the whole set. Every preset is `Never`.
+
+Gradle gets no preset: its parser is `org.gradle.cli` (`gradle:jdk21` ships `gradle-cli-*.jar` and no commons-cli), used by nothing else. It is `Posix` with `dash_dash: EndsGlobalOptions`, composed as a `const` in `gradlew_cmd.rs`. The axis value is shared infrastructure; the one-tool combination is not.
+
+`src/core/arg_tokenizer/frozen.rs` is the pre-axes implementation, kept as the oracle for the differential test in `differential.rs`: every arg vector up to four tokens over an alphabet covering each construct the scanner branches on, asserted token-for-token identical under `Posix` and `Msbuild`. Never edit `frozen.rs` to match new behaviour — a diff against it is the only proof the presets have not moved.
+
+Each grammar has a test that checks it against an explicit table of the flags it declares and the spec each takes (`None` for a boolean flag), under every token kind, with `arg_tokenizer::assert_takes_value_table`. The same check fails on a spelling declared twice (compared under the grammar's naming rules, so case-folded under a `Folded` dialect): the first declaration wins, so a second one is dead data.
+
+**Tokenizing a shell string, not an argv.** `discover` starts from a raw command line, one layer below: shell string → `discover::lexer::words_and_spans` (quote-aware words plus each word's byte offset) → `tokenize_grammar`.
+
+Those words are **unresolved shell words, not an argv**: word splitting has happened, but each word is still a slice of the original string with its quote characters and backslash escapes literal. `--config "a path/x.yml"` is one word, and that word is `"a path/x.yml"` — quotes included; `--config=a\ b` stays `--config=a\ b`. So `Token::text`, `Token::attached` and `Token::value()` carry the quoting too. **Reading a token as a value needs resolving** — put it through `discover::lexer::resolve_word_text` first, or a `--config` path is looked up with literal quote characters in it. Slicing `cmd` by offset needs no resolving. Comparing a token against a keyword is in between: it is sound for the unquoted spelling but misses a quoted one, so `golangci-lint "run"` matches no keyword and falls through to passthrough — acceptable when the fallback is "unfiltered but correct", not when a missed match would rewrite the command wrongly. `shell_split` returns a real argv but discards the offsets, so it is not a substitute when you need both.
+
+Keep the span vector alongside the words — `Token::source_index` indexes the slice you passed in, so add that slice's own start offset before indexing `spans`: `discover::registry::parse_golangci_run_parts` tokenizes `&words[1..]` and so reads `spans[source_index + 1]`. Note that `discover::lexer::TokenKind` and `arg_tokenizer::TokenKind` are different types with the same name.
+
 ## Consumer Contracts
 
 Core provides infrastructure that `cmds/` and other components consume. These contracts define expected usage.
+
+### Command Construction (`shell`)
+
+Use `shell::direct_command()` when the caller already has an argv vector. It
+preserves argument boundaries and never expands globs, variables, redirects,
+or operators. Use `shell::shell_command()` only for an intentional command
+string, with an explicit shell when syntax is shell-specific. The platform
+default remains `sh -c` on Unix and `cmd /C` on Windows for compatibility.
+
+Never infer the command parser from `$SHELL`: agent hosts and terminal wrappers
+can execute a different shell while preserving the user's login-shell value.
+Callers that accept `--shell` must require the complete script as one quoted
+argument instead of reconstructing it by joining parsed argv.
 
 ### Tracking (`TimedExecution`)
 
 Consumers must call `timer.track()` on **all** code paths — success, failure, and fallback. Calling `std::process::exit()` before `track()` loses metrics. The raw string passed to `track()` should include both stdout and stderr to produce accurate savings percentages.
 
-### Tee (`tee_and_hint`)
+### Output recovery (`tee_and_hint` + recall store)
 
-Consumers that parse structured output (JSON, NDJSON, state machines) should call `tee::tee_and_hint()` to save raw output for LLM recovery on failure. Tee must be called before `std::process::exit()`.
+Consumers that parse structured output (JSON, NDJSON, state machines) should call `tee::tee_and_hint()` to persist raw output for LLM recovery on failure. It must be called before `std::process::exit()`.
 
-For truncation recovery on **success** (e.g., list truncated at 20 items), use `tee::force_tee_hint()` which bypasses the tee mode check and writes regardless of exit code. This ensures LLMs always have a `[full output: ...]` recovery path instead of burning tokens working around missing data.
+For truncation recovery on **success** (e.g. a list capped at 20 items), use `tee::force_tee_hint()` (multi-line blocks) or `tee::force_tee_tail_hint(content, slug, offset)` (flat lists). All three persist the full output to the content-addressed recall store ([`retriever.rs`](retriever.rs)) and emit a runnable hint — `[full output: rtk recall <hash>]` or `[+N hidden: rtk recall <hash>]` — instead of burning tokens working around missing data.
 
-When the truncated output is a **flat list** and the hidden items start at a predictable line, prefer `tee::force_tee_tail_hint(content, slug, offset)`. It writes the same tee file but emits a directly runnable hint — `[see remaining: tail -n +{offset} ~/path]` — so the agent jumps to exactly the first hidden item without scanning the whole file. The offset is `header_lines + MAX_CAP + 1`. Use `force_tee_hint` instead when the output has multiple sections (e.g. running + stopped containers) and no single offset cleanly covers the gap.
+The agent runs `rtk recall <hash>` to get back exactly what was elided. For `force_tee_tail_hint`, `offset` is the 1-based first hidden line (`header_lines + MAX_CAP + 1`); it is stored so the default recall returns only the hidden tail. Storage is byte-faithful (`BLOB` + lossless gzip); tune limits via the `[retriever]` config section.
 
 ### Truncation Caps (`truncate`)
 
@@ -132,4 +246,4 @@ When the truncated output is a **flat list** and the hidden items start at a pre
 **Deviating from a cap.** A filter whose items are unusually verbose (multi-line entries, backtraces) may show fewer than its class cap. Use `truncate::reduced(cap, by)` rather than a bare `cap - by`: `reduced` returns `cap - by`, except when the reduction would empty the list (`by >= cap`), in which case it drops the deviation and uses the full `cap`. This guarantees a deviation can never hide every item, and — crucially — stays a `usize`-underflow-safe `const fn` once caps become runtime-configurable (a bare `CAP_WARNINGS - 5` would panic or wrap to "no truncation" if a user set `CAP_WARNINGS` below `5`). Never deviate with a bare literal or with `*`/`/` (those scale unboundedly). Each deviation needs a one-line comment stating why.
 
 ## Adding New Functionality
-Place new infrastructure code here if it meets **all** of these criteria: (1) it has no dependencies on command modules or hooks, (2) it is used by two or more other modules, and (3) it provides a general-purpose utility rather than command-specific logic. Follow the existing pattern of lazy-initialized resources (`lazy_static!` for regex, on-demand config loading) to preserve the <10ms startup target. Add `#[cfg(test)] mod tests` with unit tests in the same file.
+Place new infrastructure code here if it meets **all** of these criteria: (1) it has no dependencies on command modules or hooks, (2) it is used by two or more other modules, and (3) it provides a general-purpose utility rather than command-specific logic. Follow the existing pattern of lazy-initialized resources (`LazyLock` for regex, on-demand config loading) to preserve the <10ms startup target. Add `#[cfg(test)] mod tests` with unit tests in the same file.

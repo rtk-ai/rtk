@@ -1,15 +1,17 @@
 //! Filters Playwright E2E test output to show only failures.
 
+use crate::core::shell::{display_args, with_args};
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{detect_package_manager, resolved_command, strip_ansi};
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Deserialize;
+use std::sync::LazyLock;
 
 use crate::parser::{
-    emit_degradation_warning, emit_passthrough_warning, truncate_passthrough, FormatMode,
-    OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
+    FormatMode, OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
+    emit_degradation_warning, emit_passthrough_warning, truncate_passthrough,
 };
 
 /// Matches real Playwright JSON reporter output (suites → specs → tests → results)
@@ -163,14 +165,10 @@ fn collect_test_results(
 
 /// Tier 2: Extract test statistics using regex (degraded mode)
 fn extract_playwright_regex(output: &str) -> Option<TestResult> {
-    lazy_static::lazy_static! {
-        static ref SUMMARY_RE: Regex = Regex::new(
-            r"(\d+)\s+(passed|failed|flaky|skipped)"
-        ).unwrap();
-        static ref DURATION_RE: Regex = Regex::new(
-            r"\((\d+(?:\.\d+)?)(ms|s|m)\)"
-        ).unwrap();
-    }
+    static SUMMARY_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(\d+)\s+(passed|failed|flaky|skipped)").unwrap());
+    static DURATION_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\((\d+(?:\.\d+)?)(ms|s|m)\)").unwrap());
 
     let clean_output = strip_ansi(output);
 
@@ -219,11 +217,8 @@ fn extract_playwright_regex(output: &str) -> Option<TestResult> {
 
 /// Extract failures using regex
 fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
-    lazy_static::lazy_static! {
-        static ref TEST_PATTERN: Regex = Regex::new(
-            r"[×✗]\s+.*?›\s+([^›]+\.spec\.[tj]sx?)"
-        ).unwrap();
-    }
+    static TEST_PATTERN: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"[×✗]\s+.*?›\s+([^›]+\.spec\.[tj]sx?)").unwrap());
 
     let mut failures = Vec::new();
 
@@ -294,6 +289,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     // Parse output using PlaywrightParser
     let parse_result = PlaywrightParser::parse(&result.stdout);
     let mode = FormatMode::from_verbosity(verbose);
+    let tier = parse_result.tier();
 
     let filtered = match parse_result {
         ParseResult::Full(data) => {
@@ -308,21 +304,32 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             }
             data.format(mode)
         }
-        ParseResult::Passthrough(raw) => {
+        ParseResult::Passthrough(_) => {
             emit_passthrough_warning("playwright", "All parsing tiers failed");
-            raw
+            // Truncate the combined stdout+stderr (`raw`), not the parser's
+            // stdout-only truncated output — otherwise a stderr-only failure
+            // (empty stdout) shows nothing, and the guard has no way to
+            // recover content that was never in `filtered` to begin with.
+            truncate_passthrough(&raw)
         }
     };
 
     let hint = crate::core::tee::tee_and_hint(&raw, "playwright", result.exit_code);
     let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
 
-    timer.track(
-        &format!("playwright {}", args.join(" ")),
-        &format!("rtk playwright {}", args.join(" ")),
-        &raw,
-        &shown,
-    );
+    let tracked = with_args("playwright", &display_args(args));
+    if tier == 3 {
+        // Tier 3 is a genuine parse failure, not token savings — record it
+        // as such instead of feeding it into the savings timer.
+        tracking::record_parse_failure_silent(
+            &tracked,
+            "All parsing tiers failed",
+            !shown.trim().is_empty(),
+        );
+        timer.track_passthrough(&tracked, &tracking::passthrough_label(&tracked));
+    } else {
+        timer.track(&tracked, &format!("rtk {tracked}"), &raw, &shown);
+    }
 
     // Preserve exit code for CI/CD
     if !result.success() {
@@ -476,5 +483,76 @@ mod tests {
         let result = PlaywrightParser::parse(invalid);
         assert_eq!(result.tier(), 3); // Passthrough
         assert!(!result.is_ok());
+    }
+
+    // --- Tier 3 (Passthrough) content-loss regression tests ---
+    //
+    // `run()` shells out to a real `playwright` binary and writes to a real
+    // SQLite tracking DB, so it isn't practically unit-testable here. Instead
+    // these tests exercise `truncate_passthrough` directly against the
+    // function that mirrors exactly what the `ParseResult::Passthrough` arm
+    // in `run()` does — plus the (already-pure) `emit_guarded` call that
+    // follows it, so the content-loss fix is verified end-to-end without
+    // needing a process or a database.
+
+    #[test]
+    fn test_passthrough_shown_includes_stdout_when_stderr_empty() {
+        let stdout = "some captured stdout output that failed all parse tiers";
+        let stderr = "";
+        let raw = format!("{}\n{}", stdout, stderr);
+
+        let filtered = truncate_passthrough(&raw);
+        let shown = crate::core::runner::emit_guarded(&filtered, None, &raw);
+
+        assert!(shown.contains(stdout));
+    }
+
+    #[test]
+    fn test_passthrough_shown_includes_stderr_when_stdout_empty() {
+        // Regression: the old code truncated `result.stdout` alone inside
+        // PlaywrightParser::parse, so an empty stdout with a real failure
+        // reported only on stderr produced NO visible output at all.
+        let stdout = "";
+        let stderr = "Error: browser launch failed with exit code 1";
+        let raw = format!("{}\n{}", stdout, stderr);
+
+        let filtered = truncate_passthrough(&raw);
+        let shown = crate::core::runner::emit_guarded(&filtered, None, &raw);
+
+        assert!(shown.contains(stderr));
+    }
+
+    #[test]
+    fn test_passthrough_shown_empty_when_both_streams_empty() {
+        let stdout = "";
+        let stderr = "";
+        let raw = format!("{}\n{}", stdout, stderr);
+
+        let filtered = truncate_passthrough(&raw);
+        let shown = crate::core::runner::emit_guarded(&filtered, None, &raw);
+
+        // Nothing to show — don't force fake non-empty content.
+        assert!(shown.trim().is_empty());
+    }
+
+    #[test]
+    fn test_passthrough_shown_truncated_but_keeps_tee_hint() {
+        let max_chars = crate::core::config::limits().passthrough_max_chars;
+        let stdout = "x".repeat(max_chars + 500);
+        let stderr = String::new();
+        let raw = format!("{}\n{}", stdout, stderr);
+
+        let filtered = truncate_passthrough(&raw);
+        let hint = Some("[RTK:TEE] full output saved to /tmp/playwright-abc.log");
+        let shown = crate::core::runner::emit_guarded(&filtered, hint, &raw);
+
+        assert!(
+            shown.len() < raw.len(),
+            "expected truncation to shrink output"
+        );
+        assert!(
+            shown.contains("[RTK:TEE]"),
+            "tee hint must survive the guard"
+        );
     }
 }

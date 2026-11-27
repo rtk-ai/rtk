@@ -3,11 +3,19 @@
 //! with its own regex dialect and ignore semantics. rtk filters output noise only;
 //! it never substitutes one engine for the other (the bug this PR removes).
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
+mod common;
+
+/// grep/rg error text (e.g. "Is a directory") is localized; pin it so
+/// assertions on that text mean the same thing in every contributor's shell.
 fn rtk() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_rtk"))
+    let mut cmd = common::rtk_command();
+    cmd.env("LC_ALL", "C");
+    cmd
 }
 
 /// Run rtk with `input` fed on stdin; returns (stdout, exit_code).
@@ -32,8 +40,47 @@ fn rtk_stdin(input: &str, args: &[&str]) -> (String, Option<i32>) {
     )
 }
 
+fn assert_streams_before_stdin_closes(args: &[&str], expected: &str) {
+    let mut child = rtk()
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn streaming search");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut line = String::new();
+        BufReader::new(stdout)
+            .read_line(&mut line)
+            .expect("read streamed match");
+        tx.send(line).ok();
+    });
+
+    writeln!(stdin, "ERROR live").expect("write match");
+    stdin.flush().expect("flush match");
+
+    let streamed = rx.recv_timeout(Duration::from_secs(5));
+    drop(stdin);
+    if streamed.is_err() {
+        child.kill().ok();
+    }
+    let status = child.wait().expect("wait for streaming search");
+    reader.join().expect("join stdout reader");
+
+    let line = streamed.expect("match should be emitted before stdin closes");
+    assert!(line.contains(expected), "unexpected output: {line}");
+    assert!(
+        status.success(),
+        "streaming search should exit successfully"
+    );
+}
+
 fn rg_available() -> bool {
     Command::new("rg")
+        .env("LC_ALL", "C")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -145,7 +192,8 @@ fn bulky_rg_yields_token_savings() {
     }
     let (_dir, path) = write_temp(&content);
 
-    let raw = Command::new("rg")
+    let raw = common::native_command("rg")
+        .env("LC_ALL", "C")
         .args(["-nH", "MATCH", path.to_str().unwrap()])
         .output()
         .expect("rg");
@@ -242,6 +290,30 @@ fn grep_reads_piped_stdin() {
         !out.contains("Is a directory"),
         "RTK must not inject '.' and break a stdin pipe:\n{out}"
     );
+}
+
+#[test]
+fn grep_streams_matches_before_stdin_closes() {
+    assert_streams_before_stdin_closes(&["grep", "ERROR"], "ERROR live");
+}
+
+#[test]
+fn rg_streams_matches_before_stdin_closes() {
+    if rg_available() {
+        assert_streams_before_stdin_closes(&["rg", "ERROR"], "ERROR live");
+    }
+}
+
+#[test]
+fn grep_passthrough_streams_before_stdin_closes() {
+    assert_streams_before_stdin_closes(&["grep", "-o", "ERROR"], "ERROR");
+}
+
+#[test]
+fn rg_passthrough_streams_before_stdin_closes() {
+    if rg_available() {
+        assert_streams_before_stdin_closes(&["rg", "-o", "ERROR"], "ERROR");
+    }
 }
 
 #[test]

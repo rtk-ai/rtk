@@ -1,0 +1,23 @@
+[info] welcome to sbt 1.9.7 (Temurin Java 17.0.9)
+[info] loading project definition from /home/user/myproject/project
+[info] loading settings for project myproject from build.sbt
+[info] set current project to myproject (in build file:/home/user/myproject/)
+[info] Done updating.
+[info] compiling 1 Scala source to /home/user/myproject/target/scala-3.3.1/test-classes ...
+[info] MySuite:
+[info]   + test addition 0.013s
+[info]   + test subtraction 0.004s
+[info]   + test string equality 0.002s
+[info]   + test list operations 0.006s
+[info]   + test option handling 0.003s
+[info] MathSuite:
+[info]   + factorial of 0 is 1 0.001s
+[info]   + factorial of 5 is 120 0.001s
+[info]   + fibonacci 0.002s
+[info] HttpClientSuite:
+[info]   + GET request succeeds 0.045s
+[info]   + POST request with body 0.038s
+[info]   + handles 404 response 0.021s
+[info]   + handles connection timeout 0.019s
+[info] Passed: Total 12, Failed 0, Errors 0, Passed 12
+[success] Total time: 8 s, completed May 17, 2026 10:15:00 AM

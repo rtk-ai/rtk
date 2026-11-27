@@ -1,0 +1,15 @@
+* legacyPackages.x86_64-linux.haskellPackages.hello (1.0.0.2)
+  Hello World, an example package
+
+* legacyPackages.x86_64-linux.hello (2.12.3)
+  Program that produces a familiar, friendly greeting
+
+* legacyPackages.x86_64-linux.tests.arrayUtilities.getRunpathEntries.hello
+
+* legacyPackages.x86_64-linux.tests.config.allowPkgsInPermittedInsecurePackages (2.12.3)
+  Program that produces a familiar, friendly greeting
+
+* legacyPackages.x86_64-linux.tests.haskell.cabalSdist.helloFromCabalSdist (1.0.0.2)
+  Hello World, an example package
+
+* legacyPackages.x86_64-linux.vdrPlugins.hello (2.8.4)

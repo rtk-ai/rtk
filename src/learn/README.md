@@ -14,7 +14,7 @@ Analyzes Claude Code session history to detect recurring CLI mistakes — comman
 
 ## Dependencies
 
-- **Uses**: `discover::provider::ClaudeProvider` (session file discovery and command extraction), `lazy_static`/`regex` (error pattern matching), `serde_json` (JSON output)
+- **Uses**: `discover::provider::ClaudeProvider` (session file discovery and command extraction), `LazyLock`/`regex` (error pattern matching), `serde_json` (JSON output)
 - **Used by**: `src/main.rs` (routes `rtk learn` command)
 
 ## Detection Algorithm

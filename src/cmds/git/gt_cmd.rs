@@ -1,25 +1,27 @@
 //! Filters Graphite (gt) CLI output for stacking workflows.
 
+use crate::core::shell::display_args;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
-use crate::core::truncate::{reduced, CAP_LIST};
+use crate::core::truncate::{CAP_LIST, reduced};
 use crate::core::utils::{ok_confirmation, resolved_command, strip_ansi, truncate};
 use anyhow::{Context, Result};
-use lazy_static::lazy_static;
 use regex::Regex;
 use std::ffi::OsString;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref EMAIL_RE: Regex =
-        Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b").unwrap();
-    static ref BRANCH_NAME_RE: Regex = Regex::new(
-        r#"(?:Created|Pushed|pushed|Deleted|deleted)\s+branch\s+[`"']?([a-zA-Z0-9/_.\-+@]+)"#
+static EMAIL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b").unwrap());
+static BRANCH_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?:Created|Pushed|pushed|Deleted|deleted)\s+branch\s+[`"']?([a-zA-Z0-9/_.\-+@]+)"#,
     )
-    .unwrap();
-    static ref PR_LINE_RE: Regex =
-        Regex::new(r"(Created|Updated)\s+pull\s+request\s+#(\d+)\s+for\s+([^\s:]+)(?::\s*(\S+))?")
-            .unwrap();
-}
+    .unwrap()
+});
+static PR_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(Created|Updated)\s+pull\s+request\s+#(\d+)\s+for\s+([^\s:]+)(?::\s*(\S+))?")
+        .unwrap()
+});
 
 fn run_gt_filtered(
     subcmd: &[&str],
@@ -38,7 +40,7 @@ fn run_gt_filtered(
         cmd.arg(arg);
     }
 
-    let subcmd_str = subcmd.join(" ");
+    let subcmd_str = display_args(subcmd);
     if verbose > 0 {
         eprintln!("Running: gt {} {}", subcmd_str, args.join(" "));
     }
@@ -69,7 +71,7 @@ fn run_gt_filtered(
     let label = if args.is_empty() {
         format!("gt {}", subcmd_str)
     } else {
-        format!("gt {} {}", subcmd_str, args.join(" "))
+        format!("gt {} {}", subcmd_str, display_args(args))
     };
     let rtk_label = format!("rtk {}", label);
     timer.track(&label, &rtk_label, &raw, &shown);
@@ -135,18 +137,26 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
     // gt passes unknown subcommands to git, so "gt status" = "git status".
     // Route known git commands to RTK's git filters for token savings.
     match subcommand.as_ref() {
-        "status" => crate::git::run(crate::git::GitCommand::Status, &rest, None, verbose, &[]),
-        "diff" => crate::git::run(crate::git::GitCommand::Diff, &rest, None, verbose, &[]),
-        "show" => crate::git::run(crate::git::GitCommand::Show, &rest, None, verbose, &[]),
-        "add" => crate::git::run(crate::git::GitCommand::Add, &rest, None, verbose, &[]),
-        "push" => crate::git::run(crate::git::GitCommand::Push, &rest, None, verbose, &[]),
-        "pull" => crate::git::run(crate::git::GitCommand::Pull, &rest, None, verbose, &[]),
-        "fetch" => crate::git::run(crate::git::GitCommand::Fetch, &rest, None, verbose, &[]),
+        "status" => crate::git_cmd::run(
+            crate::git_cmd::GitCommand::Status,
+            &rest,
+            None,
+            verbose,
+            &[],
+        ),
+        "diff" => crate::git_cmd::run(crate::git_cmd::GitCommand::Diff, &rest, None, verbose, &[]),
+        "show" => crate::git_cmd::run(crate::git_cmd::GitCommand::Show, &rest, None, verbose, &[]),
+        "add" => crate::git_cmd::run(crate::git_cmd::GitCommand::Add, &rest, None, verbose, &[]),
+        "push" => crate::git_cmd::run(crate::git_cmd::GitCommand::Push, &rest, None, verbose, &[]),
+        "pull" => crate::git_cmd::run(crate::git_cmd::GitCommand::Pull, &rest, None, verbose, &[]),
+        "fetch" => {
+            crate::git_cmd::run(crate::git_cmd::GitCommand::Fetch, &rest, None, verbose, &[])
+        }
         "stash" => {
             let stash_sub = rest.first().cloned();
             let stash_args = rest.get(1..).unwrap_or(&[]);
-            crate::git::run(
-                crate::git::GitCommand::Stash {
+            crate::git_cmd::run(
+                crate::git_cmd::GitCommand::Stash {
                     subcommand: stash_sub,
                 },
                 stash_args,
@@ -155,7 +165,13 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
                 &[],
             )
         }
-        "worktree" => crate::git::run(crate::git::GitCommand::Worktree, &rest, None, verbose, &[]),
+        "worktree" => crate::git_cmd::run(
+            crate::git_cmd::GitCommand::Worktree,
+            &rest,
+            None,
+            verbose,
+            &[],
+        ),
         _ => passthrough_gt(&subcommand, &rest, verbose),
     }
 }

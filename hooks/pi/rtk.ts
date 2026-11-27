@@ -1,4 +1,5 @@
 // RTK Pi extension — rewrites bash commands to use rtk for token savings.
+// Shared with Oh My Pi (OMP) — OMP loads this same file via its legacy-pi-compat layer.
 // Requires: rtk >= 0.23.0 in PATH.
 //
 // This is a thin delegating extension: all rewrite logic lives in `rtk rewrite`,
@@ -10,11 +11,24 @@
 //   1           No RTK equivalent → pass through unchanged
 //   3 + stdout  Rewrite (advisory) → mutate command
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
-import { isToolCallEventType } from "@earendil-works/pi-coding-agent"
+import type {
+  BashToolCallEvent,
+  ExtensionAPI,
+  ToolCallEvent,
+} from "@earendil-works/pi-coding-agent"
 
 const REWRITE_TIMEOUT_MS = 2_000
 const MIN_SUPPORTED_RTK_MINOR = 23
+
+// Local reimplementation of the package's `isToolCallEventType("bash", event)` type
+// guard. That helper is a value export, so importing it pulls in the whole
+// `@earendil-works/pi-coding-agent` barrel at extension load — profiled at ~250ms
+// warmed, vs ~10ms for a type-only import. `BashToolCallEvent`/`ToolCallEvent`
+// below are type-only imports and are erased at compile time, so they carry none
+// of that cost. See #2753.
+function isBashToolCallEvent(event: ToolCallEvent): event is BashToolCallEvent {
+  return event.toolName === "bash"
+}
 
 // Parse "X.Y.Z" semver, return [major, minor, patch] or null.
 function parseSemver(raw: string): [number, number, number] | null {
@@ -38,10 +52,52 @@ async function rewriteCommand(
   return result.stdout.trim() || null
 }
 
+type StatusContext = {
+  ui?: {
+    setStatus?: (key: string, text: string) => void
+  }
+}
+
+// Register before the async version probe so a host cannot miss the handler
+// while the probe is in flight. If session_start happens first, retain its
+// context and apply the status as soon as the probe reports a failure.
+// pi.notify is intentionally not used — OMP wipes it on the initial render.
+function registerRtkUnavailableNotice(pi: ExtensionAPI) {
+  let reason: string | undefined
+  let sessionContext: StatusContext | undefined
+
+  const applyStatus = () => {
+    if (!reason || !sessionContext) return
+    try {
+      sessionContext.ui?.setStatus?.("rtk", `RTK disabled: ${reason}`)
+    } catch {
+      // Status reporting must never affect the extension's fail-open behavior.
+    }
+  }
+
+  try {
+    pi.on("session_start", (_event: unknown, ctx: unknown) => {
+      sessionContext = ctx as StatusContext
+      applyStatus()
+    })
+  } catch {
+    // Runtimes without a session_start event: nothing to report.
+    return (_reason: string) => {}
+  }
+
+  return (nextReason: string) => {
+    reason = nextReason
+    applyStatus()
+  }
+}
+
 export default async function (pi: ExtensionAPI) {
+  const reportRtkUnavailable = registerRtkUnavailableNotice(pi)
+
   // Probe rtk version at load time; disables extension if missing or too old.
   const ver = await pi.exec("rtk", ["--version"], { timeout: REWRITE_TIMEOUT_MS })
   if (ver.code !== 0) {
+    reportRtkUnavailable("rtk binary not found in PATH")
     console.warn("[rtk] rtk binary not found in PATH — extension disabled")
     return
   }
@@ -51,6 +107,7 @@ export default async function (pi: ExtensionAPI) {
   if (parsed) {
     const [major, minor] = parsed
     if (major === 0 && minor < MIN_SUPPORTED_RTK_MINOR) {
+      reportRtkUnavailable(`rtk ${parsed.join(".")} is too old (need >= 0.23.0)`)
       console.warn(`[rtk] rtk ${ver.stdout.trim()} is too old (need >= 0.23.0) — extension disabled`)
       return
     }
@@ -58,7 +115,7 @@ export default async function (pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event, ctx) => {
     try {
-      if (!isToolCallEventType("bash", event)) return
+      if (!isBashToolCallEvent(event)) return
 
       const cmd = event.input.command
       if (typeof cmd !== "string" || cmd.trim() === "") return
