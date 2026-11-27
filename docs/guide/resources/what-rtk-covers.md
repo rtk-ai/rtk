@@ -62,6 +62,7 @@ listing into `head`, `tail`, or `cat`.
 |---------|--------------|
 | `jest` | Failures only |
 | `vitest` | Failures only |
+| `vp test` | Compact successful one-shot summaries; failure diagnostics and explicit options pass through |
 | `tsc` | Type errors grouped by file |
 | `eslint` | Violations grouped by rule |
 | `pnpm list` | Compact dependency tree |

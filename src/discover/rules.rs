@@ -356,6 +356,14 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^vp\s+test(\s|$)",
+        rtk_cmd: "rtk vp test",
+        rewrite_prefixes: &["vp test"],
+        category: "Tests",
+        savings_pct: 20.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?vitest(\s+run)?(\s|$)",
         rtk_cmd: "rtk vitest",
         rewrite_prefixes: &[

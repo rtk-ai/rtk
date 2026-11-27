@@ -16,7 +16,7 @@ use cmds::git::{diff_cmd, gh_cmd, git_cmd, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
     bun_cmd, deno_cmd, lint_cmd, next_cmd, ng_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd,
-    prisma_cmd, tsc_cmd, vitest_cmd,
+    prisma_cmd, tsc_cmd, vitest_cmd, vp_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{
@@ -2042,6 +2042,10 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                 Ok(127)
             }
         }
+    } else if args[0] == "vp" && vp_cmd::one_shot(&args[1..]) {
+        // Preserve existing user TOML filters and native fallback for all
+        // invocations other than a recognized one-shot Vite+ test.
+        Ok(vp_cmd::run(&args[1..]))
     } else {
         // No TOML match: original passthrough behaviour (Stdio::inherit, streaming)
         let status = core::utils::resolved_command(&args[0])
