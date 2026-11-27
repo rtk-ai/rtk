@@ -236,7 +236,7 @@ Nothing changes for the developer. No secret value ever leaves the machine. The 
 
 ## Works in your agent
 
-RTK supports 18 AI coding tools. With a **hook** or **plugin**, `rtk init` installs it and compression is automatic. With a **rules file**, RTK asks the model to prefer `rtk` commands instead.
+RTK supports 19 AI coding tools. With a **hook** or **plugin**, `rtk init` installs it and compression is automatic. With a **rules file**, RTK asks the model to prefer `rtk` commands instead.
 
 | Tool | Install | How |
 |------|---------|-----|
@@ -247,6 +247,7 @@ RTK supports 18 AI coding tools. With a **hook** or **plugin**, `rtk init` insta
 | **Codex** | `rtk init -g --codex` | hook |
 | **Mistral Vibe** | `rtk init -g --agent vibe` | hook |
 | **Factory Droid** | `rtk init -g --agent droid` | hook |
+| **Qoder CLI** | `rtk init --agent qoder` (or `-g`) | hook |
 | **Trae** | `rtk init --agent trae` (or `-g`) | hook |
 | **OpenCode** (1.18.29+) | `rtk init -g --opencode` | plugin |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | plugin |
