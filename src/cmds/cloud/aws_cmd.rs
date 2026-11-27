@@ -1311,16 +1311,9 @@ fn filter_s3_objects(json_str: &str) -> Option<FilterResult> {
 
 fn filter_eks_cluster(json_str: &str) -> Option<FilterResult> {
     let v: Value = serde_json::from_str(json_str).ok()?;
-    let cluster = &v["cluster"];
-
-    let name = cluster["name"].as_str().unwrap_or("?");
-    let status = cluster["status"].as_str().unwrap_or("?");
-    let version = cluster["version"].as_str().unwrap_or("?");
-    let endpoint = cluster["endpoint"].as_str().unwrap_or("?");
-    // certificateAuthority intentionally NOT read (base64 cert, 1000+ chars)
-
-    let text = format!("{} {} k8s/{} {}", name, status, version, endpoint);
-    Some(FilterResult::new(text))
+    // A describe response is requested for its configuration, including fields
+    // added by AWS after this filter was written. Only remove JSON whitespace.
+    Some(FilterResult::new(serde_json::to_string(&v).ok()?))
 }
 
 static S3_TRANSFER_RE: LazyLock<Regex> =
@@ -2349,18 +2342,23 @@ mod tests {
                 "endpoint": "https://ABC123.gr7.us-east-1.eks.amazonaws.com",
                 "certificateAuthority": {"data": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUN5RENDQWJDZ0F3SUJBZ0lCQURBTkJna3Foa2lHOXcwQkFRc0ZBREFWTVJNd0VRWURWUVFERXdwcmRXSmwKY21...VERY_LONG_BASE64_CERT_DATA"},
                 "logging": {"clusterLogging": [{"types": ["api","audit","authenticator","controllerManager","scheduler"], "enabled": true}]},
-                "platformVersion": "eks.5"
+                "platformVersion": "eks.5",
+                "resourcesVpcConfig": {"subnetIds": ["subnet-1"], "endpointPublicAccess": false},
+                "kubernetesNetworkConfig": {"serviceIpv4Cidr": "10.100.0.0/16"},
+                "identity": {"oidc": {"issuer": "https://oidc.eks.example/id/cluster"}},
+                "encryptionConfig": [{"resources": ["secrets"], "provider": {"keyArn": "arn:aws:kms:us-east-1:123456789012:key/example"}}],
+                "tags": {"owner": "team with spaces"},
+                "accessConfig": {"authenticationMode": "API_AND_CONFIG_MAP"},
+                "health": {"issues": [{"code": "AccessDenied", "message": "check role"}]},
+                "futureField": {"empty": [], "nullable": null}
             }
         }"#;
         let result = filter_eks_cluster(json).unwrap();
-        assert!(
-            result.text.contains(
-                "my-cluster ACTIVE k8s/1.28 https://ABC123.gr7.us-east-1.eks.amazonaws.com"
-            )
+        assert_eq!(
+            serde_json::from_str::<Value>(&result.text).expect("parseable cluster details"),
+            serde_json::from_str::<Value>(json).expect("valid cluster fixture")
         );
-        // certificateAuthority should NOT appear
-        assert!(!result.text.contains("LS0tLS1CRUdJTi"));
-        assert!(!result.text.contains("VERY_LONG"));
+        assert!(!result.truncated);
     }
 
     #[test]
