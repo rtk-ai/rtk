@@ -407,7 +407,8 @@ pub fn die_by_relayed_signal() {}
 
 pub fn status_to_exit_code(status: std::process::ExitStatus) -> i32 {
     if let Some(code) = status.code() {
-        return code;
+        // An MSYS/Cygwin child killed by a signal reports `signal << 8` (#5073).
+        return super::utils::msys_signal(code).map_or(code, |sig| 128 + sig);
     }
     #[cfg(unix)]
     {

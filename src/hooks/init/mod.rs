@@ -1121,6 +1121,13 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
         );
     } else {
         eprintln!();
+        eprintln!(
+            "  Note: the RTK proxy disables Claude Code Remote Control for proxied sessions."
+        );
+        eprintln!(
+            "  For Remote Control in plain `claude` sessions, leave ANTHROPIC_BASE_URL unset"
+        );
+        eprintln!("  in settings.json and your shell; use `rtk claude` only for proxied sessions.");
         let read_yes = || -> Result<bool> {
             let mut line = String::new();
             let n = std::io::stdin().lock().read_line(&mut line)?;

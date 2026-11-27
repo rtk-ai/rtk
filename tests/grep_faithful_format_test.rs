@@ -88,6 +88,26 @@ fn single_multi_recursive_and_h_match_grep() {
 }
 
 #[test]
+fn directory_action_after_recursion_keeps_the_filename() {
+    let d = tempfile::tempdir().unwrap();
+    let f = write(d.path(), "f1.txt", "apple\nzebra apple\nbanana\n");
+    let (recursive, _) = rtk_grep(&["-rn", "apple", &f]);
+    assert_eq!(recursive, format!("{f}:1:apple\n{f}:2:zebra apple\n"));
+    for flags in [
+        &["-rn", "-d", "read"][..],
+        &["-rn", "-d", "skip"][..],
+        &["-rnd", "read"][..],
+        &["-Rn", "--directories=skip"][..],
+        &["-n", "-d", "recurse", "-d", "read"][..],
+    ] {
+        let args = [flags, &["apple", f.as_str()]].concat();
+        let (out, code) = rtk_grep(&args);
+        assert_eq!(out, recursive, "stdout for {args:?}");
+        assert_eq!(code, Some(0), "exit code for {args:?}");
+    }
+}
+
+#[test]
 fn no_match_matches_grep() {
     let d = tempfile::tempdir().unwrap();
     let f = write(d.path(), "f.txt", "hello\n");

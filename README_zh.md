@@ -80,7 +80,7 @@ Windows 上最简单的安装方式 — 一条命令，无需配置 PATH：
 winget install rtk-ai.rtk
 ```
 
-### 快速安装（Linux/macOS）
+### 快速安装（Linux/macOS/Git for Windows）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh

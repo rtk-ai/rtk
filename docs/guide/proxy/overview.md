@@ -67,6 +67,8 @@ When `rtk init -g` sets up Claude Code (picked in the agent menu, or named with 
   ↑/↓ choose · y/n answer · enter confirm · esc cancel
 ```
 
+Before asking, RTK warns that proxying Claude Code disables [Remote Control](https://code.claude.com/docs/en/remote-control#requirements): Claude Code does not support it when `ANTHROPIC_BASE_URL` points at a proxy rather than `api.anthropic.com`.
+
 In a terminal both questions are menus (arrow keys, `y`/`n`, or the option number). With stdout redirected they are plain `[y/N]` and `[1/2/3]` prompts, and without a terminal on stdin the proxy is not offered.
 
 Say yes and it writes `env.ANTHROPIC_BASE_URL` into `settings.json` and adds `extends = "rtk:proxy"` to your pipeline. Then it asks how the daemon should come back after a reboot:
@@ -77,7 +79,13 @@ Say yes and it writes `env.ANTHROPIC_BASE_URL` into `settings.json` and adds `ex
 | **2. Background service** | `rtk llm-proxy service install` — a per-user service, independent of any agent |
 | **3. Neither** | Prints the `export` line and leaves `settings.json` untouched |
 
+Choices 1 and 2 write `env.ANTHROPIC_BASE_URL` into `settings.json`. Setup also enables the `rtk:proxy` pipeline preset if needed, or prints the steps to add it manually when an existing pipeline needs your input.
+
 Declining leaves everything alone: *"Skipped — enable later with `rtk init -g` or `rtk llm-proxy start --env`."*
+
+To keep plain `claude` sessions eligible for Remote Control, decline the proxy setup and use [`rtk claude`](#rtk-harness--the-launcher) only for sessions you want to proxy. Leave `ANTHROPIC_BASE_URL` unset in both `settings.json` and your shell. Sessions launched through the proxy still cannot use Remote Control.
+
+If you already enabled the persistent setup, remove only the `env.ANTHROPIC_BASE_URL` entry that points at the RTK proxy from your Claude Code `settings.json`, unset it wherever you exported it, and start a new plain `claude` session. You can keep the RTK command hooks enabled without the proxy.
 
 If you already have the base URL set but nothing restarting the daemon, re-running `rtk init -g` asks only the persistence question.
 

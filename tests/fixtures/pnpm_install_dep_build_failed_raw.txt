@@ -1,0 +1,12 @@
+Progress: resolved 1, reused 0, downloaded 0, added 0
+[1APackages: +1[0K
++
+Progress: resolved 1, reused 0, downloaded 0, added 0
+[1AProgress: resolved 1, reused 1, downloaded 0, added 1, done
+node_modules/.pnpm/dep@file+dep/node_modules/dep: Running postinstall script...
+[1Anode_modules/.pnpm/dep@file+dep/node_modules/dep: Running postinstall script, failed in 38ms
+.../.pnpm/dep@file+dep/node_modules/dep postinstall$ node fail.js
+│ dep stdout line
+│ gyp ERR! dep native build failed
+└─ Failed in 38ms at /project/node_modules/.pnpm/dep@file+dep/node_modules/dep
+ ELIFECYCLE  Command failed with exit code 1.

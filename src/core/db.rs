@@ -532,9 +532,7 @@ fn claim<V: Version>(
     // file this open has just read and chmodded: its tag is not read again. The
     // `-wal`/`-shm` the read-only connection created copy the file's mode, so
     // they are made writable too.
-    let readonly = conn
-        .is_readonly(rusqlite::DatabaseName::Main)
-        .unwrap_or(false);
+    let readonly = conn.is_readonly("main").unwrap_or(false);
     if should_reopen(readonly, || writable(path)) {
         drop(conn);
         restrict_sidecars(path);
@@ -911,7 +909,7 @@ pub(crate) mod testing {
                     .lock()
                     .expect("waiters should not be poisoned")
                     .insert(id, waited);
-                let conn = Connection::open(&path).expect("open should succeed");
+                let mut conn = Connection::open(&path).expect("open should succeed");
                 conn.busy_handler(Some(signal_and_retry))
                     .expect("busy handler should be set");
                 let outcome = work(&conn);
@@ -1578,10 +1576,7 @@ mod tests {
             .query_row("SELECT x FROM kept", [], |row| row.get(0))
             .expect("the row should be readable");
         assert_eq!(row, 7);
-        assert!(
-            conn.is_readonly(rusqlite::DatabaseName::Main)
-                .expect("is_readonly")
-        );
+        assert!(conn.is_readonly("main").expect("is_readonly"));
         assert!(
             db_sidecars(&path).iter().all(|sidecar| !sidecar.exists()),
             "the read needs no sidecar"
@@ -2276,11 +2271,7 @@ mod tests {
             let conn = open_db(&path, OpenFlags::default(), "test").expect("open");
             conn.pragma_update(None, "query_only", true)
                 .expect("query_only should be settable");
-            assert!(
-                !conn
-                    .is_readonly(rusqlite::DatabaseName::Main)
-                    .expect("is_readonly")
-            );
+            assert!(!conn.is_readonly("main").expect("is_readonly"));
             let identity = read_identity(&conn, "test").expect("identity should be readable");
             claim(
                 conn,

@@ -1,0 +1,8 @@
+* packages.x86_64-linux.a-cr (1)
+  first partsecond part
+
+* packages.x86_64-linux.b-ws (1)
+   
+
+* packages.x86_64-linux.c-plain (1)
+  plain

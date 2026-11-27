@@ -12,6 +12,35 @@ use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+#[cfg(windows)]
+fn requires_plain_console_output(mode: Option<u32>) -> bool {
+    use windows_sys::Win32::System::Console::{
+        ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+    };
+    let ansi = ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    mode.is_some_and(|mode| mode & ansi != ansi)
+}
+
+/// A legacy console is a terminal, but displays ANSI escapes literally. Leave
+/// pipes and pseudo-terminals to `colored`'s usual terminal and environment checks.
+#[cfg(windows)]
+pub(crate) fn configure_console_color() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::GetConsoleMode;
+
+    let stdout = std::io::stdout();
+    let mut mode = 0;
+    // SAFETY: stdout owns the handle for this call and mode is writable.
+    #[allow(unsafe_code)]
+    // nosemgrep: unsafe-block
+    let has_mode = unsafe { GetConsoleMode(stdout.as_raw_handle(), &mut mode) } != 0;
+    if requires_plain_console_output(has_mode.then_some(mode))
+        && crate::core::user_env::var("CLICOLOR_FORCE").is_none_or(|value| value == "0")
+    {
+        colored::control::set_override(false);
+    }
+}
+
 /// `--format json` for the attribution views: the same rows the text view
 /// prints, as data. Sections appear only when their flag was asked for.
 fn attribution_json(
@@ -744,6 +773,7 @@ pub fn run(
         "json" => {
             return export_json(
                 &tracker,
+                history,
                 daily,
                 weekly,
                 monthly,
@@ -1724,6 +1754,12 @@ fn print_monthly(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
 struct ExportData {
     summary: ExportSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
+    output_accounting: Option<crate::core::tracking::OutputAccounting>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commands: Option<Vec<crate::core::tracking::InvocationRecord>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recall_events: Option<Vec<crate::core::tracking::RecallEventRecord>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     daily: Option<Vec<DayStats>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     weekly: Option<Vec<WeekStats>>,
@@ -1743,8 +1779,10 @@ struct ExportSummary {
     oversized_excluded: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn export_json(
     tracker: &Tracker,
+    history: bool,
     daily: bool,
     weekly: bool,
     monthly: bool,
@@ -1756,6 +1794,15 @@ fn export_json(
         .context("Failed to load token savings summary from database")?;
 
     let export = ExportData {
+        output_accounting: history
+            .then(|| tracker.output_accounting(project_scope))
+            .transpose()?,
+        commands: history
+            .then(|| tracker.invocation_history(100, project_scope))
+            .transpose()?,
+        recall_events: history
+            .then(|| tracker.recall_event_history(100, project_scope))
+            .transpose()?,
         summary: ExportSummary {
             total_commands: summary.total_commands,
             total_input: summary.total_input,
@@ -2054,6 +2101,25 @@ fn print_pro_hint_if_due(tracker: &Tracker) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn plain_output_only_for_consoles_that_cannot_render_ansi() {
+        use windows_sys::Win32::System::Console::{
+            ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WRAP_AT_EOL_OUTPUT,
+        };
+
+        let legacy = ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT;
+        assert!(requires_plain_console_output(Some(legacy)));
+        assert!(requires_plain_console_output(Some(
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        )));
+        assert!(!requires_plain_console_output(Some(
+            legacy | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        )));
+        // Pipes, including MSYS pseudo-terminals, have no Win32 console mode.
+        assert!(!requires_plain_console_output(None));
+    }
 
     #[test]
     fn pro_hint_waits_a_week_then_once_a_day() {

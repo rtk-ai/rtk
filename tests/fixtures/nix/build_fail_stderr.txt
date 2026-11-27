@@ -1,0 +1,11 @@
+this derivation will be built:
+  /nix/store/k6dfzqjcwjvbcg6r96finwrj658d7yhq-x.drv
+building '/nix/store/k6dfzqjcwjvbcg6r96finwrj658d7yhq-x.drv'...
+error: Cannot build '/nix/store/k6dfzqjcwjvbcg6r96finwrj658d7yhq-x.drv'.
+       Reason: builder failed with exit code 1.
+       Output paths:
+         /nix/store/fcpi541pai5vg5xxg5h7wx71f8agihnb-x
+       Last 1 log lines:
+       > hello.c:2:18: error: unknown type name strng
+       For full logs, run:
+         nix log /nix/store/k6dfzqjcwjvbcg6r96finwrj658d7yhq-x.drv
