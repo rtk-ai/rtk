@@ -1,0 +1,24 @@
+{"Time":"2026-11-24T10:04:23.939229842Z","Action":"run","Package":"example.com/coverage/beta","Test":"TestChoose"}
+{"Time":"2026-11-24T10:04:23.93928834Z","Action":"output","Package":"example.com/coverage/beta","Test":"TestChoose","Output":"=== RUN   TestChoose\n"}
+{"Time":"2026-11-24T10:04:23.939296428Z","Action":"output","Package":"example.com/coverage/beta","Test":"TestChoose","Output":"--- PASS: TestChoose (0.00s)\n"}
+{"Time":"2026-11-24T10:04:23.939298233Z","Action":"pass","Package":"example.com/coverage/beta","Test":"TestChoose","Elapsed":0}
+{"Time":"2026-11-24T10:04:23.939300973Z","Action":"output","Package":"example.com/coverage/beta","Output":"PASS\n"}
+{"Time":"2026-11-24T10:04:23.939302698Z","Action":"output","Package":"example.com/coverage/beta","Output":"coverage: 66.7% of statements\n"}
+{"Time":"2026-11-24T10:04:23.939390939Z","Action":"run","Package":"example.com/coverage/empty","Test":"TestNumber"}
+{"Time":"2026-11-24T10:04:23.93941135Z","Action":"output","Package":"example.com/coverage/empty","Test":"TestNumber","Output":"=== RUN   TestNumber\n"}
+{"Time":"2026-11-24T10:04:23.939417375Z","Action":"output","Package":"example.com/coverage/empty","Test":"TestNumber","Output":"--- PASS: TestNumber (0.00s)\n"}
+{"Time":"2026-11-24T10:04:23.939420554Z","Action":"pass","Package":"example.com/coverage/empty","Test":"TestNumber","Elapsed":0}
+{"Time":"2026-11-24T10:04:23.939425802Z","Action":"output","Package":"example.com/coverage/empty","Output":"PASS\n"}
+{"Time":"2026-11-24T10:04:23.939427547Z","Action":"output","Package":"example.com/coverage/empty","Output":"coverage: [no statements]\n"}
+{"Time":"2026-11-24T10:04:23.939519441Z","Action":"run","Package":"example.com/coverage/alpha","Test":"TestDouble"}
+{"Time":"2026-11-24T10:04:23.939566582Z","Action":"output","Package":"example.com/coverage/alpha","Test":"TestDouble","Output":"=== RUN   TestDouble\n"}
+{"Time":"2026-11-24T10:04:23.939579289Z","Action":"output","Package":"example.com/coverage/alpha","Test":"TestDouble","Output":"--- PASS: TestDouble (0.00s)\n"}
+{"Time":"2026-11-24T10:04:23.939586641Z","Action":"pass","Package":"example.com/coverage/alpha","Test":"TestDouble","Elapsed":0}
+{"Time":"2026-11-24T10:04:23.939591052Z","Action":"output","Package":"example.com/coverage/alpha","Output":"PASS\n"}
+{"Time":"2026-11-24T10:04:23.939594292Z","Action":"output","Package":"example.com/coverage/alpha","Output":"coverage: 100.0% of statements\n"}
+{"Time":"2026-11-24T10:04:23.939770667Z","Action":"output","Package":"example.com/coverage/empty","Output":"ok  \texample.com/coverage/empty\t0.001s\tcoverage: [no statements]\n"}
+{"Time":"2026-11-24T10:04:23.93983443Z","Action":"output","Package":"example.com/coverage/alpha","Output":"ok  \texample.com/coverage/alpha\t0.002s\tcoverage: 100.0% of statements\n"}
+{"Time":"2026-11-24T10:04:23.939781175Z","Action":"output","Package":"example.com/coverage/beta","Output":"ok  \texample.com/coverage/beta\t0.002s\tcoverage: 66.7% of statements\n"}
+{"Time":"2026-11-24T10:04:23.940010928Z","Action":"pass","Package":"example.com/coverage/empty","Elapsed":0.002}
+{"Time":"2026-11-24T10:04:23.940242589Z","Action":"pass","Package":"example.com/coverage/beta","Elapsed":0.002}
+{"Time":"2026-11-24T10:04:23.94058632Z","Action":"pass","Package":"example.com/coverage/alpha","Elapsed":0.002}

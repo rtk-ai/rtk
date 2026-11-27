@@ -569,23 +569,38 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
 
     let has_failures = total_fail > 0 || total_build_fail > 0 || total_pkg_fail > 0;
 
-    if !has_failures && total_pass == 0 {
-        return "Go test: No tests found".to_string();
-    }
-
     let total_fuzz = packages
         .values()
         .filter(|p| p.fuzz_summary.is_some())
         .count();
-    if !has_failures && total_fuzz > 0 {
-        return format_fuzz_summary(&packages, total_pass, total_fuzz);
-    }
-
     if !has_failures {
-        return format!(
-            "Go test: {} passed in {} packages",
-            total_pass, total_packages
-        );
+        let mut summary = if total_pass == 0 {
+            "Go test: No tests found".to_string()
+        } else if total_fuzz > 0 {
+            format_fuzz_summary(&packages, total_pass, total_fuzz)
+        } else {
+            format!(
+                "Go test: {} passed in {} packages",
+                total_pass, total_packages
+            )
+        };
+        // Coverage is explicitly requested and belongs to each package, not
+        // to an individual test. Keep one report even when Go prints it twice.
+        let mut coverage: Vec<_> = packages
+            .iter()
+            .filter_map(|(package, result)| {
+                result.package_fail_output.iter().rev().find_map(|line| {
+                    line.strip_prefix("coverage: ")
+                        .or_else(|| line.rsplit_once("\tcoverage: ").map(|(_, value)| value))
+                        .map(|value| (package, value))
+                })
+            })
+            .collect();
+        coverage.sort_unstable();
+        for (package, value) in coverage {
+            summary.push_str(&format!("\n  {package}: coverage: {value}"));
+        }
+        return summary;
     }
 
     let mut result = String::new();
@@ -949,6 +964,23 @@ fn compact_package_name(package: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_go_test_preserves_package_coverage() {
+        // Captured from Go 1.19.8: go test -json -cover ./...
+        let raw = include_str!("../../../tests/fixtures/go_test_coverage_raw.jsonl");
+        let filtered = filter_go_test_json(raw);
+        assert!(filtered.starts_with("Go test: 3 passed in 3 packages"));
+        for line in [
+            "example.com/coverage/alpha: coverage: 100.0% of statements",
+            "example.com/coverage/beta: coverage: 66.7% of statements",
+            "example.com/coverage/empty: coverage: [no statements]",
+        ] {
+            assert!(filtered.contains(line), "{filtered}");
+        }
+        assert_eq!(filtered.matches("coverage:").count(), 3, "{filtered}");
+        assert!(filtered.len() * 5 < raw.len() * 4);
+    }
 
     #[test]
     fn auto_detection_requires_leading_stream_evidence() {
