@@ -649,6 +649,16 @@ pub const RULES: &[RtkRule] = &[
         category: "Build",
         ..RtkRule::DEFAULT
     },
+    // Version banner -> bare version. Not pipeline-safe: a consumer such as
+    // `grep -i xdebug` reads the banner lines rtk drops.
+    RtkRule {
+        pattern: r"^php\s+(?:-v|--version)(?:\s|$)",
+        rtk_cmd: "rtk php",
+        rewrite_prefixes: &["php"],
+        category: "Build",
+        savings_pct: 95.0,
+        ..RtkRule::DEFAULT
+    },
     RtkRule {
         pattern: r"^php\s+run-tests\.php(?:\s|$)",
         rtk_cmd: "rtk phpt",
