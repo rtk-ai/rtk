@@ -2525,11 +2525,32 @@ fn run_cli() -> Result<i32> {
         Ok(cli) => cli,
         Err(e) => {
             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
-                e.exit();
+                core::version_check::maybe_refresh_background();
+                let _ = e.print();
+                if let Some(msg) = core::version_check::notification_message() {
+                    eprintln!("\n{}", msg);
+                }
+                std::process::exit(0);
             }
             return run_fallback(e);
         }
     };
+
+    // Periodic, non-blocking check for newer RTK release (Issue #725).
+    // Operational commands trigger the check if 3-hour TTL has expired,
+    // but never display notifications to protect token streams.
+    // Skip for Init/Verify (manage environments and support --dry-run) and
+    // Hook/Rewrite/Pipe (stream-sensitive paths).
+    if !matches!(
+        cli.command,
+        Commands::Init { .. }
+            | Commands::Verify { .. }
+            | Commands::Hook { .. }
+            | Commands::Rewrite { .. }
+            | Commands::Pipe { .. }
+    ) {
+        core::version_check::maybe_refresh_background();
+    }
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain (shows its own inline warning), Init/Verify (manage the
