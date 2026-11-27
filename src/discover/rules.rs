@@ -508,7 +508,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^(python3?\s+-m\s+)?mypy(\s|$)",
+        pattern: r"^(?:python[0-9.]*\s+-m\s+)?mypy(\s|$)",
         rtk_cmd: "rtk mypy",
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &["python3 -m mypy", "python -m mypy", "mypy"],
@@ -517,25 +517,25 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^ruff\s+(check|format)(?:\s|$|[;|&()<>])",
+        pattern: r"^(?:python[0-9.]*\s+-m\s+)?ruff\s+(check|format)(?:\s|$|[;|&()<>])",
         rtk_cmd: "rtk ruff",
         pipeline_safety: PipelineSafety::ProducerOnly,
-        rewrite_prefixes: &["ruff"],
+        rewrite_prefixes: &["python3 -m ruff", "python -m ruff", "ruff"],
         category: "Python",
         savings_pct: 80.0,
         subcmd_savings: &[("check", 80.0), ("format", 75.0)],
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^sqlfluff\s+lint(?:\s|$|[;|&()<>])",
+        pattern: r"^(?:python[0-9.]*\s+-m\s+)?sqlfluff\s+lint(?:\s|$|[;|&()<>])",
         rtk_cmd: "rtk sqlfluff",
-        rewrite_prefixes: &["sqlfluff"],
+        rewrite_prefixes: &["python3 -m sqlfluff", "python -m sqlfluff", "sqlfluff"],
         category: "Python",
         savings_pct: 75.0,
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^(python[0-9.]*\s+-m\s+)?pytest(\s|$)",
+        pattern: r"^(?:python[0-9.]*\s+-m\s+)?pytest(\s|$)",
         rtk_cmd: "rtk pytest",
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &["python3 -m pytest", "python -m pytest", "pytest"],
