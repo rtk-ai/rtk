@@ -189,7 +189,13 @@ impl ApprovalOwner {
 /// normal rewrite. Callers that want it suppressed apply [`suppress_identity`].
 pub(crate) fn decide(cmd: &str, verdict: PermissionVerdict, deny_rules: DenyRules) -> HookDecision {
     let (excluded, transparent_prefixes) = crate::core::config::hook_rewrite_params();
-    decide_with_params(cmd, verdict, &excluded, &transparent_prefixes, deny_rules)
+    let decision = decide_with_params(cmd, verdict, &excluded, &transparent_prefixes, deny_rules);
+    apply_ask_allowlist(
+        cmd,
+        verdict,
+        decision,
+        &crate::core::config::hook_allow_ask_commands(),
+    )
 }
 
 /// [`decide`] with the rewrite parameters supplied by the caller, mirroring
@@ -365,15 +371,61 @@ fn decide_for_agent_at_with_attestation(
     }
     suppress_identity(
         cmd,
-        decide_with_attestation(
+        apply_ask_allowlist(
             cmd,
             verdict,
-            &excluded,
-            &transparent_prefixes,
-            attest,
-            crate::discover::fish_script::try_wrap,
+            decide_with_attestation(
+                cmd,
+                verdict,
+                &excluded,
+                &transparent_prefixes,
+                attest,
+                crate::discover::fish_script::try_wrap,
+            ),
+            &crate::core::config::hook_allow_ask_commands(),
         ),
     )
+}
+
+/// Promote a *default* ask to an allow when the user listed the command in
+/// `[hooks] allow_ask_commands`.
+///
+/// Only `PermissionVerdict::Default` is promoted: an explicit `ask` rule is the
+/// user's own instruction and must keep asking, and a deny never reaches here.
+/// Chained commands are left alone — matching the first token of `jest && rm
+/// -rf` would auto-approve the rest of the chain.
+fn apply_ask_allowlist(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    decision: HookDecision,
+    allowed: &[String],
+) -> HookDecision {
+    if verdict != PermissionVerdict::Default || !is_simple_command(cmd) {
+        return decision;
+    }
+    let Some(name) = cmd.split_whitespace().next() else {
+        return decision;
+    };
+    let name = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    match decision {
+        HookDecision::AskRewrite(rewritten, AskOwner::Host)
+            if allowed.iter().any(|entry| entry == name) =>
+        {
+            HookDecision::AllowRewrite(rewritten)
+        }
+        other => other,
+    }
+}
+
+/// True when `cmd` is one simple command with no shell operators or
+/// substitutions, so its first token names the whole command.
+fn is_simple_command(cmd: &str) -> bool {
+    !cmd.chars().any(|c| {
+        matches!(
+            c,
+            '&' | '|' | ';' | '\n' | '>' | '<' | '`' | '$' | '(' | ')'
+        )
+    })
 }
 
 /// Whether `cwd` is inside a worktree Claude Code manages
@@ -693,6 +745,76 @@ mod tests {
                 DenyRules::NoneConfigured
             ),
             HookDecision::AskRewrite(_, AskOwner::Host)
+        ));
+    }
+
+    #[test]
+    fn allow_ask_commands_promotes_a_default_ask_only() {
+        let allowed = vec!["jest".to_string()];
+        let default = decide_with_params(
+            "jest --runInBand",
+            PermissionVerdict::Default,
+            &[],
+            &[],
+            DenyRules::NoneConfigured,
+        );
+        assert_eq!(
+            apply_ask_allowlist(
+                "jest --runInBand",
+                PermissionVerdict::Default,
+                default,
+                &allowed
+            ),
+            HookDecision::AllowRewrite("rtk jest --runInBand".to_string())
+        );
+
+        // An explicit ask is the user's own rule, not the default RTK ask.
+        let explicit = decide_with_params(
+            "jest --runInBand",
+            PermissionVerdict::Ask,
+            &[],
+            &[],
+            DenyRules::NoneConfigured,
+        );
+        assert!(matches!(
+            apply_ask_allowlist(
+                "jest --runInBand",
+                PermissionVerdict::Ask,
+                explicit,
+                &allowed
+            ),
+            HookDecision::AskRewrite(..)
+        ));
+
+        // A command that is not listed keeps asking.
+        let other = decide_with_params(
+            "vitest run",
+            PermissionVerdict::Default,
+            &[],
+            &[],
+            DenyRules::NoneConfigured,
+        );
+        assert!(matches!(
+            apply_ask_allowlist("vitest run", PermissionVerdict::Default, other, &allowed),
+            HookDecision::AskRewrite(..)
+        ));
+
+        // Never promote a chain from its first token alone.
+        let chain = decide_with_params(
+            "jest && rm -rf target",
+            PermissionVerdict::Default,
+            &[],
+            &[],
+            DenyRules::NoneConfigured,
+        );
+        assert!(matches!(
+            apply_ask_allowlist(
+                "jest && rm -rf target",
+                PermissionVerdict::Default,
+                chain,
+                &allowed
+            ),
+            HookDecision::AskRewrite(..)
         ));
     }
 
