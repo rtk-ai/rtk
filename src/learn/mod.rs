@@ -7,7 +7,7 @@ use crate::core::user_dirs;
 use crate::discover::provider::{ClaudeProvider, SessionProvider};
 use anyhow::Result;
 use detector::{CommandExecution, deduplicate_corrections, find_corrections};
-use report::{format_console_report, write_rules_file};
+use report::{format_console_report, format_json_report, write_rules_file};
 
 pub fn run(
     project: Option<String>,
@@ -91,18 +91,7 @@ pub fn run(
     // Output
     match format.as_str() {
         "json" => {
-            // JSON output
-            let json = serde_json::json!({
-                "sessions_scanned": sessions.len(),
-                "total_corrections": filtered.len(),
-                "rules": rules.iter().map(|r| serde_json::json!({
-                    "wrong": r.wrong_pattern,
-                    "right": r.right_pattern,
-                    "error_type": r.error_type.as_str(),
-                    "occurrences": r.occurrences,
-                    "base_command": r.base_command,
-                })).collect::<Vec<_>>(),
-            });
+            let json = format_json_report(&rules, filtered.len(), sessions.len());
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
         _ => {
