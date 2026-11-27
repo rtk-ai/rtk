@@ -1,6 +1,7 @@
 //! Filters ESLint and Biome linter output, grouping violations by rule.
 
 use crate::cmds::python::sqlfluff_cmd;
+use crate::core::arg_tokenizer::{Dialect, Flag, Grammar, ValueSpec, tokenize_grammar};
 use crate::core::config;
 use crate::core::shell::{display_args, quote_program, with_args};
 use crate::core::stream::exec_capture;
@@ -12,6 +13,57 @@ use crate::ruff_cmd;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+const ESLINT_KEEP_SCOPE: &[Flag] = &[
+    Flag::long("fix"),
+    Flag::long("fix-dry-run"),
+    Flag::long("stdin"),
+    Flag::long("pass-on-no-patterns"),
+];
+
+// ESLint 9.39 --help, including options available with ESLINT_USE_FLAT_CONFIG=false.
+const ESLINT_GRAMMAR: Grammar = Grammar::new(
+    Dialect::Posix,
+    &[
+        ESLINT_KEEP_SCOPE,
+        &[
+            Flag::pair("c", "config").takes(ValueSpec::value()),
+            Flag::long("env").takes(ValueSpec::value()),
+            Flag::long("ext").takes(ValueSpec::value()),
+            Flag::long("global").takes(ValueSpec::value()),
+            Flag::long("parser").takes(ValueSpec::value()),
+            Flag::long("parser-options").takes(ValueSpec::value()),
+            Flag::long("resolve-plugins-relative-to").takes(ValueSpec::value()),
+            Flag::long("plugin").takes(ValueSpec::value()),
+            Flag::long("rule").takes(ValueSpec::value()),
+            Flag::long("rulesdir").takes(ValueSpec::value()),
+            Flag::long("fix-type").takes(ValueSpec::value()),
+            Flag::long("ignore-path").takes(ValueSpec::value()),
+            Flag::long("ignore-pattern").takes(ValueSpec::value()),
+            Flag::long("stdin-filename").takes(ValueSpec::value()),
+            Flag::long("max-warnings").takes(ValueSpec::value()),
+            Flag::pair("o", "output-file").takes(ValueSpec::value()),
+            Flag::pair("f", "format").takes(ValueSpec::value()),
+            Flag::long("report-unused-disable-directives-severity").takes(ValueSpec::value()),
+            Flag::long("report-unused-inline-configs").takes(ValueSpec::value()),
+            Flag::long("cache-file").takes(ValueSpec::value()),
+            Flag::long("cache-location").takes(ValueSpec::value()),
+            Flag::long("cache-strategy").takes(ValueSpec::value()),
+            Flag::long("suppress-rule").takes(ValueSpec::value()),
+            Flag::long("suppressions-location").takes(ValueSpec::value()),
+            Flag::long("print-config").takes(ValueSpec::value()),
+            Flag::long("flag").takes(ValueSpec::value()),
+            Flag::long("concurrency").takes(ValueSpec::value()),
+        ],
+    ],
+);
+
+fn eslint_needs_default_path(args: &[String]) -> bool {
+    // Adding a directory can turn stdin or a fix-only invocation into a project scan.
+    !tokenize_grammar(args, &ESLINT_GRAMMAR)
+        .iter()
+        .any(|token| token.is_free_positional() || token.is_one_of(ESLINT_KEEP_SCOPE))
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct EslintMessage {
@@ -178,8 +230,12 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
         }
     }
 
-    // Default to current directory if no path specified (for ruff/pylint/mypy/eslint)
-    if matches!(linter, "ruff" | "pylint" | "mypy" | "eslint") {
+    // Keep ESLint's explicit write/stdin scope; ordinary linting still defaults to '.'.
+    if linter == "eslint" {
+        if eslint_needs_default_path(&effective_args[start_idx..]) {
+            cmd.arg(".");
+        }
+    } else if matches!(linter, "ruff" | "pylint" | "mypy") {
         let has_path = effective_args
             .iter()
             .skip(start_idx)
@@ -538,6 +594,55 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eslint_grammar_matches_help() {
+        use crate::core::arg_tokenizer::{TokenKind, assert_takes_value_table};
+        assert_takes_value_table(
+            &ESLINT_GRAMMAR,
+            &[
+                (TokenKind::Short, &["c", "o", "f"], Some(ValueSpec::value())),
+                (
+                    TokenKind::Long,
+                    &[
+                        "config",
+                        "env",
+                        "ext",
+                        "global",
+                        "parser",
+                        "parser-options",
+                        "resolve-plugins-relative-to",
+                        "plugin",
+                        "rule",
+                        "rulesdir",
+                        "fix-type",
+                        "ignore-path",
+                        "ignore-pattern",
+                        "stdin-filename",
+                        "max-warnings",
+                        "output-file",
+                        "format",
+                        "report-unused-disable-directives-severity",
+                        "report-unused-inline-configs",
+                        "cache-file",
+                        "cache-location",
+                        "cache-strategy",
+                        "suppress-rule",
+                        "suppressions-location",
+                        "print-config",
+                        "flag",
+                        "concurrency",
+                    ],
+                    Some(ValueSpec::value()),
+                ),
+                (
+                    TokenKind::Long,
+                    &["fix", "fix-dry-run", "stdin", "pass-on-no-patterns"],
+                    None,
+                ),
+            ],
+        );
+    }
 
     #[test]
     fn test_filter_eslint_json() {
