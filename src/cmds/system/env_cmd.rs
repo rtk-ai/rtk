@@ -42,17 +42,16 @@ pub fn run(filter: Option<&str>, verbose: u8) -> Result<()> {
 
         let entry = (key.clone(), display_value);
 
-        // Categorize
-        if key.contains("PATH") {
-            path_vars.push(entry);
-        } else if is_lang_var(key) {
-            lang_vars.push(entry);
-        } else if is_cloud_var(key) {
-            cloud_vars.push(entry);
-        } else if is_tool_var(key) {
-            tool_vars.push(entry);
-        } else if filter.is_some() || is_interesting_var(key) {
-            other_vars.push(entry);
+        match category(key) {
+            Category::Path => path_vars.push(entry),
+            Category::Lang => lang_vars.push(entry),
+            Category::Cloud => cloud_vars.push(entry),
+            Category::Tool => tool_vars.push(entry),
+            Category::Other => {
+                if filter.is_some() || is_interesting_var(key) {
+                    other_vars.push(entry);
+                }
+            }
         }
     }
 
@@ -127,6 +126,32 @@ pub fn run(filter: Option<&str>, verbose: u8) -> Result<()> {
     print!("{}", shown_body);
     timer.track("env", "rtk env", &raw, shown_body);
     Ok(())
+}
+
+#[derive(Debug, PartialEq)]
+enum Category {
+    Path,
+    Lang,
+    Cloud,
+    Tool,
+    Other,
+}
+
+/// Cloud patterns are checked before language ones: the "GO" language pattern is a
+/// substring of GOOGLE, so GOOGLE_CLOUD_PROJECT would otherwise land under
+/// Language/Runtime.
+fn category(key: &str) -> Category {
+    if key.contains("PATH") {
+        Category::Path
+    } else if is_cloud_var(key) {
+        Category::Cloud
+    } else if is_lang_var(key) {
+        Category::Lang
+    } else if is_tool_var(key) {
+        Category::Tool
+    } else {
+        Category::Other
+    }
 }
 
 fn is_lang_var(key: &str) -> bool {
@@ -217,6 +242,17 @@ mod tests {
         assert!(is_tool_var("GIT_AUTHOR_NAME"));
         assert!(is_tool_var("SSH_AUTH_SOCK"));
         assert!(is_tool_var("CLAUDE_API_KEY"));
+    }
+
+    #[test]
+    fn test_category_google_cloud_is_cloud() {
+        assert_eq!(category("GOOGLE_CLOUD_PROJECT"), Category::Cloud);
+        assert_eq!(category("KUBERNETES_NODE_NAME"), Category::Cloud);
+        assert_eq!(category("GOPATH"), Category::Path);
+        assert_eq!(category("GOROOT"), Category::Lang);
+        assert_eq!(category("NODE_ENV"), Category::Lang);
+        assert_eq!(category("GIT_AUTHOR_NAME"), Category::Tool);
+        assert_eq!(category("HOME"), Category::Other);
     }
 
     #[test]
