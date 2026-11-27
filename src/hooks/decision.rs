@@ -492,6 +492,9 @@ impl AgentPath {
             "antigravity" => Some(Self::InProcess(Host::Antigravity)),
             "cline" | "kilocode" | "kimi" | "windsurf" => Some(Self::RulesOnly),
             "claude" => Some(Self::ClaudeHook),
+            // WorkBuddy (CodeBuddy-derived) speaks the Claude Code hook
+            // protocol: PreToolUse + hookSpecificOutput.updatedInput.
+            "workbuddy" => Some(Self::ClaudeHook),
             "copilot" => Some(Self::InProcess(Host::Claude)),
             "codex" => Some(Self::InProcess(Host::Codex)),
             "trae" => Some(Self::InProcess(Host::Trae)),
@@ -531,6 +534,7 @@ impl AgentPath {
         "trae",
         "vibe",
         "windsurf",
+        "workbuddy",
     ];
 
     /// The verdict this agent's hook judges `cmd` against.
