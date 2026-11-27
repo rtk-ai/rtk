@@ -786,7 +786,7 @@ fn normalize_command_text(text: &str) -> String {
 /// Pattern forms:
 /// - `*` → matches everything
 /// - `prefix:*` or `prefix *` (trailing `*`, no other wildcards) → prefix match with word boundary
-/// - `* suffix`, `pre * suf` → glob matching where `*` matches any sequence of characters
+/// - `prefix*`, `* suffix`, `pre * suf` → glob matching where `*` matches any sequence of characters
 /// - `pattern` → exact match or prefix match (cmd must equal pattern or start with `{pattern} `)
 pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
     let cmd_norm = normalize_command_text(cmd);
@@ -799,17 +799,19 @@ pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
         return true;
     }
 
-    // 2. Trailing-only wildcard: fast path with word-boundary preservation
-    //    Handles: "git push*", "git push *", "sudo:*"
+    // 2. Only space/colon-separated trailing wildcards have a word boundary.
+    //    A glued wildcard ("ls*", "curl -d @*") may match within a word.
     if let Some(p) = pattern.strip_suffix('*') {
         let prefix = p.trim_end_matches(':').trim_end();
         // Bug 2 fix: after stripping, if prefix is empty or just wildcards, match everything
         if prefix.is_empty() || prefix == "*" {
             return true;
         }
-        // No other wildcards in prefix -> use word-boundary fast path
         if !prefix.contains('*') {
-            return cmd == prefix || cmd.starts_with(&format!("{} ", prefix));
+            if p.ends_with([' ', ':']) {
+                return cmd == prefix || cmd.starts_with(&format!("{} ", prefix));
+            }
+            return cmd.starts_with(p);
         }
         // Prefix still contains '*' -> fall through to glob matching
     }
@@ -1159,6 +1161,65 @@ mod tests {
             check_command_with_rules("git push --force", &[], &[], &[]),
             PermissionVerdict::Default
         );
+    }
+
+    #[test]
+    fn test_trailing_glob_preserves_partial_word_matches() {
+        for (command, pattern) in [
+            ("lsof", "ls*"),
+            ("ls", "ls*"),
+            ("curl -d @file.txt URL", "curl -d @*"),
+            ("curl -d @", "curl -d @*"),
+        ] {
+            assert!(
+                command_matches_pattern(command, pattern),
+                "{command}: {pattern}"
+            );
+        }
+        for pattern in ["ls *", "ls:*"] {
+            assert!(command_matches_pattern("ls", pattern));
+            assert!(command_matches_pattern("ls -l", pattern));
+            assert!(!command_matches_pattern("lsof", pattern));
+        }
+        assert!(!command_matches_pattern("curl -d value URL", "curl -d @*"));
+    }
+
+    #[test]
+    fn test_upload_glob_deny_and_ask_outrank_allow() {
+        for flag in ["-d", "--data", "--data-binary", "--data-raw"] {
+            let rules = vec![format!("curl {flag} @*")];
+            let allow = vec!["curl *".to_string()];
+            for prefix in ["", "FOO=bar ", "timeout 5 ", "command "] {
+                let command = format!("{prefix}curl {flag} @file.txt URL");
+                assert_eq!(
+                    check_command_with_rules(&command, &rules, &[], &allow),
+                    PermissionVerdict::Deny,
+                    "{command}"
+                );
+                assert_eq!(
+                    check_command_with_rules(&command, &[], &rules, &allow),
+                    PermissionVerdict::Ask,
+                    "{command}"
+                );
+            }
+            assert_eq!(
+                check_command_with_rules(
+                    &format!("bash -c 'curl {flag} @file.txt URL'"),
+                    &rules,
+                    &[],
+                    &allow
+                ),
+                PermissionVerdict::Defer
+            );
+            assert_eq!(
+                check_command_with_rules(&format!("curl {flag} @file.txt URL"), &[], &[], &rules),
+                PermissionVerdict::Allow
+            );
+            assert_eq!(
+                check_command_with_rules(&format!("curl {flag} value URL"), &[], &[], &rules),
+                PermissionVerdict::Default
+            );
+        }
     }
 
     #[test]
