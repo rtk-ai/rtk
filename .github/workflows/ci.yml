@@ -111,6 +111,24 @@ jobs:
           fi
           echo "Apache-2.0 edition links no BUSL crate."
 
+  # Windows on ARM is a real desktop target (Snapdragon laptops) but nothing in
+  # this workflow builds for it, so a change that breaks `aarch64-pc-windows-msvc`
+  # stays invisible until a user reports it. The hosted windows-11-arm runner is
+  # ARM64 itself, so its host triple is the target: no cross toolchain, no
+  # target flag, and the C++ tools the runner ships are the ARM64 ones the
+  # bundled SQLite needs.
+  windows-arm64:
+    name: windows-arm64 (build)
+    needs: clippy
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: *rust_toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p rtk
+      # A built-and-runs check: the arm64 build has to start, not just link.
+      - run: .\target\release\rtk.exe --version
+
   test:
     name: test (${{ matrix.os }}${{ matrix.target && format(', {0}', matrix.target) || '' }})
     needs: clippy
