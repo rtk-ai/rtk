@@ -1,8 +1,8 @@
 # RTK
 
 Prefix external programs with `rtk`: `rtk git status`, `rtk cargo test`,
-`rtk npm run build`, `rtk ls src/`; keep prefixes inside chains such as `rtk git add . &&
-rtk git commit -m "msg"`. Programs without an RTK filter run as-is, so prefixing from `PATH`
+`rtk npm run build`, `rtk ls src/`; keep prefixes inside chains such as `rtk git fetch &&
+rtk git log --oneline -5`. Programs without an RTK filter run as-is, so prefixing from `PATH`
 is safe. Do not prefix shell builtins or keywords: `test`, `[`, `read`, `cd`, `echo`, `export`,
 `eval`, `source`, `printf`, or shadowed `env`; run the native command directly when needed.
 
