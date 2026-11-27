@@ -1705,6 +1705,30 @@ make[1]: Leaving directory '/home/user/project/docs'
         assert_eq!(bare.name, "ssh");
     }
 
+    #[test]
+    fn test_task_match_command_excludes_task_dash_commands() {
+        let filters = make_filters(BUILTIN_TOML);
+        let task = filters
+            .iter()
+            .find(|f| f.name == "task")
+            .expect("task filter must exist");
+
+        for other in ["task-start foo", "task-runner --list", "task-demo"] {
+            assert!(
+                !task.match_regex.is_match(other),
+                "a hyphenated command must not activate the go-task filter: {other}"
+            );
+        }
+
+        let plain =
+            find_filter_in("task build", &filters).expect("plain task invocation must still match");
+        assert_eq!(plain.name, "task");
+
+        let bare =
+            find_filter_in("task", &filters).expect("bare task with no args must still match");
+        assert_eq!(bare.name, "task");
+    }
+
     // --- Edge cases ---
 
     #[test]
