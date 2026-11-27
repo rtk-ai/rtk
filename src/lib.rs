@@ -1291,7 +1291,7 @@ enum HookCommands {
     Cursor,
     /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
     Gemini,
-    /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
+    /// Process Copilot PreToolUse / PostToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
     /// Process Factory Droid PreToolUse hook (reads JSON from stdin)
     Droid,
