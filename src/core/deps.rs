@@ -539,12 +539,21 @@ fn install_binary(dir: &Path, url: &str, sha256: &str) -> Result<()> {
 }
 
 fn download(url: &str, file: &Path) -> Result<String> {
-    let mut response = crate::core::http::get_download(url)?;
-    let mut reader = response
-        .body_mut()
-        .with_config()
-        .limit(MAX_DOWNLOAD)
-        .reader();
+    save_response(
+        crate::core::http::get_download(url)?,
+        url,
+        file,
+        MAX_DOWNLOAD,
+    )
+}
+
+pub(crate) fn save_response(
+    mut response: ureq::http::Response<ureq::Body>,
+    url: &str,
+    file: &Path,
+    limit: u64,
+) -> Result<String> {
+    let mut reader = response.body_mut().with_config().limit(limit).reader();
     let mut out =
         std::fs::File::create(file).with_context(|| format!("create {}", file.display()))?;
     let mut hasher = Sha256::new();
@@ -564,14 +573,14 @@ fn download(url: &str, file: &Path) -> Result<String> {
 }
 
 #[cfg(unix)]
-fn make_executable(file: &Path) -> Result<()> {
+pub(crate) fn make_executable(file: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755))
         .with_context(|| format!("make {} executable", file.display()))
 }
 
 #[cfg(not(unix))]
-fn make_executable(_file: &Path) -> Result<()> {
+pub(crate) fn make_executable(_file: &Path) -> Result<()> {
     Ok(())
 }
 

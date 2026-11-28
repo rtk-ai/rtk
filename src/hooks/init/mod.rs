@@ -935,9 +935,9 @@ pub(crate) fn daemon_ready() -> bool {
 
 #[cfg(feature = "engine")]
 pub(crate) fn daemon_unavailable() -> Option<String> {
-    if !crate::llm_proxy::binary_available() {
+    if !crate::llm_proxy::binary_available() && crate::core::proxy_download::asset().is_none() {
         return Some(
-            "rtk-proxy is not installed (`rtk llm-proxy start` says where to get it)".to_string(),
+            "rtk-proxy is not installed, and none is published for this computer".to_string(),
         );
     }
     if crate::core::user_env::var("RTK_ONRAMP_DISABLED").as_deref() == Some("1") {
@@ -1061,6 +1061,100 @@ fn project_scope_footer_lines(
 }
 
 #[cfg(feature = "engine")]
+fn proxy_download_dir() -> String {
+    crate::core::proxy_download::managed_binary()
+        .and_then(|bin| bin.parent().map(|dir| dir.display().to_string()))
+        .unwrap_or_else(|| "rtk's data folder".to_string())
+}
+
+#[cfg(feature = "engine")]
+fn ask_yes(menu: bool, question: &str, yes: &str, no: &str) -> Result<bool> {
+    use std::io::BufRead;
+    if menu {
+        return crate::core::ask::confirm(question, yes, no);
+    }
+    eprint!("{question} [y/N] ");
+    let mut line = String::new();
+    let n = std::io::stdin().lock().read_line(&mut line)?;
+    Ok(n > 0 && matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
+#[cfg(feature = "engine")]
+fn ask_proxy_download(menu: bool) -> Result<bool> {
+    ask_yes(
+        menu,
+        &format!(
+            "  Download rtk-proxy {} (BUSL-1.1) from github.com/rtk-ai/rtk?",
+            crate::core::proxy_download::version()
+        ),
+        &format!("into {}", proxy_download_dir()),
+        "nothing changes",
+    )
+}
+
+#[cfg(feature = "engine")]
+fn fetch_proxy() -> bool {
+    use colored::Colorize;
+    let version = crate::core::proxy_download::version();
+    match crate::core::proxy_download::install() {
+        Ok(path) => {
+            println!("  rtk-proxy {version}: installed at {}", path.display());
+            true
+        }
+        Err(e) => {
+            eprintln!(
+                "{}",
+                format!(
+                    "  rtk-proxy {version} could not be downloaded: {e:#}. Nothing was changed; run `rtk init -g` again to retry."
+                )
+                .yellow()
+            );
+            false
+        }
+    }
+}
+
+#[cfg(feature = "engine")]
+fn offer_proxy_update(menu: bool) -> Result<()> {
+    let Some(bin) = crate::llm_proxy::located_binary() else {
+        return Ok(());
+    };
+    if !crate::core::proxy_download::is_managed(&bin) {
+        return Ok(());
+    }
+    let ours = crate::core::proxy_download::version();
+    let theirs = crate::core::proxy_download::reported_version(&bin);
+    if theirs.as_deref() == Some(ours) {
+        return Ok(());
+    }
+    eprintln!();
+    match theirs.as_deref() {
+        Some(theirs) => {
+            eprintln!("  The rtk-proxy rtk downloaded is version {theirs}; this rtk is {ours}.")
+        }
+        None => eprintln!(
+            "  The rtk-proxy rtk downloaded ({}) does not run.",
+            bin.display()
+        ),
+    }
+    let question = format!("  Update rtk-proxy to {ours}?");
+    if !ask_yes(
+        menu,
+        &question,
+        "download it from github.com/rtk-ai/rtk",
+        "keep the current one",
+    )? {
+        return Ok(());
+    }
+    if fetch_proxy() && crate::llm_proxy::is_reachable() {
+        println!(
+            "  The running daemon keeps the previous version until it restarts: rtk llm-proxy stop && rtk llm-proxy start"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
 fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
     use std::io::{BufRead, IsTerminal};
     // Only `PatchMode::Ask` may prompt. `--auto-patch` exists to run without a
@@ -1078,6 +1172,7 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
     }
     let base_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
     let menu = crate::core::ask::interactive();
+    offer_proxy_update(menu)?;
 
     let mut root: serde_json::Value = if settings_path.exists() {
         let content = fs::read_to_string(settings_path)?;
@@ -1095,18 +1190,37 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
         .and_then(|v| v.as_str().map(str::to_string));
     let aimed_here = already.as_deref() == Some(base_url.as_str());
     let autostart_present = session_start_entry_present(&root);
-    if aimed_here && autostart_present {
+    let missing = !crate::llm_proxy::binary_available();
+    if aimed_here && autostart_present && !missing {
         return Ok(());
     }
     // Routing Claude Code at a daemon that cannot be started breaks every
     // session (#4604): only offer the proxy when its binary is installed, so
     // the SessionStart hook can start it again after a reboot. A daemon that
     // merely answers on the port today may not be startable tomorrow.
-    if !crate::llm_proxy::binary_available() {
+    if missing && crate::core::proxy_download::asset().is_none() {
         eprintln!();
         eprintln!(
-            "  RTK daemon not offered: rtk-proxy is not installed (`rtk llm-proxy start` says where to get it)."
+            "  RTK daemon not offered: rtk-proxy is not installed, and none is published for this computer."
         );
+        return Ok(());
+    }
+
+    if aimed_here && autostart_present {
+        eprintln!();
+        eprintln!(
+            "  settings.json routes Claude Code through the RTK daemon, but rtk-proxy is not installed, so the daemon cannot start."
+        );
+        if !ask_proxy_download(menu)? {
+            println!("  Skipped — run `rtk init -g` again to download it.");
+            return Ok(());
+        }
+        if fetch_proxy() {
+            match crate::llm_proxy::ensure_running(crate::llm_proxy::DEFAULT_BIND) {
+                Ok(_) => println!("  rtk-proxy: running"),
+                Err(e) => println!("  [warn] rtk-proxy not started: {e}"),
+            }
+        }
         return Ok(());
     }
 
@@ -1118,6 +1232,15 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
         eprintln!(
             "  The RTK proxy is configured in settings.json, but nothing restarts the daemon after a reboot."
         );
+        if missing {
+            if !ask_proxy_download(menu)? {
+                println!("  Skipped — run `rtk init -g` again to download it.");
+                return Ok(());
+            }
+            if !fetch_proxy() {
+                return Ok(());
+            }
+        }
     } else {
         eprintln!();
         eprintln!(
@@ -1127,6 +1250,13 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
             "  For Remote Control in plain `claude` sessions, leave ANTHROPIC_BASE_URL unset"
         );
         eprintln!("  in settings.json and your shell; use `rtk claude` only for proxied sessions.");
+        if missing {
+            eprintln!(
+                "  rtk-proxy is not installed: Yes downloads rtk-proxy {} (BUSL-1.1) from github.com/rtk-ai/rtk into {}.",
+                crate::core::proxy_download::version(),
+                proxy_download_dir()
+            );
+        }
         let read_yes = || -> Result<bool> {
             let mut line = String::new();
             let n = std::io::stdin().lock().read_line(&mut line)?;
@@ -1151,7 +1281,11 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
         } else if menu {
             crate::core::ask::confirm(
                 "  Set up the RTK daemon? It runs your pipeline on the requests Claude Code sends to the model (model routing, tool-result compression and more).",
-                "next, choose how it comes back after a reboot",
+                if missing {
+                    "download rtk-proxy, then choose how it comes back after a reboot"
+                } else {
+                    "next, choose how it comes back after a reboot"
+                },
                 "nothing changes",
             )?
         } else {
@@ -1162,6 +1296,9 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
         };
         if !accepted {
             println!("  Skipped — enable later with `rtk init -g` or `rtk llm-proxy start --env`.");
+            return Ok(());
+        }
+        if missing && !fetch_proxy() {
             return Ok(());
         }
     }
@@ -1734,6 +1871,16 @@ pub fn uninstall_with_patch_mode(
             )
         })),
         Err(e) => eprintln!("  [warn] pipeline dependencies were not removed: {e:#}"),
+    }
+
+    #[cfg(feature = "engine")]
+    match crate::core::proxy_download::remove(dry_run) {
+        Ok(files) => removed.extend(
+            files
+                .into_iter()
+                .map(|file| format!("rtk-proxy downloaded by rtk: removed {}", file.display())),
+        ),
+        Err(e) => eprintln!("  [warn] the rtk-proxy rtk downloaded was not removed: {e:#}"),
     }
 
     // Report results

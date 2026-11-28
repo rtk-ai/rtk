@@ -38,6 +38,8 @@ pub mod pipeline_needs;
 pub mod pipeline_remote;
 #[cfg(feature = "engine")]
 pub mod plugins_cmd;
+#[cfg(feature = "engine")]
+pub mod proxy_download;
 pub mod retriever;
 pub mod runner;
 pub mod shell;

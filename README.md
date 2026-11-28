@@ -189,7 +189,7 @@ A pipeline can rewrite commands and send content to the models it declares, so r
 
 ### RTK Proxy (optional)
 
-The `rtk-proxy` daemon runs the same pipeline on your agent's **provider-API traffic**: it strips bytes no model ever needed without breaking the prompt cache, and carries the calls your pipeline routes to cheaper models on the credential your agent already sends, so they show up in `rtk gain`. `rtk init -g` offers to set it up; `rtk claude` starts it and launches Claude through it with no configuration at all.
+The `rtk-proxy` daemon runs the same pipeline on your agent's **provider-API traffic**: it strips bytes no model ever needed without breaking the prompt cache, and carries the calls your pipeline routes to cheaper models on the credential your agent already sends, so they show up in `rtk gain`. `rtk init -g` offers to set it up, and downloads `rtk-proxy` if it is not installed yet; `rtk claude` starts it and launches Claude through it with no configuration at all.
 
 ```bash
 rtk claude              # start the daemon if needed, then launch Claude through it
@@ -197,7 +197,7 @@ rtk llm-proxy status    # is it up
 rtk gain                # savings, command filtering and proxy side by side
 ```
 
-Separate binary, separate licence (BUSL-1.1), its own `rtk-proxy-<target>` archive: `rtk` never links it. Not the same thing as `rtk bypass`, which runs one local command unfiltered.
+Separate binary, separate licence (BUSL-1.1), its own `rtk-proxy-<target>` archive: `rtk` never links it, and `rtk init -g` downloads the one of your rtk's version, checksum-verified, when you answer Yes to the daemon. Not the same thing as `rtk bypass`, which runs one local command unfiltered.
 
 > Setup and subcommands: **[RTK Proxy](https://www.rtk-ai.app/docs/proxy/overview/)** · what it compresses: **[What the Proxy Compresses](https://www.rtk-ai.app/docs/proxy/compression/)** · settings and endpoints: **[Proxy Configuration](https://www.rtk-ai.app/docs/proxy/configuration/)**
 
@@ -298,7 +298,7 @@ RTK ships as three downloads. The two `rtk` editions install a binary with the *
 |---|---|---|
 | `rtk-<target>` | Apache-2.0 + BUSL-1.1 | Hook core, every command filter, **and** the pipeline engine |
 | `rtk-oss-<target>` | Apache-2.0 only | Hook core and every command filter. No engine. |
-| `rtk-proxy-<target>` | BUSL-1.1 | The RTK Proxy daemon. Never bundled with either `rtk`. |
+| `rtk-proxy-<target>` | BUSL-1.1 | The RTK Proxy daemon. Never bundled with either `rtk`; `rtk init -g` downloads it when you set the daemon up. |
 
 **Production use is free**, engine and daemon included. What the BUSL grant does not cover is offering RTK or a derivative to third parties as a commercial product or service — for that, contact **contact@rtk-ai.app**.
 

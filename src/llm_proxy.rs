@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 pub const DEFAULT_BIND: &str = "127.0.0.1:8080";
 
 /// The daemon binary's name, as installed next to `rtk`.
-const PROXY_BIN: &str = if cfg!(windows) {
+pub(crate) const PROXY_BIN: &str = if cfg!(windows) {
     "rtk-proxy.exe"
 } else {
     "rtk-proxy"
@@ -80,10 +80,18 @@ pub enum LlmProxySubcommand {
 
 pub fn run(cmd: &LlmProxySubcommand) -> Result<()> {
     match cmd {
-        LlmProxySubcommand::Setup => run_setup(),
+        LlmProxySubcommand::Setup => {
+            #[cfg(feature = "engine")]
+            version_note();
+            run_setup()
+        }
         LlmProxySubcommand::Start { bind, env } => run_start(bind.as_deref(), *env),
         LlmProxySubcommand::Stop { bind } => forward("stop", bind.as_deref(), &[]),
-        LlmProxySubcommand::Status { bind } => forward("status", bind.as_deref(), &[]),
+        LlmProxySubcommand::Status { bind } => {
+            #[cfg(feature = "engine")]
+            version_note();
+            forward("status", bind.as_deref(), &[])
+        }
         LlmProxySubcommand::Stats { bind } => forward("stats", bind.as_deref(), &[]),
         LlmProxySubcommand::Config { args } => forward_raw("config", args),
         LlmProxySubcommand::Service { args } => forward_raw("service", args),
@@ -521,7 +529,8 @@ fn savings_by_pipeline_at(db: &std::path::Path) -> Option<Vec<ProxyPipelineRow>>
 }
 
 /// Candidate paths for the daemon binary, in preference order: next to the
-/// running `rtk`, then whatever is on `PATH`.
+/// running `rtk`, then whatever is on `PATH`, then the copy `rtk init -g`
+/// downloads into rtk's data folder.
 ///
 /// The sibling lookup covers both real cases at once — a release installs the
 /// two binaries into the same directory, and `cargo build` drops them in the
@@ -538,7 +547,36 @@ fn binary_candidates() -> Vec<PathBuf> {
     if let Ok(found) = which::which(PROXY_BIN) {
         out.push(found);
     }
+    #[cfg(feature = "engine")]
+    if let Some(managed) = crate::core::proxy_download::managed_binary() {
+        out.push(managed);
+    }
     out
+}
+
+#[cfg(feature = "engine")]
+pub(crate) fn located_binary() -> Option<PathBuf> {
+    binary_candidates().into_iter().find(|p| p.is_file())
+}
+
+#[cfg(feature = "engine")]
+fn version_note() {
+    let Some(bin) = located_binary() else {
+        return;
+    };
+    let ours = crate::core::proxy_download::version();
+    match crate::core::proxy_download::reported_version(&bin) {
+        Some(theirs) if theirs == ours => {}
+        Some(theirs) if crate::core::proxy_download::is_managed(&bin) => eprintln!(
+            "note: rtk-proxy {theirs} ({}) is not this rtk's version ({ours}); run `rtk init -g` to update it",
+            bin.display()
+        ),
+        Some(theirs) => eprintln!(
+            "note: rtk-proxy {theirs} ({}) is not this rtk's version ({ours}); update it the way you installed it",
+            bin.display()
+        ),
+        None => {}
+    }
 }
 
 /// Whether the daemon binary is installed where `rtk llm-proxy start` looks
@@ -557,8 +595,9 @@ fn locate_binary() -> Result<PathBuf> {
     anyhow::bail!(
         "{PROXY_BIN} not found.\n\
          The daemon ships as its own release archive (rtk-proxy-<target>), not \
-         inside the rtk one -- it is licensed separately. Download it and put it \
-         next to `rtk`, or in a source checkout build it with\n  \
+         inside the rtk one -- it is licensed separately. `rtk init -g` downloads it \
+         when you answer Yes to the daemon question. You can also put it next to \
+         `rtk` yourself, or in a source checkout build it with\n  \
          cargo build --release --manifest-path proxy/Cargo.toml\nLooked in:\n{}",
         candidates
             .iter()
