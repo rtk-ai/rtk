@@ -987,6 +987,41 @@ mod tests {
         }
     }
 
+    /// #5132: the jj filter is tuned for `jj log`; its 30-line cap hid the
+    /// changes in diffs and file contents. Bare `jj` runs whatever
+    /// `ui.default-command` names, and `jj log-file` can be an alias, so both
+    /// stay unfiltered. `jj log` takes paths as well as flags, and the hook
+    /// matches the command with its blanks as typed.
+    #[test]
+    fn jj_filter_covers_log_only() {
+        for cmd in [
+            "jj\tlog",
+            "jj  log",
+            "jj log",
+            "jj log\t-n 5",
+            "jj log -r @",
+            "jj log a.py",
+        ] {
+            assert_eq!(
+                find_matching_filter(cmd).map(|f| f.name.as_str()),
+                Some("jj"),
+                "{cmd:?}"
+            );
+            assert!(command_matches_filter(cmd), "{cmd:?}");
+        }
+        for cmd in [
+            "jj",
+            "jj diff",
+            "jj file show a.py",
+            "jj log-file",
+            "jj logs",
+            "jj show",
+        ] {
+            assert!(find_matching_filter(cmd).is_none(), "{cmd:?}");
+            assert!(!command_matches_filter(cmd), "{cmd:?}");
+        }
+    }
+
     #[test]
     fn test_loss_tail_configured_unfired_max_fires_is_whole() {
         let toml = "schema_version = 1\n[filters.f]\nmatch_command = \"^cmd\"\ntail_lines = 100\nmax_lines = 2\n";
