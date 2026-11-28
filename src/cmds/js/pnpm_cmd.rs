@@ -363,6 +363,20 @@ fn format_dependency_listing(state: &DependencyState, cap: bool) -> String {
     lines.join("\n")
 }
 
+/// Render a passthrough recovery hint only when the displayed output was truncated.
+/// The injected hint is composed using the shared runner helper.
+fn render_recovery_hint<F>(shown: &str, raw: &str, label: &str, force_hint: F) -> String
+where
+    F: FnOnce(&str, &str) -> Option<String>,
+{
+    let hint = if shown.contains("[RTK:PASSTHROUGH] Output truncated") {
+        force_hint(raw, label)
+    } else {
+        None
+    };
+    crate::core::runner::with_hint(shown, hint.as_deref()).into_owned()
+}
+
 #[derive(Debug, Clone)]
 pub enum PnpmCommand {
     List { depth: usize },
@@ -437,7 +451,12 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
         // combined stdout+stderr this arm recovered from, and record it as
         // a failure — not token savings — instead of feeding it into the
         // savings timer.
-        let shown = never_worse(&combined, &filtered);
+        let shown = render_recovery_hint(
+            &never_worse(&combined, &filtered),
+            &combined,
+            "pnpm_list",
+            crate::core::tee::force_tee_hint,
+        );
         println!("{}", shown);
         tracking::record_parse_failure_silent(
             &cmd_label,
@@ -510,7 +529,12 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
     } else {
         filtered.clone()
     };
-    let shown = never_worse(&combined, &display);
+    let shown = render_recovery_hint(
+        &never_worse(&combined, &display),
+        &combined,
+        "pnpm_outdated",
+        crate::core::tee::force_tee_hint,
+    );
     println!("{}", shown);
 
     if tier == 3 {
@@ -526,7 +550,7 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
             &tracking::passthrough_label("pnpm outdated"),
         );
     } else {
-        timer.track("pnpm outdated", "rtk pnpm outdated", &combined, shown);
+        timer.track("pnpm outdated", "rtk pnpm outdated", &combined, &shown);
     }
 
     Ok(0)
@@ -1027,6 +1051,30 @@ mod tests {
     // against the combined stdout+stderr, mirroring exactly what each
     // `run_*`'s `ParseResult::Passthrough` arm does — so the content-loss
     // fix is verified without needing a process or a database.
+
+    #[test]
+    fn test_truncated_list_and_outdated_passthrough_render_recovery_hint() {
+        for label in ["pnpm_list", "pnpm_outdated"] {
+            let shown = "passthrough\n[RTK:PASSTHROUGH] Output truncated";
+            let raw = "complete raw output";
+            let rendered = render_recovery_hint(shown, raw, label, |got_raw, got_label| {
+                assert_eq!(got_raw, raw);
+                assert_eq!(got_label, label);
+                Some("[full output: rtk recall abc]".to_string())
+            });
+            assert!(rendered.contains("[RTK:PASSTHROUGH] Output truncated"));
+            assert!(rendered.ends_with("[full output: rtk recall abc]"));
+        }
+    }
+
+    #[test]
+    fn test_passthrough_without_truncation_does_not_force_recovery_hint() {
+        let shown = "short passthrough";
+        let rendered = render_recovery_hint(shown, "raw", "pnpm_list", |_, _| {
+            panic!("must not force a hint when output was not truncated");
+        });
+        assert_eq!(rendered, shown);
+    }
 
     #[test]
     fn test_pnpm_list_passthrough_includes_stderr_when_stdout_empty() {

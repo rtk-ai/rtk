@@ -314,7 +314,16 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         }
     };
 
-    let hint = crate::core::tee::tee_and_hint(&raw, "playwright", result.exit_code);
+    // Successful Tier-3 passthrough can still hide output behind the char cap.
+    // Force a recovery hint in that case; tee_and_hint intentionally skips
+    // successful commands in the default recall mode.
+    let hint = playwright_recovery_hint(
+        &filtered,
+        &raw,
+        result.exit_code,
+        crate::core::tee::force_tee_hint,
+        crate::core::tee::tee_and_hint,
+    );
     let shown = crate::core::runner::emit_guarded(&filtered, hint.as_deref(), &raw);
 
     let tracked = with_args("playwright", &display_args(args));
@@ -339,9 +348,62 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     Ok(0)
 }
 
+/// Select the recovery hint for Playwright's displayed passthrough.
+fn playwright_recovery_hint<F, T>(
+    filtered: &str,
+    raw: &str,
+    exit_code: i32,
+    force_hint: F,
+    tee_hint: T,
+) -> Option<String>
+where
+    F: FnOnce(&str, &str) -> Option<String>,
+    T: FnOnce(&str, &str, i32) -> Option<String>,
+{
+    if exit_code == 0 && filtered.contains("[RTK:PASSTHROUGH] Output truncated") {
+        force_hint(raw, "playwright")
+    } else {
+        tee_hint(raw, "playwright", exit_code)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_successful_truncated_playwright_passthrough_forces_recovery_hint() {
+        let filtered = "playwright output\n[RTK:PASSTHROUGH] Output truncated";
+        let raw = "complete playwright output";
+        let hint = playwright_recovery_hint(
+            filtered,
+            raw,
+            0,
+            |got_raw, label| {
+                assert_eq!(got_raw, raw);
+                assert_eq!(label, "playwright");
+                Some("[full output: rtk recall abc]".to_string())
+            },
+            |_, _, _| panic!("successful truncated output must force a hint"),
+        );
+        assert_eq!(hint.as_deref(), Some("[full output: rtk recall abc]"));
+    }
+
+    #[test]
+    fn test_untruncated_playwright_passthrough_uses_normal_tee_hint() {
+        let hint = playwright_recovery_hint(
+            "short playwright output",
+            "raw",
+            0,
+            |_, _| panic!("must not force a hint without truncation"),
+            |_, label, code| {
+                assert_eq!(label, "playwright");
+                assert_eq!(code, 0);
+                None
+            },
+        );
+        assert!(hint.is_none());
+    }
 
     #[test]
     fn test_playwright_parser_json() {
