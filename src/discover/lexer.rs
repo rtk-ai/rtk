@@ -798,9 +798,23 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
     let mut seg_start: usize = 0;
     let mut seg_end: Option<usize> = None;
     let mut seg_has_text = false;
+    // Under `stop_at_pipe`, inside a pipeline after its first stage: the
+    // stages are skipped until an operator ends the pipeline.
+    let mut in_pipeline_tail = false;
 
     let mut i = 0;
     while let Some(tok) = tokens.get(i) {
+        if in_pipeline_tail {
+            if tok.kind == TokenKind::Operator {
+                in_pipeline_tail = false;
+                seg_start = tok.offset + tok.value.len();
+                seg_end = None;
+                seg_has_text = false;
+            }
+            i += 1;
+            continue;
+        }
+
         let is_boundary = match tok.kind {
             TokenKind::Operator | TokenKind::Pipe(_) => true,
             TokenKind::Shellism => {
@@ -813,7 +827,9 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
             let end = seg_end.take().unwrap_or(tok.offset);
             push_segment(&mut out, trimmed, seg_start, end);
             if policy.stop_at_pipe && matches!(tok.kind, TokenKind::Pipe(_)) {
-                return out;
+                in_pipeline_tail = true;
+                i += 1;
+                continue;
             }
             seg_start = tok.offset + tok.value.len();
             seg_has_text = false;
@@ -854,8 +870,10 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
         i += 1;
     }
 
-    let end = seg_end.unwrap_or(trimmed.len());
-    push_segment(&mut out, trimmed, seg_start, end);
+    if !in_pipeline_tail {
+        let end = seg_end.unwrap_or(trimmed.len());
+        push_segment(&mut out, trimmed, seg_start, end);
+    }
     out
 }
 
@@ -870,7 +888,7 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
 /// | | here (permission gate) | [`split_on_operators`] (analytics) | `rewrite_compound` (rewrite) |
 /// |---|---|---|---|
 /// | `&&` / `\|\|` / `;` / `;;` / `;&` / `;;&` | splits | splits | splits |
-/// | `\|` | always splits | stops at first `\|` | pipeline handled specially |
+/// | `\|` | always splits | keeps each pipeline's first stage | pipeline handled specially |
 /// | background `&` | splits (Shellism boundary) | does not split | splits |
 /// | `( ... )` grouping | splits (Shellism boundary) | does not split | does not split standalone |
 /// | trailing redirect | truncates the segment | kept | kept (rewritten output preserves it) |
@@ -902,9 +920,9 @@ pub fn split_for_wrappers(cmd: &str) -> Vec<&str> {
 
 /// Split a shell command on operators (`&&`, `||`, `;`, and the `case`
 /// terminators `;;`, `;&`, `;;&`) and optionally pipes
-/// (`|`), quote-aware. `stop_at_pipe: true` returns only segments before the
-/// first `|` (rewrite's left-side-only case); `false` splits through pipes
-/// too (permission checking, every segment validated).
+/// (`|`), quote-aware. `stop_at_pipe: true` keeps only the first stage of
+/// each pipeline, resuming at the operator that ends it (`a | b && c` →
+/// `a`, `c`); `false` splits through pipes too.
 ///
 /// For classification only — unlike [`split_for_permissions`] this never
 /// splits on background `&`/`( ... )` or truncates at a redirect (see that
@@ -1790,6 +1808,13 @@ mod tests {
     fn test_split_on_operators_stop_at_pipe() {
         assert_eq!(split_on_operators("a | b | c", true), vec!["a"]);
         assert_eq!(split_on_operators("a && b | c", true), vec!["a", "b"]);
+        // The pipeline's tail is skipped, not everything after it.
+        assert_eq!(split_on_operators("a | b ; c", true), vec!["a", "c"]);
+        assert_eq!(
+            split_on_operators("a | b | c && d || e | f ; g", true),
+            vec!["a", "d", "e", "g"]
+        );
+        assert_eq!(split_on_operators("a | b &&", true), vec!["a"]);
     }
 
     #[test]
@@ -2341,8 +2366,16 @@ mod legacy_segmenters {
         let tokens = tokenize(trimmed);
         let mut results = Vec::new();
         let mut seg_start: usize = 0;
+        let mut in_pipeline_tail = false;
 
         for tok in &tokens {
+            if in_pipeline_tail {
+                if tok.kind == TokenKind::Operator {
+                    in_pipeline_tail = false;
+                    seg_start = tok.offset + tok.value.len();
+                }
+                continue;
+            }
             match tok.kind {
                 TokenKind::Operator => {
                     let segment = trimmed[seg_start..tok.offset].trim();
@@ -2357,7 +2390,8 @@ mod legacy_segmenters {
                         results.push(segment);
                     }
                     if stop_at_pipe {
-                        return results;
+                        in_pipeline_tail = true;
+                        continue;
                     }
                     seg_start = tok.offset + tok.value.len();
                 }
@@ -2365,9 +2399,11 @@ mod legacy_segmenters {
             }
         }
 
-        let tail = trimmed[seg_start..].trim();
-        if !tail.is_empty() {
-            results.push(tail);
+        if !in_pipeline_tail {
+            let tail = trimmed[seg_start..].trim();
+            if !tail.is_empty() {
+                results.push(tail);
+            }
         }
 
         results
