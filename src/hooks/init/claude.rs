@@ -289,7 +289,6 @@ fn patch_settings_json_command(
         .filter(|(event_key, _)| !hook_already_present(&root, event_key, hook_command))
         .cloned()
         .collect();
-    let wants_post = events.iter().any(|(k, _)| *k == POST_TOOL_USE_KEY);
     let mut refreshed: Vec<(&'static str, String)> = Vec::new();
     for (event_key, matcher) in &events {
         if missing.iter().any(|(k, _)| k == event_key) {
@@ -337,7 +336,13 @@ fn patch_settings_json_command(
     // Handle mode (one consent prompt covers every event being registered)
     match mode {
         PatchMode::Skip => {
-            print_manual_instructions(hook_command, include_opencode);
+            print_manual_instructions(
+                &settings_path,
+                &missing,
+                &refreshed,
+                hook_command,
+                include_opencode,
+            )?;
             return Ok(PatchResult::Skipped);
         }
         PatchMode::Ask => {
@@ -348,17 +353,22 @@ fn patch_settings_json_command(
                     settings_path.display()
                 );
             } else {
-                if wants_post {
-                    eprintln!(
-                        "\nRTK registers `{hook_command}` to rewrite Bash commands (PreToolUse)\nand compress tool outputs (PostToolUse — from your pipeline)."
-                    );
-                } else {
-                    eprintln!(
-                        "\nRTK registers `{hook_command}` to rewrite Bash commands (PreToolUse)."
-                    );
-                }
+                let registered: Vec<String> = events
+                    .iter()
+                    .map(|(event_key, matcher)| format!("{event_key} ({matcher})"))
+                    .collect();
+                eprintln!(
+                    "\nRTK registers `{hook_command}` for {}, as your pipeline requires.",
+                    registered.join(" and ")
+                );
                 if !prompt_user_consent(&settings_path)? {
-                    print_manual_instructions(hook_command, include_opencode);
+                    print_manual_instructions(
+                        &settings_path,
+                        &missing,
+                        &refreshed,
+                        hook_command,
+                        include_opencode,
+                    )?;
                     return Ok(PatchResult::Declined);
                 }
             }
