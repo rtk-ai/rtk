@@ -79,7 +79,7 @@ The cost is that commands like the ones above run unfiltered. [ismoss/dsh-rtk](h
 The command must always run, with or without rtk. Run the original command unchanged when:
 
 - `rtk` is not on `PATH`
-- `rtk --version` reports a version older than 0.25.0, the release that added `rtk rewrite` (the Pi extension and the legacy shell hooks check for 0.23.0; on 0.23.0 and 0.24.0 the call exits 2 with nothing on stdout, one more reason to run the original on exit 2 rather than block)
+- `rtk --version` reports a version older than 0.25.0, the release that added `rtk rewrite` (the Pi extension and the legacy shell hooks check for 0.25.0; on 0.23.0 and 0.24.0 the call exits 2 with nothing on stdout, one more reason to run the original on exit 2 rather than block)
 - `rtk rewrite` has not answered within about 2 seconds (the Pi extension uses a 2 s timeout, the Hermes plugin 5 s by default; a rewrite normally answers in under 20 ms)
 - it prints nothing to stdout
 - it exits with any code other than 0 or 3, or crashes
