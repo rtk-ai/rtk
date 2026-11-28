@@ -16,7 +16,7 @@ const MAX_TRACEBACK_LINES: usize = 3;
 const MAX_ERROR_LINES: usize = 4;
 static PYTEST_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^(?:=+\s*)?\d+ [^,\r\n=]+?(?:, \d+ [^,\r\n=]+?)* in \d+(?:\.\d+)?(?:s| seconds)(?: \((?:\d+ days?, )?\d+:\d{2}:\d{2}\))?(?:\s*=+)?$",
+        r"^(?:=+\s*)?\d+(?:/\d+)? [^,\r\n=]+?(?:, \d+(?:/\d+)? [^,\r\n=]+?)* in \d+(?:\.\d+)?(?:s| seconds)(?: \((?:\d+ days?, )?\d+:\d{2}:\d{2}\))?(?:\s*=+)?$",
     )
     .expect("valid pytest summary regex")
 });
@@ -48,18 +48,30 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: pytest {} {}", injected.join(" "), args.join(" "));
     }
 
+    let is_collect_only = args
+        .iter()
+        .any(|arg| arg == "--collect-only" || arg == "--co");
     runner::run_filtered_with_exit(
         cmd,
         "pytest",
         &display_args(args),
         |raw, exit_code| {
             let filtered = filter_pytest_output(raw);
-            // Any other failure parsed as empty means the run broke before reporting.
-            if exit_code != 0 && exit_code != PYTEST_EXIT_NO_TESTS && filtered == PYTEST_NO_TESTS {
-                return truncate(
-                    strip_ansi(raw).trim(),
-                    config::limits().passthrough_max_chars,
-                );
+            if filtered == PYTEST_NO_TESTS {
+                if is_collect_only && exit_code == 0 {
+                    let stripped = strip_ansi(raw);
+                    let trimmed = stripped.trim();
+                    if !trimmed.is_empty() {
+                        return truncate(trimmed, config::limits().passthrough_max_chars);
+                    }
+                }
+                // Any other failure parsed as empty means the run broke before reporting.
+                if exit_code != 0 && exit_code != PYTEST_EXIT_NO_TESTS {
+                    return truncate(
+                        strip_ansi(raw).trim(),
+                        config::limits().passthrough_max_chars,
+                    );
+                }
             }
             filtered
         },
@@ -213,8 +225,56 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         failures.push(current_failure.join("\n"));
     }
 
+    // A collection summary can include both the number of discovered tests
+    // and an import/collection error. Preserve pytest's diagnostics in that
+    // case instead of reporting only the collected count.
+    if summary_line.contains("collected")
+        && summary_line.split_whitespace().any(|word| {
+            matches!(
+                word.trim_matches(|c: char| !c.is_ascii_alphabetic()),
+                "error" | "errors"
+            )
+        })
+    {
+        return output.to_string();
+    }
+
+    if summary_line.is_empty()
+        && failures.is_empty()
+        && xfail_lines.is_empty()
+        && is_quiet_collection_listing(output)
+    {
+        return output.trim().to_string();
+    }
+
     // Build compact output
     build_pytest_summary(&summary_line, &test_files, &failures, &xfail_lines)
+}
+
+fn is_quiet_collection_listing(output: &str) -> bool {
+    let mut count_lines = 0usize;
+    let mut saw_positive = false;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some((file_part, count_part)) = trimmed.rsplit_once(": ") else {
+            return false;
+        };
+        let Ok(count) = count_part.trim().parse::<usize>() else {
+            return false;
+        };
+        let file_trimmed = file_part.trim();
+        if file_trimmed.is_empty() || !file_trimmed.ends_with(".py") {
+            return false;
+        }
+        count_lines += 1;
+        if count > 0 {
+            saw_positive = true;
+        }
+    }
+    count_lines > 0 && saw_positive
 }
 
 #[derive(Default)]
@@ -224,6 +284,7 @@ struct PytestCounts {
     skipped: usize,
     xfailed: usize,
     xpassed: usize,
+    collected: usize,
     errors: usize,
     duration: Option<String>,
 }
@@ -241,11 +302,15 @@ fn build_pytest_summary(
         skipped,
         xfailed,
         xpassed,
+        collected,
         errors,
         duration,
     } = counts;
 
     if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 && xpassed == 0 && errors == 0 {
+        if collected > 0 {
+            return format!("Pytest: {collected} tests collected");
+        }
         return PYTEST_NO_TESTS.to_string();
     }
 
@@ -445,6 +510,15 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
     for part in summary.split(',') {
         let words: Vec<&str> = part.split_whitespace().collect();
         for (i, word) in words.iter().enumerate() {
+            if *word == "collected" && i >= 2 {
+                let count = words[i - 2]
+                    .split_once('/')
+                    .map_or(words[i - 2], |(count, _)| count);
+                if let Ok(n) = count.parse::<usize>() {
+                    counts.collected = n;
+                }
+                continue;
+            }
             if i == 0 {
                 continue;
             }
@@ -570,6 +644,53 @@ collected 0 items
 
         let result = filter_pytest_output(output);
         assert!(result.contains("No tests collected"));
+    }
+
+    #[test]
+    fn test_filter_pytest_collect_only_reports_collected_count() {
+        let output = r#"tests/test_foo.py::test_one
+tests/test_foo.py::test_two
+
+========================= 15 tests collected in 0.17s =========================="#;
+
+        let result = filter_pytest_output(output);
+        assert_eq!(result, "Pytest: 15 tests collected");
+    }
+
+    #[test]
+    fn test_filter_pytest_collect_only_keyword_filter_reports_collected_count() {
+        let output =
+            "================ 2/15 tests collected (13 deselected) in 0.01s =================";
+
+        assert_eq!(filter_pytest_output(output), "Pytest: 2 tests collected");
+    }
+
+    #[test]
+    fn test_filter_pytest_collect_only_preserves_collection_errors() {
+        let output = r#"tests/broken.py::test_one
+
+E   ModuleNotFoundError: No module named 'nonexistent_module_xyz'
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+15 tests collected, 1 error in 0.22s"#;
+
+        assert_eq!(filter_pytest_output(output), output);
+    }
+
+    #[test]
+    fn test_filter_pytest_collect_only_quiet_qq_preserves_multifile_listing() {
+        let output = "test_alpha.py: 1\ntest_beta.py: 1\ntest_gamma.py: 1\n\n";
+
+        assert_eq!(
+            filter_pytest_output(output),
+            "test_alpha.py: 1\ntest_beta.py: 1\ntest_gamma.py: 1"
+        );
+    }
+
+    #[test]
+    fn test_filter_pytest_collect_only_quiet_qq_all_zero_reports_no_tests() {
+        let output = "test_alpha.py: 0\ntest_beta.py: 0\ntest_gamma.py: 0\n";
+
+        assert_eq!(filter_pytest_output(output), PYTEST_NO_TESTS);
     }
 
     #[test]
@@ -991,6 +1112,10 @@ Failures:
         assert_eq!(injected_args(&args(&["--tb=no", "-qx"])), ["-rfExX"]);
         assert_eq!(injected_args(&args(&["-xq"])), ["--tb=short", "-rxX"]);
         assert_eq!(injected_args(&args(&["--quiet"])), ["--tb=short", "-rxX"]);
+        assert_eq!(
+            injected_args(&args(&["--co", "-qq"])),
+            ["--tb=short", "-rxX"]
+        );
         assert_eq!(injected_args(&args(&["-xrfE"])), ["--tb=short", "-q"]);
         assert_eq!(injected_args(&args(&["-r", "fE"])), ["--tb=short", "-q"]);
         assert_eq!(
