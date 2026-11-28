@@ -153,7 +153,7 @@ To skip the menu, name the agent: `rtk init -g --agent claude`. Without a termin
 ## Uninstall
 
 ```bash
-rtk init -g --uninstall    # remove the Claude Code hook, RTK.md and @RTK.md; stop and remove pipeline dependencies
+rtk init -g --uninstall    # remove the Claude Code hook, RTK.md and @RTK.md; stop and remove pipeline dependencies and the rtk-proxy init downloaded
 cargo uninstall rtk         # remove binary (if installed via Cargo)
 brew uninstall rtk          # remove binary (if installed via Homebrew)
 winget uninstall rtk-ai.rtk # remove binary (if installed via winget)

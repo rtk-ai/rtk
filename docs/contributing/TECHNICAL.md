@@ -74,7 +74,9 @@ The user runs `rtk init` to set up hooks for their LLM agents. In a terminal wit
 
 1. Registers the hook in the agent's own configuration. For Claude Code that is the native `rtk hook claude` command in `settings.json`, for the events the active pipeline uses, after a consent prompt (`--auto-patch` skips it) and with a `.bak` backup. Other agents get their plugin, extension or rules file
 2. Writes RTK awareness instructions (e.g., `~/.claude/RTK.md`, referenced from `CLAUDE.md` as `@RTK.md`) for prompt-level guidance
-3. On a global Claude Code setup with `rtk-proxy` installed, offers the RTK daemon
+3. On a global Claude Code setup, offers the RTK daemon; when `rtk-proxy` is missing, a Yes first downloads the one of rtk's version into rtk's data folder (`src/core/proxy_download.rs`)
+
+Once every agent is set up, init asks the telemetry question, in a terminal, while there is no answer or the answer is 6 months old.
 
 `rtk init` sets up 17 agents, each with its own installation mode. Plugins, extensions and rules files are embedded in the binary and written at install time.
 

@@ -859,12 +859,15 @@ For each agent: its own mode (src/hooks/init/<agent>.rs)
                                 active pipeline uses, after
                                 "Patch existing …/settings.json?"
                                 (backup: settings.json.bak)
-    • RTK daemon question when rtk-proxy is installed
+    • RTK daemon question; Yes downloads rtk-proxy of
+      rtk's version first when it is missing
+      (src/core/proxy_download.rs)
   Claude Code, project:
     • ./CLAUDE.md               RTK block
     • .rtk/filters.toml         template
       ↓
-Telemetry consent (asked once, default No)
+Telemetry consent, the last question (default No;
+asked again once the answer is 6 months old)
 ```
 
 ---

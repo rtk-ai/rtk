@@ -39,6 +39,8 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Oh My Pi (OMP) | `rtk init --agent omp` | `.omp/extensions/rtk.ts` (shared Pi extension) | -- |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
 
+Two questions close an interactive setup. A global Claude Code setup offers the RTK daemon (`init/mod.rs`, `offer_proxy_onramp`); when `rtk-proxy` is missing, a Yes first downloads the one of rtk's version into rtk's data folder (`core/proxy_download.rs`), and a later init offers to update that copy when rtk's version changed. After every picked agent, project or global, init asks the telemetry question (`ask_telemetry_consent`), while there is no answer or the answer is 6 months old. `session_start.rs` keeps the daemon alive for sessions routed through it and its `systemMessage` says when the downloaded `rtk-proxy` is older than rtk.
+
 
 ## Integrity Verification
 
