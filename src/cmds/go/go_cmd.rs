@@ -653,7 +653,7 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
         for (test, outputs) in &pkg_result.failed_tests {
             result.push_str(&format!("  [FAIL] {}\n", test));
 
-            for line in select_go_test_failure_lines(outputs) {
+            for line in select_go_test_failure_lines(test, outputs) {
                 result.push_str(&format!("     {}\n", truncate(&line, 100)));
             }
         }
@@ -688,18 +688,24 @@ fn format_fuzz_summary(
     result.trim().to_string()
 }
 
-fn select_go_test_failure_lines(outputs: &[String]) -> Vec<String> {
+fn select_go_test_failure_lines(test: &str, outputs: &[String]) -> Vec<String> {
     let mut relevant = Vec::new();
     let mut keep_next_context_line = false;
+    let is_noise = |line: &str| {
+        line.is_empty()
+            || line.starts_with("=== RUN")
+            || line.starts_with("--- FAIL")
+            || line.starts_with("--- PASS")
+            || (test.starts_with("Benchmark")
+                && ["goos: ", "goarch: ", "pkg: ", "cpu: "]
+                    .iter()
+                    .any(|prefix| line.starts_with(prefix)))
+    };
 
     for line in outputs {
         let trimmed = line.trim();
 
-        if trimmed.is_empty()
-            || trimmed.starts_with("=== RUN")
-            || trimmed.starts_with("--- FAIL")
-            || trimmed.starts_with("--- PASS")
-        {
+        if is_noise(trimmed) {
             keep_next_context_line = false;
             continue;
         }
@@ -720,12 +726,10 @@ fn select_go_test_failure_lines(outputs: &[String]) -> Vec<String> {
     }
 
     if relevant.is_empty()
-        && let Some(line) = outputs.iter().map(|line| line.trim()).find(|line| {
-            !line.is_empty()
-                && !line.starts_with("=== RUN")
-                && !line.starts_with("--- FAIL")
-                && !line.starts_with("--- PASS")
-        })
+        && let Some(line) = outputs
+            .iter()
+            .map(|line| line.trim())
+            .find(|line| !is_noise(line))
     {
         relevant.push(line.to_string());
     }
@@ -1012,6 +1016,24 @@ mod tests {
         let result = filter_go_test_json(output);
         assert!(result.contains("foo_test.go:42:"));
         assert!(result.contains("values differ after normalization"));
+    }
+
+    #[test]
+    fn test_filter_go_test_omits_benchmark_headers_from_failure_context() {
+        let output = r#"{"Action":"start","Package":"example.com/failb"}
+{"Action":"output","Package":"example.com/failb","Test":"BenchmarkFail","Output":"--- FAIL: BenchmarkFail\n"}
+{"Action":"output","Package":"example.com/failb","Test":"BenchmarkFail","Output":"    f_test.go:7: benchmark intentionally failed\n"}
+{"Action":"output","Package":"example.com/failb","Test":"BenchmarkFail","Output":"goos: linux\n"}
+{"Action":"output","Package":"example.com/failb","Test":"BenchmarkFail","Output":"goarch: amd64\n"}
+{"Action":"output","Package":"example.com/failb","Test":"BenchmarkFail","Output":"pkg: example.com/failb\n"}
+{"Action":"output","Package":"example.com/failb","Test":"BenchmarkFail","Output":"cpu: Test CPU\n"}
+{"Action":"fail","Package":"example.com/failb","Test":"BenchmarkFail","Elapsed":0.01}
+{"Action":"fail","Package":"example.com/failb","Elapsed":0.01}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(result.contains("BenchmarkFail"));
+        assert!(result.contains("f_test.go:7: benchmark intentionally failed"));
+        assert!(!result.contains("goos: linux"), "{result}");
     }
 
     #[test]
