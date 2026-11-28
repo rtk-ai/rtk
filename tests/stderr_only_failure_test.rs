@@ -190,6 +190,29 @@ exit 2"#,
 }
 
 #[test]
+fn oversized_stderr_keeps_final_diagnostics_on_success_and_failure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let final_error = "final diagnostic after the captured stderr budget was exceeded";
+    for code in [0, 2] {
+        fake_tool(
+            dir.path(),
+            "ruff",
+            &format!(
+                "dd if=/dev/zero bs=1024 count=11264 2>/dev/null | tr '\\0' 'a' | fold -w 80 >&2\nprintf '{final_error}\\n' >&2\n{}\nexit {code}",
+                if code == 0 { "echo '[]'" } else { "" },
+            ),
+        );
+
+        let out = rtk_with(dir.path(), &["ruff", "check"]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(code));
+        assert!(stderr.contains(final_error), "final diagnostic was lost");
+        assert_eq!(stderr.matches("keeping only the captured tail").count(), 1);
+        assert!(!String::from_utf8_lossy(&out.stdout).contains(final_error));
+    }
+}
+
+#[test]
 fn the_k8s_alias_sees_the_boundary_the_caller_typed() {
     let dir = tempfile::tempdir().expect("tempdir");
     fake_tool(dir.path(), "kubectl", r#"echo "ARGS: $*""#);
