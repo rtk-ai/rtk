@@ -13,7 +13,7 @@ rtk-text = { path = "../text" }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-toml = "0.8"
+toml = "1.2"
 toon-format = { version = "0.7.0", default-features = false }
 htmd = "0.5.5"
 

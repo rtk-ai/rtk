@@ -1,6 +1,6 @@
 //! Filters cargo output — build errors, test results, clippy warnings.
 
-use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
+use crate::core::arg_tokenizer::{self, Dialect, Flag, Grammar, TokenKind, ValueSpec};
 use crate::core::runner;
 use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
 use crate::core::tracking;
@@ -47,8 +47,7 @@ impl CargoCommand {
         // Rustup recognizes +toolchain only as the first argument.
         // https://rust-lang.github.io/rustup/overrides.html#toolchain-override-shorthand
         let start = usize::from(words.first().is_some_and(|arg| arg.starts_with('+')));
-        let tokens =
-            arg_tokenizer::tokenize_grammar(&words[start..], &prefix_option_value, Dialect::Posix);
+        let tokens = arg_tokenizer::tokenize_grammar(&words[start..], &PREFIX_GRAMMAR);
         for token in &tokens {
             if token.kind == TokenKind::Positional {
                 if !token.is_free_positional() {
@@ -69,25 +68,22 @@ impl CargoCommand {
                 .find(|command| command.as_str() == token.text)
                 .map(|command| (command, start + token.source_index));
             }
-            if prefix_option_value(token.kind, token.text).is_some() {
-                let value = token.value(&tokens)?;
-                // The existing POSIX tokenizer can consume a separate option as a value.
-                // Cargo's prefix options reject that form; leave its diagnostic untouched.
-                // https://docs.rs/clap/latest/clap/struct.Arg.html#method.allow_hyphen_values
-                if token.linked.is_some() && value.starts_with('-') && value != "-" {
-                    return None;
+            match token.flag() {
+                Some(&CHANGE_DIR | &COLOR | &CONFIG | &UNSTABLE) => {
+                    let value = token.value(&tokens)?;
+                    // The existing POSIX tokenizer can consume a separate option as a value.
+                    // Cargo's prefix options reject that form; leave its diagnostic untouched.
+                    // https://docs.rs/clap/latest/clap/struct.Arg.html#method.allow_hyphen_values
+                    if token.linked.is_some() && value.starts_with('-') && value != "-" {
+                        return None;
+                    }
+                    if token.is(&UNSTABLE)
+                        && value.trim_start_matches('=').split('=').next() == Some("help")
+                    {
+                        return None;
+                    }
                 }
-                if token.kind == TokenKind::Short
-                    && token.text == "Z"
-                    && value.trim_start_matches('=').split('=').next() == Some("help")
-                {
-                    return None;
-                }
-                continue;
-            }
-            match (token.kind, token.text) {
-                (TokenKind::Long, "locked" | "offline" | "frozen" | "quiet" | "verbose")
-                | (TokenKind::Short, "q" | "v") => {}
+                Some(&FROZEN | &LOCKED | &OFFLINE | &QUIET | &VERBOSE) => {}
                 // Root actions (--help/--version/--list/--explain), -- and unknown
                 // options leave the whole invocation to Cargo. Guessing an unknown
                 // option's arity could mistake its value for the command.
@@ -98,17 +94,27 @@ impl CargoCommand {
     }
 }
 
-/// Only prefix options that consume a value matter for locating the command.
-/// Command-specific options are still inspected by the existing runners below.
-/// https://doc.rust-lang.org/cargo/commands/cargo.html#options
-fn prefix_option_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    match (kind, name) {
-        (TokenKind::Long, "config" | "color") | (TokenKind::Short, "C" | "Z") => {
-            Some(ValueSpec::value())
-        }
-        _ => None,
-    }
-}
+// Cargo's `-C`, `--color`, `--config` and `-Z` take a value, which decides whether the next
+// argument is the command. Command-specific options are still inspected by the runners below.
+// https://doc.rust-lang.org/cargo/commands/cargo.html#options
+const CHANGE_DIR: Flag = Flag::short("C").takes(ValueSpec::value());
+const COLOR: Flag = Flag::long("color").takes(ValueSpec::value());
+const CONFIG: Flag = Flag::long("config").takes(ValueSpec::value());
+const UNSTABLE: Flag = Flag::short("Z").takes(ValueSpec::value());
+// The prefix options that take none.
+const FROZEN: Flag = Flag::long("frozen");
+const LOCKED: Flag = Flag::long("locked");
+const OFFLINE: Flag = Flag::long("offline");
+const QUIET: Flag = Flag::pair("q", "quiet");
+const VERBOSE: Flag = Flag::pair("v", "verbose");
+
+/// What precedes Cargo's command, read to find it.
+const PREFIX_GRAMMAR: Grammar = Grammar::new(
+    Dialect::Posix,
+    &[&[
+        CHANGE_DIR, COLOR, CONFIG, FROZEN, LOCKED, OFFLINE, QUIET, VERBOSE, UNSTABLE,
+    ]],
+);
 
 pub fn run(args: &[OsString], verbose: u8) -> Result<i32> {
     let Some((command, index)) = CargoCommand::parse(args) else {
@@ -1578,7 +1584,78 @@ mod tests {
         "    Finished dev [unoptimized + debuginfo] target(s) in 0.01s\n";
 
     use super::*;
+    use crate::core::arg_tokenizer::assert_takes_value_table;
     use crate::core::args_utils::restore_double_dash_with_raw;
+
+    #[test]
+    fn test_prefix_grammar_matches_its_table() {
+        assert_takes_value_table(
+            &PREFIX_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &["color", "config"],
+                    Some(ValueSpec::value()),
+                ),
+                (
+                    TokenKind::Long,
+                    &["frozen", "locked", "offline", "quiet", "verbose"],
+                    None,
+                ),
+                (TokenKind::Short, &["C", "Z"], Some(ValueSpec::value())),
+                (TokenKind::Short, &["q", "v"], None),
+            ],
+        );
+    }
+
+    /// The command is found past each prefix option, a value-taking one consuming its value.
+    #[test]
+    fn test_parse_reads_the_command_past_each_prefix_option() {
+        let found = |args: &[&str]| {
+            CargoCommand::parse(args).map(|(command, index)| (command.as_str(), index))
+        };
+        for (args, expected) in [
+            (&["build"][..], Some(("build", 0))),
+            (&["+nightly", "test"], Some(("test", 1))),
+            // Each option that takes a value, spelled apart from it and attached to it.
+            (&["-C", "dir", "check"], Some(("check", 2))),
+            (&["-Cdir", "check"], Some(("check", 1))),
+            (&["--color", "never", "clippy"], Some(("clippy", 2))),
+            (&["--color=never", "clippy"], Some(("clippy", 1))),
+            (&["--config", "k=v", "install"], Some(("install", 2))),
+            (&["--config=k=v", "install"], Some(("install", 1))),
+            (&["-Z", "unstable-options", "nextest"], Some(("nextest", 2))),
+            (&["-Zunstable-options", "fmt"], Some(("fmt", 1))),
+            // A lone `-` is a value, not an option.
+            (&["-C", "-", "check"], Some(("check", 2))),
+            (&["--config", "-", "build"], Some(("build", 2))),
+            // The options that take none.
+            (&["--frozen", "build"], Some(("build", 1))),
+            (&["--locked", "build"], Some(("build", 1))),
+            (&["--offline", "build"], Some(("build", 1))),
+            (&["-q", "build"], Some(("build", 1))),
+            (&["--quiet", "build"], Some(("build", 1))),
+            (&["-v", "build"], Some(("build", 1))),
+            (&["--verbose", "build"], Some(("build", 1))),
+            // Cargo rejects an option as another option's value: its diagnostic is left alone.
+            (&["-C", "-x", "check"], None),
+            (&["--config", "--locked", "build"], None),
+            // `-Z help` prints cargo's own help, in any spelling.
+            (&["-Z", "help", "build"], None),
+            (&["-Zhelp", "build"], None),
+            (&["-Z=help", "build"], None),
+            (&["-Z", "help=x", "build"], None),
+            // Root actions, `--` and an unknown option or command leave the call to cargo.
+            (&["--version"], None),
+            (&["--list"], None),
+            (&["--unknown", "build"], None),
+            (&["--", "build"], None),
+            (&["b"], None),
+            (&["publish"], None),
+        ] {
+            assert_eq!(found(args), expected, "{args:?}");
+        }
+    }
 
     #[test]
     fn test_restore_double_dash_with_separator() {

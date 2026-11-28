@@ -25,7 +25,7 @@ rtk gain        # should show the savings dashboard
 
 If both commands work, RTK is already installed. Skip to [Project initialization](#project-initialization).
 
-## Quick install (Linux and macOS)
+## Quick install (Linux, macOS, or Git Bash on Windows)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh

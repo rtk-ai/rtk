@@ -12,6 +12,35 @@ use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+#[cfg(windows)]
+fn requires_plain_console_output(mode: Option<u32>) -> bool {
+    use windows_sys::Win32::System::Console::{
+        ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+    };
+    let ansi = ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    mode.is_some_and(|mode| mode & ansi != ansi)
+}
+
+/// A legacy console is a terminal, but displays ANSI escapes literally. Leave
+/// pipes and pseudo-terminals to `colored`'s usual terminal and environment checks.
+#[cfg(windows)]
+pub(crate) fn configure_console_color() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::GetConsoleMode;
+
+    let stdout = std::io::stdout();
+    let mut mode = 0;
+    // SAFETY: stdout owns the handle for this call and mode is writable.
+    #[allow(unsafe_code)]
+    // nosemgrep: unsafe-block
+    let has_mode = unsafe { GetConsoleMode(stdout.as_raw_handle(), &mut mode) } != 0;
+    if requires_plain_console_output(has_mode.then_some(mode))
+        && crate::core::user_env::var("CLICOLOR_FORCE").is_none_or(|value| value == "0")
+    {
+        colored::control::set_override(false);
+    }
+}
+
 /// `--format json` for the attribution views: the same rows the text view
 /// prints, as data. Sections appear only when their flag was asked for.
 fn attribution_json(
@@ -707,6 +736,7 @@ pub fn run(
         "json" => {
             return export_json(
                 &tracker,
+                history,
                 daily,
                 weekly,
                 monthly,
@@ -748,7 +778,13 @@ pub fn run(
     // nothing to show. The JSON and CSV exports return earlier and stay clean.
     warn_hook_issues();
 
-    if summary.total_commands == 0 && proxy_summary.is_none() {
+    // `total_commands` counts only the rows that made it under the headline
+    // input cap (`HEADLINE_INPUT_CAP_TOKENS`); every row above it is counted
+    // in `oversized_excluded` instead. So a tracker whose rows are all
+    // oversized has rows but no headline rows, and asking only about
+    // `total_commands` would call that an empty database. The empty state is
+    // for a tracker with no rows at all.
+    if summary.total_commands == 0 && summary.oversized_excluded == 0 && proxy_summary.is_none() {
         println!("No tracking data yet.");
         println!("Run some rtk commands to start tracking savings.");
         // A reachable daemon with no rows is the confusing case: the user has
@@ -801,15 +837,7 @@ pub fn run(
             ),
         );
         print_efficiency_meter(summary.avg_savings_pct);
-        if summary.oversized_excluded > 0 {
-            print_kpi(
-                "Excluded",
-                format!(
-                    "{} oversized outputs (input past the ~30k-char agent cap)",
-                    summary.oversized_excluded
-                ),
-            );
-        }
+        print_oversized_excluded(summary.oversized_excluded);
         for gap in crate::hooks::init::claude_hook_gaps() {
             print_kpi(
                 "Hook needed",
@@ -1012,7 +1040,16 @@ pub fn run(
 
         if !summary.by_command.is_empty() {
             // added: styled section header
-            println!("{}", styled("By Command", true));
+            // The per-command table is not capped, so when rows were excluded
+            // from the headline it counts more commands (and savings) than the
+            // summary above it. Say so, rather than leave two figures on one
+            // page with no explanation.
+            let by_command_header = if summary.oversized_excluded > 0 {
+                "By Command (unfiltered)"
+            } else {
+                "By Command"
+            };
+            println!("{}", styled(by_command_header, true));
 
             // added: dynamic column widths for clean alignment
             let cmd_width = 24usize;
@@ -1185,7 +1222,24 @@ pub fn run(
         print_monthly(&tracker, project_scope.as_deref())?; // changed: pass project scope
     }
 
+    // The period tables apply the same headline cap, so a tracker whose rows
+    // are all oversized prints only "No daily data available." here. Name the
+    // exclusion, as the summary view does, so that does not read as nothing
+    // having been tracked.
+    print_oversized_excluded(summary.oversized_excluded);
+
     Ok(())
+}
+
+/// The `Excluded:` KPI: rows left out of the capped aggregates. Prints nothing
+/// when no row was excluded.
+fn print_oversized_excluded(count: usize) {
+    if count > 0 {
+        print_kpi(
+            "Excluded",
+            format!("{count} oversized outputs (input past the ~30k-char agent cap)"),
+        );
+    }
 }
 
 #[cfg(feature = "engine")]
@@ -1628,6 +1682,12 @@ fn print_monthly(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
 struct ExportData {
     summary: ExportSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
+    output_accounting: Option<crate::core::tracking::OutputAccounting>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commands: Option<Vec<crate::core::tracking::InvocationRecord>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recall_events: Option<Vec<crate::core::tracking::RecallEventRecord>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     daily: Option<Vec<DayStats>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     weekly: Option<Vec<WeekStats>>,
@@ -1647,8 +1707,10 @@ struct ExportSummary {
     oversized_excluded: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn export_json(
     tracker: &Tracker,
+    history: bool,
     daily: bool,
     weekly: bool,
     monthly: bool,
@@ -1660,6 +1722,15 @@ fn export_json(
         .context("Failed to load token savings summary from database")?;
 
     let export = ExportData {
+        output_accounting: history
+            .then(|| tracker.output_accounting(project_scope))
+            .transpose()?,
+        commands: history
+            .then(|| tracker.invocation_history(100, project_scope))
+            .transpose()?,
+        recall_events: history
+            .then(|| tracker.recall_event_history(100, project_scope))
+            .transpose()?,
         summary: ExportSummary {
             total_commands: summary.total_commands,
             total_input: summary.total_input,
@@ -1958,6 +2029,25 @@ fn print_pro_hint_if_due(tracker: &Tracker) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn plain_output_only_for_consoles_that_cannot_render_ansi() {
+        use windows_sys::Win32::System::Console::{
+            ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WRAP_AT_EOL_OUTPUT,
+        };
+
+        let legacy = ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT;
+        assert!(requires_plain_console_output(Some(legacy)));
+        assert!(requires_plain_console_output(Some(
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        )));
+        assert!(!requires_plain_console_output(Some(
+            legacy | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        )));
+        // Pipes, including MSYS pseudo-terminals, have no Win32 console mode.
+        assert!(!requires_plain_console_output(None));
+    }
 
     #[test]
     fn pro_hint_waits_a_week_then_once_a_day() {

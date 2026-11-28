@@ -145,6 +145,7 @@ listing into `head`, `tail`, or `cat`.
 | `curl` | Response body only, headers stripped |
 | `helm list` | Release name, namespace, status, and chart columns |
 | `terraform plan` | Planned changes summary, resource diffs condensed |
+| `nix search` | One line per package; first 20 shown, the rest counted (a lower bound when nix fails or the output nears 10 MiB) with a recall hint; stderr forwarded (whole on failure or when short); a search with `--json`, `-v`/`--verbose`, `--debug`, `--debugger`, `--log-format` or `--trace-function-calls`, and other `nix` commands, pass through |
 
 ## Global flags
 

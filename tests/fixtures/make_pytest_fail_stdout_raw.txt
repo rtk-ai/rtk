@@ -1,0 +1,122 @@
+python3 -m pytest -v -p no:cacheprovider
+============================= test session starts ==============================
+platform linux -- Python 3.14.10, pytest-9.1.1, pluggy-1.6.0 -- /usr/bin/python3
+rootdir: /tmp/pr4691-fx/project
+plugins: anyio-4.15.1, platformdirs-4.14.5
+collecting ... collected 82 items
+
+test_fail.py::test_lookup FAILED                                         [  1%]
+test_fail.py::test_math FAILED                                           [  2%]
+test_ok.py::test_ok_1 PASSED                                             [  3%]
+test_ok.py::test_ok_2 PASSED                                             [  4%]
+test_ok.py::test_ok_3 PASSED                                             [  6%]
+test_ok.py::test_ok_4 PASSED                                             [  7%]
+test_ok.py::test_ok_5 PASSED                                             [  8%]
+test_ok.py::test_ok_6 PASSED                                             [  9%]
+test_ok.py::test_ok_7 PASSED                                             [ 10%]
+test_ok.py::test_ok_8 PASSED                                             [ 12%]
+test_ok.py::test_ok_9 PASSED                                             [ 13%]
+test_ok.py::test_ok_10 PASSED                                            [ 14%]
+test_ok.py::test_ok_11 PASSED                                            [ 15%]
+test_ok.py::test_ok_12 PASSED                                            [ 17%]
+test_ok.py::test_ok_13 PASSED                                            [ 18%]
+test_ok.py::test_ok_14 PASSED                                            [ 19%]
+test_ok.py::test_ok_15 PASSED                                            [ 20%]
+test_ok.py::test_ok_16 PASSED                                            [ 21%]
+test_ok.py::test_ok_17 PASSED                                            [ 23%]
+test_ok.py::test_ok_18 PASSED                                            [ 24%]
+test_ok.py::test_ok_19 PASSED                                            [ 25%]
+test_ok.py::test_ok_20 PASSED                                            [ 26%]
+test_ok.py::test_ok_21 PASSED                                            [ 28%]
+test_ok.py::test_ok_22 PASSED                                            [ 29%]
+test_ok.py::test_ok_23 PASSED                                            [ 30%]
+test_ok.py::test_ok_24 PASSED                                            [ 31%]
+test_ok.py::test_ok_25 PASSED                                            [ 32%]
+test_ok.py::test_ok_26 PASSED                                            [ 34%]
+test_ok.py::test_ok_27 PASSED                                            [ 35%]
+test_ok.py::test_ok_28 PASSED                                            [ 36%]
+test_ok.py::test_ok_29 PASSED                                            [ 37%]
+test_ok.py::test_ok_30 PASSED                                            [ 39%]
+test_ok.py::test_ok_31 PASSED                                            [ 40%]
+test_ok.py::test_ok_32 PASSED                                            [ 41%]
+test_ok.py::test_ok_33 PASSED                                            [ 42%]
+test_ok.py::test_ok_34 PASSED                                            [ 43%]
+test_ok.py::test_ok_35 PASSED                                            [ 45%]
+test_ok.py::test_ok_36 PASSED                                            [ 46%]
+test_ok.py::test_ok_37 PASSED                                            [ 47%]
+test_ok.py::test_ok_38 PASSED                                            [ 48%]
+test_ok.py::test_ok_39 PASSED                                            [ 50%]
+test_ok.py::test_ok_40 PASSED                                            [ 51%]
+test_ok.py::test_ok_41 PASSED                                            [ 52%]
+test_ok.py::test_ok_42 PASSED                                            [ 53%]
+test_ok.py::test_ok_43 PASSED                                            [ 54%]
+test_ok.py::test_ok_44 PASSED                                            [ 56%]
+test_ok.py::test_ok_45 PASSED                                            [ 57%]
+test_ok.py::test_ok_46 PASSED                                            [ 58%]
+test_ok.py::test_ok_47 PASSED                                            [ 59%]
+test_ok.py::test_ok_48 PASSED                                            [ 60%]
+test_ok.py::test_ok_49 PASSED                                            [ 62%]
+test_ok.py::test_ok_50 PASSED                                            [ 63%]
+test_ok.py::test_ok_51 PASSED                                            [ 64%]
+test_ok.py::test_ok_52 PASSED                                            [ 65%]
+test_ok.py::test_ok_53 PASSED                                            [ 67%]
+test_ok.py::test_ok_54 PASSED                                            [ 68%]
+test_ok.py::test_ok_55 PASSED                                            [ 69%]
+test_ok.py::test_ok_56 PASSED                                            [ 70%]
+test_ok.py::test_ok_57 PASSED                                            [ 71%]
+test_ok.py::test_ok_58 PASSED                                            [ 73%]
+test_ok.py::test_ok_59 PASSED                                            [ 74%]
+test_ok.py::test_ok_60 PASSED                                            [ 75%]
+test_ok.py::test_ok_61 PASSED                                            [ 76%]
+test_ok.py::test_ok_62 PASSED                                            [ 78%]
+test_ok.py::test_ok_63 PASSED                                            [ 79%]
+test_ok.py::test_ok_64 PASSED                                            [ 80%]
+test_ok.py::test_ok_65 PASSED                                            [ 81%]
+test_ok.py::test_ok_66 PASSED                                            [ 82%]
+test_ok.py::test_ok_67 PASSED                                            [ 84%]
+test_ok.py::test_ok_68 PASSED                                            [ 85%]
+test_ok.py::test_ok_69 PASSED                                            [ 86%]
+test_ok.py::test_ok_70 PASSED                                            [ 87%]
+test_ok.py::test_ok_71 PASSED                                            [ 89%]
+test_ok.py::test_ok_72 PASSED                                            [ 90%]
+test_ok.py::test_ok_73 PASSED                                            [ 91%]
+test_ok.py::test_ok_74 PASSED                                            [ 92%]
+test_ok.py::test_ok_75 PASSED                                            [ 93%]
+test_ok.py::test_ok_76 PASSED                                            [ 95%]
+test_ok.py::test_ok_77 PASSED                                            [ 96%]
+test_ok.py::test_ok_78 PASSED                                            [ 97%]
+test_ok.py::test_ok_79 PASSED                                            [ 98%]
+test_ok.py::test_ok_80 PASSED                                            [100%]
+
+=================================== FAILURES ===================================
+_________________________________ test_lookup __________________________________
+
+    def test_lookup():
+        data = {"present": 1}
+>       assert helper(data) == 1
+               ^^^^^^^^^^^^
+
+test_fail.py:6: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+d = {'present': 1}
+
+    def helper(d):
+>       return d["missing"]
+               ^^^^^^^^^^^^
+E       KeyError: 'missing'
+
+test_fail.py:2: KeyError
+__________________________________ test_math ___________________________________
+
+    def test_math():
+>       assert sum(range(10)) == 46
+E       assert 45 == 46
+E        +  where 45 = sum(range(0, 10))
+E        +    where range(0, 10) = range(10)
+
+test_fail.py:9: AssertionError
+=========================== short test summary info ============================
+FAILED test_fail.py::test_lookup - KeyError: 'missing'
+FAILED test_fail.py::test_math - assert 45 == 46
+========================= 2 failed, 80 passed in 0.05s =========================

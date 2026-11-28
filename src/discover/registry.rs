@@ -4,7 +4,7 @@
 // so discover borrows golangci-lint's table from `cmds` rather than moving it into `core`.
 use crate::cmds::go::golangci_cmd;
 use crate::cmds::system::search::{Engine, is_bare_file_list};
-use crate::core::arg_tokenizer::{self, Dialect, TokenKind as ArgTokenKind, ValueSpec};
+use crate::core::arg_tokenizer::{self, Dialect, Grammar, TokenKind as ArgTokenKind};
 use crate::core::utils::composer_bin_dirs;
 use regex::{Regex, RegexSet};
 use std::path::Path;
@@ -518,13 +518,14 @@ fn strip_golangci_global_opts(cmd: &str) -> String {
     }
 }
 
-/// golangci-lint's global flag grammar, reusing [`golangci_cmd::global_takes_value`] so the flag
-/// names live in one place. A value-taking flag also claims a literal `--`: cobra/pflag reads
-/// `--config --` as the config path `--`, not as an end-of-options boundary (2.13.1: "can't read
-/// viper config: open --").
-fn golangci_global_takes_value(kind: ArgTokenKind, name: &str) -> Option<ValueSpec> {
-    golangci_cmd::global_takes_value(kind, name).map(ValueSpec::claiming_dash_dash)
-}
+/// golangci-lint's global flag grammar, built from [`golangci_cmd::GLOBAL_FLAGS_CLAIMING_DASH_DASH`]
+/// so the flag names live in one place. A value-taking flag also claims a literal `--`:
+/// cobra/pflag reads `--config --` as the config path `--`, not as an end-of-options boundary
+/// (2.13.1: "can't read viper config: open --").
+const GOLANGCI_GLOBAL_GRAMMAR: Grammar = Grammar::new(
+    Dialect::Posix,
+    &[golangci_cmd::GLOBAL_FLAGS_CLAIMING_DASH_DASH],
+);
 
 /// Parse supported golangci-lint invocations with optional global flags before `run`.
 ///
@@ -541,8 +542,7 @@ fn parse_golangci_run_parts(cmd: &str) -> Option<GolangciRunParts<'_>> {
         return None;
     }
 
-    let tokens =
-        arg_tokenizer::tokenize_grammar(&words[1..], &golangci_global_takes_value, Dialect::Posix);
+    let tokens = arg_tokenizer::tokenize_grammar(&words[1..], &GOLANGCI_GLOBAL_GRAMMAR);
 
     for token in &tokens {
         match token.kind {
@@ -4205,6 +4205,37 @@ mod tests {
         }
     }
 
+    /// Only `nix search` is filtered: build, shell and eval output (builder logs,
+    /// inner commands, error locations) must reach the agent as nix printed it.
+    #[test]
+    fn test_rewrite_nix_search_only() {
+        for command in [
+            "nix --offline search nixpkgs jq",
+            "nix -L search nixpkgs jq",
+            "nix search nixpkgs jq",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                Some(format!("rtk {command}")),
+                "{command}"
+            );
+        }
+        for command in [
+            "nix build nixpkgs#hello",
+            "nix eval --expr 1",
+            "nix flake show",
+            "nix searchx",
+            "nix -- search nixpkgs jq",
+            "nix shell nixpkgs#cargo -c cargo build",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(command, &[]),
+                None,
+                "{command} must not be rewritten"
+            );
+        }
+    }
+
     #[test]
     fn test_rewrite_playwright() {
         let commands = vec![
@@ -6172,6 +6203,32 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn test_golangci_global_grammar_matches_its_table() {
+        use crate::core::arg_tokenizer::{TokenKind, ValueSpec, assert_takes_value_table};
+        assert_takes_value_table(
+            &GOLANGCI_GLOBAL_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &[
+                        "color",
+                        "config",
+                        "cpu-profile-path",
+                        "mem-profile-path",
+                        "trace-path",
+                    ],
+                    Some(ValueSpec::value().claiming_dash_dash()),
+                ),
+                (
+                    TokenKind::Short,
+                    &["c"],
+                    Some(ValueSpec::solo_only().claiming_dash_dash()),
+                ),
+            ],
+        );
     }
 
     /// The full grammar of `parse_golangci_run_parts`, pinned case by case: what the

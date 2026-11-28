@@ -151,6 +151,20 @@ jobs:
         # `--all` is `--workspace`: `rtk` + `engine`. `proxy/` is tested in
         # its own job, since it is not a member.
       - run: cargo test --all
+      # install.sh end to end against a fake release. On Windows this runs under
+      # Git Bash and installs the rtk.exe the step above built.
+      - name: install.sh tests
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            target=$CARGO_BUILD_TARGET
+            [ "$target" = host-tuple ] && target=$(rustc -vV | sed -n 's/^host: //p')
+            export RTK_TEST_EXE="$PWD/target/$target/debug/rtk.exe"
+          fi
+          sh scripts/test-install.sh | tee "$RUNNER_TEMP/test-install.log"
+          # A skip here means the runner lost unzip, python or a sha256 tool;
+          # fail rather than pass with no install exercised.
+          ! grep -F 'SKIP: end-to-end' "$RUNNER_TEMP/test-install.log"
 
   security:
     name: Security Scan

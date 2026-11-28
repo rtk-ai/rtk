@@ -53,6 +53,39 @@ they had no captured output.
 A passthrough row's duration is the wrapped process's lifetime, which can be the whole session for an
 interactive TUI such as `rtk claude`.
 
+## Invocation and retrieval accounting
+
+`rtk gain --history --format json` exports an `output_accounting` object and
+the latest 100 `commands` and 100 `recall_events`. The totals cover all retained
+rows in their respective cohorts, not just those pages. `--project` keeps the
+rows of both sets recorded in the current directory or any directory below it.
+
+- `invocation_id` is a local opaque identifier for an RTK process. A process
+  may record multiple command rows, so the command row's `id` remains its key.
+  Old rows keep a null `invocation_id`.
+- Each measured `rtk recall` emission has its own event ID and an `invoking_id`.
+  Partial selections, `--grep`, empty matches and repeated reads count separately.
+  `emitted_bytes` counts bytes the stdout writer accepted, and `output_tokens`
+  estimates tokens from those bytes. A failed lookup records no emission.
+  A write failure records only bytes accepted before the error, if any.
+- Hash references don't identify a specific capture. Their
+  `source_invocation_id` and `source_capture_id` are null.
+  `unattributed_recall_events` counts the events with no `source_invocation_id`.
+
+`initial_input_tokens`, `initial_output_tokens` and `commands_without_invocation_id`
+(command rows with a null `invocation_id`) use the same headline cap as
+`summary`; `initial_oversized_excluded` reports the omitted row count. The
+retrieval totals count all measured recall events for their own dates and
+projects, without imposing the initial-command cap. The two cohorts shouldn't
+be subtracted to infer net savings. They do not measure model context or
+billing.
+
+`measurement_complete` is false: historical reads, external tee reads, stderr
+and tracking failures are not measured here. `rtk gain --recalls` remains a
+separate unique-content metric. `retention_days` reports the configured tracking
+retention, and `rtk gain --reset` clears both histories. IDs are not sent in
+telemetry.
+
 ## Privacy
 
 - The tracking database is **local only** and never leaves your machine.

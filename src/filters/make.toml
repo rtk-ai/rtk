@@ -6,7 +6,9 @@ strip_lines_matching = [
   "^\\s*$",
   "^Nothing to be done",
 ]
-max_lines = 50
+# Keep the end: a recipe that reports on stdout (a test runner, a script) prints its failure
+# summary last. Compiler errors and `make: ***` go to stderr, which is not filtered.
+tail_lines = 50
 on_empty = "make: ok"
 
 [[tests.make]]

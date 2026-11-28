@@ -210,9 +210,7 @@ description = "Rewrite bash commands through rtk to save tokens."
 /// Tradeoff: matches the exact spacing `name = "rtk-rewrite"`. A reformatted
 /// file (`name="rtk-rewrite"` or extra whitespace) would defeat idempotency
 /// and cause a duplicate append on re-install. Acceptable because our own
-/// installer only ever writes the canonical spacing, and the alternative
-/// (parse-serialize round-trip via toml_edit) would clobber user comments
-/// and formatting in the file.
+/// installer only ever writes the canonical spacing.
 fn vibe_hooks_toml_has_rtk(content: &str) -> bool {
     let needle = format!(r#"name = "{VIBE_HOOK_NAME}""#);
     content.contains(&needle)

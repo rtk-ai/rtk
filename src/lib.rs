@@ -28,7 +28,7 @@ use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
     ast_grep_cmd, ctest_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls,
-    pipe_cmd, read, search, summary, tree, wc_cmd,
+    nix_cmd, pipe_cmd, read, search, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -665,6 +665,13 @@ enum Commands {
     /// Next.js build with compact output
     Next {
         /// Next.js build arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Nix search with compact output. Every other nix command passes through.
+    Nix {
+        /// Arguments passed to nix
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2489,13 +2496,18 @@ fn require_single_script(subcommand: &str, shell: Option<&str>, command: &[Strin
 
 /// Whether this invocation runs the daily telemetry ping. A parsed
 /// `rtk hook …` command does not: the hook processors run before every
-/// command an agent runs. Anything clap rejects (help, version, a
-/// passthrough command) still runs it.
+/// command an agent runs. Neither does `rtk telemetry forget`: the send thread
+/// would outlive the command and could write the ping marker back after
+/// `forget` deleted it. Anything clap rejects (help, version, a passthrough
+/// command) still runs it.
 fn pings_telemetry(parsed: &Result<Cli, clap::Error>) -> bool {
     !matches!(
         parsed,
         Ok(Cli {
-            command: Commands::Hook { .. },
+            command: Commands::Hook { .. }
+                | Commands::Telemetry {
+                    command: core::telemetry_cmd::TelemetrySubcommand::Forget,
+                },
             ..
         })
     )
@@ -3136,9 +3148,13 @@ fn run_cli() -> Result<i32> {
             }
         }
 
+        Commands::Nix { args } => nix_cmd::run(&args, cli.verbose)?,
+
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
         Commands::Gain(gain_args) => {
+            #[cfg(windows)]
+            analytics::gain::configure_console_color();
             let GainArgs {
                 project,
                 graph,
@@ -4053,6 +4069,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Prisma { .. }
             | Commands::Tsc { .. }
             | Commands::Next { .. }
+            | Commands::Nix { .. }
             | Commands::Ng { .. }
             | Commands::Lint { .. }
             | Commands::Prettier { .. }
@@ -4684,6 +4701,7 @@ mod tests {
             "prisma",
             "tsc",
             "next",
+            "nix",
             "ng",
             "lint",
             "prettier",
@@ -4785,12 +4803,12 @@ mod tests {
 
     #[test]
     fn grep_dash_h_reaches_grep() {
-        let cli = try_parse_cli_from(["rtk", "grep", "-h", "TODO", "a.txt"]).unwrap();
-        match cli.command {
-            Commands::Grep { extra_args, .. } => {
-                assert_eq!(extra_args, vec!["-h", "TODO", "a.txt"]);
+        for args in [["-h", "TODO", "a.txt"], ["-hr", "TODO", "dir"]] {
+            let cli = try_parse_cli_from(["rtk", "grep"].into_iter().chain(args)).unwrap();
+            match cli.command {
+                Commands::Grep { extra_args, .. } => assert_eq!(extra_args, args),
+                other => panic!("Expected Grep command, got {other:?}"),
             }
-            other => panic!("Expected Grep command, got {other:?}"),
         }
     }
 
@@ -5251,10 +5269,19 @@ mod tests {
     }
 
     #[test]
+    fn telemetry_forget_skips_the_telemetry_ping() {
+        assert!(
+            !pings_telemetry(&try_parse_cli_from(["rtk", "telemetry", "forget"])),
+            "a ping thread started by `forget` could recreate the marker it deletes"
+        );
+    }
+
+    #[test]
     fn other_invocations_still_run_the_ping() {
         for args in [
             &["rtk", "ls"][..],
             &["rtk", "gain"],
+            &["rtk", "telemetry", "status"],
             &["rtk", "--help"],
             &["rtk", "--version"],
             // Rejected by clap: an unknown command runs through the fallback,

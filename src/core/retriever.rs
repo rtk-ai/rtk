@@ -769,6 +769,21 @@ fn store_inner(
     })
 }
 
+/// Count bytes actually accepted by stdout, including a partial write before an
+/// error. Token estimates use exactly those bytes, never the full stored blob.
+fn emit_recall(writer: &mut impl Write, output: &[u8]) -> (usize, std::io::Result<()>) {
+    let mut written = 0;
+    while written < output.len() {
+        match writer.write(&output[written..]) {
+            Ok(0) => return (written, Err(std::io::ErrorKind::WriteZero.into())),
+            Ok(n) => written += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return (written, Err(e)),
+        }
+    }
+    (written, writer.flush())
+}
+
 #[derive(Debug)]
 struct Row {
     shown_upto: usize,
@@ -864,7 +879,7 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
         with_cached(
             path,
             |path| open_existing_path(path).context(UNAVAILABLE),
-            |conn| recall_from(conn, &args),
+            |conn| recall_from(conn, &args, &mut std::io::stdout().lock()),
         )
     });
     match recalled {
@@ -885,7 +900,7 @@ pub fn run_recall(args: RecallArgs) -> Result<i32> {
     }
 }
 
-fn recall_from(conn: &Connection, args: &RecallArgs) -> Result<i32> {
+fn recall_from(conn: &Connection, args: &RecallArgs, writer: &mut impl Write) -> Result<i32> {
     if args.list {
         return list_entries(conn);
     }
@@ -928,8 +943,13 @@ fn recall_from(conn: &Connection, args: &RecallArgs) -> Result<i32> {
         );
         return Ok(1);
     }
-    let stdout = std::io::stdout();
-    let _ = stdout.lock().write_all(&out);
+    let (emitted, result) = emit_recall(writer, &out);
+    if (result.is_ok() || emitted > 0)
+        && let Ok(tracker) = super::tracking::Tracker::new()
+    {
+        let _ = tracker.record_recall_event(emitted, None, None);
+    }
+    result.context("write recalled output")?;
     mark_recalled(conn, &row.hash, &row.command);
 
     if row.truncated {
@@ -1000,6 +1020,187 @@ mod tests {
             database_path: Some(dir.join("recall_test.db")),
             ..RetrieverConfig::default()
         }
+    }
+
+    #[test]
+    fn recall_writer_retries_interrupted_and_reports_write_zero_and_flush_errors() {
+        struct Writer {
+            written: Vec<u8>,
+            interrupt: bool,
+            zero: bool,
+            fail_flush: bool,
+        }
+        impl Write for Writer {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                if std::mem::take(&mut self.interrupt) {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                if self.zero {
+                    return Ok(0);
+                }
+                self.written.extend_from_slice(data);
+                Ok(data.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                if self.fail_flush {
+                    Err(std::io::ErrorKind::BrokenPipe.into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let mut writer = Writer {
+            written: Vec::new(),
+            interrupt: true,
+            zero: false,
+            fail_flush: false,
+        };
+        let output = b"a\xff\n";
+        let (emitted, outcome) = emit_recall(&mut writer, output);
+        outcome.expect("retry interrupted write");
+        assert_eq!(emitted, output.len());
+        assert_eq!(writer.written, output);
+
+        writer.zero = true;
+        let (emitted, outcome) = emit_recall(&mut writer, b"not written");
+        assert_eq!(emitted, 0);
+        assert_eq!(outcome.unwrap_err().kind(), std::io::ErrorKind::WriteZero);
+
+        writer.zero = false;
+        writer.fail_flush = true;
+        let (emitted, outcome) = emit_recall(&mut writer, b"flush fails");
+        assert_eq!(emitted, 11);
+        assert_eq!(outcome.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn recall_records_only_the_partial_output_and_propagates_the_write_error() {
+        struct PartialWriter(usize);
+
+        impl Write for PartialWriter {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                let accepted = self.0.min(data.len());
+                self.0 -= accepted;
+                Ok(accepted)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                panic!("a failed write should not flush")
+            }
+        }
+
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let stored = store_inner(&cfg, b"first\nsecond\n", "test", Some(0), 1)
+            .expect("the entry should be stored");
+        let conn = open(&cfg).expect("the store should open");
+        let args = RecallArgs {
+            hash: Some(&stored.hash),
+            full: true,
+            from: None,
+            lines: None,
+            grep: None,
+            list: false,
+        };
+        user_env::with_path("RTK_DB_PATH", Some(dir.path().join("tracking.db")), || {
+            let error =
+                recall_from(&conn, &args, &mut PartialWriter(5)).expect_err("partial write");
+            assert_eq!(
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .expect("the write error should be propagated")
+                    .kind(),
+                std::io::ErrorKind::BrokenPipe
+            );
+            let tracker = tracking::Tracker::new().expect("tracking");
+            let events = tracker
+                .recall_event_history(10, None)
+                .expect("events should be readable");
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].emitted_bytes, 5);
+            assert_eq!(events[0].output_tokens, 2);
+            assert!(events[0].invoking_id.is_some());
+            assert!(events[0].source_capture_id.is_none());
+        });
+        let recalled: i64 = conn
+            .query_row(
+                "SELECT recalled FROM recall WHERE hash = ?1",
+                params![stored.hash],
+                |row| row.get(0),
+            )
+            .expect("the entry should still exist");
+        assert_eq!(recalled, 0, "a failed write must not count as a recall");
+    }
+
+    #[test]
+    fn recall_still_emits_when_tracking_is_unavailable_or_rejects_the_event() {
+        let dir = crate::core::test_isolation::tempdir();
+        let cfg = temp_cfg(dir.path());
+        let stored = store_inner(&cfg, b"first\nsecond\n", "test", Some(0), 1)
+            .expect("the entry should be stored");
+        let conn = open(&cfg).expect("the store should open");
+        let args = RecallArgs {
+            hash: Some(&stored.hash),
+            full: true,
+            from: None,
+            lines: None,
+            grep: None,
+            list: false,
+        };
+
+        // A tracking path whose parent is a regular file cannot be created.
+        let not_a_dir = dir.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, b"").expect("file should be written");
+        user_env::with_path("RTK_DB_PATH", Some(not_a_dir.join("history.db")), || {
+            assert!(tracking::Tracker::new().is_err());
+            let mut out = Vec::new();
+            assert_eq!(
+                recall_from(&conn, &args, &mut out).expect("recall without tracking"),
+                0
+            );
+            assert_eq!(out, b"first\nsecond\n");
+        });
+        let recalled: i64 = conn
+            .query_row(
+                "SELECT recalled FROM recall WHERE hash = ?1",
+                params![stored.hash],
+                |row| row.get(0),
+            )
+            .expect("the entry should still exist");
+        assert_eq!(recalled, 1, "a delivered recall counts");
+
+        // A tracking database that refuses the recall event. That recall_from
+        // attempts the insert after a successful write is pinned by
+        // `repeated_filtered_reads_count_actual_stdout_and_stay_unattributed`.
+        let tracking_db = dir.path().join("tracking.db");
+        user_env::with_path("RTK_DB_PATH", Some(tracking_db.clone()), || {
+            drop(tracking::Tracker::new().expect("tracking should initialize"));
+            Connection::open(&tracking_db)
+                .expect("tracking should open")
+                .execute_batch(
+                    "CREATE TRIGGER reject_recall_events BEFORE INSERT ON recall_events
+                     BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+                )
+                .expect("trigger should be created");
+            tracking::Tracker::new()
+                .expect("tracking should open")
+                .record_recall_event(1, None, None)
+                .expect_err("the trigger should reject a recall event");
+            let mut out = Vec::new();
+            assert_eq!(
+                recall_from(&conn, &args, &mut out).expect("recall despite a rejected event"),
+                0
+            );
+            assert_eq!(out, b"first\nsecond\n");
+            let events: i64 = Connection::open(&tracking_db)
+                .expect("tracking should open")
+                .query_row("SELECT COUNT(*) FROM recall_events", [], |row| row.get(0))
+                .expect("events should be countable");
+            assert_eq!(events, 0, "the trigger must have rejected the event");
+        });
     }
 
     #[test]
