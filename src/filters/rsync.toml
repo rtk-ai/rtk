@@ -1,6 +1,6 @@
 [filters.rsync]
 description = "Compact rsync output — short-circuit on success, strip progress"
-match_command = "^rsync\\b"
+match_command = "^rsync(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

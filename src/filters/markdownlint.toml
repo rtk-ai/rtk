@@ -1,6 +1,6 @@
 [filters.markdownlint]
 description = "Compact markdownlint output — strip blank lines, limit rows"
-match_command = "^markdownlint\\b"
+match_command = "^markdownlint(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

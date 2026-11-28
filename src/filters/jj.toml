@@ -1,6 +1,6 @@
 [filters.jj]
 description = "Compact Jujutsu (jj) output — strip blank lines, truncate"
-match_command = "^jj\\b"
+match_command = "^jj(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

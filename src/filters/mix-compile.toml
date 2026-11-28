@@ -1,6 +1,6 @@
 [filters.mix-compile]
 description = "Compact mix compile output"
-match_command = "^mix\\s+compile(\\s|$)"
+match_command = "^mix[ \\t\\n]+compile([ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^Compiling \\d+ file",

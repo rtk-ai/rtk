@@ -1,6 +1,6 @@
 [filters.stat]
 description = "Compact stat output — strip device/inode/birth noise"
-match_command = "^stat\\b"
+match_command = "^stat(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",

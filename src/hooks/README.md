@@ -72,7 +72,7 @@ All file operations use atomic writes (tempfile + rename) to prevent corruption 
 RTK enforces a permission precedence that matches Claude Code's least-privilege default:
 
 ```
-Deny > Defer > Ask > Allow (explicit) > Default (ask)
+Deny > Defer > TooComplex > Ask > Allow (explicit) > Default (ask)
 ```
 
 Rules are loaded from all Claude Code `settings.json` files (project + global, including `.local` variants). Only `Bash(...)` rules are extracted; other scopes (Read, Write) are ignored.
@@ -191,6 +191,7 @@ commands. For those:
 | Ask | `permissions.ask` rule matched | 3 | Rewrite + let host tool prompt user |
 | Allow | `permissions.allow` rule matched | 0 | Rewrite + auto-allow |
 | Default | No rule matched | 3 | Rewrite + let host tool prompt user |
+| TooComplex | The line, or a wrapper's script, is too complex to tell what runs, and no deny rule names a command on it | 1 | The Claude hook asks for it as written, over an allow rule that names some commands, unless the session's permission mode never prompts (`bypassPermissions`, `dontAsk`, `auto`); any other host decides. With every settings file read, no deny entry or `Bash(…)` ask rule, and either `Bash(*)` allowed or no `Bash(…)` allow rule at all, it leaves the line to the host as well |
 | Defer | `permissions.deny` rule matched inside a shell wrapper | 1 | Passthrough — command runs as without RTK |
 
 A deny or ask rule is matched against each segment as written, without the grammar a split leaves (`{`, `!`, `(`), and past each leading assignment or wrapper in turn (`registry::matching_readings`): `env HUSKY=0 git push` is read as `HUSKY=0 git push` and as `git push`, as Claude Code reads it. A reading need not be what the shell runs (`nohup HUSKY=0 git push` makes nohup look for a program named `HUSKY=0`), so it can only make a verdict stricter. Past 32 prefixes the command behind them is unread, and where a deny or ask rule exists the verdict is at least Ask. An allow rule matches the segment as written only, so a wrapper never inherits the allow of the command it runs.

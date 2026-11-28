@@ -1,6 +1,6 @@
 [filters.gcloud]
 description = "Compact gcloud output"
-match_command = "^gcloud\\b"
+match_command = "^gcloud(?:[ \\t\\n]|$)"
 strip_ansi = true
 strip_lines_matching = ["^\\s*$"]
 truncate_lines_at = 120

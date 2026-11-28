@@ -234,6 +234,7 @@ mod tests {
         ///   Default→ 3 (process::exit(3)) — grouped with Ask
         ///   Deny   → 2 (process::exit(2)) — handled before rewrite match
         ///   Defer  → 1 (process::exit(1)) — passthrough, no rewrite
+        ///   TooComplex → 1 (process::exit(1)) — passthrough, no rewrite
         fn expected_exit_code(verdict: &PermissionVerdict) -> i32 {
             match verdict {
                 PermissionVerdict::Allow => 0,
@@ -241,6 +242,7 @@ mod tests {
                 PermissionVerdict::Ask => 3,
                 PermissionVerdict::Default => 3, // MUST be 3, not 0!
                 PermissionVerdict::Defer => 1,
+                PermissionVerdict::TooComplex => 1,
             }
         }
 
