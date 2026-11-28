@@ -1,0 +1,23 @@
+{
+  "name": "rtk",
+  "version": "1.0.0",
+  "description": "Agent skills for installing RTK (Rust Token Killer), working with its condensed command output, and measuring token savings.",
+  "author": {
+    "name": "RTK",
+    "url": "https://www.rtk-ai.app/"
+  },
+  "homepage": "https://www.rtk-ai.app/",
+  "repository": "https://github.com/rtk-ai/rtk",
+  "license": "Apache-2.0",
+  "keywords": [
+    "rtk",
+    "token-savings",
+    "cli",
+    "proxy",
+    "hooks",
+    "claude-code",
+    "codex",
+    "agent-skills"
+  ],
+  "skills": "./skills/"
+}

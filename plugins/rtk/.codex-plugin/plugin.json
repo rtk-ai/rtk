@@ -1,0 +1,44 @@
+{
+  "name": "rtk",
+  "version": "1.0.0",
+  "description": "Agent skills for installing RTK (Rust Token Killer), working with its condensed command output, and measuring token savings.",
+  "author": {
+    "name": "RTK",
+    "url": "https://www.rtk-ai.app/"
+  },
+  "homepage": "https://www.rtk-ai.app/",
+  "repository": "https://github.com/rtk-ai/rtk",
+  "license": "Apache-2.0",
+  "keywords": [
+    "rtk",
+    "token-savings",
+    "cli",
+    "proxy",
+    "hooks",
+    "claude-code",
+    "codex",
+    "agent-skills"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "RTK",
+    "shortDescription": "Cut command-output tokens",
+    "longDescription": "Skills for RTK, the CLI proxy that filters and compresses shell output before it reaches an LLM. Covers installing RTK and hooking it into Claude Code, Codex, Cursor, Copilot, Gemini CLI, OpenCode and rules-file agents with rtk init; how to read filtered output, when to use rtk bypass, and how pipelines and the optional rtk-proxy extend compression; and measuring savings with rtk gain, rtk discover and rtk session.",
+    "developerName": "RTK",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://www.rtk-ai.app/",
+    "defaultPrompt": [
+      "Install RTK and hook it into Codex",
+      "This test output looks cut off, should I bypass RTK?",
+      "Show me how many tokens RTK saved this week"
+    ],
+    "brandColor": "#203040",
+    "composerIcon": "./assets/logo.png",
+    "logo": "./assets/logo.png"
+  }
+}
