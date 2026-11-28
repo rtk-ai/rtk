@@ -201,10 +201,20 @@ fn filter_line(line: &str) -> Option<&str> {
 ```rust
 // ❌ WRONG: No escaping
 let full_cmd = format!("{} {}", cmd, args.join(" "));
-Command::new("sh").arg("-c").arg(&full_cmd).spawn();
+let status = resolved_command("sh")
+    .arg("-c")
+    .arg(&full_cmd)
+    .status()
+    .context("Failed to run sh")?;
 
-// ✅ RIGHT: Use Command builder (automatic escaping)
-Command::new(cmd).args(args).spawn();
+// ✅ RIGHT: Use the ChildCommand builder (each argument encoded for the child)
+let status = resolved_command(cmd)
+    .args(args)
+    .status()
+    .with_context(|| format!("Failed to run {cmd}"))?;
+if !status.success() {
+    std::process::exit(status.code().unwrap_or(1));
+}
 ```
 
 ### 6. Verify and Validate

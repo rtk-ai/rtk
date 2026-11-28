@@ -16,7 +16,7 @@ use crate::core::runner::{self, RunOptions};
 use crate::core::shell::display_args;
 use crate::core::stream::RAW_CAP;
 use crate::core::truncate::CAP_LIST;
-use crate::core::utils::{ChildArgExt, resolved_command, strip_ansi};
+use crate::core::utils::{resolved_command, strip_ansi};
 use anyhow::Result;
 use std::ffi::OsString;
 
@@ -33,7 +33,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     let mut cmd = resolved_command("nix");
-    cmd.child_args(args);
+    cmd.args(args);
 
     if verbose > 0 {
         eprintln!("Running: nix {}", display_args(args));
