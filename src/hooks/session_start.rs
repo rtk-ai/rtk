@@ -32,6 +32,7 @@ pub fn ensure_proxy() -> Option<String> {
         |addr| is_listening(addr, Duration::from_millis(150)),
         rtk_set_up_for,
         spawn_start,
+        crate::llm_proxy::stale_download_notice,
         Duration::from_millis(700),
     )
 }
@@ -42,6 +43,7 @@ fn ensure_proxy_impl(
     is_listening: impl Fn(&str) -> bool,
     set_up_for: impl FnOnce(&[String]) -> bool,
     spawn: impl FnOnce(&str) -> anyhow::Result<()>,
+    notice: impl FnOnce() -> Option<String>,
     wait: Duration,
 ) -> Option<String> {
     let addrs = loopback_addrs(url)?;
@@ -58,11 +60,12 @@ fn ensure_proxy_impl(
     }
     match spawn(addr) {
         Ok(()) => {
+            let stale = notice().map(|n| format!(" — {n}")).unwrap_or_default();
             let deadline = Instant::now() + wait;
             loop {
                 if probe(addr) {
                     return Some(format!(
-                        "rtk: started the RTK proxy for this session ({url})"
+                        "rtk: started the RTK proxy for this session ({url}){stale}"
                     ));
                 }
                 if Instant::now() >= deadline {
@@ -71,7 +74,7 @@ fn ensure_proxy_impl(
                 std::thread::sleep(Duration::from_millis(50));
             }
             Some(format!(
-                "rtk: launched the RTK proxy for {url} but it is not answering yet — a failed first request succeeds on retry; check with `rtk llm-proxy status`"
+                "rtk: launched the RTK proxy for {url} but it is not answering yet — a failed first request succeeds on retry; check with `rtk llm-proxy status`{stale}"
             ))
         }
         Err(e) => Some(format!(
@@ -208,6 +211,7 @@ mod tests {
             |_| panic!("must not connect to a remote url"),
             |_| panic!("must not read the setup for a remote url"),
             |_| panic!("must not spawn for a remote url"),
+            || None,
             Duration::ZERO,
         );
         assert_eq!(out, None);
@@ -221,6 +225,7 @@ mod tests {
             |_| panic!("the health response already confirms a listener"),
             |_| panic!("a daemon that answers needs no setup check"),
             |_| panic!("must not spawn when the daemon answers"),
+            || None,
             Duration::ZERO,
         );
         assert_eq!(out, None);
@@ -236,6 +241,7 @@ mod tests {
             |addr| is_listening(addr, Duration::from_millis(150)),
             |_| false,
             |_| panic!("must not start a proxy on an occupied port"),
+            || None,
             Duration::ZERO,
         );
         assert_eq!(out, None);
@@ -251,6 +257,7 @@ mod tests {
                 |addr| is_listening(addr, Duration::from_secs(2)),
                 |_| false,
                 |_| panic!("must not start a proxy over a gateway returning {status}"),
+                || None,
                 Duration::ZERO,
             );
             responder.join().expect("gateway responder");
@@ -272,6 +279,7 @@ mod tests {
                 |addr| is_listening(addr, Duration::from_millis(150)),
                 rtk_set_up_for,
                 |_| panic!("must not start a proxy on an occupied port"),
+                || None,
                 Duration::ZERO,
             );
             let msg = out.expect("a port RTK was set up for must not go quiet");
@@ -294,6 +302,7 @@ mod tests {
                     |addr| is_listening(addr, Duration::from_secs(2)),
                     rtk_set_up_for,
                     |_| panic!("must not start a proxy over another service"),
+                    || None,
                     Duration::ZERO,
                 )
             });
@@ -340,6 +349,7 @@ mod tests {
             only_ipv6,
             |_| false,
             |_| panic!("must not start a proxy while [::1] takes the requests"),
+            || None,
             Duration::ZERO,
         );
         assert_eq!(silent, None);
@@ -350,6 +360,7 @@ mod tests {
             only_ipv6,
             |_| true,
             |_| panic!("must not start a proxy while [::1] takes the requests"),
+            || None,
             Duration::ZERO,
         );
         let msg = warned.expect("a port RTK was set up for must not go quiet");
@@ -364,6 +375,7 @@ mod tests {
             |_| panic!("the health response already confirms a listener"),
             |_| panic!("a daemon that answers needs no setup check"),
             |_| panic!("must not spawn when the daemon answers"),
+            || None,
             Duration::ZERO,
         );
         assert_eq!(out, None);
@@ -381,6 +393,7 @@ mod tests {
             |addr| is_listening(addr, Duration::from_millis(150)),
             |_| false,
             |_| panic!("must not start a proxy while [::1] takes the requests"),
+            || None,
             Duration::ZERO,
         );
         assert_eq!(out, None);
@@ -398,11 +411,48 @@ mod tests {
             |_| false,
             |_| panic!("a free port needs no setup check"),
             |_| Ok(()),
+            || None,
             Duration::from_millis(200),
         );
         let msg = out.expect("a start must be reported");
         assert!(msg.contains("started the RTK proxy"), "{msg}");
         assert!(msg.contains("http://127.0.0.1:8080"), "{msg}");
+    }
+
+    #[test]
+    fn a_start_with_a_stale_downloaded_daemon_says_how_to_update_it() {
+        let calls = Cell::new(0usize);
+        let out = ensure_proxy_impl(
+            "http://127.0.0.1:8080",
+            |_| {
+                calls.set(calls.get() + 1);
+                calls.get() > 1
+            },
+            |_| false,
+            |_| panic!("a free port needs no setup check"),
+            |_| Ok(()),
+            || {
+                Some("rtk-proxy 1.2.1 is not this rtk's version (1.3.0); run `rtk init -g` to update it".to_string())
+            },
+            Duration::from_millis(200),
+        );
+        let msg = out.expect("a start must be reported");
+        assert!(msg.contains("started the RTK proxy"), "{msg}");
+        assert!(msg.contains("run `rtk init -g` to update it"), "{msg}");
+    }
+
+    #[test]
+    fn a_running_daemon_is_never_version_checked() {
+        let out = ensure_proxy_impl(
+            "http://127.0.0.1:8080",
+            |_| true,
+            |_| panic!("a running daemon needs no listener check"),
+            |_| panic!("a running daemon needs no setup check"),
+            |_| panic!("must not spawn when the daemon answers"),
+            || panic!("must not check the version of a daemon it does not start"),
+            Duration::ZERO,
+        );
+        assert_eq!(out, None);
     }
 
     #[test]
@@ -417,6 +467,7 @@ mod tests {
                 *spawned_on.borrow_mut() = addr.to_string();
                 Ok(())
             },
+            || None,
             Duration::ZERO,
         );
         assert_eq!(spawned_on.into_inner(), "127.0.0.1:8580");
@@ -430,6 +481,7 @@ mod tests {
             |_| false,
             |_| panic!("a free port needs no setup check"),
             |_| Ok(()),
+            || None,
             Duration::ZERO,
         );
         let msg = out.expect("a pending start must be reported");
@@ -444,6 +496,7 @@ mod tests {
             |_| false,
             |_| panic!("a free port needs no setup check"),
             |_| anyhow::bail!("binary missing"),
+            || None,
             Duration::ZERO,
         );
         let msg = out.expect("a failed start must be reported");

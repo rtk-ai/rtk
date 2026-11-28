@@ -28,7 +28,7 @@ The daemon is a second binary, `rtk-proxy`, shipped as its own release archive (
 
 ## Install the daemon
 
-`rtk init -g` installs it for you. When `rtk-proxy` is missing and you answer Yes to the daemon question, rtk downloads the `rtk-proxy-<target>` archive of its own version from the [GitHub release](https://github.com/rtk-ai/rtk/releases), checks it against that release's `checksums.txt`, makes sure the binary reports the same version, and puts it in rtk's data folder: `~/Library/Application Support/rtk/bin/` on macOS, `~/.local/share/rtk/bin/` on Linux, `%LOCALAPPDATA%\rtk\bin\` on Windows. If the download fails, nothing is changed. After you update rtk, the next `rtk init -g` offers to update that copy to the matching version (default No), and `rtk llm-proxy status` says when the two versions differ. `rtk init -g --uninstall` removes it.
+`rtk init -g` installs it for you. When `rtk-proxy` is missing and you answer Yes to the daemon question, rtk downloads the `rtk-proxy-<target>` archive of its own version from the [GitHub release](https://github.com/rtk-ai/rtk/releases), checks it against that release's `checksums.txt`, makes sure the binary reports the same version, and puts it in rtk's data folder: `~/Library/Application Support/rtk/bin/` on macOS, `~/.local/share/rtk/bin/` on Linux, `%LOCALAPPDATA%\rtk\bin\` on Windows. If the download fails, nothing is changed. After you update rtk, the next `rtk init -g` offers to update that copy to the matching version (default No). Until then, `rtk llm-proxy status` and every start of the daemon (`rtk claude`, `rtk llm-proxy start`, the SessionStart hook's message) say that the two versions differ; nothing is downloaded without that question. `rtk init -g --uninstall` removes it.
 
 You can also install it yourself: download the `rtk-proxy-<target>` archive for your platform from the [releases page](https://github.com/rtk-ai/rtk/releases) and put the binary next to `rtk` (anywhere on your `PATH` also works). rtk never replaces a copy you installed yourself; it only tells you when its version differs.
 
@@ -101,7 +101,7 @@ It does **not** do the redirection — that is the `settings.json` entry above. 
 
 If a listener at that address does not identify as RTK at `/health`, the hook never starts a daemon over it. It warns when `env.ANTHROPIC_BASE_URL` in `settings.json` or `RTK_PROXY_BIND` names that address, because the listener could be another service taking the requests or a hung RTK daemon, and the hook cannot tell which. With neither set, the hook treats the listener as your own gateway and stays silent. After starting a daemon, the hook still verifies the RTK identity before reporting that it started successfully.
 
-It reports through `systemMessage`, which is user-visible and never enters model context — RTK spends no tokens configuring itself. A problem is at most a warning; the hook never disrupts the session.
+It reports through `systemMessage`, which is user-visible and never enters model context — RTK spends no tokens configuring itself. When the daemon it starts is a copy `rtk init -g` downloaded for an older rtk, the message says so and how to update it. A problem is at most a warning; the hook never disrupts the session.
 
 This route only exists on harnesses that *have* a SessionStart hook, which is why the next one matters.
 
