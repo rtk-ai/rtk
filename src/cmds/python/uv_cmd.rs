@@ -81,8 +81,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         result.exit_code,
     );
 
-    let shown =
+    let mut shown =
         runner::print_with_hint(&filtered, &result.raw, &result.raw, "uv", result.exit_code);
+    runner::print_capture_notice(
+        &mut shown,
+        result.stdout_truncated || result.stderr_truncated,
+    );
     timer.track(&original_cmd, &rtk_cmd, &result.raw, &shown);
 
     Ok(result.exit_code)

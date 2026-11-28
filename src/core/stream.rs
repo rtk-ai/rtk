@@ -42,7 +42,8 @@ fn read_lines_lossy(reader: impl Read) -> impl Iterator<Item = String> {
 pub trait StreamFilter {
     fn feed_line(&mut self, line: &str) -> Option<String>;
     fn flush(&mut self) -> String;
-    fn on_exit(&mut self, _exit_code: i32, _raw: &str) -> Option<String> {
+    /// `raw` can be truncated even though every line reached `feed_line`.
+    fn on_exit(&mut self, _exit_code: i32, _raw: &str, _raw_truncated: bool) -> Option<String> {
         None
     }
 }
@@ -57,7 +58,8 @@ pub trait BlockHandler {
     fn should_skip(&mut self, line: &str) -> bool;
     fn is_block_start(&mut self, line: &str) -> bool;
     fn is_block_continuation(&mut self, line: &str, block: &[String]) -> bool;
-    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String>;
+    /// Qualify raw-based fallbacks when truncated; observed-line counters remain complete.
+    fn format_summary(&self, exit_code: i32, raw: &str, raw_truncated: bool) -> Option<String>;
 }
 
 pub struct BlockStreamFilter<H: BlockHandler> {
@@ -121,8 +123,8 @@ impl<H: BlockHandler> StreamFilter for BlockStreamFilter<H> {
         self.emit_block().unwrap_or_default()
     }
 
-    fn on_exit(&mut self, exit_code: i32, raw: &str) -> Option<String> {
-        self.handler.format_summary(exit_code, raw)
+    fn on_exit(&mut self, exit_code: i32, raw: &str, raw_truncated: bool) -> Option<String> {
+        self.handler.format_summary(exit_code, raw, raw_truncated)
     }
 }
 
@@ -138,7 +140,7 @@ pub trait LineHandler {
 
     fn observe_line(&mut self, _line: &str) {}
 
-    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String>;
+    fn format_summary(&self, exit_code: i32, raw: &str, _raw_truncated: bool) -> Option<String>;
 }
 
 pub struct LineStreamFilter<H: LineHandler> {
@@ -164,8 +166,8 @@ impl<H: LineHandler> StreamFilter for LineStreamFilter<H> {
         String::new()
     }
 
-    fn on_exit(&mut self, exit_code: i32, raw: &str) -> Option<String> {
-        self.handler.format_summary(exit_code, raw)
+    fn on_exit(&mut self, exit_code: i32, raw: &str, raw_truncated: bool) -> Option<String> {
+        self.handler.format_summary(exit_code, raw, raw_truncated)
     }
 }
 
@@ -221,7 +223,7 @@ impl BlockHandler for RegexBlockFilter {
         line.starts_with(' ') || line.starts_with('\t')
     }
 
-    fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+    fn format_summary(&self, _exit_code: i32, _raw: &str, _raw_truncated: bool) -> Option<String> {
         if self.block_count == 0 {
             Some(format!("{}: no errors found\n", self.tool_name))
         } else {
@@ -258,7 +260,18 @@ pub struct StreamResult {
     pub raw: String,
     pub raw_stdout: String,
     pub raw_stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
     pub filtered: String,
+}
+
+pub fn append_capture_notice(output: &mut String) {
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(
+        "[rtk] partial output: capture limit reached; summary and recall are incomplete\n",
+    );
 }
 
 impl StreamResult {
@@ -445,6 +458,8 @@ pub fn run_streaming(
             raw: String::new(),
             raw_stdout: String::new(),
             raw_stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
             filtered: String::new(),
         });
     }
@@ -591,7 +606,7 @@ pub fn run_streaming(
         stdout_thread.join().ok();
         stderr_thread.join().ok();
     } else {
-        let stderr_thread = std::thread::spawn(move || -> String {
+        let stderr_thread = std::thread::spawn(move || {
             let mut raw_err = String::new();
             let mut capped = false;
             for line in read_lines_lossy(stderr) {
@@ -602,7 +617,7 @@ pub fn run_streaming(
                     capped = true;
                 }
             }
-            raw_err
+            (raw_err, capped)
         });
 
         {
@@ -631,6 +646,9 @@ pub fn run_streaming(
                         eprintln!("[rtk] warning: filter panicked — passing through raw output");
                         raw_stdout.clone()
                     });
+                    if capped_out {
+                        append_capture_notice(&mut filtered);
+                    }
                     match write!(out, "{}", filtered) {
                         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
                         Err(e) => return Err(e.into()),
@@ -654,9 +672,9 @@ pub fn run_streaming(
             }
         }
 
-        raw_stderr = stderr_thread.join().unwrap_or_else(|e| {
+        (raw_stderr, capped_err) = stderr_thread.join().unwrap_or_else(|e| {
             eprintln!("[rtk] warning: stderr reader thread panicked: {:?}", e);
-            String::new()
+            (String::new(), false)
         });
     }
     if let Some(t) = stdin_thread {
@@ -668,7 +686,7 @@ pub fn run_streaming(
     let raw = format!("{}{}", raw_stdout, raw_stderr);
 
     if let Some(mut f) = saved_filter
-        && let Some(post) = f.on_exit(exit_code, &raw)
+        && let Some(post) = f.on_exit(exit_code, &raw, capped_out || capped_err)
     {
         filtered.push_str(&post);
         let mut dest: Box<dyn Write> = if filter_fd_is_stderr {
@@ -688,6 +706,8 @@ pub fn run_streaming(
         raw,
         raw_stdout,
         raw_stderr,
+        stdout_truncated: capped_out,
+        stderr_truncated: capped_err,
         filtered,
     })
 }
@@ -992,6 +1012,8 @@ pub(crate) mod tests {
             raw: String::new(),
             raw_stdout: String::new(),
             raw_stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
             filtered: String::new(),
         };
         assert!(r.success());
@@ -1004,6 +1026,8 @@ pub(crate) mod tests {
             raw: String::new(),
             raw_stdout: String::new(),
             raw_stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
             filtered: String::new(),
         };
         assert!(!r.success());
@@ -1016,6 +1040,8 @@ pub(crate) mod tests {
             raw: String::new(),
             raw_stdout: String::new(),
             raw_stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
             filtered: String::new(),
         };
         assert!(!r.success());
@@ -1115,6 +1141,8 @@ pub(crate) mod tests {
             result.raw.len() > 1_000_000,
             "Should have captured significant data"
         );
+        assert!(result.stdout_truncated);
+        assert!(!result.stderr_truncated);
     }
 
     #[test]
@@ -1132,6 +1160,31 @@ pub(crate) mod tests {
             result.raw.len() <= RAW_CAP + 200,
             "stderr in raw should be capped at ~10 MiB, got {} bytes",
             result.raw.len()
+        );
+        assert!(!result.stdout_truncated);
+        assert!(result.stderr_truncated);
+    }
+
+    #[test]
+    fn test_buffered_capture_qualifies_a_dropped_first_line() {
+        // nosemgrep: interpreter-execution
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "dd if=/dev/zero bs=1024 count=10241 2>/dev/null | tr '\\0' 'a'",
+        ]);
+        let result = run_streaming(
+            &mut cmd,
+            StdinMode::Null,
+            FilterMode::Buffered(Box::new(|_| "summary".to_string())),
+        )
+        .expect("run buffered capture");
+        assert!(result.stdout_truncated);
+        assert!(!result.stderr_truncated);
+        assert!(result.raw.is_empty());
+        assert_eq!(
+            result.filtered,
+            "summary\n[rtk] partial output: capture limit reached; summary and recall are incomplete\n"
         );
     }
 
@@ -1222,7 +1275,7 @@ pub(crate) mod tests {
             }
         }
         output.push_str(&filter.flush());
-        if let Some(post) = filter.on_exit(exit_code, input) {
+        if let Some(post) = filter.on_exit(exit_code, input, false) {
             output.push_str(&post);
         }
         output
@@ -1243,7 +1296,12 @@ pub(crate) mod tests {
         fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
             line.starts_with("  ")
         }
-        fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+        fn format_summary(
+            &self,
+            _exit_code: i32,
+            _raw: &str,
+            _raw_truncated: bool,
+        ) -> Option<String> {
             None
         }
     }
@@ -1268,7 +1326,12 @@ pub(crate) mod tests {
         fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
             line.starts_with("  ")
         }
-        fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+        fn format_summary(
+            &self,
+            _exit_code: i32,
+            _raw: &str,
+            _raw_truncated: bool,
+        ) -> Option<String> {
             Some("DONE\n".to_string())
         }
     }
@@ -1388,7 +1451,7 @@ pub(crate) mod tests {
             fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
                 line.starts_with(' ')
             }
-            fn format_summary(&self, _: i32, _: &str) -> Option<String> {
+            fn format_summary(&self, _: i32, _: &str, _raw_truncated: bool) -> Option<String> {
                 None
             }
         }
@@ -1441,7 +1504,12 @@ pub(crate) mod tests {
             self.observed.push(line.to_string());
         }
 
-        fn format_summary(&self, exit_code: i32, _raw: &str) -> Option<String> {
+        fn format_summary(
+            &self,
+            exit_code: i32,
+            _raw: &str,
+            _raw_truncated: bool,
+        ) -> Option<String> {
             Some(format!(
                 "{}: {} kept, exit={}\n",
                 self.summary_tag,
@@ -1459,7 +1527,7 @@ pub(crate) mod tests {
             }
         }
         out.push_str(&filter.flush());
-        if let Some(post) = filter.on_exit(exit_code, input) {
+        if let Some(post) = filter.on_exit(exit_code, input, false) {
             out.push_str(&post);
         }
         out
@@ -1469,7 +1537,7 @@ pub(crate) mod tests {
     fn test_line_filter_defaults_keep_all() {
         struct DefaultHandler;
         impl LineHandler for DefaultHandler {
-            fn format_summary(&self, _: i32, _: &str) -> Option<String> {
+            fn format_summary(&self, _: i32, _: &str, _raw_truncated: bool) -> Option<String> {
                 None
             }
         }

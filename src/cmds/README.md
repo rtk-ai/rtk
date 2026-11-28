@@ -161,13 +161,17 @@ impl BlockHandler for MyHandler {
     fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
         line.starts_with("  ") || line.starts_with("at ")
     }
-    fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+    fn format_summary(&self, _exit_code: i32, _raw: &str, _raw_truncated: bool) -> Option<String> {
         Some(format!("{} failures\n", self.error_count))
     }
 }
 ```
 
 See `cmds/rust/cargo_cmd.rs::CargoBuildHandler` and `cmds/js/tsc_cmd.rs::TscHandler` for production examples.
+
+`raw_truncated` describes the cached raw input, not the lines already observed by
+the handler. Use it to qualify summaries reparsed from that cache; counters built
+from the full stream remain complete.
 
 **Level 3: `StreamFilter` trait** — full line-by-line control
 
@@ -184,7 +188,7 @@ impl StreamFilter for MyFilter {
         if line.contains("error") { Some(format!("{}\n", line)) } else { None }
     }
     fn flush(&mut self) -> String { String::new() }
-    fn on_exit(&mut self, exit_code: i32, raw: &str) -> Option<String> { None }
+    fn on_exit(&mut self, exit_code: i32, raw: &str, raw_truncated: bool) -> Option<String> { None }
 }
 ```
 

@@ -83,6 +83,15 @@ pub fn print_with_hint(
     emit_guarded(filtered, hint.as_deref(), guard_raw)
 }
 
+/// Qualify partial input after the size guard, even when no captured line fitted.
+pub fn print_capture_notice(shown: &mut String, truncated: bool) {
+    if truncated {
+        let start = shown.len();
+        stream::append_capture_notice(shown);
+        print!("{}", &shown[start..]);
+    }
+}
+
 #[cfg(test)]
 mod guarded_output_tests {
     use super::*;
@@ -318,7 +327,12 @@ where
         if !result.raw_stderr.trim().is_empty() {
             eprint!("{}", result.raw_stderr);
         }
-        timer.track(cmd_label, &format!("rtk {}", cmd_label), raw, raw);
+        let mut shown = raw.clone();
+        print_capture_notice(
+            &mut shown,
+            result.stdout_truncated || result.stderr_truncated,
+        );
+        timer.track(cmd_label, &format!("rtk {}", cmd_label), raw, &shown);
         return Ok(exit_code);
     }
 
@@ -337,7 +351,7 @@ where
 
     // The guard governs the stdout rtk replaces. stderr is forwarded separately below, and
     // only ever shrinks there, so it cannot push the total past what the command emitted.
-    let shown = if let Some(label) = opts.tee_label {
+    let mut shown = if let Some(label) = opts.tee_label {
         print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
     } else if opts.no_trailing_newline {
         // The filters that opt out own their line endings: what they return is already
@@ -348,6 +362,10 @@ where
     } else {
         emit(&filtered, None, raw_for_tracking, opts.clean_outputs)
     };
+    print_capture_notice(
+        &mut shown,
+        result.stdout_truncated || (!opts.filter_stdout_only && result.stderr_truncated),
+    );
 
     // Stdout-only filters parse structured stdout; stderr still carries diagnostics
     // (config errors, missing linters) that the user needs.
@@ -801,7 +819,7 @@ impl StreamFilter for ErrorStreamFilter {
         String::new()
     }
 
-    fn on_exit(&mut self, exit_code: i32, raw: &str) -> Option<String> {
+    fn on_exit(&mut self, exit_code: i32, raw: &str, raw_truncated: bool) -> Option<String> {
         if self.emitted_any {
             return None;
         }
@@ -809,6 +827,9 @@ impl StreamFilter for ErrorStreamFilter {
             Some("[ok] Command completed successfully (no errors)".to_string())
         } else {
             let mut msg = format!("[FAIL] Command failed (exit code: {})\n", exit_code);
+            if raw_truncated {
+                stream::append_capture_notice(&mut msg);
+            }
             let lines: Vec<&str> = raw.lines().collect();
             for line in lines.iter().rev().take(10).rev() {
                 msg.push_str(&format!("  {}\n", line));
@@ -858,7 +879,7 @@ pub fn run_err_unrunnable(
 ) -> i32 {
     report_unrunnable(tool, display, outcome, verbose, |raw, code| {
         ErrorStreamFilter::new()
-            .on_exit(code, raw)
+            .on_exit(code, raw, false)
             .unwrap_or_default()
     })
 }
