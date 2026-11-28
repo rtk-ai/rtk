@@ -899,6 +899,17 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        // Only the bare listing has the tabular shape `rtk launchctl` compacts; a label after
+        // `list` prints one job's dictionary. Not producer-safe: the filter leaves out Apple's
+        // own services, so `launchctl list | grep com.apple.Finder` would find nothing.
+        pattern: r"^launchctl\s+list\s*$",
+        rtk_cmd: "rtk launchctl",
+        rewrite_prefixes: &["launchctl"],
+        category: "System",
+        savings_pct: 95.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^make\b",
         rtk_cmd: "rtk make",
         rewrite_prefixes: &["make"],

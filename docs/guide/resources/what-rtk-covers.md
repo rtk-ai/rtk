@@ -147,6 +147,12 @@ listing into `head`, `tail`, or `cat`.
 | `terraform plan` | Planned changes summary, resource diffs condensed |
 | `nix search` | One line per package; first 20 shown, the rest counted (a lower bound when nix fails or the output nears 10 MiB) with a recall hint; stderr forwarded (whole on failure or when short); a search with `--json`, `-v`/`--verbose`, `--debug`, `--debugger`, `--log-format` or `--trace-function-calls`, and other `nix` commands, pass through |
 
+## System
+
+| Command | What changes |
+|---------|--------------|
+| `launchctl list` | Apple's own `com.apple.*` services left out and counted; every other job shown verbatim |
+
 ## Global flags
 
 These flags apply to all RTK commands and must come before the subcommand:
