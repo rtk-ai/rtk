@@ -2221,7 +2221,6 @@ mod tests {
 
     #[test]
     fn test_websearch_with_recall_counts_the_filtered_result_once() {
-        let tee_dir = crate::core::test_isolation::tempdir();
         let result = (0..40)
             .map(|i| format!("\x1b[1mresult number {i:02}\x1b[0m "))
             .collect::<String>();
@@ -2246,9 +2245,11 @@ mod tests {
             "{raw_tokens} -> {filtered_tokens}"
         );
 
+        // Recall in its default mode: the hint names a fixed-length hash rather
+        // than a file path, so its size does not grow with TMPDIR.
         let (output, entries) = run_logged_with(
             &websearch_event(&result),
-            &tee_config(tee_dir.path()),
+            &Config::default(),
             &pipeline,
             true,
         );
@@ -2259,7 +2260,7 @@ mod tests {
             .as_str()
             .expect("the filtered result is a string");
         assert!(
-            emitted.starts_with(&format!("{filtered}\n[full output: ")),
+            emitted.starts_with(&format!("{filtered}\n[full output: rtk recall ")),
             "{emitted}"
         );
 
