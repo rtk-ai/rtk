@@ -148,9 +148,17 @@ mod tests {
         );
     }
 
-    /// The shipped hooks that call `rtk rewrite` refuse an older rtk. Their
-    /// floor is the release whose CHANGELOG section lists f447a3d, the commit
-    /// that added `rtk rewrite` (#5126: they said 0.23.0; it is 0.25.0).
+    /// The Claude and Cursor shell hooks and the Pi extension refuse an rtk
+    /// older than the release whose CHANGELOG section lists f447a3d, the commit
+    /// that added `rtk rewrite` (0.25.0). Each carries its whole guard exactly
+    /// once, every line of it at the start of a line: the major and minor
+    /// comparison, the "too old" message naming that release, and the early
+    /// exit. Each has a `Requires:` header, and every three-part number in it
+    /// (`X.Y.Z`, in a message or a comment) is that release. In the Pi
+    /// extension the floor is declared once and the guard comes before the
+    /// `tool_call` handler is registered. The shell hooks are also run against a
+    /// stub rtk in `tests/hook_decision_protocol_test.rs`; the Pi extension is
+    /// only checked here, as text.
     #[test]
     fn test_shipped_hooks_gate_on_the_release_that_added_rewrite() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -174,33 +182,72 @@ mod tests {
             .nth(1)
             .expect("a major.minor.patch release");
 
-        let message = format!("too old (need >= {release})");
-        for (path, guard, messages) in [
-            (
-                "hooks/claude/rtk-rewrite.sh",
-                format!("[ \"$MINOR\" -lt {minor} ]"),
-                1,
-            ),
-            (
-                "hooks/cursor/rtk-rewrite.sh",
-                format!("[ \"$MINOR\" -lt {minor} ]"),
-                1,
-            ),
-            (
-                "hooks/pi/rtk.ts",
-                format!("const MIN_SUPPORTED_RTK_MINOR = {minor}\n"),
-                2,
-            ),
+        // The hooks indent their guards differently, so blocks are compared
+        // line by line with leading whitespace removed. Each line, the first
+        // included, is matched from a line start, so a copy behind a line
+        // comment (`#`, `//`) does not count.
+        let unindent = |text: &str| {
+            let lines: Vec<&str> = text.lines().map(str::trim_start).collect();
+            format!("\n{}\n", lines.join("\n"))
+        };
+        let shell_guard = format!(
+            "\nif [ \"$MAJOR\" -eq 0 ] && [ \"$MINOR\" -lt {minor} ]; then\n\
+             echo \"[rtk] WARNING: rtk $RTK_VERSION is too old (need >= {release}). \
+             Upgrade: cargo install rtk\" >&2\n\
+             exit 0\n\
+             fi\n"
+        );
+        let pi_guard = format!(
+            "\nconst parsed = parseSemver(ver.stdout.replace(/^rtk\\s+/, \"\"))\n\
+             if (parsed) {{\n\
+             const [major, minor] = parsed\n\
+             if (major === 0 && minor < MIN_SUPPORTED_RTK_MINOR) {{\n\
+             reportRtkUnavailable(`rtk ${{parsed.join(\".\")}} is too old (need >= {release})`)\n\
+             console.warn(`[rtk] rtk ${{ver.stdout.trim()}} is too old (need >= {release}) \
+             — extension disabled`)\n\
+             return\n\
+             }}\n\
+             }}\n"
+        );
+        let pi_floor = format!("\nconst MIN_SUPPORTED_RTK_MINOR = {minor}\n");
+        let header = format!("Requires: rtk >= {release}");
+        let version = regex::Regex::new(r"\d+\.\d+\.\d+").expect("valid version pattern");
+        for (path, guards) in [
+            ("hooks/claude/rtk-rewrite.sh", vec![&shell_guard]),
+            ("hooks/cursor/rtk-rewrite.sh", vec![&shell_guard]),
+            ("hooks/pi/rtk.ts", vec![&pi_floor, &pi_guard]),
         ] {
-            let hook = read(path);
-            assert!(hook.contains(&guard), "{path} lacks `{guard}`");
-            assert_eq!(
-                hook.matches(&message).count(),
-                messages,
-                "{path} should say `{message}` {messages} time(s)"
-            );
-            assert!(!hook.contains("0.23.0"), "{path} still names 0.23.0");
+            let hook = unindent(&read(path));
+            for guard in guards {
+                assert_eq!(
+                    hook.matches(guard.as_str()).count(),
+                    1,
+                    "{path} should carry this guard exactly once:\n{guard}"
+                );
+            }
+            assert!(hook.contains(&header), "{path} lacks `{header}`");
+            let stale: Vec<&str> = version
+                .find_iter(&hook)
+                .map(|m| m.as_str())
+                .filter(|named| *named != release)
+                .collect();
+            assert!(stale.is_empty(), "{path} names {stale:?}, not {release}");
         }
+
+        let pi = unindent(&read("hooks/pi/rtk.ts"));
+        assert_eq!(
+            pi.matches("\nconst MIN_SUPPORTED_RTK_MINOR =").count(),
+            1,
+            "hooks/pi/rtk.ts declares its floor more than once"
+        );
+        let guard_at = pi.find(pi_guard.as_str()).expect("Pi guard present");
+        let handler_at = pi
+            .find("\npi.on(\"tool_call\"")
+            .expect("Pi registers a tool_call handler");
+        assert!(
+            guard_at < handler_at,
+            "hooks/pi/rtk.ts registers its tool_call handler before the version guard"
+        );
     }
 
     #[test]

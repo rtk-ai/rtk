@@ -159,7 +159,8 @@ impl Sandbox {
     /// gets only what every isolated child keeps, never a `BASH_ENV`, another
     /// `rtk`, an audit or data directory; config, data and cache all live in
     /// this sandbox, and temporary files go to `TMPDIR` as they do for any
-    /// child.
+    /// child. The `env` entries are set last, so they replace any of the
+    /// variables above, `PATH` included.
     #[cfg(unix)]
     fn run_hook(&self, hook: &str, cmd: &str, env: &[(&str, &str)]) -> (i32, String, String) {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -959,5 +960,99 @@ mod rewrite_host_scoping {
         let (code, _) = denied.rewrite_as("openclaw", &format!("tail -n +52 {}", denied.tee_log()));
         assert_eq!(code, 2, "the deny rule must match, or this proves nothing");
         assert!(!denied.recorded_a_recall());
+    }
+}
+
+/// The shell hooks' version floor, run rather than read: `rtk rewrite` first
+/// shipped in 0.25.0, and older binaries answer it with exit 2 and nothing on
+/// stdout, so a hook that lets them through gets no rewrite and says nothing.
+#[cfg(unix)]
+mod version_floor {
+    use super::Sandbox;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// One run of `hook` in a fresh sandbox, so the Claude hook's cached version
+    /// check cannot carry over between versions. A stub `rtk` comes first on
+    /// PATH: it reports `version`, answers every `rewrite` with
+    /// `rtk git status` and logs each call. Returns the hook's exit code,
+    /// stdout and stderr, and the stub's log.
+    fn run(hook: &str, version: &str) -> (i32, String, String, String) {
+        let sb = Sandbox::bare();
+        let bin = sb.home.join("stub-bin");
+        std::fs::create_dir_all(&bin).expect("create stub dir");
+        let stub = bin.join("rtk");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\n\
+             printf '%s\\n' \"$*\" >> \"$STUB_LOG\"\n\
+             case \"$1\" in\n\
+             --version) echo \"rtk $STUB_VERSION\" ;;\n\
+             rewrite) echo \"rtk git status\" ;;\n\
+             *) exit 1 ;;\n\
+             esac\n",
+        )
+        .expect("write stub rtk");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("make stub rtk executable");
+        let log = sb.home.join("stub.log");
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let path =
+            std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+                .expect("PATH entries join");
+        let (code, stdout, stderr) = sb.run_hook(
+            hook,
+            "git status",
+            &[
+                ("PATH", path.to_str().expect("PATH is UTF-8")),
+                ("STUB_LOG", log.to_str().expect("log path is UTF-8")),
+                ("STUB_VERSION", version),
+            ],
+        );
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        (code, stdout, stderr, calls)
+    }
+
+    /// Below the floor, on the last release before it (0.24.0) and on a
+    /// one-digit minor (0.9.0, which a string comparison would let through),
+    /// the hook warns, exits 0 and never calls `rtk rewrite`. At the floor and
+    /// on a later major, it calls it and hands the rewrite back with no
+    /// warning.
+    #[test]
+    fn shell_hooks_call_rewrite_only_from_the_release_that_added_it() {
+        for hook in ["hooks/claude/rtk-rewrite.sh", "hooks/cursor/rtk-rewrite.sh"] {
+            for version in ["0.24.0", "0.9.0"] {
+                let (code, stdout, stderr, calls) = run(hook, version);
+                assert_eq!(code, 0, "{hook} on {version}: stderr {stderr:?}");
+                assert!(
+                    stderr.contains(&format!("rtk {version} is too old (need >= 0.25.0)")),
+                    "{hook} on {version} did not warn: stderr {stderr:?}"
+                );
+                assert!(
+                    !calls.lines().any(|call| call.starts_with("rewrite")),
+                    "{hook} on {version} called rtk rewrite: {calls:?}"
+                );
+                assert!(
+                    !stdout.contains("rtk git status"),
+                    "{hook} on {version} handed back a rewrite: {stdout:?}"
+                );
+            }
+
+            for version in ["0.25.0", "1.2.0"] {
+                let (code, stdout, stderr, calls) = run(hook, version);
+                assert_eq!(code, 0, "{hook} on {version}: stderr {stderr:?}");
+                assert!(
+                    !stderr.contains("too old"),
+                    "{hook} on {version} warned: {stderr:?}"
+                );
+                assert!(
+                    calls.lines().any(|call| call == "rewrite git status"),
+                    "{hook} on {version} did not call rtk rewrite: {calls:?}"
+                );
+                assert!(
+                    stdout.contains("\"rtk git status\""),
+                    "{hook} on {version} did not hand back the rewrite: {stdout:?}"
+                );
+            }
+        }
     }
 }
