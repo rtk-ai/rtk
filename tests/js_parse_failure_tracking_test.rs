@@ -157,15 +157,15 @@ fn pnpm_list_parsed_run_is_still_savings() {
 
     let run = rtk_with(bin.path(), &["pnpm", "list"]);
 
-    assert!(run.stdout().contains("lodash"), "got:\n{}", run.stdout());
+    assert_eq!(
+        run.stdout().trim_end(),
+        "4 packages (1 prod / 3 dev)\n[prod]\n  lodash 4.17.0\n[dev]\n  @playwright/test 1.56.1\n  jest 29.7.0\n  vitest 3.2.4"
+    );
     assert_booked_as_savings(&run, "pnpm list --depth=0");
 }
 
-/// pnpm 12 lists a project with no `name` field as a bare `path`, which the
-/// list parser does not read. Should it learn to, this case needs another
-/// stream the parser cannot read.
 #[test]
-fn pnpm_list_output_the_parser_cannot_read_is_a_parse_failure() {
+fn pnpm_list_unnamed_project_has_no_dependencies() {
     let bin = common::tempdir();
     fake_tool(
         bin.path(),
@@ -177,7 +177,25 @@ fn pnpm_list_output_the_parser_cannot_read_is_a_parse_failure() {
 
     let run = rtk_with(bin.path(), &["pnpm", "list"]);
 
-    assert!(run.stdout().contains("\"path\""), "got:\n{}", run.stdout());
+    assert_eq!(run.stdout().trim_end(), "0 packages (0 prod / 0 dev)");
+    assert_booked_as_savings(&run, "pnpm list --depth=0");
+}
+
+#[test]
+fn pnpm_list_output_the_parser_cannot_read_is_a_parse_failure() {
+    let bin = common::tempdir();
+    fake_tool(
+        bin.path(),
+        "pnpm",
+        None,
+        Some("pnpm_outdated_bad_manifest_stderr.txt"),
+        0,
+    );
+    let run = rtk_with(bin.path(), &["pnpm", "list"]);
+    assert!(
+        run.stdout()
+            .contains("ERR_PNPM_PACKAGE_MANIFEST_SERIALIZATION_ERROR")
+    );
     assert_booked_as_failure(&run, "pnpm list --depth=0");
 }
 
