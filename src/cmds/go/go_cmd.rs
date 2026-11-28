@@ -361,22 +361,57 @@ fn pipe_event_line(index: usize, line: &str) -> &str {
     }
 }
 
+fn is_go_build_text_header(line: &str) -> bool {
+    let Some(header) = line.strip_prefix("# ") else {
+        return false;
+    };
+    let mut fields = header.split_ascii_whitespace();
+    fields.next().is_some()
+        && fields
+            .next()
+            .is_none_or(|variant| variant.starts_with('[') && variant.ends_with(".test]"))
+        && fields.next().is_none()
+}
+
+fn is_go_build_text_diagnostic(line: &str) -> bool {
+    !line.trim_start().starts_with('{') && is_go_build_error_line(line)
+}
+
 /// Auto-detect only a leading Go stream, not events quoted inside other text.
-/// Cold-cache downloads may precede events; arbitrary prose, Markdown fences and
-/// diff headers must instead keep the whole input on the lossless fallback path.
-/// Build events alone are not a test report and must retain their diagnostics.
+/// Downloads and plain compiler diagnostics may precede events. A diagnostic
+/// block must start with a Go package header, and some test event evidence must
+/// follow it. Build events alone are not a test report.
 pub(crate) fn is_go_test_json(input: &str) -> bool {
-    for (index, line) in input.lines().enumerate() {
-        let line = pipe_event_line(index, line);
+    let mut lines = input.lines().enumerate().peekable();
+    while let Some((index, raw)) = lines.next() {
+        let line = pipe_event_line(index, raw);
         if line.is_empty() || line.starts_with("go: downloading ") {
             continue;
         }
-        let Some(event) = pipe_event(line) else {
-            return false;
-        };
-        if pipe_test_evidence(&event) {
-            return true;
+        if let Some(event) = pipe_event(line) {
+            if pipe_test_evidence(&event) {
+                return true;
+            }
+            continue;
         }
+        if !is_go_build_text_header(line)
+            || lines
+                .next_if(|(_, raw)| is_go_build_text_diagnostic(raw))
+                .is_none()
+        {
+            return false;
+        }
+        // Compiler diagnostics can have indented continuation lines and a bare
+        // `too many errors` trailer after 10 gc errors. A JSON record ends the
+        // block even if it is indented or contains a file location.
+        while lines
+            .next_if(|(_, raw)| {
+                is_go_build_text_diagnostic(raw)
+                    || raw.trim() == "too many errors"
+                    || (raw.starts_with([' ', '\t']) && !raw.trim_start().starts_with('{'))
+            })
+            .is_some()
+        {}
     }
     false
 }
@@ -971,6 +1006,45 @@ mod tests {
         }
         assert!(!is_go_test_json("go: downloading example.com/dep v1.0.0\n"));
         assert!(!is_go_test_json(r#"{"Action":"start"}"#));
+    }
+
+    #[test]
+    fn auto_detection_handles_leading_go_build_diagnostic_blocks() {
+        let event = r#"{"Action":"fail","Package":"example.com/proj","Test":"TestX"}"#;
+        let output_with_go_loc = r#"{"Action":"output","Package":"example.com/proj","Test":"TestX","Output":"x_test.go:12: boom\n"}"#;
+
+        let multi_diag = format!(
+            "# example.com/proj/broken [example.com/proj/broken.test]\nbroken/a.go:1:2: undefined: first\nbroken/b.go:3:4: undefined: second\n{event}\n"
+        );
+        assert!(is_go_test_json(&multi_diag));
+
+        let indented_json = format!(
+            "# example.com/proj/broken [example.com/proj/broken.test]\nbroken/a.go:1:2: undefined: first\n  {event}\n"
+        );
+        assert!(is_go_test_json(&indented_json));
+
+        let json_output_after_diag = format!(
+            "# example.com/proj/broken [example.com/proj/broken.test]\nbroken/a.go:1:2: undefined: first\n{output_with_go_loc}\n"
+        );
+        assert!(is_go_test_json(&json_output_after_diag));
+
+        let header_then_json_with_go_loc = format!("# Notes\n{output_with_go_loc}\n{event}\n");
+        assert!(!is_go_test_json(&header_then_json_with_go_loc));
+
+        let mut too_many = String::from("# p [p.test]\n");
+        for i in 1..=10 {
+            too_many.push_str(&format!("./a.go:{i}:2: undefined: x{i}\n"));
+        }
+        too_many.push_str("too many errors\n");
+        assert!(!is_go_test_json(&too_many));
+        assert!(!is_go_test_json(&format!(
+            "{too_many}unrelated prose\n{event}\n"
+        )));
+        assert!(!is_go_test_json(&format!("too many errors\n{event}\n")));
+
+        too_many.push_str(event);
+        too_many.push('\n');
+        assert!(is_go_test_json(&too_many));
     }
 
     #[test]
