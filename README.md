@@ -287,6 +287,15 @@ RTK collects **no command content and no file contents**. Telemetry is anonymous
 
 <br>
 
+## Agent skills
+
+An agent-agnostic plugin marketplace at [`.agents/plugins/marketplace.json`](.agents/plugins/marketplace.json)
+registers [`plugins/rtk`](plugins/rtk), with [agent skills](https://agentskills.io/) for setting up RTK, working with
+filtered output and measuring savings. Codex and Claude Code manifests are in the plugin directory. The hooks
+themselves are still installed with `rtk init`.
+
+<br>
+
 ## Editions and licence
 
 RTK ships as three downloads. The two `rtk` editions install a binary with the **same name** — hooks, scripts and agent config work unchanged across both — so they cannot be installed together. Uninstall one before installing the other.

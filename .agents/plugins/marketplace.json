@@ -1,0 +1,20 @@
+{
+  "name": "rtk",
+  "interface": {
+    "displayName": "RTK"
+  },
+  "plugins": [
+    {
+      "name": "rtk",
+      "source": {
+        "source": "local",
+        "path": "./plugins/rtk"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
