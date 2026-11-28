@@ -11,7 +11,11 @@ network access to replay them.
   the historical lifecycle events. A separate `-json -v=false` benchmark run
   captures `bench`: with chatty JSON enabled, `b.Log` prints immediately instead
   of producing the buffered `--- BENCH:` report.
-- Both scripts retain timestamps, timings and temporary artifact paths exactly
+- `capture_bench.sh` was run with official Go 1.27.4 on Windows arm64. It runs
+  one benchmark set (plain, two sub-benchmarks, a skip, and one that prints to
+  stdout) chatty and then quiet (`-v=false`), so both streams of the same run
+  can be compared, plus a `-fuzz` run with `-bench` in a second package.
+- The scripts retain timestamps, timings and temporary artifact paths exactly
   as emitted. Regeneration changes those values, not the expected summaries.
 
 Run each script with the corresponding Go binary first on `PATH`:
@@ -19,6 +23,7 @@ Run each script with the corresponding Go binary first on `PATH`:
 ```sh
 bash tests/fixtures/go_test_pipe/capture.sh
 bash tests/fixtures/go_test_pipe/capture_legacy.sh
+bash tests/fixtures/go_test_pipe/capture_bench.sh
 ```
 
 | File | Producer / purpose |
@@ -32,6 +37,9 @@ bash tests/fixtures/go_test_pipe/capture_legacy.sh
 | `build_only.jsonl` | `go build -json` for the broken package, not a test report |
 | `legacy_core.jsonl` | Go 1.24.6 lifecycle/parallel/skip/benchmark capture |
 | `legacy_bench.jsonl` | Go 1.24.6 non-chatty logging benchmark emitting `Action: bench` |
+| `bench_chatty.jsonl` | Go 1.27.4 `go test -json -bench .`: sub-benchmarks, a skipped benchmark, one printing to stdout; one row too fast to measure |
+| `bench_quiet.jsonl` | The same run with `-v=false`: rows split in two events, stdout between a row's halves |
+| `bench_fuzz.jsonl` | Go 1.27.4 `-fuzz` with `-bench` in one package |
 | `build_failure.jsonl` | Captured by hand (below): `go test -json` for a package that does not compile |
 | `cold_build_failure.jsonl` | Captured by hand (below): `go test -json ./... 2>&1` with a fresh module cache and a package that does not compile |
 | `finding_module.jsonl` | Captured by hand (below): `go test -json ./... 2>&1` with `GOFLAGS=-mod=mod` resolving a missing requirement |

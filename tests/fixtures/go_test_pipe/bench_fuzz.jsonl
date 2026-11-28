@@ -1,0 +1,19 @@
+{"Time":"2026-11-26T11:00:56.565672+05:30","Action":"start","Package":"example.com/rtk-pipe-fixture/fz"}
+{"Time":"2026-11-26T11:00:56.7136484+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/fz","Output":"goos: windows\n"}
+{"Time":"2026-11-26T11:00:56.7141684+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/fz","Output":"goarch: arm64\n"}
+{"Time":"2026-11-26T11:00:56.7141684+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/fz","Output":"pkg: example.com/rtk-pipe-fixture/fz\n"}
+{"Time":"2026-11-26T11:00:56.7141684+05:30","Action":"run","Package":"example.com/rtk-pipe-fixture/fz","Test":"BenchmarkEcho"}
+{"Time":"2026-11-26T11:00:56.7141684+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/fz","Test":"BenchmarkEcho","Output":"=== RUN   BenchmarkEcho\n","OutputType":"frame"}
+{"Time":"2026-11-26T11:00:56.7141684+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/fz","Test":"BenchmarkEcho","Output":"BenchmarkEcho\n"}
+{"Time":"2026-11-26T11:00:56.7146798+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/fz","Test":"BenchmarkEcho","Output":"BenchmarkEcho-12    \t"}
+{"Time":"2026-11-26T11:00:56.7146798+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/fz","Test":"BenchmarkEcho","Output":"       2\t       450.0 ns/op\n"}
+{"Time":"2026-11-26T11:00:56.7146798+05:30","Action":"run","Package":"example.com/rtk-pipe-fixture/fz","Test":"FuzzEcho"}
+{"Time":"2026-11-26T11:00:56.7146798+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/fz","Test":"FuzzEcho","Output":"=== RUN   FuzzEcho\n","OutputType":"frame"}
+{"Time":"2026-11-26T11:00:56.7194074+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/fz","Test":"FuzzEcho","Output":"fuzz: elapsed: 0s, gathering baseline coverage: 0/1 completed\n"}
+{"Time":"2026-11-26T11:00:56.74115+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/fz","Test":"FuzzEcho","Output":"fuzz: elapsed: 0s, gathering baseline coverage: 1/1 completed, now fuzzing with 12 workers\n"}
+{"Time":"2026-11-26T11:00:56.7513834+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/fz","Test":"FuzzEcho","Output":"fuzz: elapsed: 0s, execs: 20 (636/sec), new interesting: 0 (total: 1)\n"}
+{"Time":"2026-11-26T11:00:56.7513834+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/fz","Test":"FuzzEcho","Output":"--- PASS: FuzzEcho (0.04s)\n","OutputType":"frame"}
+{"Time":"2026-11-26T11:00:56.7513834+05:30","Action":"pass","Package":"example.com/rtk-pipe-fixture/fz","Test":"FuzzEcho","Elapsed":0.04}
+{"Time":"2026-11-26T11:00:56.7513834+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/fz","Output":"PASS\n","OutputType":"frame"}
+{"Time":"2026-11-26T11:00:56.7544099+05:30","Action":"output","Package":"example.com/rtk-pipe-fixture/fz","Output":"ok  \texample.com/rtk-pipe-fixture/fz\t0.188s\n"}
+{"Time":"2026-11-26T11:00:56.7544099+05:30","Action":"pass","Package":"example.com/rtk-pipe-fixture/fz","Elapsed":0.189}

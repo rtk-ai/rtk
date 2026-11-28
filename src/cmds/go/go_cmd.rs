@@ -45,6 +45,8 @@ struct PackageResult {
     package_failed: bool,                     // package-level failure (timeout, signal, etc.)
     package_fail_output: Vec<String>,         // output lines collected before the package fail
     fuzz_summary: Option<String>,
+    benchmark_output: Vec<String>, // benchmark result rows, in order (one per sample)
+    benchmark_pending: Option<String>, // a bare benchmark name awaiting its result half
 }
 
 fn forwarded_help(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
@@ -529,6 +531,16 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
             }
             "output" => {
                 if let Some(output_text) = &event.output {
+                    // Benchmark rows are printed package-level (quiet) or under a
+                    // `Benchmark…` test (chatty); a unit test's own stdout is not one.
+                    if event
+                        .test
+                        .as_deref()
+                        .is_none_or(|test| test.starts_with("Benchmark"))
+                    {
+                        add_go_benchmark_output(pkg_result, output_text);
+                    }
+
                     if let Some(test) = &event.test {
                         // Keep the package's last fuzz progress line: Go prints the final stats there
                         if output_text.starts_with("fuzz: elapsed:") {
@@ -558,6 +570,9 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
     let total_pass: usize = packages.values().map(|p| p.pass).sum();
     let total_fail: usize = packages.values().map(|p| p.fail).sum();
     let total_skip: usize = packages.values().map(|p| p.skip).sum();
+    // The rows are the benchmarks: Go sends no `pass` for one, a parent of
+    // sub-benchmarks prints no row, and a skipped one stays in `skip`.
+    let total_benchmarks: usize = packages.values().map(|p| p.benchmark_output.len()).sum();
     let total_build_fail: usize = packages.values().filter(|p| p.build_failed).count();
     // Only count package-level fails for packages with no individual test or build failures.
     // go test -json emits a trailing package-level {"action":"fail"} after any test failure
@@ -569,7 +584,7 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
 
     let has_failures = total_fail > 0 || total_build_fail > 0 || total_pkg_fail > 0;
 
-    if !has_failures && total_pass == 0 {
+    if !has_failures && total_pass == 0 && total_benchmarks == 0 {
         return "Go test: No tests found".to_string();
     }
 
@@ -579,6 +594,10 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
         .count();
     if !has_failures && total_fuzz > 0 {
         return format_fuzz_summary(&packages, total_pass, total_fuzz);
+    }
+
+    if !has_failures && total_benchmarks > 0 {
+        return format_benchmark_summary(&packages, total_pass, total_benchmarks, total_packages);
     }
 
     if !has_failures {
@@ -659,7 +678,100 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
         }
     }
 
+    if total_benchmarks > 0 {
+        append_benchmark_results(&mut result, &packages);
+    }
+
     result.trim().to_string()
+}
+
+/// Go prints a benchmark row as `BenchmarkX-12 \t` before the run and the
+/// iteration count and measurements after it; test2json emits the two halves
+/// as separate `output` events, and stdout the benchmark writes meanwhile can
+/// land between them. Only the bare name is held until its result half comes.
+fn add_go_benchmark_output(pkg_result: &mut PackageResult, output_text: &str) {
+    if is_bare_benchmark_name(output_text) {
+        pkg_result.benchmark_pending = Some(output_text.to_string());
+        return;
+    }
+    // The result half starts with the iteration count, so only a fragment that
+    // completes the pending name into a row is taken; other stdout leaves it.
+    if let Some(name) = pkg_result.benchmark_pending.take() {
+        let row = format!("{name}{output_text}");
+        if is_go_benchmark_result_line(&row) {
+            pkg_result.benchmark_output.push(row.trim().to_string());
+            return;
+        }
+        pkg_result.benchmark_pending = Some(name);
+    }
+    for line in output_text.lines() {
+        add_go_benchmark_row(pkg_result, line);
+    }
+}
+
+fn add_go_benchmark_row(pkg_result: &mut PackageResult, line: &str) {
+    // No dedup: `-count=N` legitimately repeats a benchmark, and identical
+    // result lines are still separate samples (benchstat needs every one).
+    if is_go_benchmark_result_line(line) {
+        pkg_result.benchmark_output.push(line.trim().to_string());
+    }
+}
+
+/// `BenchmarkX-12 \t`: one `Benchmark…` token, trailing whitespace, no newline.
+fn is_bare_benchmark_name(text: &str) -> bool {
+    let name = text.trim_end();
+    name.starts_with("Benchmark")
+        && name.len() < text.len()
+        && !text.contains('\n')
+        && !name.contains(char::is_whitespace)
+}
+
+/// A benchmark row: name, integer iteration count, then value and unit pairs
+/// (`BenchmarkX-12  10  1679 ns/op  0 B/op`). Go leaves the pairs out when the
+/// run took less than the timer resolves (`BenchmarkX-12  2`).
+fn is_go_benchmark_result_line(line: &str) -> bool {
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    fields.len() >= 2
+        && fields[0].starts_with("Benchmark")
+        && fields[1].parse::<u64>().is_ok()
+        && (fields.len() == 2
+            || (fields.len() >= 4
+                && fields[2].parse::<f64>().is_ok()
+                && fields[3].parse::<f64>().is_err()))
+}
+
+fn format_benchmark_summary(
+    packages: &HashMap<String, PackageResult>,
+    total_pass: usize,
+    total_benchmarks: usize,
+    total_packages: usize,
+) -> String {
+    let benchmark_label = if total_benchmarks == 1 {
+        "benchmark"
+    } else {
+        "benchmarks"
+    };
+    let mut result = format!(
+        "Go test: {} passed, {} {} in {} packages\n",
+        total_pass, total_benchmarks, benchmark_label, total_packages
+    );
+    append_benchmark_results(&mut result, packages);
+    result.trim().to_string()
+}
+
+fn append_benchmark_results(result: &mut String, packages: &HashMap<String, PackageResult>) {
+    let mut benchmarked: Vec<(&String, &PackageResult)> = packages
+        .iter()
+        .filter(|(_, pkg_result)| !pkg_result.benchmark_output.is_empty())
+        .collect();
+    benchmarked.sort_by_key(|(package, _)| *package);
+
+    for (package, pkg_result) in benchmarked {
+        result.push_str(&format!("\n{}\n", compact_package_name(package)));
+        for line in &pkg_result.benchmark_output {
+            result.push_str(&format!("  {}\n", line));
+        }
+    }
 }
 
 fn format_fuzz_summary(
@@ -673,17 +785,22 @@ fn format_fuzz_summary(
         total_fuzz,
         packages.len()
     );
-    let mut fuzzed: Vec<(&String, &String)> = packages
+    let mut fuzzed: Vec<(&String, &PackageResult, &String)> = packages
         .iter()
-        .filter_map(|(pkg, r)| r.fuzz_summary.as_ref().map(|s| (pkg, s)))
+        .filter_map(|(pkg, r)| r.fuzz_summary.as_ref().map(|s| (pkg, r, s)))
         .collect();
-    fuzzed.sort();
-    for (package, summary) in fuzzed {
+    fuzzed.sort_by_key(|(package, _, _)| *package);
+    for (package, pkg_result, summary) in fuzzed {
         result.push_str(&format!(
             "{}\n  {}\n",
             compact_package_name(package),
             summary
         ));
+        // `-fuzz` takes a single package, so its benchmark rows go under the
+        // same heading.
+        for line in &pkg_result.benchmark_output {
+            result.push_str(&format!("  {}\n", line));
+        }
     }
     result.trim().to_string()
 }
@@ -984,6 +1101,178 @@ mod tests {
         assert!(result.contains("Go test"));
         assert!(result.contains("1 passed"));
         assert!(result.contains("1 packages"));
+    }
+
+    #[test]
+    fn test_go_benchmark_result_line_layout() {
+        // Real rows: chatty and quiet halves joined, `-benchmem` pairs, and a
+        // run too short for the timer, which Go prints with no measurement.
+        for row in [
+            "BenchmarkX-12        \t       2\t       150.0 ns/op",
+            "BenchmarkSub/n=0-12  \t       2\t        50.00 ns/op\n",
+            "BenchmarkSub/n=1-12  \t       2\n",
+            "BenchmarkMem-12    \t1000000000\t         0.3061 ns/op\t       0 B/op\t       0 allocs/op",
+        ] {
+            assert!(is_go_benchmark_result_line(row), "{row:?}");
+        }
+        for line in [
+            "Benchmarks loaded from /srv/data",   // no iteration count
+            "BenchmarkConfig 3 2",                // no unit
+            "BenchmarkX-12 \t 2\t 3",             // value without a unit
+            "BenchmarkConfig 3 2 1",              // numbers where the unit goes
+            "BenchmarkX-12 \t 2.5\t 150.0 ns/op", // iterations are an integer
+            "BenchmarkX-12 \t 2\t fast ns/op",    // value is a number
+            "ProfileX-12 \t 2\t 150.0 ns/op",     // a `Benchmark…` name
+            "BenchmarkX\n",
+            "goos: windows",
+        ] {
+            assert!(!is_go_benchmark_result_line(line), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn test_bare_benchmark_name_is_one_token_then_whitespace() {
+        assert!(is_bare_benchmark_name("BenchmarkX-12        \t"));
+        assert!(is_bare_benchmark_name("BenchmarkSub/n=0-12  \t"));
+        for text in [
+            "BenchmarkX\n",                     // chatty name line
+            "BenchmarkX-12",                    // no trailing whitespace
+            "BenchmarkX-12 \t 2\t 150.0 ns/op", // a whole row
+            "Benchmarks loaded \t",             // two tokens
+            "ProfileX-12 \t",                   // not a benchmark
+        ] {
+            assert!(!is_bare_benchmark_name(text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn test_filter_go_test_unit_test_stdout_is_not_a_benchmark() {
+        // Plain `rtk go test` never runs benchmarks: a test's own stdout is
+        // never a row, even when it has a row's layout.
+        let output = r#"{"Action":"run","Package":"example.com/app","Test":"TestLoad"}
+{"Action":"output","Package":"example.com/app","Test":"TestLoad","Output":"Benchmarks loaded from /srv/data\n"}
+{"Action":"output","Package":"example.com/app","Test":"TestLoad","Output":"BenchmarkConfig 3 2\n"}
+{"Action":"output","Package":"example.com/app","Test":"TestLoad","Output":"BenchmarkFake-8 \t      10\t     100 ns/op\n"}
+{"Action":"output","Package":"example.com/app","Test":"TestLoad","Output":"BenchmarkFake-8 \t"}
+{"Action":"output","Package":"example.com/app","Test":"TestLoad","Output":"      10\t     100 ns/op\n"}
+{"Action":"pass","Package":"example.com/app","Test":"TestLoad","Elapsed":0}
+{"Action":"pass","Package":"example.com/app","Elapsed":0.1}"#;
+
+        assert_eq!(
+            filter_go_test_json(output),
+            "Go test: 1 passed in 1 packages"
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_bench_count_keeps_identical_samples() {
+        // `-count=2` in quiet mode: two runs can print byte-identical results.
+        let output = r#"{"Action":"output","Package":"example.com/benchrepro","Output":"BenchmarkMem-12    \t"}
+{"Action":"output","Package":"example.com/benchrepro","Output":"1000000000\t         0.3058 ns/op\n"}
+{"Action":"output","Package":"example.com/benchrepro","Output":"BenchmarkMem-12    \t"}
+{"Action":"output","Package":"example.com/benchrepro","Output":"1000000000\t         0.3058 ns/op\n"}
+{"Action":"pass","Package":"example.com/benchrepro","Elapsed":0.9}"#;
+
+        let result = filter_go_test_json(output);
+
+        assert_eq!(
+            result.matches("BenchmarkMem-12").count(),
+            2,
+            "every -count sample must be kept: {result}"
+        );
+        assert!(result.contains("2 benchmarks"), "got: {result}");
+    }
+
+    #[test]
+    fn test_filter_go_test_bench_with_benchmem() {
+        let output = r#"{"Action":"output","Package":"example.com/benchrepro","Test":"BenchmarkMem","Output":"BenchmarkMem-12    \t1000000000\t         0.3061 ns/op\t       0 B/op\t       0 allocs/op\n"}"#;
+
+        let result = filter_go_test_json(output);
+
+        assert!(
+            result.ends_with("0.3061 ns/op\t       0 B/op\t       0 allocs/op"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_bench_row_without_trailing_newline() {
+        let output = r#"{"Action":"output","Package":"example.com/benchrepro","Output":"BenchmarkTail-12\t100\t123 ns/op"}"#;
+
+        assert_eq!(
+            filter_go_test_json(output),
+            "Go test: 0 passed, 1 benchmark in 1 packages\n\nbenchrepro\n  BenchmarkTail-12\t100\t123 ns/op"
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_bench_packages_sorted_and_rowless_ones_left_out() {
+        // Eight packages in reverse order: without the sort, HashMap order
+        // would match this one only by chance. `example.com/plain` has a
+        // passing test and no rows, so it gets no heading.
+        let mut output = String::from(
+            r#"{"Action":"pass","Package":"example.com/plain","Test":"TestPlain","Elapsed":0}"#,
+        );
+        for pkg in ["h", "g", "f", "e", "d", "c", "b", "a"] {
+            output.push_str(&format!(
+                "\n{{\"Action\":\"output\",\"Package\":\"example.com/{pkg}\",\"Output\":\"Benchmark{pkg}-12\\t1\\t5 ns/op\\n\"}}"
+            ));
+        }
+
+        let result = filter_go_test_json(&output);
+
+        let headings: Vec<&str> = result
+            .lines()
+            .filter(|line| {
+                !line.is_empty() && !line.starts_with(' ') && !line.starts_with("Go test")
+            })
+            .collect();
+        assert_eq!(
+            headings,
+            ["a", "b", "c", "d", "e", "f", "g", "h"],
+            "got: {result}"
+        );
+        assert!(result.starts_with("Go test: 1 passed, 8 benchmarks in 9 packages"));
+    }
+
+    #[test]
+    fn test_filter_go_test_bench_with_unit_failure_preserves_benchmark() {
+        let output = r#"{"Action":"output","Package":"example.com/benchrepro","Test":"BenchmarkGood","Output":"BenchmarkGood-12\t10\t123 ns/op\n"}
+{"Action":"fail","Package":"example.com/benchrepro","Test":"TestBroken","Elapsed":0}
+{"Action":"output","Package":"example.com/benchrepro","Test":"TestBroken","Output":"broken_test.go:5: expected 2, got 1\n"}"#;
+
+        let result = filter_go_test_json(output);
+
+        assert!(
+            result.starts_with("Go test: 0 passed, 1 failed"),
+            "got: {result}"
+        );
+        assert!(result.contains("[FAIL] TestBroken"), "got: {result}");
+        assert!(
+            result.ends_with("benchrepro\n  BenchmarkGood-12\t10\t123 ns/op"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_failing_bench_reports_failure() {
+        let output = r#"{"Action":"run","Package":"example.com/benchrepro/fail","Test":"BenchmarkFail"}
+{"Action":"output","Package":"example.com/benchrepro/fail","Test":"BenchmarkFail","Output":"BenchmarkFail\n"}
+{"Action":"output","Package":"example.com/benchrepro/fail","Test":"BenchmarkFail","Output":"    fail_test.go:5: benchmark intentionally failed\n"}
+{"Action":"output","Package":"example.com/benchrepro/fail","Test":"BenchmarkFail","Output":"--- FAIL: BenchmarkFail\n"}
+{"Action":"fail","Package":"example.com/benchrepro/fail","Test":"BenchmarkFail"}"#;
+
+        let result = filter_go_test_json(output);
+
+        assert!(
+            result.starts_with("Go test: 0 passed, 1 failed"),
+            "got: {result}"
+        );
+        assert!(result.contains("[FAIL] BenchmarkFail"), "got: {result}");
+        assert!(
+            result.contains("benchmark intentionally failed"),
+            "got: {result}"
+        );
     }
 
     #[test]
