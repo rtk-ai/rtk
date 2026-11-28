@@ -3426,12 +3426,6 @@ fn filter_status_with_args(output: &str) -> String {
             continue;
         }
 
-        // Special case: clean working tree
-        if trimmed.contains("nothing to commit") && trimmed.contains("working tree clean") {
-            result.push(trimmed.to_string());
-            break;
-        }
-
         result.push(line.to_string());
     }
 
@@ -8488,6 +8482,68 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let output = "nothing to commit, working tree clean\n";
         let result = filter_status_with_args(output);
         assert!(result.contains("nothing to commit"));
+    }
+
+    #[test]
+    fn test_filter_status_with_args_keeps_entries_after_clean_phrase_path() {
+        // A path may spell git's clean-tree sentence; it must not end the listing.
+        let short = "?? \"nothing to commit, working tree clean\"\n?? zz-after.txt\n";
+        let result = filter_status_with_args(short);
+        assert!(result.contains("?? zz-after.txt"), "{result}");
+
+        let long = "On branch main
+Untracked files:
+  (use \"git add <file>...\" to include in what will be committed)
+\tnothing to commit, working tree clean
+\tzz-after.txt
+
+nothing added to commit but untracked files present (use \"git add\" to track)
+";
+        let result = filter_status_with_args(long);
+        assert!(result.contains("\tzz-after.txt"), "{result}");
+    }
+
+    #[test]
+    fn test_filter_status_with_args_keeps_clean_phrase_path_line_verbatim() {
+        // The status columns and indentation are part of the entry: trimmed, the unstaged
+        // ` M` would read as a staged `M`, and the long-form path as git's own sentence.
+        let porcelain = " M \"nothing to commit, working tree clean\"\n M zz-after.txt\n";
+        assert_eq!(
+            filter_status_with_args(porcelain),
+            " M \"nothing to commit, working tree clean\"\n M zz-after.txt"
+        );
+
+        let long = "On branch main
+Untracked files:
+  (use \"git add <file>...\" to include in what will be committed)
+\tnothing to commit, working tree clean
+\tzz-after.txt
+
+nothing added to commit but untracked files present (use \"git add\" to track)
+";
+        let result = filter_status_with_args(long);
+        assert!(
+            result.starts_with(
+                "On branch main\nUntracked files:\n\tnothing to commit, working tree clean\n\tzz-after.txt"
+            ),
+            "{result}"
+        );
+    }
+
+    #[test]
+    fn test_filter_status_with_args_keeps_stash_summary_after_clean_tree() {
+        // `git status --show-stash` prints its summary after the clean-tree sentence.
+        let raw = "On branch main
+Your branch is ahead of 'up' by 1 commit.
+  (use \"git push\" to publish your local commits)
+
+nothing to commit, working tree clean
+Your stash currently has 1 entry
+";
+        assert_eq!(
+            filter_status_with_args(raw),
+            "On branch main\nYour branch is ahead of 'up' by 1 commit.\nnothing to commit, working tree clean\nYour stash currently has 1 entry"
+        );
     }
 
     #[test]
