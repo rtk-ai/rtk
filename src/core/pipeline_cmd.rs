@@ -1065,12 +1065,15 @@ impl CardData {
     }
 
     pub fn print_terminal(&self) {
-        print_terminal_card(
-            &self.display,
-            &self.stats(),
-            self.published.as_deref(),
-            env!("CARGO_PKG_VERSION"),
-            &self.date,
+        print!(
+            "{}",
+            terminal_card(
+                &self.display,
+                &self.stats(),
+                self.published.as_deref(),
+                env!("CARGO_PKG_VERSION"),
+                &self.date,
+            )
         );
     }
 
@@ -1240,6 +1243,12 @@ fn active_sources(active: &str) -> Vec<(String, String)> {
 
 /// A 10-step bar for a percentage, monospace-safe on every platform that
 /// renders the card. Shares the visual language of `rtk gain`'s meters.
+/// Both cards' activity cell when every filtering row is above the headline
+/// cap, in `rtk gain`'s words.
+fn oversized_excluded_text(count: usize) -> String {
+    format!("{count} oversized outputs excluded")
+}
+
 fn pct_bar(pct: f64) -> String {
     let filled = ((pct / 10.0).round() as usize).min(10);
     format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled))
@@ -1310,27 +1319,42 @@ struct CardStats<'a> {
 /// drawn as panels in `rtk gain`'s visual language so a screenshot of it is
 /// presentable as-is. The markdown stays the paste artifact — this never
 /// prints TOML, and ends by saying how to get the markdown.
-fn print_terminal_card(
+fn terminal_card(
     name: &str,
     stats: &CardStats,
     published: Option<&str>,
     version: &str,
     date: &str,
-) {
+) -> String {
+    let buf = std::cell::RefCell::new(String::new());
+    let line = |text: String| {
+        let mut buf = buf.borrow_mut();
+        buf.push_str(&text);
+        buf.push('\n');
+    };
     use crate::core::utils::format_tokens;
     use colored::Colorize;
     const W: usize = 74;
     let hr = |title: &str| {
         let title = format!(" {title} ");
         let fill = W.saturating_sub(title.chars().count() + 2);
-        println!("{}", format!("┌─{title}{}┐", "─".repeat(fill)).cyan());
+        line(format!(
+            "{}",
+            format!("┌─{title}{}┐", "─".repeat(fill)).cyan()
+        ));
     };
     let row_cols = |left: String, right: String| {
         let text = format!("{left} {right}");
         let pad = W.saturating_sub(text.chars().count() + 3);
-        println!("{} {}{} {}", "│".cyan(), text, " ".repeat(pad), "│".cyan());
+        line(format!(
+            "{} {}{} {}",
+            "│".cyan(),
+            text,
+            " ".repeat(pad),
+            "│".cyan()
+        ));
     };
-    let end_panel = || println!("{}", format!("└{}┘", "─".repeat(W - 1)).cyan());
+    let end_panel = || line(format!("{}", format!("└{}┘", "─".repeat(W - 1)).cyan()));
     let trunc = |text: &str, max: usize| -> String {
         if text.chars().count() <= max {
             text.to_string()
@@ -1374,7 +1398,7 @@ fn print_terminal_card(
         let text = format!("{label:<28} {activity:>14}  ");
         let unit_str = format!(" {unit}");
         let pad = W.saturating_sub(text.chars().count() + 10 + 4 + 5 + unit_str.chars().count());
-        println!(
+        line(format!(
             "{} {}{} {:>4.0}%{}{} {}",
             "│".cyan(),
             text,
@@ -1383,7 +1407,7 @@ fn print_terminal_card(
             unit_str.dimmed(),
             " ".repeat(pad),
             "│".cyan()
-        );
+        ));
     };
     if let Some(f) = stats.filtering.filter(|f| f.total_commands > 0) {
         bar_row(
@@ -1391,6 +1415,14 @@ fn print_terminal_card(
             format!("{} commands", f.total_commands),
             f.avg_savings_pct,
             "removed",
+        );
+        any = true;
+    } else if let Some(f) = stats.filtering.filter(|f| f.oversized_excluded > 0) {
+        // Every row is above the headline cap: there is activity, but no
+        // reduction to show.
+        row_cols(
+            "command filtering".to_string(),
+            oversized_excluded_text(f.oversized_excluded),
         );
         any = true;
     }
@@ -1475,13 +1507,13 @@ fn print_terminal_card(
     if any {
         let note = "~ estimates (≈ bytes/4) — ratios reliable, absolutes approximate";
         let pad = W.saturating_sub(note.chars().count() + 3);
-        println!(
+        line(format!(
             "{} {}{} {}",
             "│".cyan(),
             note.dimmed(),
             " ".repeat(pad),
             "│".cyan()
-        );
+        ));
     }
     end_panel();
     // The share CTA is the card's one next action — a panel in the card's
@@ -1489,13 +1521,13 @@ fn print_terminal_card(
     // Once published it flips to the repo link and the line others run.
     let row_accent = |text: &str| {
         let pad = W.saturating_sub(text.chars().count() + 3);
-        println!(
+        line(format!(
             "{} {}{} {}",
             "│".cyan(),
             text.green().bold(),
             " ".repeat(pad),
             "│".cyan()
-        );
+        ));
     };
     match published {
         Some(install) => {
@@ -1524,10 +1556,11 @@ fn print_terminal_card(
             end_panel();
         }
     }
-    println!(
+    line(format!(
         "{}",
         format!("  rtk v{version} · {date} · markdown: rtk pipeline share --md").dimmed()
-    );
+    ));
+    buf.into_inner()
 }
 
 fn share_card(
@@ -1545,7 +1578,9 @@ fn share_card(
         tasks,
         proxy,
     } = *stats;
-    let has_filtering = filtering.is_some_and(|f| f.total_commands > 0);
+    // Rows above the headline cap are not in `total_commands`, but they are
+    // still recorded activity.
+    let has_filtering = filtering.is_some_and(|f| f.total_commands > 0 || f.oversized_excluded > 0);
     let mut out = String::new();
     out.push_str(&format!("# rtk pipeline · {name}\n\n"));
 
@@ -1581,6 +1616,11 @@ fn share_card(
                 f.total_commands,
                 pct_bar(f.avg_savings_pct),
                 f.avg_savings_pct,
+            ));
+        } else if let Some(f) = filtering.filter(|f| f.oversized_excluded > 0) {
+            out.push_str(&format!(
+                "| command filtering (rtk git/npm/…) | {} | — |\n",
+                oversized_excluded_text(f.oversized_excluded),
             ));
         }
         if let Some(row) = hook {
@@ -2332,6 +2372,84 @@ mod tests {
         assert!(card.contains("No recorded activity yet"));
         assert!(!card.contains("| lever |"));
         assert!(card.contains("```toml\nx = 1\n```"));
+    }
+
+    /// A project's filtering summary: `total_commands` rows under the headline
+    /// cap, `oversized_excluded` rows above it.
+    fn filtering(
+        total_commands: usize,
+        oversized_excluded: usize,
+    ) -> crate::core::tracking::GainSummary {
+        crate::core::tracking::GainSummary {
+            total_commands,
+            total_input: 0,
+            total_output: 0,
+            total_saved: 0,
+            avg_savings_pct: 0.0,
+            total_time_ms: 0,
+            avg_time_ms: 0,
+            by_command: Vec::new(),
+            by_day: Vec::new(),
+            oversized_excluded,
+        }
+    }
+
+    fn cards(
+        filtering: Option<&crate::core::tracking::GainSummary>,
+        hook: Option<&crate::core::tracking::AttributionRow>,
+    ) -> (String, String) {
+        let stats = super::CardStats {
+            what: &[],
+            filtering,
+            hook,
+            hook_slices: &[],
+            tasks: &[],
+            proxy: None,
+        };
+        let terminal = super::terminal_card("p", &stats, None, "1.0.0", "2026-11-28");
+        let markdown = super::share_card("p", &[], &stats, "1.0.0", "2026-11-28");
+        (crate::core::utils::strip_ansi(&terminal), markdown)
+    }
+
+    #[test]
+    fn share_cards_count_a_project_whose_rows_are_all_oversized() {
+        let (terminal, markdown) = cards(Some(&filtering(0, 1)), None);
+
+        assert!(!terminal.contains("no recorded activity yet"), "{terminal}");
+        assert!(
+            terminal.contains("│ command filtering 1 oversized outputs excluded"),
+            "{terminal}"
+        );
+        assert!(!markdown.contains("No recorded activity yet"), "{markdown}");
+        assert!(
+            markdown.contains(
+                "| command filtering (rtk git/npm/…) | 1 oversized outputs excluded | — |"
+            ),
+            "{markdown}"
+        );
+    }
+
+    #[test]
+    fn share_cards_without_filtering_rows_have_no_filtering_row() {
+        // Nothing recorded at all: still the empty state.
+        let (terminal, markdown) = cards(Some(&filtering(0, 0)), None);
+        assert!(terminal.contains("no recorded activity yet"), "{terminal}");
+        assert!(markdown.contains("No recorded activity yet"), "{markdown}");
+
+        // Another lever has activity: the table is shown, without a filtering row.
+        let hook = crate::core::tracking::AttributionRow {
+            name: "p".into(),
+            calls: 2,
+            tokens_in: 100,
+            tokens_out: 50,
+        };
+        let (terminal, markdown) = cards(Some(&filtering(0, 0)), Some(&hook));
+        assert!(!terminal.contains("command filtering"), "{terminal}");
+        assert!(
+            markdown.contains("| agent hooks (last 30d) |"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("command filtering"), "{markdown}");
     }
 
     #[test]
