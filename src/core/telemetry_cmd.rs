@@ -1,3 +1,4 @@
+use crate::core::http;
 use crate::core::user_env;
 use anyhow::{Context, Result};
 use clap::Subcommand;
@@ -30,9 +31,9 @@ fn salt_missing_label(
         Some(false) | None => "(telemetry not enabled; run `rtk telemetry enable` to opt in)",
         Some(true) if !enabled => "(telemetry disabled in config.toml)",
         // Every gate is clear, so the salt is simply not there yet. This is true
-        // both when no ping has landed (the 23 h interval, or a run that touched
-        // the marker before the detached thread wrote the salt) and when a write
-        // genuinely failed — as far as the available state lets us go.
+        // both when no ping has been prepared yet (the 23 h interval, or every
+        // run so far exited before the detached thread wrote the salt) and when
+        // a write genuinely failed — as far as the available state lets us go.
         Some(true) => "(no salt file yet; written on the first ping)",
     }
 }
@@ -255,14 +256,13 @@ fn send_erasure_request(device_hash: &str) -> Result<()> {
         "action": "erasure",
     });
 
-    let mut req = ureq::post(&url).set("Content-Type", "application/json");
+    let mut req = ureq::post(&url);
 
     if let Some(token) = option_env!("RTK_TELEMETRY_TOKEN") {
-        req = req.set("X-RTK-Token", token);
+        req = req.header("X-RTK-Token", token);
     }
 
-    req.timeout(std::time::Duration::from_secs(5))
-        .send_string(&payload.to_string())?;
+    http::global_timeout(req, std::time::Duration::from_secs(5)).send_json(&payload)?;
 
     Ok(())
 }

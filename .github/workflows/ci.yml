@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: &rust_toolchain dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: *rust_toolchain
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: *rust_toolchain
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --no-deps
 
@@ -74,7 +74,7 @@ jobs:
     needs: clippy
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: *rust_toolchain
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -92,7 +92,7 @@ jobs:
     needs: clippy
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: *rust_toolchain
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -134,7 +134,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: *rust_toolchain
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -151,6 +151,20 @@ jobs:
         # `--all` is `--workspace`: `rtk` + `engine`. `proxy/` is tested in
         # its own job, since it is not a member.
       - run: cargo test --all
+      # install.sh end to end against a fake release. On Windows this runs under
+      # Git Bash and installs the rtk.exe the step above built.
+      - name: install.sh tests
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            target=$CARGO_BUILD_TARGET
+            [ "$target" = host-tuple ] && target=$(rustc -vV | sed -n 's/^host: //p')
+            export RTK_TEST_EXE="$PWD/target/$target/debug/rtk.exe"
+          fi
+          sh scripts/test-install.sh | tee "$RUNNER_TEMP/test-install.log"
+          # A skip here means the runner lost unzip, python or a sha256 tool;
+          # fail rather than pass with no install exercised.
+          ! grep -F 'SKIP: end-to-end' "$RUNNER_TEMP/test-install.log"
 
   security:
     name: Security Scan
@@ -161,7 +175,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: *rust_toolchain
 
       - uses: Swatinem/rust-cache@v2
 
@@ -296,12 +310,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: *rust_toolchain
 
       - uses: Swatinem/rust-cache@v2
 
+      # Only output tokens are measured, so a release build would only add time.
       - name: Build rtk
-        run: cargo build --release
+        run: cargo build
 
       - name: Install system tools
         run: sudo apt-get install -y tree ripgrep
@@ -314,11 +329,30 @@ jobs:
         with:
           go-version: "stable"
 
-      - name: Install Go tools
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          install-only: true
+          skip-cache: true
 
       - name: Run benchmark
         run: ./scripts/benchmark.sh
+        env:
+          RTK_BIN: target/debug/rtk
+
+  # The one PR job building the shipped profile: LTO problems only show at this link.
+  release:
+    name: release (build)
+    needs: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: *rust_toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --release
 
   # ─── AI Doc Review: develop PRs only ───
 

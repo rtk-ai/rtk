@@ -6,7 +6,7 @@
 
 The **lifecycle management** layer for LLM agent hooks: install, uninstall, verify integrity, audit usage, and manage trust. This component creates and maintains the hook artifacts that live in `hooks/` (root), but does **not** execute rewrite logic itself — that lives in `discover/registry`.
 
-Owns: `rtk init` installation flows (6 agents via `AgentTarget` enum, now including Mistral Vibe + 3 special modes: Gemini, Codex, OpenCode), SHA-256 integrity verification, hook version checking, audit log analysis, `rtk rewrite` CLI entry point, and TOML filter trust management.
+Owns: `rtk init` installation flows (Claude Code by default, `--agent <AgentTarget>` for the other enum agents, `--gemini`, `--codex` and `--copilot` for the agents outside the enum, `-g --opencode` for the OpenCode plugin), SHA-256 integrity verification, hook version checking, audit log analysis, `rtk rewrite` CLI entry point, and TOML filter trust management.
 
 Does **not** own: the deployed hook scripts themselves (that's `hooks/`), the rewrite pattern registry (that's `discover/`), or command filtering (that's `cmds/`).
 
@@ -112,8 +112,14 @@ Claude Code's rule sources never reach the hook at all (`--settings`,
 `cd`'d away from), so a rule in one of those becomes a prompt rather than a
 refusal. The user docs say so.
 
+The decision records a wrap it built as an `AskRewrite` whose `AskOwner` is
+`Hook`, and only that carries the explicit ask. A command the user typed as
+`rtk run --shell fish -c ...` that the rules only rewrote around keeps its
+normal permission decision, also when the rewrite drops a leading line
+continuation; the hook does not infer wrap ownership from the resulting string.
+
 **It is offered only on `rtk hook claude`** (`DenyRules` and
-`claude_hook_deny_rules` in `permissions.rs`), and only when every Claude Code
+`check_claude_hook_command` in `permissions.rs`), and only when every Claude Code
 settings file RTK reads parsed and none of them has a deny rule. Once the
 script reaches a fish, RTK's own view of it stops describing what runs: fish
 starts a command where the bash-shaped segmenter does not look — the condition
@@ -147,6 +153,12 @@ and Claude Code's hook is the only one:
 
 The cost is deliberate and belongs in the user docs: a user with any deny rule
 keeps the behaviour they had before the wrap existed.
+
+The Claude hook and `rtk hook check --agent claude` share one settings scan for
+the verdict and wrap attestation, so a malformed file is not read and warned
+about again for a fish command. Attestation uses the scan's raw deny entries and
+read/parse status only after the wrapper's syntax gates and fish probe pass.
+Other hosts do not enter the wrapper or perform its probes.
 
 **Why it runs before the unattestable gate.** Every other rewrite refuses a
 command the gate could not decompose. The wrap cannot wait for that gate and

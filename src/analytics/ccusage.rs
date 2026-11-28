@@ -189,7 +189,12 @@ pub fn fetch(granularity: Granularity) -> Result<Option<Vec<CcusagePeriod>>> {
                 requested_monday = true;
                 continue;
             }
-            periods = aggregate_weekly_periods(periods)?;
+            periods = aggregate_periods(periods, subcommand)?;
+        }
+
+        if matches!(granularity, Granularity::Monthly) {
+            // Per-project grouping repeats a month once per project.
+            periods = aggregate_periods(periods, subcommand)?;
         }
 
         return Ok(Some(periods));
@@ -211,46 +216,47 @@ fn canonicalize_weekly_keys(periods: &mut [CcusagePeriod]) -> Result<bool> {
     Ok(all_mondays)
 }
 
-/// Combine the final Monday report's disjoint project rows. Legacy ccusage can
-/// emit multiple rows per week while omitting project identity from JSON.
-/// Sum totalTokens independently; some sources count cache tokens differently.
-fn aggregate_weekly_periods(periods: Vec<CcusagePeriod>) -> Result<Vec<CcusagePeriod>> {
-    let mut weeks: BTreeMap<String, CcusageMetrics> = BTreeMap::new();
+/// Combine a report's disjoint project rows into one bucket per period key.
+/// Legacy ccusage can emit multiple rows per period while omitting project
+/// identity from JSON. Sum totalTokens independently; some sources count cache
+/// tokens differently. `label` names the granularity in overflow errors.
+fn aggregate_periods(periods: Vec<CcusagePeriod>, label: &str) -> Result<Vec<CcusagePeriod>> {
+    let mut buckets: BTreeMap<String, CcusageMetrics> = BTreeMap::new();
     for period in periods {
-        let week = weeks.entry(period.key).or_default();
+        let sum = buckets.entry(period.key).or_default();
         let metrics = period.metrics;
-        week.input_tokens = week
+        sum.input_tokens = sum
             .input_tokens
             .checked_add(metrics.input_tokens)
-            .context("ccusage weekly input tokens overflow")?;
-        week.output_tokens = week
+            .with_context(|| format!("ccusage {label} input tokens overflow"))?;
+        sum.output_tokens = sum
             .output_tokens
             .checked_add(metrics.output_tokens)
-            .context("ccusage weekly output tokens overflow")?;
-        week.cache_creation_tokens = week
+            .with_context(|| format!("ccusage {label} output tokens overflow"))?;
+        sum.cache_creation_tokens = sum
             .cache_creation_tokens
             .checked_add(metrics.cache_creation_tokens)
-            .context("ccusage weekly cache creation tokens overflow")?;
-        week.cache_read_tokens = week
+            .with_context(|| format!("ccusage {label} cache creation tokens overflow"))?;
+        sum.cache_read_tokens = sum
             .cache_read_tokens
             .checked_add(metrics.cache_read_tokens)
-            .context("ccusage weekly cache read tokens overflow")?;
-        week.total_tokens = week
+            .with_context(|| format!("ccusage {label} cache read tokens overflow"))?;
+        sum.total_tokens = sum
             .total_tokens
             .checked_add(metrics.total_tokens)
-            .context("ccusage weekly total tokens overflow")?;
-        week.total_cost += metrics.total_cost;
+            .with_context(|| format!("ccusage {label} total tokens overflow"))?;
+        sum.total_cost += metrics.total_cost;
         anyhow::ensure!(
-            week.total_cost.is_finite(),
-            "ccusage weekly total cost overflow"
+            sum.total_cost.is_finite(),
+            "ccusage {label} total cost overflow"
         );
     }
-    for week in weeks.values() {
-        week.input_tokens
-            .checked_add(week.output_tokens)
-            .context("ccusage weekly active tokens overflow")?;
+    for sum in buckets.values() {
+        sum.input_tokens
+            .checked_add(sum.output_tokens)
+            .with_context(|| format!("ccusage {label} active tokens overflow"))?;
     }
-    Ok(weeks
+    Ok(buckets
         .into_iter()
         .map(|(key, metrics)| CcusagePeriod { key, metrics })
         .collect())
@@ -371,7 +377,7 @@ mod tests {
         let mut empty = parse_json(r#"{"weekly": []}"#, Granularity::Weekly).expect("empty weekly");
         assert!(canonicalize_weekly_keys(&mut empty).expect("empty keys"));
         assert!(
-            aggregate_weekly_periods(empty)
+            aggregate_periods(empty, "weekly")
                 .expect("empty metrics")
                 .is_empty()
         );
@@ -408,7 +414,7 @@ mod tests {
             let mut periods =
                 parse_json(&json.to_string(), Granularity::Weekly).expect("weekly rows");
             assert!(canonicalize_weekly_keys(&mut periods).expect("Monday dates"));
-            let result = aggregate_weekly_periods(periods).expect("safe weekly sums");
+            let result = aggregate_periods(periods, "weekly").expect("safe weekly sums");
             assert_eq!(result.len(), 2);
             assert_eq!(result[0].key, "2026-09-28");
             assert_eq!(result[0].metrics.input_tokens, 200);
@@ -442,7 +448,7 @@ mod tests {
             json["weekly"][1][field] = serde_json::json!(1);
             let periods =
                 parse_json(&json.to_string(), Granularity::Weekly).expect("valid u64 values");
-            let error = aggregate_weekly_periods(periods).expect_err("sum must not overflow");
+            let error = aggregate_periods(periods, "weekly").expect_err("sum must not overflow");
             assert!(
                 error.to_string().contains(&format!("{label} overflow")),
                 "{field}: {error}"
@@ -456,7 +462,7 @@ mod tests {
         let periods =
             parse_json(&json.to_string(), Granularity::Weekly).expect("finite source costs");
         assert!(
-            aggregate_weekly_periods(periods)
+            aggregate_periods(periods, "weekly")
                 .expect_err("finite sum required")
                 .to_string()
                 .contains("total cost overflow")
@@ -469,7 +475,7 @@ mod tests {
         let periods =
             parse_json(&json.to_string(), Granularity::Weekly).expect("valid source counters");
         assert!(
-            aggregate_weekly_periods(periods)
+            aggregate_periods(periods, "weekly")
                 .expect_err("active sum must fit")
                 .to_string()
                 .contains("active tokens overflow")
@@ -504,7 +510,7 @@ mod tests {
         let mut periods =
             parse_json(json, Granularity::Weekly).expect("source-derived synthetic fixture");
         assert!(canonicalize_weekly_keys(&mut periods).expect("valid Monday"));
-        let periods = aggregate_weekly_periods(periods).expect("valid metrics");
+        let periods = aggregate_periods(periods, "weekly").expect("valid metrics");
         assert_eq!(periods.len(), 1);
         assert_eq!(periods[0].key, "2025-12-29");
         assert_eq!(periods[0].metrics.input_tokens, 100);

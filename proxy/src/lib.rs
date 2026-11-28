@@ -46,6 +46,7 @@ pub struct AppState {
     pub config: Arc<config::Config>,
     /// HTTP client to the upstream providers (rustls, streaming).
     pub http: reqwest::Client,
+    pub http_buffered: reqwest::Client,
     /// The request-transform pipeline. Empty = passthrough.
     pub pipeline: pipeline::Pipeline,
     /// Usage store for stats. `None` when recording is disabled (`RTK_PROXY_DB`
@@ -109,10 +110,20 @@ fn http_client() -> reqwest::Client {
     )
 }
 
-fn http_client_with(connect: std::time::Duration, read: std::time::Duration) -> reqwest::Client {
+pub(crate) fn http_client_with(
+    connect: std::time::Duration,
+    read: std::time::Duration,
+) -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(connect)
         .read_timeout(read)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+fn http_client_buffered() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }
@@ -291,6 +302,7 @@ impl AppState {
         Self {
             config: Arc::new(config),
             http: http_client(),
+            http_buffered: http_client_buffered(),
             pipeline,
             store,
             runtime: Arc::new(RwLock::new(runtime)),

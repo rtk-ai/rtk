@@ -1,0 +1,36 @@
+[
+  {
+    "name": "p3344",
+    "version": "1.0.0",
+    "path": "/app",
+    "private": true,
+    "dependencies": {
+      "lodash": {
+        "from": "lodash",
+        "version": "4.17.0",
+        "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.17.0.tgz",
+        "path": "/app/node_modules/.pnpm/lodash@4.17.0/node_modules/lodash"
+      }
+    },
+    "devDependencies": {
+      "@playwright/test": {
+        "from": "@playwright/test",
+        "version": "1.56.1",
+        "resolved": "https://registry.npmjs.org/@playwright/test/-/test-1.56.1.tgz",
+        "path": "/app/node_modules/.pnpm/@playwright+test@1.56.1/node_modules/@playwright/test"
+      },
+      "jest": {
+        "from": "jest",
+        "version": "29.7.0",
+        "resolved": "https://registry.npmjs.org/jest/-/jest-29.7.0.tgz",
+        "path": "/app/node_modules/.pnpm/jest@29.7.0_@types+node@26.6.6_supports-color@8.1.1/node_modules/jest"
+      },
+      "vitest": {
+        "from": "vitest",
+        "version": "3.2.4",
+        "resolved": "https://registry.npmjs.org/vitest/-/vitest-3.2.4.tgz",
+        "path": "/app/node_modules/.pnpm/vitest@3.2.4_@types+node@26.6.6_supports-color@8.1.1/node_modules/vitest"
+      }
+    }
+  }
+]

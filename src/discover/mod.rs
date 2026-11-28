@@ -118,7 +118,7 @@ struct CoverageContext {
 /// imprecision is unavoidable without per-segment hook logging and isn't worth
 /// chasing further. `Estimated` is the fallback for history that predates
 /// `hook_decisions` logging — but note it does NOT simply fade out over time:
-/// `hook_decisions` rows are pruned by the same `DEFAULT_HISTORY_DAYS` retention
+/// `hook_decisions` rows are pruned by the same `tracking.history_days` retention
 /// window as the rest of the tracking DB (see `Tracker::cleanup_hook_decisions`),
 /// so any `--since` reaching further back than that window permanently needs
 /// `Estimated`, indefinitely, not just during an initial backfill period.
@@ -232,13 +232,10 @@ fn would_be_covered_without_bypass(
 /// The segment `strip_disabled_prefix_for_analytics` split into `env_prefix` and
 /// `actual_cmd`, with its `RTK_DISABLED=` words removed and every other word kept
 /// verbatim, wrapper included. Words are split the way the rest of discover splits
-/// them (`lexer::tokenize` + `coalesce_words`), so a quoted or expanded value
+/// them (`lexer::words_and_spans`), so a quoted or expanded value
 /// (`RTK_DISABLED='1 2'`, `RTK_DISABLED=$CI`) goes as a whole.
 fn without_rtk_disabled(env_prefix: &str, actual_cmd: &str) -> String {
-    let starts: Vec<usize> = lexer::coalesce_words(env_prefix, &lexer::tokenize(env_prefix))
-        .iter()
-        .map(|&(_, start)| start)
-        .collect();
+    let (_, starts) = lexer::words_and_spans(env_prefix);
     let mut line = String::with_capacity(env_prefix.len() + actual_cmd.len() + 1);
     for (i, &start) in starts.iter().enumerate() {
         let end = starts.get(i + 1).copied().unwrap_or(env_prefix.len());
@@ -392,15 +389,24 @@ pub fn run(
         match Tracker::new() {
             Ok(t) => {
                 let log = t.hook_decisions_since(cutoff).unwrap_or_else(|e| {
-                    eprintln!(
-                        "rtk: warning: failed to read hook_decisions log ({e}). \
-                         Coverage will fall back to the current-state estimate. \
-                         Run `rtk init` if the tracking database looks corrupted."
-                    );
+                    // `rtk init` would fail the same step, and `rtk gain` reports it.
+                    if !crate::core::db::lacks_what_was_not_upgraded(&e) {
+                        eprintln!(
+                            "rtk: warning: failed to read hook_decisions log ({e}). \
+                             Coverage will fall back to the current-state estimate. \
+                             Run `rtk init` if the tracking database looks corrupted."
+                        );
+                    } else if verbose > 0 {
+                        eprintln!("rtk: warning: failed to read hook_decisions log ({e}).");
+                    }
                     HashMap::new()
                 });
                 let measured_since = t.earliest_hook_decision_timestamp().unwrap_or_else(|e| {
-                    eprintln!("rtk: warning: failed to read hook_decisions log timestamp ({e}).");
+                    if !crate::core::db::lacks_what_was_not_upgraded(&e) || verbose > 0 {
+                        eprintln!(
+                            "rtk: warning: failed to read hook_decisions log timestamp ({e})."
+                        );
+                    }
                     None
                 });
                 (log, measured_since)
@@ -411,7 +417,7 @@ pub fn run(
                 // `rtk discover` run doesn't alarm a first-time user.
                 if verbose > 0 {
                     eprintln!(
-                        "rtk: warning: failed to open tracking database ({e}). \
+                        "rtk: warning: failed to open tracking database ({e:#}). \
                          Coverage will fall back to the current-state estimate."
                     );
                 }

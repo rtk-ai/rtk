@@ -302,6 +302,7 @@ mod tests {
             body,
             tokens_saved: 0,
             saved_by_stage: Vec::new(),
+            saved_by_rule: Vec::new(),
             routed_from: None,
             request_class: None,
         }

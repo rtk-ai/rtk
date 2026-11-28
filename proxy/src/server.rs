@@ -272,6 +272,7 @@ async fn handle(
         .clone()
         .or_else(|| declared_routed_from(&headers));
     let saved_by_stage = applied.saved_by_stage.clone();
+    let saved_by_rule = applied.saved_by_rule.clone();
     let project = applied.project.clone();
     let session = applied.session.clone();
 
@@ -321,6 +322,7 @@ async fn handle(
                 routed_from,
                 ctx,
                 &saved_by_stage,
+                &saved_by_rule,
                 &outcome,
             );
             response
@@ -335,6 +337,7 @@ async fn handle(
                 let s2 = s.clone();
                 let path = path.to_string();
                 let saved_by_stage = saved_by_stage.clone();
+                let saved_by_rule = saved_by_rule.clone();
                 let (project, session) = (project.clone(), session.clone());
                 let routed_from = routed_from.clone();
                 tokio::spawn(async move {
@@ -352,6 +355,7 @@ async fn handle(
                             routed_from,
                             ctx,
                             &saved_by_stage,
+                            &saved_by_rule,
                             &outcome,
                         );
                     }
@@ -378,6 +382,7 @@ fn record_usage(
     routed_from: Option<String>,
     ctx: crate::context_analysis::ContextComposition,
     saved_by_stage: &[(&'static str, i64)],
+    saved_by_rule: &[(String, i64)],
     outcome: &crate::model::UsageOutcome,
 ) {
     let Some(store) = s.store.clone() else { return };
@@ -464,8 +469,21 @@ fn record_usage(
         saved_pixel_compress: saved_for("pixel_compress", saved_by_stage),
         saved_ccr: saved_for(crate::pipeline::ccr::STAGE_NAME, saved_by_stage),
         saved_normalize: saved_for(crate::pipeline::normalize::STAGE, saved_by_stage),
+        saved_engine_methods: saved_for(crate::pipeline::engine_methods::STAGE, saved_by_stage),
+        saved_rules: rules_json(saved_by_rule),
     };
     tokio::spawn(async move { store.record(row).await });
+}
+
+fn rules_json(saved_by_rule: &[(String, i64)]) -> Option<String> {
+    if saved_by_rule.is_empty() {
+        return None;
+    }
+    let map: serde_json::Map<String, serde_json::Value> = saved_by_rule
+        .iter()
+        .map(|(rule, saved)| (rule.clone(), serde_json::Value::from(*saved)))
+        .collect();
+    Some(serde_json::Value::Object(map).to_string())
 }
 
 /// Tokens attributed to one stage in a per-stage breakdown, 0 when that stage

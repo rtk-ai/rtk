@@ -64,7 +64,7 @@ fn main() {
     }
 
     // Validate: parse the combined TOML to catch errors at build time
-    let parsed: toml::Value = combined.parse().unwrap_or_else(|e| {
+    let parsed: toml::Table = combined.parse().unwrap_or_else(|e| {
         panic!(
             "TOML validation failed for combined filters:\n{}\n\nCheck src/filters/*.toml files",
             e

@@ -308,6 +308,152 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
     Ok(if exit_code == 1 { 0 } else { exit_code })
 }
 
+fn is_pipe_test_action(action: &str) -> bool {
+    matches!(
+        action,
+        "start" | "run" | "pause" | "cont" | "pass" | "bench" | "fail" | "output" | "skip"
+    )
+}
+
+fn pipe_event(line: &str) -> Option<GoTestEvent> {
+    let event: GoTestEvent = serde_json::from_str(line).ok()?;
+    let supported = match event.action.as_str() {
+        "build-output" => event.import_path.is_some() && event.output.is_some(),
+        "build-fail" => event.import_path.is_some(),
+        action => is_pipe_test_action(action) && (action != "output" || event.output.is_some()),
+    };
+    if supported
+        && is_pipe_test_action(&event.action)
+        && event.package.is_none()
+        && event.test.is_none()
+        && event.output.is_none()
+    {
+        // Package-less lifecycle records can contain just Action/Time/Elapsed.
+        // Unknown fields on a metadata-only log must not lose their diagnostics
+        // merely because the log uses the same verb or timestamp as test2json.
+        let fields: serde_json::Map<String, serde_json::Value> = serde_json::from_str(line).ok()?;
+        if fields
+            .keys()
+            .any(|key| !matches!(key.as_str(), "Action" | "Time" | "Elapsed"))
+        {
+            return None;
+        }
+    }
+    supported.then_some(event)
+}
+
+fn pipe_test_evidence(event: &GoTestEvent) -> bool {
+    // test2json may omit both Package and Time. Bare lifecycle records are
+    // accepted within a stream, but a lone {"Action":"pass"} is not evidence.
+    is_pipe_test_action(&event.action)
+        && (event.package.is_some()
+            || event.test.is_some()
+            || event.time.is_some()
+            || event.output.is_some()
+            || event.elapsed.is_some())
+}
+
+fn pipe_event_line(index: usize, line: &str) -> &str {
+    if index == 0 {
+        line.strip_prefix('\u{feff}').unwrap_or(line).trim()
+    } else {
+        line.trim()
+    }
+}
+
+/// Auto-detect only a leading Go stream, not events quoted inside other text.
+/// Cold-cache downloads may precede events; arbitrary prose, Markdown fences and
+/// diff headers must instead keep the whole input on the lossless fallback path.
+/// Build events alone are not a test report and must retain their diagnostics.
+pub(crate) fn is_go_test_json(input: &str) -> bool {
+    for (index, line) in input.lines().enumerate() {
+        let line = pipe_event_line(index, line);
+        if line.is_empty() || line.starts_with("go: downloading ") {
+            continue;
+        }
+        let Some(event) = pipe_event(line) else {
+            return false;
+        };
+        if pipe_test_evidence(&event) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Reduce piped test events while retaining unrelated or unrecognized records.
+/// This adapter deliberately leaves the runner's reducer and completeness
+/// semantics unchanged; a partial stream still reports only the events seen.
+pub(crate) fn filter_go_test_pipe(input: &str) -> String {
+    let records: Vec<_> = input
+        .split_inclusive('\n')
+        .enumerate()
+        .map(|(index, raw)| {
+            let line = pipe_event_line(index, raw);
+            (raw, line, pipe_event(line))
+        })
+        .collect();
+    if !records
+        .iter()
+        .any(|(_, _, event)| event.as_ref().is_some_and(pipe_test_evidence))
+    {
+        return input.to_string();
+    }
+
+    // The reducer renders build output only for a matching package-level fail.
+    // Unmatched build records must not disappear beside otherwise valid tests.
+    let mut failed_packages = std::collections::HashSet::new();
+    let repeated_build_failure = records
+        .iter()
+        .filter_map(|(_, _, event)| event.as_ref())
+        .filter(|event| {
+            event.action == "fail" && event.test.is_none() && event.failed_build.is_some()
+        })
+        .any(|event| !failed_packages.insert(event.package.as_deref().unwrap_or("unknown")));
+    let mut represented_builds: HashMap<_, _> = records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, _, event))| event.as_ref().map(|event| (index, event)))
+        .filter(|(_, event)| event.action == "fail" && event.test.is_none())
+        .filter_map(|(index, event)| event.failed_build.as_deref().map(|path| (path, index)))
+        .collect();
+    // A later build failure for the same package can replace earlier errors in
+    // the reducer. Retain all build records when that representation is lossy.
+    if repeated_build_failure {
+        represented_builds.clear();
+    }
+    let mut events = String::new();
+    let mut residual = String::new();
+    let mut has_residual = false;
+    for (index, (raw, line, event)) in records.iter().enumerate() {
+        let consumed = event.as_ref().is_some_and(|event| {
+            if matches!(event.action.as_str(), "build-output" | "build-fail") {
+                event.import_path.as_deref().is_some_and(|path| {
+                    represented_builds
+                        .get(path)
+                        .is_some_and(|fail_index| index < *fail_index)
+                })
+            } else {
+                true
+            }
+        });
+        if consumed {
+            events.push_str(line);
+            events.push('\n');
+        } else {
+            // This also keeps CRLF and an unterminated final fragment intact.
+            residual.push_str(raw);
+            has_residual |= !line.is_empty();
+        }
+    }
+    let mut shown = filter_go_test_json(&events);
+    if has_residual {
+        shown.push('\n');
+        shown.push_str(&residual);
+    }
+    shown
+}
+
 /// Parse go test -json output (NDJSON format)
 pub(crate) fn filter_go_test_json(output: &str) -> String {
     let mut packages: HashMap<String, PackageResult> = HashMap::new();
@@ -803,6 +949,29 @@ fn compact_package_name(package: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_detection_requires_leading_stream_evidence() {
+        let event = r#"{"Action":"pass","Package":"example.com/proj","Test":"TestOK"}"#;
+        for prefix in [
+            "",
+            "\u{feff}",
+            " \r\n",
+            "go: downloading example.com/dep v1.0.0\n",
+        ] {
+            assert!(is_go_test_json(&format!("{prefix}{event}")));
+        }
+        for prefix in [
+            "diff --git a/report b/report\n ",
+            "```json\n",
+            "# Notes\n\n",
+            "Diagnostic example:\n",
+        ] {
+            assert!(!is_go_test_json(&format!("{prefix}{event}")));
+        }
+        assert!(!is_go_test_json("go: downloading example.com/dep v1.0.0\n"));
+        assert!(!is_go_test_json(r#"{"Action":"start"}"#));
+    }
 
     #[test]
     fn test_filter_go_test_all_pass() {

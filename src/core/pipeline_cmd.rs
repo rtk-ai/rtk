@@ -1,5 +1,6 @@
 //! `rtk pipeline` and `rtk methods` command surface over the engine.
 
+use crate::core::http;
 use crate::core::pipeline_config::{self, LoadedPipeline};
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -219,11 +220,8 @@ fn read_source(source: &str) -> Result<String> {
     if source.starts_with("http://") || source.starts_with("https://") {
         let url = gist_raw_url(source);
         // GET of a URL the user typed on the CLI; inbound content only.
-        // nosemgrep: ureq-outside-telemetry
-        return ureq::get(&url)
-            .call()
-            .context("fetch pipeline")?
-            .into_string()
+        let mut response = http::get(&url).context("fetch pipeline")?;
+        return http::read_text_lossy(&mut response, http::MAX_BODY)
             .context("read fetched pipeline");
     }
     std::fs::read_to_string(source).with_context(|| format!("read {source}"))
@@ -1965,34 +1963,44 @@ pub fn run_explain_last() -> Result<i32> {
         );
         return Ok(1);
     };
-    println!("{}", crate::core::pipeline_log::render(entry));
+    for line in explain_last_lines(entry) {
+        println!("{line}");
+    }
+    Ok(0)
+}
+
+/// The lines `rtk pipeline explain --last` prints for one logged decision.
+fn explain_last_lines(entry: &crate::core::pipeline_log::LogEntry) -> Vec<String> {
+    let mut lines = vec![crate::core::pipeline_log::render(entry)];
     let position = format!("{}.{}.{}", entry.site, entry.event, entry.subject);
     match (&entry.action, entry.methods.is_empty()) {
-        (Some(action), _) => println!(
+        (Some(action), _) => lines.push(format!(
             "rule `{}` fired at {position} with action `{action}`",
             entry.rule
-        ),
+        )),
         (None, false) => {
-            println!(
+            lines.push(format!(
                 "rule `{}` fired at {position}; methods applied: [{}]",
                 entry.rule,
                 entry.methods.join(", ")
-            );
-            if let (Some(before), Some(after)) = (entry.tokens_before, entry.tokens_after) {
+            ));
+            if let Some(outcome) = &entry.outcome {
+                lines.push(format!("outcome: {outcome}"));
+            } else if let (Some(before), Some(after)) = (entry.tokens_before, entry.tokens_after) {
                 let savings = if before > 0 {
                     100.0 - (after as f64 / before as f64 * 100.0)
                 } else {
                     0.0
                 };
-                println!("tokens {before} -> {after} ({savings:.1}% saved)");
+                lines.push(format!("tokens {before} -> {after} ({savings:.1}% saved)"));
             }
         }
         _ => {}
     }
     if entry.shadow {
-        println!("shadow rule: recorded only, nothing was emitted");
+        lines.push("shadow rule: recorded only, nothing was emitted".to_string());
     }
-    Ok(0)
+    lines
 }
 
 pub fn run_bench(file: &std::path::Path) -> Result<i32> {
@@ -2167,6 +2175,53 @@ mod tests {
         validate,
     };
 
+    fn kept_as_is_entry() -> crate::core::pipeline_log::LogEntry {
+        crate::core::pipeline_log::LogEntry {
+            site: "hook".into(),
+            event: "after_tool".into(),
+            subject: "search".into(),
+            rule: "grep-group".into(),
+            methods: vec!["grep-group".into()],
+            tokens_before: Some(120),
+            tokens_after: Some(120),
+            outcome: Some("kept as is (no smaller result)".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn explain_last_prints_the_outcome_instead_of_tokens_when_kept_as_is() {
+        let lines = super::explain_last_lines(&kept_as_is_entry());
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "outcome: kept as is (no smaller result)"),
+            "{lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.starts_with("tokens ")),
+            "a kept-as-is decision saved nothing: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn explain_last_prints_tokens_when_no_outcome_is_set() {
+        let entry = crate::core::pipeline_log::LogEntry {
+            tokens_after: Some(30),
+            outcome: None,
+            ..kept_as_is_entry()
+        };
+        let lines = super::explain_last_lines(&entry);
+        assert!(
+            lines.iter().any(|l| l == "tokens 120 -> 30 (75.0% saved)"),
+            "{lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.starts_with("outcome:")),
+            "{lines:#?}"
+        );
+    }
+
     #[test]
     fn extract_toml_pulls_the_fenced_block_from_a_share_card() {
         let card = "# rtk pipeline: demo\n\nprose\n\n```toml\n[pipeline]\nname = \"demo\"\n```\n\ntrailing";
@@ -2196,6 +2251,7 @@ mod tests {
             saved_normalize: 350,
             saved_ingest_filter: 0,
             saved_pixel_compress: 0,
+            saved_rules: 0,
             cache_read: 4000,
             cache_created: 1000,
         };

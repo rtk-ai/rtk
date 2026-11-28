@@ -1,9 +1,10 @@
 # rtk:delegate-reads — oversize reads answered by a cheaper model
 #
 # Declares two delegation tasks and routes a whole-file Read over 350 lines to
-# the `bulk-read` task, so the file never enters the agent's context. Needs an
-# upstream you supply: without one the rule is inert and `validate` says so
-# (W007).
+# the `bulk-read` task, so the file never enters the agent's context. This
+# rule leaves images and PDFs to the agent's read tool: it renders them, and
+# their newline-byte count says nothing about their size. Needs an upstream
+# you supply: without one the rule is inert and `validate` says so (W007).
 #
 # Benchmark: not published. `rtk gain` accounts for the worker's own cost
 #            separately.
@@ -23,6 +24,6 @@ kind = "generate"
 
 [[hook.before_tool.read]]
 name   = "shunt-large-read"
-when   = { file_lines_gt = 350, whole_file = true }
+when   = { file_lines_gt = 350, whole_file = true, extension_not_in = ["png", "PNG", "jpg", "JPG", "jpeg", "JPEG", "gif", "GIF", "webp", "WEBP", "pdf", "PDF"] }
 action = "route"
 task   = "bulk-read"

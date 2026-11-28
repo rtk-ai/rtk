@@ -350,9 +350,9 @@ mod unix {
         );
     }
 
-    /// `--shell` is RTK's flag on `rtk test`, and a flag other tools carry too.
-    /// The guard that answers a misused `rtk test --shell` must not read argv
-    /// belonging to a command RTK is only passing through.
+    /// `--shell` is a flag of several RTK subcommands, and one other tools carry too.
+    /// Only the first argument decides a flag error, so a command RTK is passing
+    /// through keeps the flag.
     #[test]
     fn a_passthrough_keeps_its_own_shell_flag() {
         let output = rtk()

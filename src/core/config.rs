@@ -3,7 +3,7 @@
 use super::constants::{CONFIG_TOML, DEFAULT_HISTORY_DAYS, RTK_DATA_DIR};
 use crate::core::user_dirs;
 use crate::core::user_env;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -37,7 +37,7 @@ pub struct Config {
 ///
 /// - `default`: output contract only. The agent never learns rtk exists.
 /// - `high`: adds what RTK is and its meta commands (`rtk gain`, `rtk bypass`, `RTK_DISABLED=1`).
-/// - `full`: adds "prefix every command with `rtk`". Required for agents without a command
+/// - `full`: adds "prefix external programs with `rtk`". Required for agents without a command
 ///   hook; those agents always receive `full` regardless of this setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -188,6 +188,12 @@ pub struct DisplayConfig {
     pub colors: bool,
     pub emoji: bool,
     pub max_width: usize,
+    #[serde(default = "default_pro_hint")]
+    pub pro_hint: bool,
+}
+
+fn default_pro_hint() -> bool {
+    true
 }
 
 impl Default for DisplayConfig {
@@ -196,6 +202,7 @@ impl Default for DisplayConfig {
             colors: true,
             emoji: true,
             max_width: 120,
+            pro_hint: true,
         }
     }
 }
@@ -448,16 +455,8 @@ fn apply_recall_mode(content: &str, mode: crate::core::retriever::RecoveryMode) 
                 .and_then(|i| i.as_value())
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
-            max_files: legacy
-                .get("max_files")
-                .and_then(|i| i.as_value())
-                .and_then(|v| v.as_integer())
-                .map(|n| n as usize),
-            max_file_size: legacy
-                .get("max_file_size")
-                .and_then(|i| i.as_value())
-                .and_then(|v| v.as_integer())
-                .map(|n| n as usize),
+            max_files: legacy_count(legacy, "max_files")?,
+            max_file_size: legacy_count(legacy, "max_file_size")?,
             directory: legacy
                 .get("directory")
                 .and_then(|i| i.as_value())
@@ -470,10 +469,10 @@ fn apply_recall_mode(content: &str, mode: crate::core::retriever::RecoveryMode) 
             .unwrap_or_default();
         let mapping = map_legacy_tee(&tee, true, &explicit_keys);
         if let Some(v) = mapping.tee_max_files {
-            doc["retriever"]["tee_max_files"] = toml_edit::value(v as i64);
+            doc["retriever"]["tee_max_files"] = toml_edit::value(toml_integer(v)?);
         }
         if let Some(v) = mapping.tee_max_file_size {
-            doc["retriever"]["tee_max_file_size"] = toml_edit::value(v as i64);
+            doc["retriever"]["tee_max_file_size"] = toml_edit::value(toml_integer(v)?);
         }
         if let Some(d) = mapping.tee_directory {
             doc["retriever"]["tee_directory"] = toml_edit::value(d.to_string_lossy().as_ref());
@@ -483,6 +482,22 @@ fn apply_recall_mode(content: &str, mode: crate::core::retriever::RecoveryMode) 
         }
     }
     Ok(doc.to_string())
+}
+
+fn legacy_count(legacy: &dyn toml_edit::TableLike, key: &str) -> Result<Option<usize>> {
+    legacy
+        .get(key)
+        .and_then(|i| i.as_value())
+        .and_then(|v| v.as_integer())
+        .map(|n| {
+            usize::try_from(n)
+                .with_context(|| format!("[tee].{key} must be a non-negative integer, got {n}"))
+        })
+        .transpose()
+}
+
+fn toml_integer(v: usize) -> Result<i64> {
+    i64::try_from(v).with_context(|| format!("{v} does not fit in a TOML integer"))
 }
 
 pub fn set_recall_mode(mode: crate::core::retriever::RecoveryMode) -> Result<PathBuf> {
@@ -1017,5 +1032,14 @@ enabled = false
             reparsed.retriever.tee_directory,
             Some(PathBuf::from("/custom/tee"))
         );
+    }
+
+    #[test]
+    fn test_apply_recall_mode_rejects_negative_legacy_count() {
+        use crate::core::retriever::RecoveryMode;
+        assert!(Config::from_toml("[tee]\nmax_files = -1\n").is_err());
+        let err = apply_recall_mode("[tee]\nmax_files = -1\n", RecoveryMode::Tee)
+            .expect_err("a negative count is rejected, as on load");
+        assert!(err.to_string().contains("[tee].max_files"), "{err}");
     }
 }

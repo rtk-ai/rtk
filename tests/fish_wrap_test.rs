@@ -738,9 +738,7 @@ mode = "swap"
     /// agent typed itself, which the rules only rewrote around, keeps the
     /// decision it gets without the feature: an allow where the rules allow
     /// every part, and no `permissionDecision` at all where they leave it to
-    /// the host. With the wrap off that holds for any spelling. With it on, a
-    /// typed form behind a leading line continuation is still asked for: the
-    /// rules drop the continuation, so the hook cannot tell it from a wrap.
+    /// the host, including when the rules normalize a leading continuation.
     #[test]
     fn a_typed_wrap_form_keeps_its_decision() {
         for (enabled, command) in [
@@ -752,6 +750,10 @@ mode = "swap"
             // The rules drop a leading line continuation, so the rewritten
             // text starts in the wrap form while the typed one does not.
             (None, "\\\nrtk run --shell fish -c 'echo ok' && git status"),
+            (
+                Some(true),
+                "\\\nrtk run --shell fish -c 'echo ok' && git status",
+            ),
             // Leading whitespace is not a different command.
             (
                 Some(true),
@@ -785,12 +787,10 @@ mode = "swap"
         }
     }
 
-    /// With the wrap off, a fish script costs the hook and `rtk hook check`
-    /// nothing they did not cost before: the settings are walked as often as
-    /// for any other command, so a file RTK cannot parse warns as often too.
+    /// The verdict and wrap attestation share one settings scan (#4762),
+    /// including commands the wrap's pure gates will refuse.
     #[test]
-    fn a_fish_script_reads_the_settings_no_more_often_when_the_wrap_is_off() {
-        const FISH: &str = "git diff HEAD~3 HEAD; and true";
+    fn fish_wrap_checks_reuse_the_verdict_settings_scan() {
         let count = |output: Output| {
             String::from_utf8_lossy(&output.stderr)
                 .matches("failed to parse permissions")
@@ -802,28 +802,28 @@ mode = "swap"
         let check =
             |home: &tempfile::TempDir, command: &str| count(hook_check("claude", command, home));
 
-        let off = home_with_wrap(&[(".claude/settings.json", "{ not json")], None);
-        let plain = hook(&off, "git status");
-        assert!(plain > 0, "control: the broken file must warn at all");
-        assert_eq!(hook(&off, FISH), plain, "rtk hook claude");
-        assert_eq!(
-            check(&off, FISH),
-            check(&off, "git status"),
-            "rtk hook check"
-        );
-        assert_eq!(check(&off, "git status"), plain, "rtk hook check");
+        for enabled in [None, Some(true)] {
+            let home = home_with_wrap(&[(".claude/settings.json", "{ not json")], enabled);
+            let plain = hook(&home, "git status");
+            assert!(plain > 0, "control: the broken file must warn at all");
+            assert_eq!(check(&home, "git status"), plain, "rtk hook check");
 
-        // The control: with the wrap on, the same script is attested, which
-        // walks the settings again, so the count is what tells them apart.
-        let on = home_with_wrap(&[(".claude/settings.json", "{ not json")], Some(true));
-        assert!(
-            hook(&on, FISH) > plain,
-            "control: {FISH} classifies as fish"
-        );
-        assert!(
-            check(&on, FISH) > check(&on, "git status"),
-            "control: rtk hook check attests only what the hook attests"
-        );
+            for command in [
+                "git diff HEAD~3 HEAD; and true",
+                "rtk git status; and true",
+                "git status; and echo $(whoami)",
+                "git status > out; and true",
+                r"git status; and echo '\\'",
+                "git status &| cat; and true",
+            ] {
+                assert_eq!(hook(&home, command), plain, "hook: {enabled:?} {command:?}");
+                assert_eq!(
+                    check(&home, command),
+                    plain,
+                    "check: {enabled:?} {command:?}"
+                );
+            }
+        }
     }
 
     #[test]

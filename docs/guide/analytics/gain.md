@@ -110,6 +110,10 @@ Same columns as daily, aggregated by Sunday-Saturday week or calendar month.
 }
 ```
 
+## The RTK Pro line
+
+After a week of data, `rtk gain` ends with one dim line about [RTK Pro](https://pro.rtk-ai.app), at most once a day and only on a terminal: a piped `rtk gain`, and so an agent reading it, never sees it. `pro_hint = false` under `[display]` in `config.toml`, or `RTK_PRO_HINT=0`, turns it off.
+
 ## How token estimation works
 
 `rtk gain` estimates tokens as `bytes / 4`; RTK ships no tokenizer. The same estimator is applied to raw and filtered output, so the percentage is reliable; the absolute token counts are approximate and will not match your provider's billing.
@@ -250,6 +254,14 @@ rtk gain --by-pipeline    # which pipeline
 ```
 
 These combine — passing several renders several sections in one report.
+
+At the proxy, what `proxy.request` rules remove is counted under the `rules` method and credited to the rule that rewrote each tool result. Rules chained with `continue = true` run as one chain and share one entry (`first + second`). The default report lists the largest of them under `via rules`, and `--by-rule` lists them all:
+
+```
+Trimmed in flight: 1.7K removed across the 1 req it touched (per-mechanism ratios below)
+  via rules:       1.7K
+    web-pages:     1.7K
+```
 
 ### One pipeline in detail
 

@@ -1,0 +1,120 @@
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/l2tp/l2tp_ip.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/l2tp/l2tp_netlink.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/l2tp/l2tp_netlink.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/l2tp/l2tp_netlink.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/l2tp/l2tp_eth.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/l2tp/l2tp_eth.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/l2tp/l2tp_eth.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/l2tp/l2tp_ip6.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/l2tp/l2tp_ip6.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/l2tp/l2tp_ip6.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/sctp/sctp.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/sctp/sctp.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/sctp/sctp.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/sctp/sctp_diag.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/sctp/sctp_diag.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/sctp/sctp_diag.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/mac80211/mac80211.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/mac80211/mac80211.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/mac80211/mac80211.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/rfkill/rfkill.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/rfkill/rfkill.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/rfkill/rfkill.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/9p/9pnet.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/9p/9pnet.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/9p/9pnet.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/9p/9pnet_fd.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/9p/9pnet_fd.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/9p/9pnet_fd.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/6lowpan.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/6lowpan.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/6lowpan.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_dest.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_dest.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_dest.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_fragment.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_fragment.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_fragment.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_hop.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_hop.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_hop.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_ipv6.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_ipv6.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_ipv6.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_mobility.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_mobility.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_mobility.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_routing.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_routing.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_routing.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_udp.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_udp.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/6lowpan/nhc_udp.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/ieee802154/6lowpan/ieee802154_6lowpan.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/ieee802154/6lowpan/ieee802154_6lowpan.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/ieee802154/6lowpan/ieee802154_6lowpan.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/ieee802154/ieee802154.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/ieee802154/ieee802154.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/ieee802154/ieee802154.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/ieee802154/ieee802154_socket.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/ieee802154/ieee802154_socket.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/ieee802154/ieee802154_socket.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/mac802154/mac802154.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/mac802154/mac802154.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/mac802154/mac802154.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/ceph/libceph.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/ceph/libceph.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/ceph/libceph.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/batman-adv/batman-adv.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/batman-adv/batman-adv.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/batman-adv/batman-adv.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/nfc/nfc.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/nfc/nfc.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/nfc/nfc.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/openvswitch/openvswitch.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/openvswitch/openvswitch.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/openvswitch/openvswitch.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/openvswitch/vport-vxlan.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/openvswitch/vport-vxlan.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/openvswitch/vport-vxlan.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/openvswitch/vport-gre.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/openvswitch/vport-gre.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/openvswitch/vport-gre.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/vmw_vsock/vsock.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/vmw_vsock/vsock.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/vmw_vsock/vsock.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/vmw_vsock/vsock_diag.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/vmw_vsock/vsock_diag.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/vmw_vsock/vsock_diag.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/vmw_vsock/vsock_loopback.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/vmw_vsock/vsock_loopback.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/vmw_vsock/vsock_loopback.ko.xz
+  INSTALL /work/output/target/lib/modules/6.12.61-v8/kernel/net/nsh/nsh.ko
+  STRIP   /work/output/target/lib/modules/6.12.61-v8/kernel/net/nsh/nsh.ko
+  XZ      /work/output/target/lib/modules/6.12.61-v8/kernel/net/nsh/nsh.ko.xz
+  DEPMOD  /work/output/target/lib/modules/6.12.61-v8
+# Installing dtc (device tree compiler) as host tool, if selected
+if grep -q "CONFIG_DTC=y" /work/output/build/linux-custom/.config; then /usr/bin/install -D -m 0755 /work/output/build/linux-custom/scripts/dtc/dtc /work/output/host/bin/linux-dtc ; ln -sf linux-dtc /work/output/host/bin/dtc; fi
+>>> linux custom Installing to images directory
+/usr/bin/install -m 0644 -D /work/output/build/linux-custom/arch/arm64/boot/Image /work/output/images/Image
+# dtbs moved from arch/<ARCH>/boot to arch/<ARCH>/boot/dts since 3.8-rc1
+install -D /work/output/build/linux-custom/arch/arm64/boot/dts/broadcom/bcm2711-rpi-4-b.dtb /work/output/images/bcm2711-rpi-4-b.dtb
+install -D /work/output/build/linux-custom/arch/arm64/boot/dts/broadcom/bcm2711-rpi-400.dtb /work/output/images/bcm2711-rpi-400.dtb
+install -D /work/output/build/linux-custom/arch/arm64/boot/dts/broadcom/bcm2711-rpi-cm4.dtb /work/output/images/bcm2711-rpi-cm4.dtb
+install -D /work/output/build/linux-custom/arch/arm64/boot/dts/broadcom/bcm2711-rpi-cm4s.dtb /work/output/images/bcm2711-rpi-cm4s.dtb
+comm: /work/output/build/linux-custom/.files-list.before: No such file or directory
+comm: /work/output/build/linux-custom/.files-list-staging.before: No such file or directory
+comm: /work/output/build/linux-custom/.files-list-images.before: No such file or directory
+comm: /work/output/build/linux-custom/.files-list-host.before: No such file or directory
+>>> rtk-fail-compile 1.0 Building
+/work/output/host/bin/aarch64-linux-gcc -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64  -O2 -g0 -D_FORTIFY_SOURCE=1  -o /work/output/build/rtk-fail-compile-1.0/rtk-fail-compile /work/output/build/rtk-fail-compile-1.0/rtk-fail-compile.c
+/work/output/build/rtk-fail-compile-1.0/rtk-fail-compile.c: In function ‘main’:
+/work/output/build/rtk-fail-compile-1.0/rtk-fail-compile.c:7:9: error: ‘count’ undeclared (first use in this function)
+    7 |         count += i;
+      |         ^~~~~
+/work/output/build/rtk-fail-compile-1.0/rtk-fail-compile.c:7:9: note: each undeclared identifier is reported only once for each function it appears in
+make[1]: *** [package/pkg-generic.mk:273: /work/output/build/rtk-fail-compile-1.0/.stamp_built] Error 1
+make: *** [Makefile:23: _all] Error 2

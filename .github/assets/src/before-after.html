@@ -1,0 +1,104 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<!-- Real output. Captured with `rtk bypass cargo test` (left) and `rtk cargo test` (right)
+     on a 48-test crate with one failing assertion, rtk core 1.0.1. Only the lines marked
+     "⋯ N more lines" are elided; the counts are exact. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=block" rel="stylesheet">
+<style>
+:root{--bg:#060b18;--bg-card:#0f1629;--text:#e2e8f0;--text-bright:#f8fafc;--text-muted:#94a3b8;--text-dim:#7e8ca6;--accent:#00e599;--accent-dim:rgba(0,229,153,.10);--accent-glow:rgba(0,229,153,.25);--red:#f87171;--scene:rgba(0,229,153,.09);--tint:rgba(0,229,153,.045);--vignette:rgba(0,0,0,.42);--grid:rgba(148,163,184,.05);--line:rgba(148,163,184,.14)}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:1280px;height:560px;background:transparent}
+.card{position:relative;width:1280px;height:560px;border-radius:20px;overflow:hidden;background:var(--bg);border:1px solid var(--line);isolation:isolate;font-family:'Geist','Inter',sans-serif;color:var(--text)}
+.atmo{position:absolute;inset:0;z-index:-1;background-image:
+ radial-gradient(ellipse 34% 80% at 50% 50%,var(--scene),transparent 62%),
+ linear-gradient(180deg,transparent 4%,var(--tint) 42%,transparent 84%),
+ radial-gradient(ellipse 120% 105% at 50% 48%,transparent 56%,var(--vignette) 100%)}
+.grid{position:absolute;inset:0;z-index:-1;background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);background-size:40px 40px;-webkit-mask-image:radial-gradient(ellipse 30% 70% at 50% 50%,#000 20%,transparent 75%)}
+.eyebrow{position:absolute;left:56px;top:34px;font-family:'JetBrains Mono',monospace;font-weight:500;font-size:14px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-dim)}
+.eyebrow b{color:var(--text-muted);font-weight:500}
+.cmd{position:absolute;right:56px;top:30px;font-family:'JetBrains Mono',monospace;font-size:15px;color:var(--text-muted)}
+.cmd span{color:var(--accent)}
+.panel{position:absolute;top:84px;width:470px;height:440px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,.025),transparent 30%),var(--bg-card);overflow:hidden}
+.panel.left{left:56px}.panel.right{right:56px}
+.ph{display:flex;align-items:center;gap:10px;height:42px;padding:0 18px;border-bottom:1px solid var(--line);font-family:'JetBrains Mono',monospace;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-dim)}
+.ph i{width:9px;height:9px;border-radius:50%;display:inline-block}
+.left .ph i{background:var(--red);opacity:.8}.right .ph i{background:var(--accent);box-shadow:0 0 10px var(--accent-glow)}
+.ph .n{margin-left:auto;letter-spacing:.04em;text-transform:none}
+.left .ph .n{color:var(--red);opacity:.85}.right .ph .n{color:var(--accent)}
+pre{font-family:'JetBrains Mono',monospace}
+.left pre{white-space:pre;padding:10px 18px;font-size:11.5px;line-height:13.5px;color:rgba(148,163,184,.55)}
+.left pre .f{color:var(--red);opacity:.9}
+.left pre .m{color:rgba(148,163,184,.38);font-style:italic}
+.right pre{white-space:pre-wrap;padding:18px 20px;font-size:13.5px;line-height:22px;color:var(--text)}
+.right pre .f{color:var(--red)}
+.right pre .ok{color:var(--accent)}
+.right pre .p{color:var(--text-muted)}
+.right pre .r{color:var(--accent);opacity:.85}
+.gate{position:absolute;left:526px;top:84px;width:228px;height:440px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px}
+.gate::before{content:'';position:absolute;left:50%;top:0;width:1px;height:100%;transform:translateX(-50%);background:linear-gradient(to bottom,transparent,var(--accent-glow) 30%,var(--accent-glow) 70%,transparent)}
+.gate::after{content:'';position:absolute;left:50%;top:50%;width:260px;height:260px;transform:translate(-50%,-50%);background:radial-gradient(circle,var(--accent-glow) 0%,transparent 62%);opacity:.7}
+.gate img{position:relative;z-index:1;width:124px;height:124px;filter:drop-shadow(0 0 10px var(--accent-glow)) drop-shadow(0 0 32px var(--accent-glow))}
+.gate .lbl{position:relative;z-index:1;font-family:'JetBrains Mono',monospace;font-size:13px;letter-spacing:.26em;color:var(--text-muted)}
+.strand{position:absolute;left:526px;top:84px;width:228px;height:440px;z-index:0}
+</style></head>
+<body><div class="card"><div class="atmo"></div><div class="grid"></div>
+<p class="eyebrow">01 / Install &amp; forget · <b>what your agent reads</b></p>
+<p class="cmd"><span>$</span> cargo test</p>
+
+<div class="panel left">
+ <div class="ph"><i></i>without rtk<span class="n">71 lines</span></div>
+<pre>   Compiling authkit v0.4.2 (/private/tmp/claude-501/-Users-aeppling--superconductor-worktrees-rtk-sc-flux-phonon-4e98/d36bac6a-c158-4776-8c24-adbe62511c7f/scratchpad/demo)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.52s
+     Running unittests src/lib.rs (/private/tmp/claude-501/-Users-aeppling--superconductor-worktrees-rtk-sc-flux-phonon-4e98/d36bac6a-c158-4776-8c24-adbe62511c7f/scratchpad/demo/target/debug/deps/authkit-7b3ad5cbf6b078ab)
+
+running 48 tests
+test auth::tests::login_ok ... ok
+test auth::tests::login_locked_account ... ok
+test auth::tests::login_bad_password ... ok
+<span class="m">⋯ 11 more lines</span>
+<span class="f">test auth::tests::refresh_token_expired ... FAILED</span>
+<span class="m">⋯ 34 more lines</span>
+failures:
+
+---- auth::tests::refresh_token_expired stdout ----
+
+thread 'auth::tests::refresh_token_expired' (823614) panicked at src/lib.rs:15:38:
+assertion `left == right` failed
+  left: Expired
+ right: Valid
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    auth::tests::refresh_token_expired
+
+test result: FAILED. 47 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`</pre>
+</div>
+
+<svg class="strand" viewBox="0 0 228 440" aria-hidden="true">
+ <defs><linearGradient id="g" x1="0" x2="1"><stop offset="0" stop-color="#00e599" stop-opacity=".0"/><stop offset=".5" stop-color="#00e599" stop-opacity=".55"/><stop offset="1" stop-color="#00e599" stop-opacity=".0"/></linearGradient></defs>
+ <path d="M0 200 C 60 200, 60 212, 114 212 S 168 224, 228 224" stroke="url(#g)" stroke-width="1.2" fill="none"/>
+ <path d="M0 236 C 60 236, 60 222, 114 222 S 168 208, 228 208" stroke="url(#g)" stroke-width="1.2" fill="none"/>
+ <path d="M0 170 C 60 170, 60 218, 114 218 S 168 216, 228 216" stroke="url(#g)" stroke-width="1" fill="none"/>
+ <path d="M0 266 C 60 266, 60 218, 114 218 S 168 216, 228 216" stroke="url(#g)" stroke-width="1" fill="none"/>
+</svg>
+<div class="gate"><img src="helmet.webp" alt=""><span class="lbl">rtk</span></div>
+
+<div class="panel right">
+ <div class="ph"><i></i>with rtk<span class="n">11 lines</span></div>
+<pre><span class="p">---- auth::tests::refresh_token_expired stdout ----</span>
+
+thread 'auth::tests::refresh_token_expired' (823713) panicked at src/lib.rs:15:38:
+assertion `left == right` failed
+  left: Expired
+ right: Valid
+<span class="p">note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace</span>
+
+
+<span class="r">[full output: rtk recall fa8d45164a47]</span>
+test result: <span class="f">FAILED</span>. <span class="ok">47 passed</span>; <span class="f">1 failed</span>; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s</pre>
+</div>
+</div></body></html>

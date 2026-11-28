@@ -1,0 +1,8 @@
+Packages: -1
+-
+
+> minus-case@1.0.0 postinstall /project
+> node -e "console.log('postinstall: config check failed'); process.exit(5)"
+
+postinstall: config check failed
+ ELIFECYCLE  Command failed with exit code 5.

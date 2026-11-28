@@ -1,0 +1,45 @@
+{"Time":"2026-10-21T09:01:16.074842386-07:00","Action":"start","Package":"example.com/rtk-pipe-fixture/cases"}
+{"Time":"2026-10-21T09:01:16.076496139-07:00","Action":"run","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestPass"}
+{"Time":"2026-10-21T09:01:16.07653024-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestPass","Output":"=== RUN   TestPass\n"}
+{"Time":"2026-10-21T09:01:16.076540706-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestPass","Output":"    capture_test.go:5: captured pass\n"}
+{"Time":"2026-10-21T09:01:16.076548828-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestPass","Output":"--- PASS: TestPass (0.00s)\n"}
+{"Time":"2026-10-21T09:01:16.076551833-07:00","Action":"pass","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestPass","Elapsed":0}
+{"Time":"2026-10-21T09:01:16.076555869-07:00","Action":"run","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelA"}
+{"Time":"2026-10-21T09:01:16.076557922-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelA","Output":"=== RUN   TestParallelA\n"}
+{"Time":"2026-10-21T09:01:16.076560226-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelA","Output":"=== PAUSE TestParallelA\n"}
+{"Time":"2026-10-21T09:01:16.076561638-07:00","Action":"pause","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelA"}
+{"Time":"2026-10-21T09:01:16.076563551-07:00","Action":"run","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelB"}
+{"Time":"2026-10-21T09:01:16.076565383-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelB","Output":"=== RUN   TestParallelB\n"}
+{"Time":"2026-10-21T09:01:16.076567497-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelB","Output":"=== PAUSE TestParallelB\n"}
+{"Time":"2026-10-21T09:01:16.076568969-07:00","Action":"pause","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelB"}
+{"Time":"2026-10-21T09:01:16.076570681-07:00","Action":"run","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestSkip"}
+{"Time":"2026-10-21T09:01:16.076572314-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestSkip","Output":"=== RUN   TestSkip\n"}
+{"Time":"2026-10-21T09:01:16.076574107-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestSkip","Output":"    capture_test.go:8: captured skip\n"}
+{"Time":"2026-10-21T09:01:16.07657632-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestSkip","Output":"--- SKIP: TestSkip (0.00s)\n"}
+{"Time":"2026-10-21T09:01:16.076578273-07:00","Action":"skip","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestSkip","Elapsed":0}
+{"Time":"2026-10-21T09:01:16.076580035-07:00","Action":"cont","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelA"}
+{"Time":"2026-10-21T09:01:16.076581648-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelA","Output":"=== CONT  TestParallelA\n"}
+{"Time":"2026-10-21T09:01:16.07658333-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelA","Output":"    capture_test.go:6: parallel A\n"}
+{"Time":"2026-10-21T09:01:16.076585614-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelA","Output":"--- PASS: TestParallelA (0.00s)\n"}
+{"Time":"2026-10-21T09:01:16.076587437-07:00","Action":"pass","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelA","Elapsed":0}
+{"Time":"2026-10-21T09:01:16.07658991-07:00","Action":"cont","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelB"}
+{"Time":"2026-10-21T09:01:16.076591292-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelB","Output":"=== CONT  TestParallelB\n"}
+{"Time":"2026-10-21T09:01:16.076592775-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelB","Output":"    capture_test.go:7: parallel B\n"}
+{"Time":"2026-10-21T09:01:16.07668234-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelB","Output":"--- PASS: TestParallelB (0.00s)\n"}
+{"Time":"2026-10-21T09:01:16.077276465-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelB","Output":"goos: linux\n"}
+{"Time":"2026-10-21T09:01:16.077283586-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelB","Output":"goarch: amd64\n"}
+{"Time":"2026-10-21T09:01:16.077286-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelB","Output":"pkg: example.com/rtk-pipe-fixture/cases\n"}
+{"Time":"2026-10-21T09:01:16.077287883-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelB","Output":"cpu: AMD EPYC 9V74 80-Core Processor                \n"}
+{"Time":"2026-10-21T09:01:16.077293111-07:00","Action":"pass","Package":"example.com/rtk-pipe-fixture/cases","Test":"TestParallelB","Elapsed":0}
+{"Time":"2026-10-21T09:01:16.077295534-07:00","Action":"run","Package":"example.com/rtk-pipe-fixture/cases","Test":"BenchmarkLogged"}
+{"Time":"2026-10-21T09:01:16.077297006-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"BenchmarkLogged","Output":"=== RUN   BenchmarkLogged\n"}
+{"Time":"2026-10-21T09:01:16.077298939-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"BenchmarkLogged","Output":"BenchmarkLogged\n"}
+{"Time":"2026-10-21T09:01:16.078076922-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"BenchmarkLogged","Output":"    capture_test.go:10: captured benchmark log\n"}
+{"Time":"2026-10-21T09:01:16.078165195-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"BenchmarkLogged","Output":"BenchmarkLogged-9   \t"}
+{"Time":"2026-10-21T09:01:16.078180048-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Test":"BenchmarkLogged","Output":"       1\t     69545 ns/op\n"}
+{"Time":"2026-10-21T09:01:16.078223884-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Output":"PASS\n"}
+{"Time":"2026-10-21T09:01:16.078461743-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/cases","Output":"ok  \texample.com/rtk-pipe-fixture/cases\t0.003s\n"}
+{"Time":"2026-10-21T09:01:16.078475153-07:00","Action":"pass","Package":"example.com/rtk-pipe-fixture/cases","Elapsed":0.004}
+{"Time":"2026-10-21T09:01:16.078560943-07:00","Action":"start","Package":"example.com/rtk-pipe-fixture/empty"}
+{"Time":"2026-10-21T09:01:16.078566671-07:00","Action":"output","Package":"example.com/rtk-pipe-fixture/empty","Output":"?   \texample.com/rtk-pipe-fixture/empty\t[no test files]\n"}
+{"Time":"2026-10-21T09:01:16.078570457-07:00","Action":"skip","Package":"example.com/rtk-pipe-fixture/empty","Elapsed":0}
