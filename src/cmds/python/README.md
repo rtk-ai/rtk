@@ -11,7 +11,7 @@
   Locations retain the rule code; differing messages and rules outside the
   summary cap keep their descriptions beside each location.
 - `pip_cmd.rs` auto-detects `uv` as a pip alternative and routes accordingly
-- `uv_cmd.rs` preserves `uv run` environment semantics: the program's own output passes through on success (bounded, with a tee hint), diagnostics are extracted on failure
+- `uv_cmd.rs` preserves `uv run` environment semantics: the program's own output passes through on success (bounded, with a recovery hint); failures retain bounded partial stdout and traceback frame context alongside extracted diagnostics
 - `python -m pytest` and `python3 -m mypy` are rewritten by the hook registry to `rtk pytest` / `rtk mypy`
 
 ## Cross-command
