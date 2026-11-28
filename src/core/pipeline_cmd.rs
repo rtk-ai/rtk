@@ -1144,10 +1144,11 @@ pub(crate) fn collect_card(name: Option<&str>) -> Result<Option<CardData>> {
     // The PreTool rewrite (grep -> rtk grep, which compresses) is RTK's primary
     // bash-savings lever, recorded in the commands table — the "Command
     // filtering" panel. Scoped to the cwd so a shared project's card reflects
-    // its own work, matching how `rtk gain` filters.
+    // its own work, matching how `rtk gain` filters, and spelled as the
+    // tracker records it (canonical), or the rows are not found.
     let filtering = tracker.as_ref().and_then(|t| {
-        let cwd = crate::core::user_dirs::current_dir().ok()?;
-        t.get_summary_filtered(cwd.to_str()).ok()
+        let project = crate::core::tracking::current_project_path_string();
+        t.get_summary_filtered(Some(&project)).ok()
     });
     let hook = tracker
         .as_ref()
