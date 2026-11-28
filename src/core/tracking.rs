@@ -48,7 +48,7 @@ use std::time::Instant;
 // ── Project path helpers ── // added: project-scoped tracking support
 
 /// Get the canonical project path string for the current working directory.
-fn current_project_path_string() -> String {
+pub(crate) fn current_project_path_string() -> String {
     user_dirs::current_dir()
         .ok()
         .and_then(|p| p.canonicalize().ok())
