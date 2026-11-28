@@ -1,0 +1,55 @@
+# Lines on which bash 3.2, 5.2 and 5.3 all run `canary` (a recording stub), read by the permission gate
+# with `canary` denied and `git status` allowed. `deny`: the gate denies the line.
+# `not_allow`: the gate leaves the line to the host, as it does a quoted script or a substitution it
+# cannot say how the shell reads. Never an allow. Fields: expectation, line (`\\` `\n` `\t` escaped).
+# The name only labels a failure.
+deny	00_baseline	git status; canary
+deny	09_heredoc_same_line	cat <<EOF; canary\nbody\nEOF\ngit status
+deny	10_heredoc_dash	cat <<-EOF\n\tbody\n\tEOF\ncanary
+deny	12_heredoc_unquoted_subst	cat <<EOF\n$(canary)\nEOF\ngit status
+deny	15_case_in_subst_paren	echo $(case x in (x) canary;; esac); git status
+deny	16_bsnl_in_dquote	echo "a\\\nb"; canary
+deny	17_bsnl_in_squote	echo 'a\\\nb'; canary
+deny	18_bsnl_in_word	git sta\\\ntus; can\\\nary
+not_allow	19_bsnl_dollar_paren	git status "$\\\n(canary)"
+deny	20_bsnl_before_hash	echo x\\\n#y; canary
+deny	21_param_default_subst	echo ${x:-$(canary)}; git status
+deny	22_param_hash	echo ${x#y}; canary
+deny	23_arith_base	echo $((16#ff)); canary
+deny	24_arith_base_var	n=1; echo $((10#$n)); canary
+deny	27_comment_newline	git status #c\ncanary
+deny	28_hash_midword	echo a#b; canary
+deny	29_hash_escaped	echo \\#; canary
+deny	36_brace_group	{ git status; canary; }
+deny	37_subshell	(git status; canary)
+deny	38_dbracket	[[ -n x ]] && canary
+deny	40_time_pipeline	time git status | canary
+not_allow	41_backquote	echo `canary`; git status
+deny	42_procsubst	diff <(canary) <(git status)
+deny	43_arith_subst	echo $(( $(canary) + 1 ))
+deny	44_locale_string	echo $"hello"; canary
+deny	45_nested_quotes	echo "$(echo "a;b")"; canary
+deny	46_assign_subst	x=$(canary) git status
+deny	47_env_wrapper	env A=1 canary
+not_allow	48_sh_c	sh -c 'git status; canary'
+not_allow	49_bash_c_dq	bash -c "git status && canary"
+deny	50_timeout_wrapper	timeout 5 canary
+deny	51_two_assign_newline	a=1 b=2\ncanary
+deny	52_eqeq_arg	echo ==; canary
+deny	53_pipe3_heredoc	git status | cat | cat\ncanary\ncat <<'EOF'\nx\nEOF
+deny	54_pipe2_andand	git status | cat | head -30\ncanary && cd s
+deny	55_heredoc_redirect_pipe	cat <<EOF 2>&1 | canary\nhi\nEOF
+deny	56_rw_redirect	cat <> f; canary
+deny	57_param_semicolon	echo ${x/;/}; canary
+deny	58_param_pipes	echo ${x:-a|b|c}; canary
+deny	59_dollar_dparen_cmd	echo $((canary) && git status)
+deny	60_func_def	f() { canary; }; f
+deny	61_if_then	if git status; then canary; fi
+deny	62_for_loop	for i in 1; do canary; done
+deny	63_andand_bsnl	git status && \\\ncanary
+deny	64_redirect_then	git status >/dev/null; canary
+deny	65_bang	! git status; canary
+deny	66_background	git status & canary
+deny	68_herestring	cat <<< "x"; canary
+deny	70_extglob	shopt -s extglob\nls !(x); canary
+deny	72_escaped_newline_comment	echo a # c \\\ncanary
