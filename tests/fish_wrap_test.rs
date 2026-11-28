@@ -462,14 +462,26 @@ mode = "swap"
             ("Library/Application Support/rtk/pipeline.toml", RULE),
         ]);
 
-        // The control: a plain command the rule matches is swapped, so the
-        // rule is live and the gate is the thing being exercised.
-        let swapped = hook_stdin("claude", &claude_payload("git status"), &home);
-        assert!(
-            String::from_utf8_lossy(&swapped.stdout).contains("rtk check-build"),
-            "control: the swap rule must fire: {}",
-            String::from_utf8_lossy(&swapped.stdout)
-        );
+        // The engine build swaps a matching plain command; the OSS build
+        // ignores pipeline.toml and keeps the normal rewrite.
+        let control = hook_stdin("claude", &claude_payload("git status"), &home);
+        if cfg!(feature = "engine") {
+            assert!(
+                String::from_utf8_lossy(&control.stdout).contains("rtk check-build"),
+                "control: the swap rule must fire: {}",
+                String::from_utf8_lossy(&control.stdout)
+            );
+        } else {
+            let response: serde_json::Value =
+                serde_json::from_slice(&control.stdout).expect("OSS hook response");
+            assert_eq!(
+                response
+                    .pointer("/hookSpecificOutput/updatedInput/command")
+                    .and_then(serde_json::Value::as_str),
+                Some("rtk git status"),
+                "the OSS build must ignore the pipeline rule"
+            );
+        }
 
         // A fish chain the same rule matches is not swapped into `sh -c`.
         let output = hook_stdin("claude", &claude_payload(FISH_CHAIN), &home);
