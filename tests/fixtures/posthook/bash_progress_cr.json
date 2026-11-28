@@ -1,0 +1,21 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/home/user/.claude/projects/example-project/00000000-0000-0000-0000-000000000000.jsonl",
+  "cwd": "/home/user/project",
+  "prompt_id": "00000000-0000-0000-0000-000000000000",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "python3 -c \"import sys; [sys.stdout.write('\\rDownloading '+str(i)+'%') for i in range(0,101,2)]; print(' done')\""
+  },
+  "tool_response": {
+    "stdout": "\rDownloading 0%\rDownloading 2%\rDownloading 4%\rDownloading 6%\rDownloading 8%\rDownloading 10%\rDownloading 12%\rDownloading 14%\rDownloading 16%\rDownloading 18%\rDownloading 20%\rDownloading 22%\rDownloading 24%\rDownloading 26%\rDownloading 28%\rDownloading 30%\rDownloading 32%\rDownloading 34%\rDownloading 36%\rDownloading 38%\rDownloading 40%\rDownloading 42%\rDownloading 44%\rDownloading 46%\rDownloading 48%\rDownloading 50%\rDownloading 52%\rDownloading 54%\rDownloading 56%\rDownloading 58%\rDownloading 60%\rDownloading 62%\rDownloading 64%\rDownloading 66%\rDownloading 68%\rDownloading 70%\rDownloading 72%\rDownloading 74%\rDownloading 76%\rDownloading 78%\rDownloading 80%\rDownloading 82%\rDownloading 84%\rDownloading 86%\rDownloading 88%\rDownloading 90%\rDownloading 92%\rDownloading 94%\rDownloading 96%\rDownloading 98%\rDownloading 100% done",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false
+  },
+  "tool_use_id": "toolu_01GYp4XzhRYfr8azD9HdK4nT",
+  "duration_ms": 50
+}

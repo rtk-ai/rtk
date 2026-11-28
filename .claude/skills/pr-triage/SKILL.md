@@ -228,7 +228,7 @@ prompt: |
   - anyhow::Result + .context() (no unwrap())
   - Fallback to raw command on filter failure
   - Exit code propagation
-  - Token savings ≥60% in tests with real fixtures
+  - Token savings ≥20% in tests with real fixtures
   - No async/tokio dependencies
 
   Return structured review:

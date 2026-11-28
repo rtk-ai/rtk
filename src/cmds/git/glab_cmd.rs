@@ -11,7 +11,7 @@
 //! - Pipeline: `head_pipeline.status` (not `statusCheckRollup`)
 
 use super::git_cmd;
-use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
+use crate::core::arg_tokenizer::{self, Dialect, Flag, Grammar, TokenKind, ValueSpec};
 use crate::core::args_utils;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::quote_word;
@@ -116,47 +116,26 @@ fn filter_markdown_segment(text: &str) -> String {
 }
 
 /// State icon for MR/issue states (glab uses lowercase).
-fn state_icon(state: &str, ultra_compact: bool) -> &'static str {
-    if ultra_compact {
-        match state {
-            "opened" => "O",
-            "merged" => "M",
-            "closed" => "C",
-            _ => "?",
-        }
-    } else {
-        match state {
-            "opened" => "[open]",
-            "merged" => "[merged]",
-            "closed" => "[closed]",
-            _ => "?",
-        }
+fn state_icon(state: &str) -> &'static str {
+    match state {
+        "opened" => "[open]",
+        "merged" => "[merged]",
+        "closed" => "[closed]",
+        _ => "?",
     }
 }
 
-/// Pipeline status icon. Non-compact mode uses text tags for parity with
-/// `gh_cmd.rs` (avoids multi-byte terminal rendering quirks; aligns with the
-/// rest of the codebase). Ultra-compact keeps single-char density.
-fn pipeline_icon(status: &str, ultra_compact: bool) -> &'static str {
-    if ultra_compact {
-        match status {
-            "success" => "+",
-            "failed" => "x",
-            "canceled" | "cancelled" => "X",
-            "running" | "pending" => "~",
-            "skipped" => "-",
-            _ => "?",
-        }
-    } else {
-        match status {
-            "success" => "[ok]",
-            "failed" => "[fail]",
-            "canceled" | "cancelled" => "[cancel]",
-            "running" => "[run]",
-            "pending" => "[pend]",
-            "skipped" => "[skip]",
-            _ => "?",
-        }
+/// Pipeline status icon: text tags for parity with `gh_cmd.rs` (avoids
+/// multi-byte terminal rendering quirks; aligns with the rest of the codebase).
+fn pipeline_icon(status: &str) -> &'static str {
+    match status {
+        "success" => "[ok]",
+        "failed" => "[fail]",
+        "canceled" | "cancelled" => "[cancel]",
+        "running" => "[run]",
+        "pending" => "[pend]",
+        "skipped" => "[skip]",
+        _ => "?",
     }
 }
 
@@ -170,98 +149,69 @@ fn extract_mr_number(text: &str) -> Option<String> {
 
 /// pflag reads a literal `--` as the value of a value-taking flag rather than as the
 /// end-of-options boundary: `glab mr view --page -- 5` rejects `--` as the page number.
-fn glab_value() -> ValueSpec {
-    ValueSpec::value().claiming_dash_dash()
-}
+const GLAB_VALUE: ValueSpec = ValueSpec::value().claiming_dash_dash();
 
 /// glab's inherited flags, available on every subcommand. `--group` is only glab's own on the
 /// list/search family, but rtk's `Commands::Glab` injects it into any subcommand's args, so it
 /// has to be classified everywhere or its value is read as the identifier.
-fn inherited_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    match kind {
-        TokenKind::Long => matches!(name, "repo" | "group").then(glab_value),
-        TokenKind::Short => matches!(name, "R" | "g").then(glab_value),
-        _ => None,
-    }
-}
+const INHERITED_FLAGS: &[Flag] = &[
+    Flag::pair("g", "group").takes(GLAB_VALUE),
+    Flag::pair("R", "repo").takes(GLAB_VALUE),
+];
 
 /// `glab mr view` and `glab issue view` share one grammar — their value-taking flag sets are
 /// identical on both glab 1.36 and 1.117. The table is the union over those two: 1.117 added
 /// `--jq` and `-F/--output` to the `-p/-P/-R` set 1.36 had.
-fn view_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    let own = match kind {
-        TokenKind::Long => matches!(name, "jq" | "output" | "page" | "per-page").then(glab_value),
-        TokenKind::Short => matches!(name, "F" | "p" | "P").then(glab_value),
-        _ => None,
-    };
-    own.or_else(|| inherited_takes_value(kind, name))
-}
+const VIEW_FLAGS: &[Flag] = &[
+    Flag::long("jq").takes(GLAB_VALUE),
+    Flag::pair("F", "output").takes(GLAB_VALUE),
+    Flag::pair("p", "page").takes(GLAB_VALUE),
+    Flag::pair("P", "per-page").takes(GLAB_VALUE),
+];
+const VIEW_GRAMMAR: Grammar = Grammar::new(Dialect::Posix, &[INHERITED_FLAGS, VIEW_FLAGS]);
 
 /// `glab mr merge`: `-s` is the boolean `--squash` here but the value-taking `--sha` on
-/// `glab mr approve`, so the two cannot share a table.
-fn mr_merge_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    let own = match kind {
-        TokenKind::Long => matches!(name, "message" | "sha" | "squash-message").then(glab_value),
-        TokenKind::Short => (name == "m").then(glab_value),
-        _ => None,
-    };
-    own.or_else(|| inherited_takes_value(kind, name))
-}
+/// `glab mr approve`, so the two cannot share a grammar.
+const MR_MERGE_FLAGS: &[Flag] = &[
+    Flag::pair("m", "message").takes(GLAB_VALUE),
+    Flag::long("sha").takes(GLAB_VALUE),
+    Flag::long("squash-message").takes(GLAB_VALUE),
+];
+const MR_MERGE_GRAMMAR: Grammar = Grammar::new(Dialect::Posix, &[INHERITED_FLAGS, MR_MERGE_FLAGS]);
 
 /// `glab mr approve`: `-s/--sha` is its only own value-taking flag.
-fn mr_approve_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    let own = match kind {
-        TokenKind::Long => (name == "sha").then(glab_value),
-        TokenKind::Short => (name == "s").then(glab_value),
-        _ => None,
-    };
-    own.or_else(|| inherited_takes_value(kind, name))
-}
+const MR_APPROVE_FLAGS: &[Flag] = &[Flag::pair("s", "sha").takes(GLAB_VALUE)];
+const MR_APPROVE_GRAMMAR: Grammar =
+    Grammar::new(Dialect::Posix, &[INHERITED_FLAGS, MR_APPROVE_FLAGS]);
 
 /// `glab mr note`: `-m/--message` carries the comment body. 1.117 moved it onto the
-/// `note create` sub-subcommand; 1.36 still takes it here, so the table keeps both.
-fn mr_note_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    let own = match kind {
-        TokenKind::Long => (name == "message").then(glab_value),
-        TokenKind::Short => (name == "m").then(glab_value),
-        _ => None,
-    };
-    own.or_else(|| inherited_takes_value(kind, name))
-}
+/// `note create` sub-subcommand; 1.36 still takes it here, so the grammar keeps both.
+const MR_NOTE_FLAGS: &[Flag] = &[Flag::pair("m", "message").takes(GLAB_VALUE)];
+const MR_NOTE_GRAMMAR: Grammar = Grammar::new(Dialect::Posix, &[INHERITED_FLAGS, MR_NOTE_FLAGS]);
 
 /// `glab mr update`: nearly every flag takes a value, so a missing entry turns a label, a
 /// title or a username into the MR number.
-fn mr_update_takes_value(kind: TokenKind, name: &str) -> Option<ValueSpec> {
-    let own = match kind {
-        TokenKind::Long => matches!(
-            name,
-            "assignee"
-                | "attach"
-                | "description"
-                | "description-file"
-                | "label"
-                | "milestone"
-                | "reviewer"
-                | "target-branch"
-                | "title"
-                | "unlabel"
-        )
-        .then(glab_value),
-        TokenKind::Short => matches!(name, "a" | "d" | "l" | "m" | "t" | "u").then(glab_value),
-        _ => None,
-    };
-    own.or_else(|| inherited_takes_value(kind, name))
-}
+const MR_UPDATE_FLAGS: &[Flag] = &[
+    Flag::pair("a", "assignee").takes(GLAB_VALUE),
+    Flag::long("attach").takes(GLAB_VALUE),
+    Flag::pair("d", "description").takes(GLAB_VALUE),
+    Flag::long("description-file").takes(GLAB_VALUE),
+    Flag::pair("l", "label").takes(GLAB_VALUE),
+    Flag::pair("m", "milestone").takes(GLAB_VALUE),
+    Flag::long("reviewer").takes(GLAB_VALUE),
+    Flag::long("target-branch").takes(GLAB_VALUE),
+    Flag::pair("t", "title").takes(GLAB_VALUE),
+    Flag::pair("u", "unlabel").takes(GLAB_VALUE),
+];
+const MR_UPDATE_GRAMMAR: Grammar =
+    Grammar::new(Dialect::Posix, &[INHERITED_FLAGS, MR_UPDATE_FLAGS]);
 
-/// Splits `args` into the MR/issue identifier — the first free positional under `takes_value` —
+/// Splits `args` into the MR/issue identifier — the first free positional under `grammar` —
 /// and everything else, verbatim and in order. glab keeps reading positionals past `--`
 /// (`glab mr view -- 42` views MR 42), so the search reaches past the boundary, but only while
 /// the boundary escapes a lone token that is not itself flag-shaped.
-fn split_identifier(
-    args: &[String],
-    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
-) -> (Option<String>, Vec<String>) {
-    let tokens = arg_tokenizer::tokenize_grammar(args, takes_value, Dialect::Posix);
+fn split_identifier(args: &[String], grammar: &Grammar) -> (Option<String>, Vec<String>) {
+    let tokens = arg_tokenizer::tokenize_grammar(args, grammar);
 
     // Re-emitting the identifier in front of the `--` unescapes it along with whatever else
     // trailed it, so reach past the boundary only where that is a no-op: one token, still read
@@ -339,7 +289,6 @@ pub fn run(
     repo: Option<&str>,
     group: Option<&str>,
     verbose: u8,
-    ultra_compact: bool,
 ) -> Result<i32> {
     // clap carves `subcommand` out of the same trailing region as `args`, so the stripped `--`
     // has to be restored over the whole region — over `args` alone it lands one token off.
@@ -368,7 +317,7 @@ pub fn run(
         injected.extend(["-g".to_string(), g.to_string()]);
     }
     if !injected.is_empty() {
-        // Grammar-less: the sub-subcommand that picks a `takes_value` table is only known after
+        // Grammar-less: the sub-subcommand that picks a grammar is only known after
         // the split below, so a `--` that is some flag's own value reads as the boundary here.
         let at = arg_tokenizer::injection_point(&arg_tokenizer::tokenize(&region), region.len());
         region.splice(at..at, injected);
@@ -385,10 +334,10 @@ pub fn run(
     }
 
     match subcommand {
-        "mr" => run_mr(args, verbose, ultra_compact),
-        "issue" => run_issue(args, verbose, ultra_compact),
-        "ci" | "pipeline" => run_ci(args, verbose, ultra_compact),
-        "release" => run_release(args, verbose, ultra_compact),
+        "mr" => run_mr(args, verbose),
+        "issue" => run_issue(args, verbose),
+        "ci" | "pipeline" => run_ci(args, verbose),
+        "release" => run_release(args, verbose),
         "api" => run_api(args, verbose),
         _ => run_passthrough("glab", subcommand, args),
     }
@@ -408,62 +357,42 @@ fn split_glab_region(region: &[String]) -> Option<(&str, &[String])> {
 
 // ── MR subcommands ──────────────────────────────────────────────────────
 
-fn run_mr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn run_mr(args: &[String], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         return run_passthrough("glab", "mr", args);
     }
 
     match args[0].as_str() {
-        "list" => mr_list(&args[1..], verbose, ultra_compact),
-        "view" => mr_view(&args[1..], verbose, ultra_compact),
+        "list" => mr_list(&args[1..], verbose),
+        "view" => mr_view(&args[1..], verbose),
         "create" => mr_create(&args[1..], verbose),
-        "merge" => mr_action(
-            "merge",
-            "merged",
-            &args[1..],
-            verbose,
-            &mr_merge_takes_value,
-        ),
+        "merge" => mr_action("merge", "merged", &args[1..], verbose, &MR_MERGE_GRAMMAR),
         "approve" => mr_action(
             "approve",
             "approved",
             &args[1..],
             verbose,
-            &mr_approve_takes_value,
+            &MR_APPROVE_GRAMMAR,
         ),
         "diff" => mr_diff(&args[1..], verbose),
-        "note" => mr_action("note", "noted", &args[1..], verbose, &mr_note_takes_value),
-        "update" => mr_action(
-            "update",
-            "updated",
-            &args[1..],
-            verbose,
-            &mr_update_takes_value,
-        ),
+        "note" => mr_action("note", "noted", &args[1..], verbose, &MR_NOTE_GRAMMAR),
+        "update" => mr_action("update", "updated", &args[1..], verbose, &MR_UPDATE_GRAMMAR),
         _ => run_passthrough("glab", "mr", args),
     }
 }
 
 /// Format MR list JSON into compact output (pure function, testable).
-fn format_mr_list(json: &Value, ultra_compact: bool) -> String {
+fn format_mr_list(json: &Value) -> String {
     let mrs = match json.as_array() {
         Some(arr) => arr,
         None => return String::new(),
     };
     if mrs.is_empty() {
-        return if ultra_compact {
-            "No MRs\n".to_string()
-        } else {
-            "No Merge Requests\n".to_string()
-        };
+        return "No Merge Requests\n".to_string();
     }
 
     let mut filtered = String::new();
-    filtered.push_str(if ultra_compact {
-        "MRs\n"
-    } else {
-        "Merge Requests\n"
-    });
+    filtered.push_str("Merge Requests\n");
 
     let all_lines: Vec<String> = mrs
         .iter()
@@ -472,7 +401,7 @@ fn format_mr_list(json: &Value, ultra_compact: bool) -> String {
             let title = mr["title"].as_str().unwrap_or("???");
             let state = mr["state"].as_str().unwrap_or("???");
             let author = mr["author"]["username"].as_str().unwrap_or("???");
-            let icon = state_icon(state, ultra_compact);
+            let icon = state_icon(state);
             format!("  {} !{} {} ({})", icon, iid, truncate(title, 60), author)
         })
         .collect();
@@ -493,17 +422,17 @@ fn format_mr_list(json: &Value, ultra_compact: bool) -> String {
     filtered
 }
 
-fn mr_list(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn mr_list(args: &[String], _verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("glab");
     cmd.args(["mr", "list", "-F", "json"]);
     for arg in args {
         cmd.arg(arg);
     }
-    run_glab_json(cmd, "mr list", |json| format_mr_list(json, ultra_compact))
+    run_glab_json(cmd, "mr list", format_mr_list)
 }
 
 /// Format MR view JSON into compact output (pure function, testable).
-fn format_mr_view(json: &Value, ultra_compact: bool) -> String {
+fn format_mr_view(json: &Value) -> String {
     let iid = json["iid"].as_i64().unwrap_or(0);
     let title = json["title"].as_str().unwrap_or("???");
     let state = json["state"].as_str().unwrap_or("???");
@@ -513,7 +442,7 @@ fn format_mr_view(json: &Value, ultra_compact: bool) -> String {
     let source_branch = json["source_branch"].as_str().unwrap_or("???");
     let target_branch = json["target_branch"].as_str().unwrap_or("???");
 
-    let icon = state_icon(state, ultra_compact);
+    let icon = state_icon(state);
 
     let mut filtered = String::new();
     filtered.push_str(&format!("{} MR !{}: {}\n", icon, iid, title));
@@ -549,7 +478,7 @@ fn format_mr_view(json: &Value, ultra_compact: bool) -> String {
         && !pipeline.is_null()
     {
         let pipeline_status = pipeline["status"].as_str().unwrap_or("unknown");
-        let p_icon = pipeline_icon(pipeline_status, ultra_compact);
+        let p_icon = pipeline_icon(pipeline_status);
         filtered.push_str(&format!("  Pipeline: {} {}\n", p_icon, pipeline_status));
     }
 
@@ -570,9 +499,9 @@ fn format_mr_view(json: &Value, ultra_compact: bool) -> String {
     filtered
 }
 
-fn mr_view(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn mr_view(args: &[String], _verbose: u8) -> Result<i32> {
     // `glab mr view` without an identifier defaults to the MR for the current branch.
-    let (mr_number_opt, extra_args) = split_identifier(args, &view_takes_value);
+    let (mr_number_opt, extra_args) = split_identifier(args, &VIEW_GRAMMAR);
 
     // Passthrough for --web, --comments, or explicit output format
     if should_passthrough_view(&extra_args) {
@@ -596,7 +525,7 @@ fn mr_view(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
         Some(id) => format!("mr view {}", quote_word(id)),
         None => "mr view".to_string(),
     };
-    run_glab_json(cmd, &label, |json| format_mr_view(json, ultra_compact))
+    run_glab_json(cmd, &label, format_mr_view)
 }
 
 fn mr_create(args: &[String], _verbose: u8) -> Result<i32> {
@@ -645,15 +574,15 @@ fn mr_diff(args: &[String], _verbose: u8) -> Result<i32> {
     )
 }
 
-/// Generic MR action handler for merge/approve/note/update. Each takes its own `takes_value`
-/// table: the MR number is only reported, but reading it out of a flag's value would put a
+/// Generic MR action handler for merge/approve/note/update. Each takes its own grammar: the
+/// MR number is only reported, but reading it out of a flag's value would put a
 /// commit message or a label in the confirmation line.
 fn mr_action(
     subcmd: &str,
     label: &str,
     args: &[String],
     _verbose: u8,
-    takes_value: &dyn Fn(TokenKind, &str) -> Option<ValueSpec>,
+    grammar: &Grammar,
 ) -> Result<i32> {
     let mut cmd = resolved_command("glab");
     cmd.args(["mr", subcmd]);
@@ -661,7 +590,7 @@ fn mr_action(
         cmd.arg(arg);
     }
 
-    let mr_num = split_identifier(args, takes_value)
+    let mr_num = split_identifier(args, grammar)
         .0
         .map(|id| format!("!{}", id))
         .unwrap_or_default();
@@ -677,20 +606,20 @@ fn mr_action(
 
 // ── Issue subcommands ───────────────────────────────────────────────────
 
-fn run_issue(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn run_issue(args: &[String], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         return run_passthrough("glab", "issue", args);
     }
 
     match args[0].as_str() {
-        "list" => issue_list(&args[1..], verbose, ultra_compact),
+        "list" => issue_list(&args[1..], verbose),
         "view" => issue_view(&args[1..], verbose),
         _ => run_passthrough("glab", "issue", args),
     }
 }
 
 /// Format issue list JSON into compact output (pure function, testable).
-fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
+fn format_issue_list(json: &Value) -> String {
     let issues = match json.as_array() {
         Some(arr) => arr,
         None => return String::new(),
@@ -708,9 +637,7 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
             let iid = issue["iid"].as_i64().unwrap_or(0);
             let title = issue["title"].as_str().unwrap_or("???");
             let state = issue["state"].as_str().unwrap_or("???");
-            let icon = if ultra_compact {
-                if state == "opened" { "O" } else { "C" }
-            } else if state == "opened" {
+            let icon = if state == "opened" {
                 "[open]"
             } else {
                 "[closed]"
@@ -735,15 +662,13 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
     filtered
 }
 
-fn issue_list(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn issue_list(args: &[String], _verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("glab");
     cmd.args(["issue", "list", "-F", "json"]);
     for arg in args {
         cmd.arg(arg);
     }
-    run_glab_json(cmd, "issue list", |json| {
-        format_issue_list(json, ultra_compact)
-    })
+    run_glab_json(cmd, "issue list", format_issue_list)
 }
 
 /// Format issue view JSON into compact output (pure function, testable).
@@ -783,7 +708,7 @@ fn format_issue_view(json: &Value) -> String {
 
 fn issue_view(args: &[String], _verbose: u8) -> Result<i32> {
     // Let glab emit its own error message when the identifier is missing rather than pre-rejecting.
-    let (issue_number_opt, extra_args) = split_identifier(args, &view_takes_value);
+    let (issue_number_opt, extra_args) = split_identifier(args, &VIEW_GRAMMAR);
 
     if should_passthrough_view(&extra_args) {
         let mut base: Vec<&str> = vec!["issue", "view"];
@@ -811,14 +736,14 @@ fn issue_view(args: &[String], _verbose: u8) -> Result<i32> {
 
 // ── CI/Pipeline subcommands ─────────────────────────────────────────────
 
-fn run_ci(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn run_ci(args: &[String], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         return run_passthrough("glab", "ci", args);
     }
 
     match args[0].as_str() {
-        "list" => ci_list(&args[1..], verbose, ultra_compact),
-        "status" => ci_status(&args[1..], verbose, ultra_compact),
+        "list" => ci_list(&args[1..], verbose),
+        "status" => ci_status(&args[1..], verbose),
         "trace" => ci_trace(&args[1..]),
         // "ci view" is an interactive TUI (tcell) — must run with inherited stdio
         _ => run_passthrough("glab", "ci", args),
@@ -826,7 +751,7 @@ fn run_ci(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
 }
 
 /// Format CI list JSON into compact output (pure function, testable).
-fn format_ci_list(json: &Value, ultra_compact: bool) -> String {
+fn format_ci_list(json: &Value) -> String {
     let pipelines = match json.as_array() {
         Some(arr) => arr,
         None => return String::new(),
@@ -843,7 +768,7 @@ fn format_ci_list(json: &Value, ultra_compact: bool) -> String {
             let id = pipeline["id"].as_i64().unwrap_or(0);
             let status = pipeline["status"].as_str().unwrap_or("???");
             let ref_name = pipeline["ref"].as_str().unwrap_or("???");
-            let icon = pipeline_icon(status, ultra_compact);
+            let icon = pipeline_icon(status);
             format!("  {} #{} {} ({})", icon, id, status, ref_name)
         })
         .collect();
@@ -863,19 +788,19 @@ fn format_ci_list(json: &Value, ultra_compact: bool) -> String {
     filtered
 }
 
-fn ci_list(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn ci_list(args: &[String], _verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("glab");
     cmd.args(["ci", "list", "-F", "json"]);
     for arg in args {
         cmd.arg(arg);
     }
-    run_glab_json(cmd, "ci list", |json| format_ci_list(json, ultra_compact))
+    run_glab_json(cmd, "ci list", format_ci_list)
 }
 
 /// Format `glab ci status` text output (English keyword parsing, raw fallback).
 /// Returns the raw input when no status keyword is recognized on any line
 /// (e.g. non-English locale).
-fn format_ci_status(raw: &str, ultra_compact: bool) -> String {
+fn format_ci_status(raw: &str) -> String {
     let mut filtered = String::new();
     let mut any_keyword_matched = false;
     for line in raw.lines() {
@@ -884,15 +809,15 @@ fn format_ci_status(raw: &str, ultra_compact: bool) -> String {
             continue;
         }
         let icon = if trimmed.contains("passed") || trimmed.contains("success") {
-            pipeline_icon("success", ultra_compact)
+            pipeline_icon("success")
         } else if trimmed.contains("failed") {
-            pipeline_icon("failed", ultra_compact)
+            pipeline_icon("failed")
         } else if trimmed.contains("running") {
-            pipeline_icon("running", ultra_compact)
+            pipeline_icon("running")
         } else if trimmed.contains("pending") {
-            pipeline_icon("pending", ultra_compact)
+            pipeline_icon("pending")
         } else if trimmed.contains("canceled") || trimmed.contains("cancelled") {
-            pipeline_icon("canceled", ultra_compact)
+            pipeline_icon("canceled")
         } else {
             ""
         };
@@ -913,7 +838,7 @@ fn format_ci_status(raw: &str, ultra_compact: bool) -> String {
     }
 }
 
-fn ci_status(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn ci_status(args: &[String], _verbose: u8) -> Result<i32> {
     // glab ci status does not support -F json — text parsing with raw fallback
     let mut cmd = resolved_command("glab");
     cmd.args(["ci", "status"]);
@@ -924,7 +849,7 @@ fn ci_status(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> 
         cmd,
         "glab",
         "ci status",
-        |stdout| format_ci_status(stdout, ultra_compact),
+        format_ci_status,
         RunOptions::stdout_only().early_exit_on_failure(),
     )
 }
@@ -998,7 +923,7 @@ fn filter_ci_trace(raw: &str) -> String {
 
 // ── Release subcommands ──────────────────────────────────────────────────
 
-fn run_release(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32> {
+fn run_release(args: &[String], _verbose: u8) -> Result<i32> {
     if args.is_empty() {
         return run_passthrough("glab", "release", args);
     }
@@ -1168,41 +1093,36 @@ fn run_passthrough_with_extra(cmd: &str, base_args: &[&str], extra_args: &[Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::arg_tokenizer::assert_takes_value_table;
 
     #[test]
     fn test_state_icon_opened() {
-        assert_eq!(state_icon("opened", false), "[open]");
-        assert_eq!(state_icon("opened", true), "O");
+        assert_eq!(state_icon("opened"), "[open]");
     }
 
     #[test]
     fn test_state_icon_merged() {
-        assert_eq!(state_icon("merged", false), "[merged]");
-        assert_eq!(state_icon("merged", true), "M");
+        assert_eq!(state_icon("merged"), "[merged]");
     }
 
     #[test]
     fn test_state_icon_closed() {
-        assert_eq!(state_icon("closed", false), "[closed]");
-        assert_eq!(state_icon("closed", true), "C");
+        assert_eq!(state_icon("closed"), "[closed]");
     }
 
     #[test]
     fn test_pipeline_icon_success() {
-        assert_eq!(pipeline_icon("success", false), "[ok]");
-        assert_eq!(pipeline_icon("success", true), "+");
+        assert_eq!(pipeline_icon("success"), "[ok]");
     }
 
     #[test]
     fn test_pipeline_icon_failed() {
-        assert_eq!(pipeline_icon("failed", false), "[fail]");
-        assert_eq!(pipeline_icon("failed", true), "x");
+        assert_eq!(pipeline_icon("failed"), "[fail]");
     }
 
     #[test]
     fn test_pipeline_icon_running() {
-        assert_eq!(pipeline_icon("running", false), "[run]");
-        assert_eq!(pipeline_icon("running", true), "~");
+        assert_eq!(pipeline_icon("running"), "[run]");
     }
 
     #[test]
@@ -1300,7 +1220,7 @@ mod tests {
     #[test]
     fn test_mr_list_token_savings() {
         let input = include_str!("../../../tests/fixtures/glab_mr_list_raw.json");
-        let output = format_mr_list(&parse_fixture(input), false);
+        let output = format_mr_list(&parse_fixture(input));
         let input_tokens = count_tokens(input);
         let output_tokens = count_tokens(&output);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
@@ -1316,7 +1236,7 @@ mod tests {
     #[test]
     fn test_mr_list_format() {
         let input = include_str!("../../../tests/fixtures/glab_mr_list_raw.json");
-        let output = format_mr_list(&parse_fixture(input), false);
+        let output = format_mr_list(&parse_fixture(input));
         assert!(output.contains("Merge Requests"));
         assert!(output.contains("!314"));
         assert!(output.contains("[open]")); // opened
@@ -1325,19 +1245,9 @@ mod tests {
     }
 
     #[test]
-    fn test_mr_list_ultra_compact() {
-        let input = include_str!("../../../tests/fixtures/glab_mr_list_raw.json");
-        let output = format_mr_list(&parse_fixture(input), true);
-        assert!(output.starts_with("MRs\n"));
-        assert!(output.contains("O ")); // opened
-        assert!(output.contains("M ")); // merged
-        assert!(output.contains("C ")); // closed
-    }
-
-    #[test]
     fn test_issue_list_token_savings() {
         let input = include_str!("../../../tests/fixtures/glab_issue_list_raw.json");
-        let output = format_issue_list(&parse_fixture(input), false);
+        let output = format_issue_list(&parse_fixture(input));
         let input_tokens = count_tokens(input);
         let output_tokens = count_tokens(&output);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
@@ -1353,7 +1263,7 @@ mod tests {
     #[test]
     fn test_issue_list_format() {
         let input = include_str!("../../../tests/fixtures/glab_issue_list_raw.json");
-        let output = format_issue_list(&parse_fixture(input), false);
+        let output = format_issue_list(&parse_fixture(input));
         assert!(output.contains("Issues"));
         assert!(output.contains("#156"));
         assert!(output.contains("[open]")); // opened
@@ -1364,20 +1274,96 @@ mod tests {
     fn test_format_mr_list_non_array_returns_empty() {
         // Non-array JSON (e.g. error object) returns empty — run_glab_json then
         // falls back to raw stdout through its JSON parse branch.
-        let output = format_mr_list(&Value::Object(Default::default()), false);
+        let output = format_mr_list(&Value::Object(Default::default()));
         assert!(output.is_empty());
     }
 
     #[test]
     fn test_format_issue_list_non_array_returns_empty() {
-        let output = format_issue_list(&Value::Object(Default::default()), false);
+        let output = format_issue_list(&Value::Object(Default::default()));
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_grammars_match_their_tables() {
+        assert_takes_value_table(
+            &VIEW_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &["group", "jq", "output", "page", "per-page", "repo"],
+                    Some(GLAB_VALUE),
+                ),
+                (
+                    TokenKind::Short,
+                    &["F", "g", "P", "p", "R"],
+                    Some(GLAB_VALUE),
+                ),
+            ],
+        );
+        assert_takes_value_table(
+            &MR_MERGE_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &["group", "message", "repo", "sha", "squash-message"],
+                    Some(GLAB_VALUE),
+                ),
+                (TokenKind::Short, &["g", "m", "R"], Some(GLAB_VALUE)),
+            ],
+        );
+        assert_takes_value_table(
+            &MR_APPROVE_GRAMMAR,
+            &[
+                (TokenKind::Long, &["group", "repo", "sha"], Some(GLAB_VALUE)),
+                (TokenKind::Short, &["g", "R", "s"], Some(GLAB_VALUE)),
+            ],
+        );
+        assert_takes_value_table(
+            &MR_NOTE_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &["group", "message", "repo"],
+                    Some(GLAB_VALUE),
+                ),
+                (TokenKind::Short, &["g", "m", "R"], Some(GLAB_VALUE)),
+            ],
+        );
+        assert_takes_value_table(
+            &MR_UPDATE_GRAMMAR,
+            &[
+                (
+                    TokenKind::Long,
+                    &[
+                        "assignee",
+                        "attach",
+                        "description",
+                        "description-file",
+                        "group",
+                        "label",
+                        "milestone",
+                        "repo",
+                        "reviewer",
+                        "target-branch",
+                        "title",
+                        "unlabel",
+                    ],
+                    Some(GLAB_VALUE),
+                ),
+                (
+                    TokenKind::Short,
+                    &["a", "d", "g", "l", "m", "R", "t", "u"],
+                    Some(GLAB_VALUE),
+                ),
+            ],
+        );
     }
 
     #[test]
     fn test_split_identifier_simple() {
         let args: Vec<String> = vec!["42".into()];
-        let (id, extra) = split_identifier(&args, &view_takes_value);
+        let (id, extra) = split_identifier(&args, &VIEW_GRAMMAR);
         assert_eq!(id.as_deref(), Some("42"));
         assert!(extra.is_empty());
     }
@@ -1386,7 +1372,7 @@ mod tests {
     fn test_split_identifier_with_repo_flag_before() {
         // glab mr view -R group/project 42
         let args: Vec<String> = vec!["-R".into(), "group/project".into(), "42".into()];
-        let (id, extra) = split_identifier(&args, &view_takes_value);
+        let (id, extra) = split_identifier(&args, &VIEW_GRAMMAR);
         assert_eq!(id.as_deref(), Some("42"));
         assert_eq!(extra, vec!["-R", "group/project"]);
     }
@@ -1395,7 +1381,7 @@ mod tests {
     fn test_split_identifier_with_repo_flag_after() {
         // glab mr view 42 -R group/project
         let args: Vec<String> = vec!["42".into(), "-R".into(), "group/project".into()];
-        let (id, extra) = split_identifier(&args, &view_takes_value);
+        let (id, extra) = split_identifier(&args, &VIEW_GRAMMAR);
         assert_eq!(id.as_deref(), Some("42"));
         assert_eq!(extra, vec!["-R", "group/project"]);
     }
@@ -1403,7 +1389,7 @@ mod tests {
     #[test]
     fn test_split_identifier_with_group_flag() {
         let args: Vec<String> = vec!["-g".into(), "mygroup".into(), "7".into()];
-        let (id, extra) = split_identifier(&args, &view_takes_value);
+        let (id, extra) = split_identifier(&args, &VIEW_GRAMMAR);
         assert_eq!(id.as_deref(), Some("7"));
         assert_eq!(extra, vec!["-g", "mygroup"]);
     }
@@ -1412,7 +1398,7 @@ mod tests {
     fn test_split_identifier_empty_yields_no_id() {
         // `glab mr view` (no args) must surface as (None, []) so the caller
         // hands the request to glab, which resolves the current branch's MR.
-        let (id, extra) = split_identifier(&[], &view_takes_value);
+        let (id, extra) = split_identifier(&[], &VIEW_GRAMMAR);
         assert!(id.is_none());
         assert!(extra.is_empty());
     }
@@ -1422,7 +1408,7 @@ mod tests {
         // Regression: `glab mr view -R group/project` previously triggered
         // "MR number required". Now flags must round-trip into `extra`.
         let args: Vec<String> = vec!["-R".into(), "group/project".into()];
-        let (id, extra) = split_identifier(&args, &view_takes_value);
+        let (id, extra) = split_identifier(&args, &VIEW_GRAMMAR);
         assert!(id.is_none());
         assert_eq!(extra, vec!["-R", "group/project"]);
     }
@@ -1433,7 +1419,7 @@ mod tests {
     fn test_view_pagination_values_are_not_the_identifier() {
         for flag in ["-p", "--page", "-P", "--per-page"] {
             let args: Vec<String> = vec![flag.into(), "2".into()];
-            let (id, extra) = split_identifier(&args, &view_takes_value);
+            let (id, extra) = split_identifier(&args, &VIEW_GRAMMAR);
             assert!(id.is_none(), "{} swallowed its value as the id", flag);
             assert_eq!(extra, vec![flag, "2"]);
         }
@@ -1442,7 +1428,7 @@ mod tests {
     #[test]
     fn test_view_jq_expression_is_not_the_identifier() {
         let args: Vec<String> = vec!["--jq".into(), ".iid".into()];
-        let (id, _) = split_identifier(&args, &view_takes_value);
+        let (id, _) = split_identifier(&args, &VIEW_GRAMMAR);
         assert!(id.is_none());
     }
 
@@ -1450,7 +1436,7 @@ mod tests {
     fn test_view_identifier_past_double_dash() {
         // `glab mr view -- 42` views MR 42: `--` ends flag parsing, not positional parsing.
         let args: Vec<String> = vec!["--".into(), "42".into()];
-        let (id, extra) = split_identifier(&args, &view_takes_value);
+        let (id, extra) = split_identifier(&args, &VIEW_GRAMMAR);
         assert_eq!(id.as_deref(), Some("42"));
         assert_eq!(extra, vec!["--"]);
     }
@@ -1460,7 +1446,7 @@ mod tests {
         // glab mr merge -m "ship it" previously confirmed "ok merged !ship it".
         for flag in ["-m", "--message", "--squash-message"] {
             let args: Vec<String> = vec![flag.into(), "ship it".into()];
-            let (id, _) = split_identifier(&args, &mr_merge_takes_value);
+            let (id, _) = split_identifier(&args, &MR_MERGE_GRAMMAR);
             assert!(
                 id.is_none(),
                 "{} swallowed its value as the MR number",
@@ -1474,10 +1460,10 @@ mod tests {
         // -s is --squash on merge and --sha on approve: one shared table would break one of them.
         let args: Vec<String> = vec!["-s".into(), "42".into()];
         assert_eq!(
-            split_identifier(&args, &mr_merge_takes_value).0.as_deref(),
+            split_identifier(&args, &MR_MERGE_GRAMMAR).0.as_deref(),
             Some("42")
         );
-        assert!(split_identifier(&args, &mr_approve_takes_value).0.is_none());
+        assert!(split_identifier(&args, &MR_APPROVE_GRAMMAR).0.is_none());
     }
 
     #[test]
@@ -1485,7 +1471,7 @@ mod tests {
         // glab mr update --add a label: -l/-t/-a values are not identifiers.
         for flag in ["-l", "--label", "-t", "--title", "-a", "--assignee"] {
             let args: Vec<String> = vec![flag.into(), "bug".into()];
-            let (id, _) = split_identifier(&args, &mr_update_takes_value);
+            let (id, _) = split_identifier(&args, &MR_UPDATE_GRAMMAR);
             assert!(
                 id.is_none(),
                 "{} swallowed its value as the MR number",
@@ -1497,14 +1483,14 @@ mod tests {
     #[test]
     fn test_mr_update_keeps_an_explicit_mr_number() {
         let args: Vec<String> = vec!["--label".into(), "bug".into(), "42".into()];
-        let (id, _) = split_identifier(&args, &mr_update_takes_value);
+        let (id, _) = split_identifier(&args, &MR_UPDATE_GRAMMAR);
         assert_eq!(id.as_deref(), Some("42"));
     }
 
     #[test]
     fn test_mr_note_message_is_not_the_mr_number() {
         let args: Vec<String> = vec!["-m".into(), "looks good".into()];
-        let (id, _) = split_identifier(&args, &mr_note_takes_value);
+        let (id, _) = split_identifier(&args, &MR_NOTE_GRAMMAR);
         assert!(id.is_none());
     }
 
@@ -1565,7 +1551,7 @@ mod tests {
     fn test_split_identifier_with_message_flag() {
         // glab mr note -m "comment" 42 — number should be 42, not "comment"
         let args: Vec<String> = vec!["-m".into(), "comment".into(), "42".into()];
-        let (id, extra) = split_identifier(&args, &mr_note_takes_value);
+        let (id, extra) = split_identifier(&args, &MR_NOTE_GRAMMAR);
         assert_eq!(id.as_deref(), Some("42"));
         assert_eq!(extra, vec!["-m", "comment"]);
     }
@@ -1694,25 +1680,19 @@ mod tests {
 
     #[test]
     fn test_format_mr_list_empty_array() {
-        let output = format_mr_list(&parse_fixture("[]"), false);
+        let output = format_mr_list(&parse_fixture("[]"));
         assert_eq!(output, "No Merge Requests\n");
     }
 
     #[test]
-    fn test_format_mr_list_empty_array_ultra_compact() {
-        let output = format_mr_list(&parse_fixture("[]"), true);
-        assert_eq!(output, "No MRs\n");
-    }
-
-    #[test]
     fn test_format_issue_list_empty_array() {
-        let output = format_issue_list(&parse_fixture("[]"), false);
+        let output = format_issue_list(&parse_fixture("[]"));
         assert_eq!(output, "No Issues\n");
     }
 
     #[test]
     fn test_format_ci_list_empty_array() {
-        let output = format_ci_list(&parse_fixture("[]"), false);
+        let output = format_ci_list(&parse_fixture("[]"));
         assert_eq!(output, "No Pipelines\n");
     }
 
@@ -1723,7 +1703,7 @@ mod tests {
         let json = parse_fixture(
             r#"{"iid":42,"title":"Edge","state":"opened","author":null,"web_url":"","merge_status":"unknown","description":null}"#,
         );
-        let output = format_mr_view(&json, false);
+        let output = format_mr_view(&json);
         assert!(output.contains("MR !42: Edge"));
         assert!(output.contains("???")); // author fallback
     }
@@ -1744,7 +1724,7 @@ mod tests {
     fn test_format_ci_status_non_english_fallback() {
         // Non-English locale output with no recognized keyword must fall back to raw.
         let raw = "Le pipeline est en cours d'exécution\n";
-        let output = format_ci_status(raw, false);
+        let output = format_ci_status(raw);
         // format_ci_status returns raw when no keywords match
         assert_eq!(output, raw);
     }
@@ -1776,7 +1756,7 @@ mod tests {
 
     #[test]
     fn test_format_mr_view_branches() {
-        let output = format_mr_view(&parse_fixture(MR_VIEW_FULL), false);
+        let output = format_mr_view(&parse_fixture(MR_VIEW_FULL));
         assert!(
             output.contains("feat/widget -> main"),
             "expected branches line, got:\n{}",
@@ -1786,7 +1766,7 @@ mod tests {
 
     #[test]
     fn test_format_mr_view_labels() {
-        let output = format_mr_view(&parse_fixture(MR_VIEW_FULL), false);
+        let output = format_mr_view(&parse_fixture(MR_VIEW_FULL));
         assert!(
             output.contains("Labels: enhancement, cli"),
             "expected labels line, got:\n{}",
@@ -1796,7 +1776,7 @@ mod tests {
 
     #[test]
     fn test_format_mr_view_reviewers() {
-        let output = format_mr_view(&parse_fixture(MR_VIEW_FULL), false);
+        let output = format_mr_view(&parse_fixture(MR_VIEW_FULL));
         assert!(
             output.contains("Reviewers: @bob_review, @carol_review"),
             "expected reviewers line, got:\n{}",
@@ -1815,7 +1795,7 @@ mod tests {
                 "labels":[], "reviewers":[], "description":null
             }"#,
         );
-        let output = format_mr_view(&json, false);
+        let output = format_mr_view(&json);
         assert!(!output.contains("Labels:"));
         assert!(!output.contains("Reviewers:"));
         // branches line still present
@@ -1824,7 +1804,7 @@ mod tests {
 
     #[test]
     fn test_format_mr_view_mergeable_text_tag() {
-        let output = format_mr_view(&parse_fixture(MR_VIEW_FULL), false);
+        let output = format_mr_view(&parse_fixture(MR_VIEW_FULL));
         // merge_status="can_be_merged" -> "[ok]" (text tag, no emoji)
         assert!(
             output.contains("opened | [ok]"),

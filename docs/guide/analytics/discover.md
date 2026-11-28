@@ -17,7 +17,7 @@ rtk discover --all              # all projects
 rtk discover --all --since 7    # last 7 days, all projects
 ```
 
-**Example output** (sample numbers, not typical results):
+**Example output** (illustrative values):
 
 ```
 Missed savings analysis (last 7 days)
@@ -34,7 +34,7 @@ Run `rtk init --global` to capture these automatically.
 
 The `~N tokens` figures are **estimated bash output bytes divided by 4**, not tokens billed by your provider. RTK ships no real tokenizer, and bash output is only one contributor to input tokens. Read them as an order of magnitude of the output volume RTK could have compressed. See [How RTK Savings Work](../resources/savings-explained.md).
 
-If commands appear in the missed list after installing RTK, it usually means the hook isn't active for that agent. See [Troubleshooting](../resources/troubleshooting.md) — "Agent not using RTK".
+If commands appear in the missed list after installing RTK, it usually means the hook isn't active for that agent. See [Troubleshooting](../resources/troubleshooting.md#ai-assistant-not-using-rtk) — "AI assistant not using RTK".
 
 ## rtk session — adoption tracking
 
@@ -44,17 +44,17 @@ If commands appear in the missed list after installing RTK, it usually means the
 rtk session
 ```
 
-**Example output:**
+**Example output** (illustrative values):
 
 ```
 Recent sessions (last 10)
 ─────────────────────────────────────────────────────
 Session                         Total   RTK   Coverage
-2026-04-06 14:32  (45 cmds)       45    43      95.6%
-2026-04-05 09:14  (38 cmds)       38    38     100.0%
-2026-04-04 16:50  (52 cmds)       52    49      94.2%
+2026-01-03 10:00  (40 cmds)       40    38      95.0%
+2026-01-02 10:00  (40 cmds)       40    40     100.0%
+2026-01-01 10:00  (40 cmds)       40    36      90.0%
 ─────────────────────────────────────────────────────
-Average coverage: 96.6%
+Average coverage: 95.0%
 ```
 
 Low coverage on a session usually means RTK was disabled (`RTK_DISABLED=1`) or the hook wasn't active for a specific subagent.

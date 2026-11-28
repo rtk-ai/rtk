@@ -1,0 +1,35 @@
+{"Time":"2026-10-21T08:56:12.046744649-07:00","Action":"start"}
+{"Time":"2026-10-21T08:56:12.048616977-07:00","Action":"run","Test":"TestPass"}
+{"Time":"2026-10-21T08:56:12.048674183-07:00","Action":"output","Test":"TestPass","Output":"=== RUN   TestPass\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:12.048727553-07:00","Action":"output","Test":"TestPass","Output":"--- PASS: TestPass (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:12.048735435-07:00","Action":"pass","Test":"TestPass","Elapsed":0}
+{"Time":"2026-10-21T08:56:12.048742566-07:00","Action":"run","Test":"TestParallelA"}
+{"Time":"2026-10-21T08:56:12.048744859-07:00","Action":"output","Test":"TestParallelA","Output":"=== RUN   TestParallelA\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:12.04875206-07:00","Action":"output","Test":"TestParallelA","Output":"=== PAUSE TestParallelA\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:12.048784279-07:00","Action":"pause","Test":"TestParallelA"}
+{"Time":"2026-10-21T08:56:12.048787183-07:00","Action":"run","Test":"TestParallelB"}
+{"Time":"2026-10-21T08:56:12.048789136-07:00","Action":"output","Test":"TestParallelB","Output":"=== RUN   TestParallelB\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:12.048791229-07:00","Action":"output","Test":"TestParallelB","Output":"=== PAUSE TestParallelB\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:12.048792491-07:00","Action":"pause","Test":"TestParallelB"}
+{"Time":"2026-10-21T08:56:12.048794134-07:00","Action":"run","Test":"TestSkip"}
+{"Time":"2026-10-21T08:56:12.048795656-07:00","Action":"output","Test":"TestSkip","Output":"=== RUN   TestSkip\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:12.048797268-07:00","Action":"output","Test":"TestSkip","Output":"    capture_test.go:21: captured skip\n"}
+{"Time":"2026-10-21T08:56:12.048799432-07:00","Action":"output","Test":"TestSkip","Output":"--- SKIP: TestSkip (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:12.048801054-07:00","Action":"skip","Test":"TestSkip","Elapsed":0}
+{"Time":"2026-10-21T08:56:12.048802747-07:00","Action":"run","Test":"TestFail"}
+{"Time":"2026-10-21T08:56:12.048803939-07:00","Action":"output","Test":"TestFail","Output":"=== RUN   TestFail\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:12.048805741-07:00","Action":"output","Test":"TestFail","Output":"    capture_test.go:26: expected 1, got 2\n","OutputType":"error"}
+{"Time":"2026-10-21T08:56:12.048807955-07:00","Action":"output","Test":"TestFail","Output":"--- FAIL: TestFail (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:12.048809537-07:00","Action":"fail","Test":"TestFail","Elapsed":0}
+{"Time":"2026-10-21T08:56:12.048811109-07:00","Action":"cont","Test":"TestParallelA"}
+{"Time":"2026-10-21T08:56:12.048812331-07:00","Action":"output","Test":"TestParallelA","Output":"=== CONT  TestParallelA\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:12.048813924-07:00","Action":"output","Test":"TestParallelA","Output":"    capture_test.go:19: parallel A\n"}
+{"Time":"2026-10-21T08:56:12.04881817-07:00","Action":"output","Test":"TestParallelA","Output":"--- PASS: TestParallelA (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:12.048820043-07:00","Action":"pass","Test":"TestParallelA","Elapsed":0}
+{"Time":"2026-10-21T08:56:12.048823728-07:00","Action":"cont","Test":"TestParallelB"}
+{"Time":"2026-10-21T08:56:12.048825161-07:00","Action":"output","Test":"TestParallelB","Output":"=== CONT  TestParallelB\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:12.048826713-07:00","Action":"output","Test":"TestParallelB","Output":"    capture_test.go:20: parallel B\n"}
+{"Time":"2026-10-21T08:56:12.048828636-07:00","Action":"output","Test":"TestParallelB","Output":"--- PASS: TestParallelB (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:12.048830208-07:00","Action":"pass","Test":"TestParallelB","Elapsed":0}
+{"Time":"2026-10-21T08:56:12.04883159-07:00","Action":"output","Output":"FAIL\n","OutputType":"frame"}
+{"Time":"2026-10-21T08:56:12.0490074-07:00","Action":"fail","Elapsed":0.002}

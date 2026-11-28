@@ -1,0 +1,14 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________________ test_two ___________________________________
+test_tc.py:9: in test_two
+    assert 0, "two captured sections"
+E   AssertionError: two captured sections
+E   assert 0
+----------------------------- Captured stdout call -----------------------------
+E stdout looks like error
+----------------------------- Captured stderr call -----------------------------
+E stderr looks like error
+------------------------------ Captured log call -------------------------------
+WARNING  app:test_tc.py:8 from helper.py:12 something
+1 failed in 0.02s

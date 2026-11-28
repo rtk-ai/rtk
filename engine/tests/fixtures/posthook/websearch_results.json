@@ -1,0 +1,67 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/home/user/.claude/projects/example-project/00000000-0000-0000-0000-000000000000.jsonl",
+  "cwd": "/home/user/project",
+  "prompt_id": "00000000-0000-0000-0000-000000000000",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "WebSearch",
+  "tool_input": {
+    "query": "rust toon token oriented object notation crate"
+  },
+  "tool_response": {
+    "query": "rust toon token oriented object notation crate",
+    "results": [
+      {
+        "tool_use_id": "srvtoolu_01Datxw3gU6UFCCdZ27He1zk",
+        "content": [
+          {
+            "title": "toon_format - Rust",
+            "url": "https://docs.rs/toon-format"
+          },
+          {
+            "title": "toon-format - crates.io: Rust Package Registry",
+            "url": "https://crates.io/crates/toon-format/0.2.2"
+          },
+          {
+            "title": "TOON (Token-Oriented Object Notation) - Rust",
+            "url": "https://crates.io/crates/toon"
+          },
+          {
+            "title": "rtoon - crates.io: Rust Package Registry",
+            "url": "https://crates.io/crates/rtoon/0.1.0"
+          },
+          {
+            "title": "toon-format \u2014 Rust utility // Lib.rs",
+            "url": "https://lib.rs/crates/toon-format"
+          },
+          {
+            "title": "toon_ld - Rust",
+            "url": "https://docs.rs/toon-ld/latest/toon_ld/"
+          },
+          {
+            "title": "GitHub - toon-format/toon-rust: \ud83e\udd80 Community-driven Rust implementation of TOON",
+            "url": "https://github.com/toon-format/toon-rust"
+          },
+          {
+            "title": "GitHub - dedsecrattle/toon-rust: \u058e Token-Oriented Object Notation (TOON) - Rust implementation",
+            "url": "https://github.com/dedsecrattle/toon-rust"
+          },
+          {
+            "title": "totoon - crates.io: Rust Package Registry",
+            "url": "https://crates.io/crates/totoon"
+          },
+          {
+            "title": "toon-rust",
+            "url": "https://crates.io/crates/toon-rust/versions"
+          }
+        ]
+      },
+      "Based on the search results, here's what I found about TOON (Token-Oriented Object Notation) Rust crates:\n\n## Overview\n\nToken-Oriented Object Notation (TOON) is a compact, human-readable format designed for passing structured data to Large Language Models with significantly reduced token usage.\n\n## Main Rust Crates\n\nThere are several Rust crates implementing TOON:\n\n1. **toon-format** - This crate provides the official, spec-compliant Rust implementation of TOON, offering both a library (toon-format) and a full-featured command-line tool (toon). It provides the official, spec-compliant Rust implementation of TOON v3.0.\n\n2. **toon** - A Rust implementation of Token-Oriented Object Notation (TOON), a compact, human-readable format designed for passing structured data to Large Language Models with significantly reduced token usage.\n\n3. **rtoon** - This is a Rust implementation of the TOON specification.\n\n4. **toon_ld** - Token-Oriented Object Notation for Linked Data \u2014 A compact RDF serialization format that achieves 40-60% token reduction compared to JSON-LD.\n\n## Token Efficiency\n\nTOON conveys the same information with 30-60% fewer tokens than JSON. The toon-format crate natively serializes from and deserializes to serde_json::Value for easy integration."
+    ],
+    "durationSeconds": 7.916562697,
+    "searchCount": 1
+  },
+  "tool_use_id": "toolu_016onesMDcT7ckXmpFd4qbnh",
+  "duration_ms": 7920
+}

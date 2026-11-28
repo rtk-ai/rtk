@@ -1,0 +1,12 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________________ test_sp ____________________________________
+bob's dir/test_sp.py:2: in test_sp
+    assert {"a": 1} == {"a": 2}, "spaced dir"
+E   AssertionError: spaced dir
+E   assert {'a': 1} == {'a': 2}
+E     
+E     Differing items:
+E     {'a': 1} != {'a': 2}
+E     Use -v to get more diff
+1 failed in 0.01s

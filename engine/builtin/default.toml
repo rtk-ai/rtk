@@ -1,0 +1,37 @@
+# rtk:default — RTK exactly as it works today
+#
+# What you get with no pipeline file at all. Rewrites a shell command to its
+# `rtk` equivalent before it runs, and — when a daemon is running — removes
+# bytes from tool results that no reader ever sees. Nothing here is lossy and
+# nothing rewrites conversation history.
+#
+# Benchmark: not published.
+
+schema_version = 1
+
+[pipeline]
+name = "rtk:default"
+
+# `ls` -> `rtk ls` for every command RTK has a filter for; others untouched
+[[hook.before_tool.shell]]
+name   = "rtk-rewrite"
+action = "rewrite"
+
+# Strips ANSI codes, progress bars and repeated lines from tool results,
+# applied by the proxy daemon when one is running. Each method is a pure
+# function of the block's own content, so the request prefix stays
+# byte-identical across turns and the upstream prompt cache keeps hitting --
+# `validate` enforces that property ("not cache-stable" is an error under
+# `proxy.request`). `rtk-proxy --normalize false` turns it off.
+[[proxy.request.tool_result]]
+name = "normalize"
+use  = ["ansi", "progress", "dedup"]
+
+# today's [awareness] level in config.toml still applies
+[[directive]]
+use   = "rtk-awareness"
+level = "default"
+
+[guards]
+never_worse       = true
+min_size          = 512

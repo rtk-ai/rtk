@@ -312,7 +312,7 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "go",
     "golangci-lint",
     "rewrite",
-    "proxy",
+    "bypass",
     "verify",
     "learn",
 ];
@@ -437,6 +437,44 @@ pub fn filter_parse_error(content: &str) -> Option<String> {
 }
 
 static MATCH_SET: LazyLock<RegexSet> = LazyLock::new(build_match_set);
+
+#[cfg(feature = "engine")]
+static LEADING_WORDS: LazyLock<std::collections::HashSet<String>> = LazyLock::new(|| {
+    collect_match_patterns()
+        .iter()
+        .flat_map(|pattern| leading_words(pattern))
+        .collect()
+});
+
+#[cfg(feature = "engine")]
+static LEADING_WORD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_][A-Za-z0-9_.+-]*").expect("valid regex"));
+
+#[cfg(feature = "engine")]
+fn leading_words(pattern: &str) -> Vec<String> {
+    let Some(body) = pattern.strip_prefix('^') else {
+        return Vec::new();
+    };
+    let alternatives: Vec<&str> = match body.strip_prefix('(') {
+        Some(group) => group
+            .split(')')
+            .next()
+            .unwrap_or("")
+            .trim_start_matches("?:")
+            .split('|')
+            .collect(),
+        None => vec![body],
+    };
+    alternatives
+        .iter()
+        .filter_map(|alt| LEADING_WORD.find(alt).map(|m| m.as_str().to_string()))
+        .collect()
+}
+
+#[cfg(feature = "engine")]
+pub fn is_filtered_command_word(word: &str) -> bool {
+    LEADING_WORDS.contains(word)
+}
 
 pub fn command_matches_filter(command: &str) -> bool {
     MATCH_SET.is_match(command)
@@ -907,6 +945,22 @@ mod tests {
             std::fs::write(&path, format!("{trusted}# edited\n")).expect("edit filters");
             assert_eq!(loaded(), 0, "changed since it was trusted");
         });
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn leading_words_cover_bare_and_grouped_patterns() {
+        assert_eq!(leading_words(r"^terraform\s+plan"), vec!["terraform"]);
+        assert_eq!(leading_words(r"^make\b"), vec!["make"]);
+        assert_eq!(
+            leading_words(r"^(gradle|gradlew|\./)gradlew?\b"),
+            vec!["gradle", "gradlew"]
+        );
+        assert_eq!(
+            leading_words(r"^(?:docker|podman)\s+ps"),
+            vec!["docker", "podman"]
+        );
+        assert!(leading_words("no-anchor").is_empty());
     }
 
     // Helper: build a CompiledFilter from inline TOML for tests.
@@ -1517,6 +1571,48 @@ make[1]: Leaving directory '/home/user/project/docs'
             savings,
             input_words,
             out_words
+        );
+    }
+
+    #[test]
+    fn test_make_keeps_the_error_at_the_end_of_a_long_build() {
+        let filters = make_filters(BUILTIN_TOML);
+        let filter = find_filter_in("make", &filters).expect("make built-in");
+        // Last 120 lines of a failing Buildroot build: kernel module install, then a compile error.
+        // Captured with stdout and stderr merged; in `rtk make` the error lines arrive on stderr.
+        let input = include_str!("../../tests/fixtures/make_buildroot_fail_compile_raw.txt");
+
+        let out = apply_filter(filter, input);
+
+        assert!(out.starts_with("... ("), "the cut must be marked: {out}");
+        assert!(out.contains("rtk-fail-compile.c:7:9: error: ‘count’ undeclared"));
+        assert!(out.ends_with("make: *** [Makefile:23: _all] Error 2"));
+        assert!(
+            !out.contains("l2tp_ip.ko.xz"),
+            "the head of the build is dropped"
+        );
+    }
+
+    #[test]
+    fn test_make_keeps_the_failure_summary_a_recipe_prints_on_stdout() {
+        let filters = make_filters(BUILTIN_TOML);
+        let filter = find_filter_in("make test", &filters).expect("make built-in");
+        // Stdout of a failing `make test` running `pytest -v`: 122 lines, 9 of them blank.
+        let input = include_str!("../../tests/fixtures/make_pytest_fail_stdout_raw.txt");
+
+        let out = apply_filter(filter, input);
+
+        assert!(
+            out.starts_with("... (63 lines omitted)\n"),
+            "the last 50 lines are kept and the cut is marked: {out}"
+        );
+        assert_eq!(out.lines().count(), 51, "50 kept lines plus the marker");
+        assert!(out.contains("FAILED test_fail.py::test_lookup - KeyError: 'missing'"));
+        assert!(out.contains("FAILED test_fail.py::test_math - assert 45 == 46"));
+        assert!(out.contains("2 failed, 80 passed"));
+        assert!(
+            !out.contains("python3 -m pytest"),
+            "the head of the run is dropped"
         );
     }
 

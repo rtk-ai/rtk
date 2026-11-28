@@ -1,0 +1,27 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________________ test_loc ___________________________________
+
+    def test_loc():
+        _hidden_ = 1
+        fr = Frame()
+>       helper(fr)
+
+_hidden_   = 1
+fr         = <Frame app.py:12>
+
+test_dlo.py:13: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+f = <Frame app.py:12>
+
+    def helper(f):
+>       raise ValueError('helper boom\nl2\nl3')
+E       ValueError: helper boom
+E       l2
+E       l3
+
+f          = <Frame app.py:12>
+
+test_dlo.py:7: ValueError
+1 failed in 0.01s

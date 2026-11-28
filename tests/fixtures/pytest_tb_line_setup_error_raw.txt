@@ -1,0 +1,14 @@
+EFF                                                                      [100%]
+==================================== ERRORS ====================================
+_______________________ ERROR at setup of test_setup_err _______________________
+E   ConnectionError: db down
+=================================== FAILURES ===================================
+E   assert (1 + 1) == 3
+/home/user/project/test_mixed.py:14: assert (1 + 1) == 3
+E   AssertionError: inner mismatch
+    assert 'a' == 'b'
+      
+      - b
+      + a
+/home/user/project/test_mixed.py:18: AssertionError: inner mismatch
+2 failed, 1 error in 0.01s

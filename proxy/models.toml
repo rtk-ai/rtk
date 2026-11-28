@@ -1,0 +1,111 @@
+# Model registry — families and prompt-cache rates. Loaded at startup;
+# override the file with the env var RTK_PROXY_MODELS_TOML (absolute path)
+# to ship your own without recompiling.
+#
+# rtk ships NO prices: dollar figures exist only when you add `input` and
+# `output` (USD per million tokens) to an entry here. `cache_read_mult` is
+# what a cached-prefix read costs relative to the input price (Anthropic
+# 0.1x, OpenAI 0.5x, Google ~0.25x).
+#
+# `pattern` is matched as a lowercase SUBSTRING of the model id, so dated ids
+# (claude-opus-4-8-20260101, gpt-4o-2024-08-06) still resolve. ORDER MATTERS:
+# the first match wins, so list specific patterns before generic ones.
+
+# ── Anthropic (Claude) ────────────────────────────────────────────────────
+[[model]]
+pattern = "opus"
+family = "anthropic"
+cache_read_mult = 0.1
+
+[[model]]
+pattern = "sonnet"
+family = "anthropic"
+cache_read_mult = 0.1
+
+[[model]]
+pattern = "haiku"
+family = "anthropic"
+cache_read_mult = 0.1
+
+# ── OpenAI (Codex) ────────────────────────────────────────────────────────
+[[model]]
+pattern = "gpt-4o-mini"
+family = "openai"
+cache_read_mult = 0.5
+
+[[model]]
+pattern = "o4-mini"
+family = "openai"
+cache_read_mult = 0.5
+
+[[model]]
+pattern = "o3-mini"
+family = "openai"
+cache_read_mult = 0.5
+
+[[model]]
+pattern = "o1"
+family = "openai"
+cache_read_mult = 0.5
+
+[[model]]
+pattern = "gpt-4o"
+family = "openai"
+cache_read_mult = 0.5
+
+[[model]]
+pattern = "gpt-4"
+family = "openai"
+cache_read_mult = 0.5
+
+[[model]]
+pattern = "gpt-5"
+family = "openai"
+cache_read_mult = 0.5
+
+# ── Google (Antigravity / Gemini) ─────────────────────────────────────────
+[[model]]
+pattern = "gemini-1.5-flash"
+family = "google"
+cache_read_mult = 0.25
+
+[[model]]
+pattern = "flash"
+family = "google"
+cache_read_mult = 0.25
+
+[[model]]
+pattern = "gemini"
+family = "google"
+cache_read_mult = 0.25
+
+[[model]]
+pattern = "gemma"
+family = "google"
+cache_read_mult = 0.25
+
+# ── Other providers ───────────────────────────────────────────────────────
+[[model]]
+pattern = "deepseek"
+family = "other"
+cache_read_mult = 0.1
+
+[[model]]
+pattern = "mistral"
+family = "other"
+cache_read_mult = 0.1
+
+[[model]]
+pattern = "mixtral"
+family = "other"
+cache_read_mult = 0.1
+
+[[model]]
+pattern = "grok"
+family = "other"
+cache_read_mult = 0.1
+
+# Fallback for anything unmatched — a cheap tier so savings are never overstated.
+[default]
+family = "other"
+cache_read_mult = 0.1

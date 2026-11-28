@@ -45,22 +45,10 @@ This is why RTK reports bash output reduction rather than a cost figure. Bash ou
 
 ## Why the token counts are estimates
 
-`rtk gain` estimates tokens as `bytes / 4`:
-
-```rust
-// src/core/tracking.rs
-pub fn estimate_tokens(text: &str) -> usize {
-    // ~4 chars per token on average
-    (text.len() as f64 / 4.0).ceil() as usize
-}
-```
-
-RTK ships **no real tokenizer** by design. Embedding one would cost startup time, and it would require a tokenizer per model, or a per-session model lookup, which RTK does not implement.
-
-The consequence is worth understanding:
+`rtk gain` estimates tokens as `bytes / 4` (rounded up). RTK ships **no tokenizer**, so:
 
 - **The percentage is reliable.** The same estimator is applied to the raw output and the filtered output, so the ratio between them holds regardless of the estimator's absolute accuracy.
-- **The absolute token counts are approximate.** They will not match your provider's billing. Treat `Input tokens: 45,230` as an order of magnitude, not an invoice line.
+- **The absolute token counts are approximate.** They will not match your provider's billing. Treat a figure such as `Input tokens: 50,000` as an order of magnitude, not an invoice line.
 
 If you need exact counts, run the raw and filtered output through your model's own tokenizer.
 
@@ -83,5 +71,5 @@ If you need exact counts, run the raw and filtered output through your model's o
 
 ## See also
 
-- [What RTK Optimizes](what-rtk-covers.md) — per-command bash output reduction
+- [What RTK Optimizes](what-rtk-covers.md) — what each supported command filter changes
 - [Token Savings Analytics](../analytics/gain.md) — reading the `rtk gain` dashboard

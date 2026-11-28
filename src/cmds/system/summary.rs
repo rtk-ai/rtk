@@ -1,7 +1,7 @@
 //! Runs a command and produces a heuristic summary of its output.
 
 use crate::core::guard::never_worse;
-use crate::core::stream::exec_capture;
+use crate::core::stream::exec_capture_unguarded;
 use crate::core::tracking;
 use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::truncate;
@@ -34,7 +34,7 @@ pub fn run(command: &[String], shell: Option<&str>, verbose: u8) -> Result<i32> 
     let result = match crate::core::shell::command_from_args(command, shell)
         .context("Failed to prepare summary command")?
     {
-        crate::core::shell::Launch::Ready(mut cmd) => match exec_capture(&mut cmd) {
+        crate::core::shell::Launch::Ready(mut cmd) => match exec_capture_unguarded(&mut cmd) {
             Ok(result) => result,
             Err(error) => {
                 let error = error.context("Failed to execute command");

@@ -4,9 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**rtk (Rust Token Killer)** is a high-performance CLI proxy that minimizes LLM token consumption by filtering and compressing command outputs. It reduces bash output by 60-90% on common development operations through smart filtering, grouping, truncation, and deduplication. All percentages in this repo measure bash output, not your bill. RTK ships no tokenizer (`src/core/tracking.rs` estimates tokens as `bytes / 4`), so the ratios are reliable but the absolute token counts are approximate.
-
-This is a fork with critical fixes for git argument parsing and modern JavaScript stack support (pnpm, vitest, Next.js, TypeScript, Playwright, Prisma).
+**rtk (Rust Token Killer)** is a high-performance CLI proxy that minimizes LLM token consumption by filtering and compressing command outputs. It reduces bash output on common development operations (each filter must cut at least 20%; most cut far more) through smart filtering, grouping, truncation, and deduplication. All percentages in this repo measure bash output, not your bill. RTK ships no tokenizer (`src/core/tracking.rs` estimates tokens as `bytes / 4`), so the ratios are reliable but the absolute token counts are approximate.
 
 ### Name Collision Warning
 
@@ -16,7 +14,7 @@ This is a fork with critical fixes for git argument parsing and modern JavaScrip
 
 **Verify correct installation:**
 ```bash
-rtk --version  # Should show "rtk 0.28.2" (or newer)
+rtk --version  # Any current version; the check that matters is the next line
 rtk gain       # Should show token savings stats (NOT "command not found")
 ```
 
@@ -57,6 +55,7 @@ rtk cargo clippy --all-targets # preferred
 ### Pre-commit Gate
 ```bash
 cargo fmt --all && cargo clippy --all-targets && cargo test --all
+cargo fmt --manifest-path proxy/Cargo.toml --all   # proxy/ is its own workspace — root fmt does not cover it
 ```
 
 ### Package Building
@@ -77,11 +76,11 @@ Module responsibilities are documented in each folder's `README.md` and each fil
 
 Supported ecosystems: git/gh/gt, cargo, go/golangci-lint, npm/pnpm/npx, ruff/pytest/pip/mypy, rspec/rubocop/rake, dotnet, playwright/vitest/jest, docker/kubectl/aws, gradlew/mvn, php/artisan/phpunit/phpstan/pest.
 
-### Proxy Mode
+### Bypass Mode
 
 **Purpose**: Execute commands without filtering but track usage for metrics.
 
-**Usage**: `rtk proxy <command> [args...]`
+**Usage**: `rtk bypass <command> [args...]`
 
 **Benefits**:
 - **Bypass RTK filtering**: Workaround bugs or get full unfiltered output
@@ -90,12 +89,43 @@ Supported ecosystems: git/gh/gt, cargo, go/golangci-lint, npm/pnpm/npx, ruff/pyt
 
 **Examples**:
 ```bash
-rtk proxy git log --oneline -20    # Full git log output (no truncation)
-rtk proxy npm install express      # Raw npm output (no filtering)
-rtk proxy curl https://api.example.com/data  # Any command works
+rtk bypass git log --oneline -20    # Full git log output (no truncation)
+rtk bypass npm install express      # Raw npm output (no filtering)
+rtk bypass curl https://api.example.com/data  # Any command works
 ```
 
-All proxy commands appear in `rtk gain --history` with 0% bash output reduction (input = output).
+All bypassed commands appear in `rtk gain --history` with 0% bash output reduction (input = output).
+
+> **Not the same thing as `rtk llm-proxy`.** `rtk bypass <cmd>` runs one local
+> command unfiltered (`rtk proxy` is a deprecated alias for it). `rtk llm-proxy` manages the `rtk-proxy` daemon in
+> [`proxy/`](proxy/README.md), which intercepts your agent's *provider API*
+> traffic and strips bytes no reader sees (ANSI, progress redraws, duplicate
+> lines). CCR compression is implemented but off by default.
+
+### LLM Proxy (`proxy/`)
+
+Its own workspace root, **not** a member of the `rtk` workspace and **not** a
+dependency of the `rtk` crate: the CLI locates and spawns the `rtk-proxy` binary
+and reads its SQLite usage DB for `rtk gain`. This
+keeps tokio/axum out of a CLI with a <10ms startup budget, and keeps the two
+licenses (rtk is Apache-2.0, `proxy/` is BUSL-1.1) in separate artifacts.
+
+```bash
+# `proxy/` is NOT a workspace member (keeps tokio/axum out of the CLI's
+# graph). Cargo still scans every manifest in the repo, so installs must
+# name the package: `cargo install --git <url> rtk`. Build and test the
+# daemon from its own manifest:
+cargo build --release                                   # rtk (+ engine)
+cargo build --release --manifest-path proxy/Cargo.toml   # the daemon
+cargo test --workspace                                  # rtk + engine
+cargo test  --manifest-path proxy/Cargo.toml            # the daemon
+cargo clippy --workspace --all-targets
+cargo clippy --manifest-path proxy/Cargo.toml --all-targets
+```
+
+`proxy/` pins `rusqlite 0.34` to match what `icm-store` links — `libsqlite3-sys`
+declares `links = "sqlite3"`, so two versions cannot coexist in one graph. That
+pin is why the root crate tracks the same version; do not bump one alone.
 
 ## Coding Rules
 
@@ -108,7 +138,7 @@ Rust patterns, error handling, and anti-patterns are defined in `.claude/rules/r
 - **No async**: single-threaded by design (startup <10ms)
 - **Exit code propagation**: `std::process::exit(code)` on child failure
 
-Testing strategy and performance targets are defined in `.claude/rules/cli-testing.md` (auto-loaded). Key targets: <10ms startup, <5MB memory, 60-90% reduction in bash output bytes.
+Testing strategy and performance targets are defined in `.claude/rules/cli-testing.md` (auto-loaded). Key targets: <10ms on the hook path, ≥20% reduction in bash output bytes per filter (the CONTRIBUTING.md floor). Binary size is tracked there against a measured breakdown rather than a fixed ceiling.
 
 For contribution workflow and design philosophy, see [CONTRIBUTING.md](CONTRIBUTING.md). For the step-by-step filter implementation checklist, see [src/cmds/README.md](src/cmds/README.md#adding-a-new-command-filter).
 
@@ -118,6 +148,7 @@ For contribution workflow and design philosophy, see [CONTRIBUTING.md](CONTRIBUT
 
 ```bash
 cargo fmt --all && cargo clippy --all-targets && cargo test --all
+cargo fmt --manifest-path proxy/Cargo.toml --all   # proxy/ is its own workspace — root fmt does not cover it
 ```
 
 **Rules**:

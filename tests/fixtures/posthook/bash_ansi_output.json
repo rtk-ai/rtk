@@ -1,0 +1,21 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/home/user/.claude/projects/example-project/00000000-0000-0000-0000-000000000000.jsonl",
+  "cwd": "/home/user/project",
+  "prompt_id": "00000000-0000-0000-0000-000000000000",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "python3 -c \"import sys; [sys.stdout.write('\\x1b[32mPASS\\x1b[0m test_'+str(i)+'\\n') for i in range(30)]\""
+  },
+  "tool_response": {
+    "stdout": "\u001b[32mPASS\u001b[0m test_0\n\u001b[32mPASS\u001b[0m test_1\n\u001b[32mPASS\u001b[0m test_2\n\u001b[32mPASS\u001b[0m test_3\n\u001b[32mPASS\u001b[0m test_4\n\u001b[32mPASS\u001b[0m test_5\n\u001b[32mPASS\u001b[0m test_6\n\u001b[32mPASS\u001b[0m test_7\n\u001b[32mPASS\u001b[0m test_8\n\u001b[32mPASS\u001b[0m test_9\n\u001b[32mPASS\u001b[0m test_10\n\u001b[32mPASS\u001b[0m test_11\n\u001b[32mPASS\u001b[0m test_12\n\u001b[32mPASS\u001b[0m test_13\n\u001b[32mPASS\u001b[0m test_14\n\u001b[32mPASS\u001b[0m test_15\n\u001b[32mPASS\u001b[0m test_16\n\u001b[32mPASS\u001b[0m test_17\n\u001b[32mPASS\u001b[0m test_18\n\u001b[32mPASS\u001b[0m test_19\n\u001b[32mPASS\u001b[0m test_20\n\u001b[32mPASS\u001b[0m test_21\n\u001b[32mPASS\u001b[0m test_22\n\u001b[32mPASS\u001b[0m test_23\n\u001b[32mPASS\u001b[0m test_24\n\u001b[32mPASS\u001b[0m test_25\n\u001b[32mPASS\u001b[0m test_26\n\u001b[32mPASS\u001b[0m test_27\n\u001b[32mPASS\u001b[0m test_28\n\u001b[32mPASS\u001b[0m test_29",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false
+  },
+  "tool_use_id": "toolu_01PANfNqdp9uHgMnrzQQtpXy",
+  "duration_ms": 452
+}

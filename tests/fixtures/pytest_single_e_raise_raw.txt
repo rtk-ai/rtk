@@ -1,0 +1,7 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________________________ test_raise __________________________________
+test_r.py:2: in test_raise
+    raise ValueError("boom")
+E   ValueError: boom
+1 failed in 0.01s

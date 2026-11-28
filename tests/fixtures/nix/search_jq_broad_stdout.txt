@@ -1,0 +1,188 @@
+* legacyPackages.x86_64-linux.chickenPackages_5.chickenEggs.sq (0.2)
+  Scheme jq wrapper for processing S-expressions
+
+* legacyPackages.x86_64-linux.faq (0.0.7-unstable-2022-01-09)
+  Intended to be a more flexible jq, supporting additional formats
+
+* legacyPackages.x86_64-linux.fq (0.18.0)
+  jq for binary formats
+
+* legacyPackages.x86_64-linux.gojq (0.12.20)
+  Pure Go implementation of jq
+
+* legacyPackages.x86_64-linux.haskellPackages.fay-jquery (0.6.1.0)
+  jQuery bindings for Fay
+
+* legacyPackages.x86_64-linux.haskellPackages.haquery (0.1.1.3)
+  jQuery for Haskell
+
+* legacyPackages.x86_64-linux.haskellPackages.js-dgtable (0.5.2)
+  Obtain minified jquery.dgtable code
+
+* legacyPackages.x86_64-linux.haskellPackages.js-jquery (3.7.1)
+  Obtain minified jQuery code
+
+* legacyPackages.x86_64-linux.haskellPackages.servant-jquery (0.4.4.7)
+  Automatically derive (jquery) javascript functions to query servant webservices
+
+* legacyPackages.x86_64-linux.haskellPackages.xml-conduit-selectors (0.2.0.2)
+  jQuery-style CSS selectors for xml-conduit
+
+* legacyPackages.x86_64-linux.haskellPackages.yesod-datatables (0.1.1)
+  Yesod plugin for DataTables (jQuery grid plugin)
+
+* legacyPackages.x86_64-linux.haskellPackages.yesod-pnotify (1.1.3.2)
+  Yet another getMessage/setMessage using pnotify jquery plugins
+
+* legacyPackages.x86_64-linux.htmlq (0.4.0)
+  Like jq, but for HTML
+
+* legacyPackages.x86_64-linux.ijq (1.4.2)
+  Interactive wrapper for jq
+
+* legacyPackages.x86_64-linux.jaq (3.2.0)
+  Jq clone focused on correctness, speed and simplicity
+
+* legacyPackages.x86_64-linux.jiq (0.7.2)
+  Interactive JSON query tool using jq expressions
+
+* legacyPackages.x86_64-linux.jnv (0.7.1)
+  Interactive JSON filter using jq
+
+* legacyPackages.x86_64-linux.jq (1.8.2)
+  Lightweight and flexible command-line JSON processor
+
+* legacyPackages.x86_64-linux.jq-lsp (0.1.19)
+  jq language server
+
+* legacyPackages.x86_64-linux.jq-zsh-plugin (0.6.1)
+  Interactively build jq expressions in Zsh
+
+* legacyPackages.x86_64-linux.jqfmt (0.1.0)
+  Like gofmt, but for jq
+
+* legacyPackages.x86_64-linux.jql (8.1.2)
+  JSON Query Language CLI tool built with Rust
+
+* legacyPackages.x86_64-linux.jqp (0.8.0)
+  TUI playground to experiment with jq
+
+* legacyPackages.x86_64-linux.jquake (1.8.5)
+  Real-time earthquake map of Japan
+
+* legacyPackages.x86_64-linux.mdq (0.10.0)
+  Like jq but for Markdown: find specific elements in a md doc
+
+* legacyPackages.x86_64-linux.njq (0.0.3.1)
+  Command-line JSON processor using nix as query language
+
+* legacyPackages.x86_64-linux.oq (1.3.5)
+  Performant, and portable jq wrapper
+
+* legacyPackages.x86_64-linux.perl5Packages.HTMLQuery (0.09)
+  jQuery-like selection queries for HTML::Element
+
+* legacyPackages.x86_64-linux.perlPackages.HTMLQuery (0.09)
+  jQuery-like selection queries for HTML::Element
+
+* legacyPackages.x86_64-linux.python313Packages.django-jquery-js (3.1.1)
+  jQuery, bundled up so apps can depend upon it
+
+* legacyPackages.x86_64-linux.python313Packages.django-paintstore (0.2)
+  Django app that integrates jQuery ColorPicker with the Django admin
+
+* legacyPackages.x86_64-linux.python313Packages.jq (1.13.0)
+  Python bindings for jq, the flexible JSON processor
+
+* legacyPackages.x86_64-linux.python313Packages.llm-jq (0.1.1)
+  Write and execute jq programs with the help of LLM
+
+* legacyPackages.x86_64-linux.python313Packages.pdfquery (0.4.3)
+  Concise, friendly PDF scraping using JQuery or XPath syntax
+
+* legacyPackages.x86_64-linux.python313Packages.pyquery (2.1.0)
+  Jquery-like library for Python
+
+* legacyPackages.x86_64-linux.python313Packages.sphinxcontrib-jquery (4.1)
+  Extension to include jQuery on newer Sphinx releases
+
+* legacyPackages.x86_64-linux.python313Packages.tree-sitter-grammars.tree-sitter-jq (0+unstable20250510)
+  Python bindings for tree-sitter-jq
+
+* legacyPackages.x86_64-linux.python313Packages.xstatic-jquery (3.5.1.1)
+  jquery packaged static files for python
+
+* legacyPackages.x86_64-linux.python313Packages.xstatic-jquery-file-upload (10.32.0.1)
+  jquery-file-upload packaged static files for python
+
+* legacyPackages.x86_64-linux.python313Packages.xstatic-jquery-ui (1.13.0.2)
+  jquery-ui packaged static files for python
+
+* legacyPackages.x86_64-linux.python313Packages.yq (3.4.3)
+  Command-line YAML/XML/TOML processor - jq wrapper for YAML, XML, TOML documents
+
+* legacyPackages.x86_64-linux.python314Packages.django-jquery-js (3.1.1)
+  jQuery, bundled up so apps can depend upon it
+
+* legacyPackages.x86_64-linux.python314Packages.django-paintstore (0.2)
+  Django app that integrates jQuery ColorPicker with the Django admin
+
+* legacyPackages.x86_64-linux.python314Packages.jq (1.13.0)
+  Python bindings for jq, the flexible JSON processor
+
+* legacyPackages.x86_64-linux.python314Packages.llm-jq (0.1.1)
+  Write and execute jq programs with the help of LLM
+
+* legacyPackages.x86_64-linux.python314Packages.pdfquery (0.4.3)
+  Concise, friendly PDF scraping using JQuery or XPath syntax
+
+* legacyPackages.x86_64-linux.python314Packages.pyquery (2.1.0)
+  Jquery-like library for Python
+
+* legacyPackages.x86_64-linux.python314Packages.sphinxcontrib-jquery (4.1)
+  Extension to include jQuery on newer Sphinx releases
+
+* legacyPackages.x86_64-linux.python314Packages.tree-sitter-grammars.tree-sitter-jq (0+unstable20250510)
+  Python bindings for tree-sitter-jq
+
+* legacyPackages.x86_64-linux.python314Packages.xstatic-jquery (3.5.1.1)
+  jquery packaged static files for python
+
+* legacyPackages.x86_64-linux.python314Packages.xstatic-jquery-file-upload (10.32.0.1)
+  jquery-file-upload packaged static files for python
+
+* legacyPackages.x86_64-linux.python314Packages.xstatic-jquery-ui (1.13.0.2)
+  jquery-ui packaged static files for python
+
+* legacyPackages.x86_64-linux.python314Packages.yq (3.4.3)
+  Command-line YAML/XML/TOML processor - jq wrapper for YAML, XML, TOML documents
+
+* legacyPackages.x86_64-linux.tests.fetchFromHuggingFace.rootDir
+
+* legacyPackages.x86_64-linux.texlivePackages.ijqc (1.2)
+  BibTeX style file for the Intl. J. Quantum Chem
+
+* legacyPackages.x86_64-linux.tjq (0.0.1)
+  Giving types to jq
+
+* legacyPackages.x86_64-linux.tree-sitter-grammars.tree-sitter-jq (0-unstable-2025-05-10)
+  Tree-sitter grammar for jq
+
+* legacyPackages.x86_64-linux.typstPackages.yak (0.1.0)
+  Run jq filter agains data
+
+* legacyPackages.x86_64-linux.typstPackages.yak_0_1_0 (0.1.0)
+  Run jq filter agains data
+
+* legacyPackages.x86_64-linux.vimPlugins.jq-vim (1.0.3-unstable-2024-11-19)
+
+* legacyPackages.x86_64-linux.vimPlugins.nvim-jqx (0.1.4)
+
+* legacyPackages.x86_64-linux.vimPlugins.nvim-treesitter-parsers.jq (0.0.0+rev=c204e36)
+  Tree-sitter grammar for jq
+
+* legacyPackages.x86_64-linux.xq (0.5.0)
+  Pure rust implementation of jq
+
+* legacyPackages.x86_64-linux.yq (3.4.3)
+  Command-line YAML/XML/TOML processor - jq wrapper for YAML, XML, TOML documents

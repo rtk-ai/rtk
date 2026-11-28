@@ -13,6 +13,19 @@ mod scratch;
 
 use std::process::Command;
 
+/// A recall store (0x5254_4B02 is the recall kind) stamped at `version`, set up
+/// further by `sql`.
+pub fn recall_store(path: &std::path::Path, version: i64, sql: &str) {
+    rusqlite::Connection::open(path)
+        .expect("open should succeed")
+        .execute_batch(&format!(
+            "PRAGMA application_id = 0x52544B02;
+             PRAGMA user_version = {version};
+             {sql}"
+        ))
+        .expect("the store should be seeded");
+}
+
 /// Build a `Command` for the rtk binary, isolated by [`isolate_rtk`]. Use it in
 /// place of `Command::new(env!("CARGO_BIN_EXE_rtk"))`.
 ///
@@ -59,6 +72,12 @@ pub fn native_command(program: &str) -> Command {
 /// variables.
 pub fn isolate_git(cmd: &mut Command) {
     scratch::isolate_git(cmd);
+}
+
+/// A temporary directory of the test's own under the scratch directory, so
+/// concurrent runs never share one. Keep the `TempDir` alive for the test.
+pub fn tempdir() -> tempfile::TempDir {
+    scratch::tempdir()
 }
 
 /// A throwaway git repository with one commit, which works with no user git

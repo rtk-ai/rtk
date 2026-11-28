@@ -1,0 +1,13 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________________________________ test_rst ___________________________________
+test_rst.py:2: in test_rst
+    assert "=====\nbody a\n" == "=====\nbody b\n"
+E   AssertionError: assert '=====\nbody a\n' == '=====\nbody b\n'
+E     
+E       =====
+E     - body b
+E     ?      ^
+E     + body a
+E     ?      ^
+1 failed in 0.01s

@@ -1,11 +1,13 @@
 {
+  "version": 1,
   "hooks": {
     "PreToolUse": [
       {
         "type": "command",
-        "command": "rtk hook",
+        "bash": "command -v rtk >/dev/null 2>&1 || exit 0; exec rtk hook copilot",
+        "powershell": "if (Get-Command rtk -ErrorAction SilentlyContinue) { rtk hook copilot }",
         "cwd": ".",
-        "timeout": 5
+        "timeoutSec": 5
       }
     ]
   }

@@ -1,0 +1,23 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/home/user/.claude/projects/example-project/00000000-0000-0000-0000-000000000000.jsonl",
+  "cwd": "/home/user/project",
+  "prompt_id": "00000000-0000-0000-0000-000000000000",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "WebFetch",
+  "tool_input": {
+    "url": "https://raw.githubusercontent.com/rust-lang/rust/master/README.md",
+    "prompt": "summarize"
+  },
+  "tool_response": {
+    "bytes": 3304,
+    "code": 200,
+    "codeText": "OK",
+    "result": "# Rust Programming Language Repository Summary\n\nThis is the official source repository for Rust, containing the compiler, standard library, and documentation.\n\n**Key Strengths:**\n- **Performance**: \"Fast and memory-efficient, suitable for critical services, embedded devices\"\n- **Reliability**: The type system and ownership model prevent memory and thread safety issues at compile time\n- **Productivity**: Includes comprehensive docs, helpful compiler diagnostics, and tools like Cargo (package manager), rustfmt (formatter), Clippy (linter), and rust-analyzer (editor support)\n\n**Getting Started:**\nUsers should consult \"Installation\" from The Book for standard setup. Source installation is available but not recommended.\n\n**Contributing & Community:**\nThe project welcomes contributions; developers can find guidance in CONTRIBUTING.md and the rustc-dev-guide. Community support is available through various chat platforms and forums.\n\n**Legal:**\nRust uses dual licensing under MIT and Apache 2.0 licenses, with some BSD-licensed components. The Rust Foundation manages trademark usage.",
+    "durationMs": 3336,
+    "url": "https://raw.githubusercontent.com/rust-lang/rust/master/README.md"
+  },
+  "tool_use_id": "toolu_018qEf1YLEFESfn3BGNxmK3k",
+  "duration_ms": 3336
+}

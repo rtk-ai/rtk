@@ -1,0 +1,12 @@
+# Turn on more than rtk:default: output compression after every tool call
+# (rtk:posthook adds the PostToolUse hook on the next `rtk init`), and the
+# proxy (rtk:proxy activates the daemon — `rtk init` offers to install and
+# route it).
+#
+# rtk:proxy enables only cache-stable methods: stripping ANSI codes, progress
+# bars and repeated lines (ansi/progress/dedup), and cache-breakpoint
+# alignment. CCR and write-body retirement are not included.
+schema_version = 1
+
+[pipeline]
+extends = ["rtk:posthook", "rtk:proxy"]

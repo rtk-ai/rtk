@@ -6,13 +6,86 @@ pub const SETTINGS_JSON: &str = "settings.json";
 pub const SETTINGS_LOCAL_JSON: &str = "settings.local.json";
 pub const HOOKS_JSON: &str = "hooks.json";
 pub const PRE_TOOL_USE_KEY: &str = "PreToolUse";
+pub const POST_TOOL_USE_KEY: &str = "PostToolUse";
+pub const SESSION_START_KEY: &str = "SessionStart";
 pub const BEFORE_TOOL_KEY: &str = "BeforeTool";
 
 /// Native Rust hook command for Claude Code (replaces rtk-rewrite.sh).
 pub const CLAUDE_HOOK_COMMAND: &str = "rtk hook claude";
+/// Tool matcher for the Claude Code PreToolUse rewrite hook.
+pub const CLAUDE_PRE_MATCHER: &str = "Bash";
+#[cfg(feature = "engine")]
+/// Claude Code tool names per engine subject. A pipeline that registers no
+/// rule for a subject must not spawn the hook for its tools, so the matcher
+/// is composed from the subjects the resolved pipeline actually uses.
+pub fn claude_tools_for_subject(subject: rtk_engine::block::Subject) -> &'static [&'static str] {
+    use rtk_engine::block::Subject;
+    match subject {
+        Subject::Shell => &["Bash"],
+        Subject::Read => &["Read"],
+        Subject::Write => &["Write"],
+        Subject::Edit => &["Edit"],
+        Subject::Search => &["Grep", "Glob"],
+        Subject::Web => &["WebFetch", "WebSearch"],
+        Subject::Subagent => &["Task", "Agent"],
+        Subject::Mcp => &["mcp__.*"],
+        Subject::Any => &[
+            "Bash",
+            "Read",
+            "Write",
+            "Edit",
+            "Grep",
+            "Glob",
+            "WebFetch",
+            "WebSearch",
+            "Task",
+            "Agent",
+        ],
+        _ => &[],
+    }
+}
+
+#[cfg(feature = "engine")]
+/// `Subject::Any` order, so a composed matcher is stable regardless of the
+/// order rules appear in the pipeline file.
+const CLAUDE_TOOL_ORDER: &[&str] = &[
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "Grep",
+    "Glob",
+    "WebFetch",
+    "WebSearch",
+    "Task",
+    "mcp__.*",
+];
+
+#[cfg(feature = "engine")]
+/// Compose a Claude Code matcher from the subjects a pipeline uses. Returns
+/// `None` when no subject maps to a tool, so the caller registers nothing.
+pub fn claude_matcher(subjects: &[rtk_engine::block::Subject]) -> Option<String> {
+    let mut tools: Vec<&'static str> = Vec::new();
+    for subject in subjects {
+        for tool in claude_tools_for_subject(*subject) {
+            if !tools.contains(tool) {
+                tools.push(tool);
+            }
+        }
+    }
+    if tools.is_empty() {
+        return None;
+    }
+    tools.sort_by_key(|t| {
+        CLAUDE_TOOL_ORDER
+            .iter()
+            .position(|o| o == t)
+            .unwrap_or(usize::MAX)
+    });
+    Some(tools.join("|"))
+}
 /// Native Rust hook command for Trae.
 pub const TRAE_HOOK_COMMAND: &str = "rtk hook trae";
-
 /// Native Rust hook command for Codex CLI.
 pub const CODEX_HOOK_COMMAND: &str = "rtk hook codex";
 /// Native Rust hook command for Cursor (replaces rtk-rewrite.sh).
@@ -85,3 +158,48 @@ pub const VIBE_PROMPTS_SUBDIR: &str = "prompts";
 pub const VIBE_PROMPT_FILE: &str = "rtk.md";
 pub const VIBE_HOOK_NAME: &str = "rtk-rewrite";
 pub const VIBE_BASH_MATCH: &str = "bash";
+
+#[cfg(all(test, feature = "engine"))]
+mod tests {
+    use super::*;
+    use rtk_engine::block::{Event, Subject};
+    use rtk_engine::pipeline::{SiteKind, resolve};
+
+    #[test]
+    fn rtk_default_registers_bash_only() {
+        let (resolved, _) = resolve(&[]);
+        let subjects = resolved.subjects_used(SiteKind::Hook, Event::BeforeTool);
+        assert_eq!(claude_matcher(&subjects).as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn a_read_rule_widens_the_pre_matcher() {
+        assert_eq!(
+            claude_matcher(&[Subject::Shell, Subject::Read]).as_deref(),
+            Some("Bash|Read")
+        );
+    }
+
+    #[test]
+    fn subject_order_in_the_file_does_not_change_the_matcher() {
+        assert_eq!(
+            claude_matcher(&[Subject::Read, Subject::Shell]),
+            claude_matcher(&[Subject::Shell, Subject::Read])
+        );
+    }
+
+    #[test]
+    fn posthook_subjects_reproduce_the_previous_post_matcher() {
+        assert_eq!(
+            claude_matcher(&[Subject::Shell, Subject::Read, Subject::Search, Subject::Web])
+                .as_deref(),
+            Some("Bash|Read|Grep|Glob|WebFetch|WebSearch")
+        );
+    }
+
+    #[test]
+    fn a_proxy_only_subject_registers_nothing() {
+        assert!(claude_matcher(&[Subject::ToolResult, Subject::Cache]).is_none());
+        assert!(claude_matcher(&[]).is_none());
+    }
+}

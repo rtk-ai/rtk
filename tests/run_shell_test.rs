@@ -302,9 +302,10 @@ mod unix {
         }
     }
 
-    /// The two named-shell tests above skip wherever `fish` is absent, which is
-    /// every CI runner — this one names a shell that always exists, so the
-    /// explicit-shell branch is actually exercised somewhere.
+    /// The two named-shell tests above skip wherever `fish` is absent — CI
+    /// installs it on the Linux and macOS runners, a developer machine may not
+    /// have it — so this one names a shell that always exists and keeps the
+    /// explicit-shell branch exercised everywhere.
     #[test]
     fn explicit_shell_by_name_runs_the_named_shell() {
         let output = rtk()
@@ -349,9 +350,9 @@ mod unix {
         );
     }
 
-    /// `--shell` is RTK's flag on `rtk test`, and a flag other tools carry too.
-    /// The guard that answers a misused `rtk test --shell` must not read argv
-    /// belonging to a command RTK is only passing through.
+    /// `--shell` is a flag of several RTK subcommands, and one other tools carry too.
+    /// Only the first argument decides a flag error, so a command RTK is passing
+    /// through keeps the flag.
     #[test]
     fn a_passthrough_keeps_its_own_shell_flag() {
         let output = rtk()

@@ -1,0 +1,4 @@
+* packages.x86_64-linux.demo-cli (1.0)
+  Demo command line tool
+
+* packages.x86_64-linux.demo-lib (2.0)

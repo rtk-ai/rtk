@@ -1,0 +1,10 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________________________ test_lint ___________________________________
+test_lint.py:6: in test_lint
+    assert lint("pkg/test_a.py::test_b") == []
+E   AssertionError: assert ['foo.py:3: E...ine too long'] == []
+E     
+E     Left contains one more item: 'foo.py:3: E501 line too long'
+E     Use -v to get more diff
+1 failed in 0.01s

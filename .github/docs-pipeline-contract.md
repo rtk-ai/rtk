@@ -15,19 +15,21 @@ lives in the codebase (distributed, co-located pattern):
 
 ```
 docs/
-  README.md      <- This file (interface contract — do not remove)
   guide/         -> User-facing documentation (website "Guide" tab)
     index.md
-    getting-started/
-      installation.md
-      quick-start.md
-      supported-agents.md
-    what-rtk-covers.md
-    analytics/
-      gain.md
-    configuration.md
-    troubleshooting.md
+    getting-started/   installation, quick-start, supported-agents, configuration
+    analytics/         gain, discover
+    pipelines/         the engine: overview, writing-pipelines, conditions, methods,
+                       directives, tasks, reference-pipelines, commands, errors, plugins
+    proxy/             the RTK Proxy daemon: overview, compression, configuration
+    resources/         what-rtk-covers, savings-explained, troubleshooting, telemetry,
+                       editions, agent-coverage
 ```
+
+Engine and proxy user documentation lives here, not in `engine/README.md` or
+`proxy/README.md` — those are short crate READMEs that point into `guide/`.
+Links stay inside `guide/`: a relative link that leaves it (`../../../engine/…`)
+has no page on the website.
 
 ## Frontmatter (required on every .md)
 
@@ -54,4 +56,4 @@ if frontmatter is missing or malformed.
 - **Code samples**: always specify the language (`rust`, `toml`, `bash`)
 - **Language**: English only
 - **No `rtk <cmd>` syntax**: users never type `rtk` — hooks rewrite commands transparently.
-  Only `rtk gain`, `rtk init`, `rtk verify`, and `rtk proxy` appear as user-typed commands.
+  Only `rtk gain`, `rtk init`, `rtk verify`, and `rtk bypass` appear as user-typed commands.

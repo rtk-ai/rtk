@@ -1,0 +1,17 @@
+.F                                                                       [100%]
+=================================== FAILURES ===================================
+__________________________________ test_total __________________________________
+test_warn.py:9: in test_total
+    assert list(range(5)) == list(range(1, 6)), "totals differ"
+E   AssertionError: totals differ
+E   assert [0, 1, 2, 3, 4] == [1, 2, 3, 4, 5]
+E     
+E     At index 0 diff: 0 != 1
+E     Use -v to get more diff
+=============================== warnings summary ===============================
+test_warn.py::test_noisy
+  /home/user/project/test_warn.py:5: UserWarning: deprecated knob
+    warnings.warn("deprecated knob", UserWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 failed, 1 passed, 1 warning in 0.01s

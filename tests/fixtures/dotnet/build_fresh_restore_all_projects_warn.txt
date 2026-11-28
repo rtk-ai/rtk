@@ -1,0 +1,66 @@
+  Determining projects to restore...
+/fx/fresh/B.Tests/B.Tests.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data. [/fx/fresh/Two.sln]
+/fx/fresh/A.Tests/A.Tests.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data. [/fx/fresh/Two.sln]
+/fx/fresh/Lib/Lib.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data. [/fx/fresh/Two.sln]
+/fx/fresh/Lib/Lib.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json. [/fx/fresh/Two.sln]
+/fx/fresh/B.Tests/B.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json. [/fx/fresh/Two.sln]
+/fx/fresh/A.Tests/A.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json. [/fx/fresh/Two.sln]
+/fx/fresh/Lib/Lib.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data. [/fx/fresh/Two.sln]
+/fx/fresh/A.Tests/A.Tests.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data. [/fx/fresh/Two.sln]
+/fx/fresh/B.Tests/B.Tests.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data. [/fx/fresh/Two.sln]
+/fx/fresh/Lib/Lib.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json. [/fx/fresh/Two.sln]
+/fx/fresh/B.Tests/B.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json. [/fx/fresh/Two.sln]
+/fx/fresh/A.Tests/A.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json. [/fx/fresh/Two.sln]
+  Restored /fx/fresh/Lib/Lib.csproj (in 11.15 sec).
+  Restored /fx/fresh/B.Tests/B.Tests.csproj (in 11.15 sec).
+  Restored /fx/fresh/A.Tests/A.Tests.csproj (in 11.15 sec).
+/fx/fresh/A.Tests/A.Tests.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data.
+/fx/fresh/A.Tests/A.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json.
+/fx/fresh/A.Tests/A.Tests.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data.
+/fx/fresh/A.Tests/A.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json.
+/fx/fresh/B.Tests/B.Tests.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data.
+/fx/fresh/B.Tests/B.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json.
+/fx/fresh/B.Tests/B.Tests.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data.
+/fx/fresh/B.Tests/B.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json.
+/fx/fresh/B.Tests/UnitTest1.cs(5,39): warning CS0168: The variable 'unused' is declared but never used [/fx/fresh/B.Tests/B.Tests.csproj]
+  B.Tests -> /fx/fresh/B.Tests/bin/Debug/net10.0/B.Tests.dll
+/fx/fresh/Lib/Lib.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data.
+/fx/fresh/Lib/Lib.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json.
+/fx/fresh/Lib/Lib.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data.
+/fx/fresh/Lib/Lib.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json.
+  Lib -> /fx/fresh/Lib/bin/Debug/net10.0/Lib.dll
+  A.Tests -> /fx/fresh/A.Tests/bin/Debug/net10.0/A.Tests.dll
+
+Build succeeded.
+
+/fx/fresh/B.Tests/B.Tests.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data. [/fx/fresh/Two.sln]
+/fx/fresh/A.Tests/A.Tests.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data. [/fx/fresh/Two.sln]
+/fx/fresh/Lib/Lib.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data. [/fx/fresh/Two.sln]
+/fx/fresh/Lib/Lib.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json. [/fx/fresh/Two.sln]
+/fx/fresh/B.Tests/B.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json. [/fx/fresh/Two.sln]
+/fx/fresh/A.Tests/A.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json. [/fx/fresh/Two.sln]
+/fx/fresh/Lib/Lib.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data. [/fx/fresh/Two.sln]
+/fx/fresh/A.Tests/A.Tests.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data. [/fx/fresh/Two.sln]
+/fx/fresh/B.Tests/B.Tests.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data. [/fx/fresh/Two.sln]
+/fx/fresh/Lib/Lib.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json. [/fx/fresh/Two.sln]
+/fx/fresh/B.Tests/B.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json. [/fx/fresh/Two.sln]
+/fx/fresh/A.Tests/A.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json. [/fx/fresh/Two.sln]
+/fx/fresh/A.Tests/A.Tests.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data.
+/fx/fresh/A.Tests/A.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json.
+/fx/fresh/A.Tests/A.Tests.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data.
+/fx/fresh/A.Tests/A.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json.
+/fx/fresh/B.Tests/B.Tests.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data.
+/fx/fresh/B.Tests/B.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json.
+/fx/fresh/B.Tests/B.Tests.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data.
+/fx/fresh/B.Tests/B.Tests.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json.
+/fx/fresh/B.Tests/UnitTest1.cs(5,39): warning CS0168: The variable 'unused' is declared but never used [/fx/fresh/B.Tests/B.Tests.csproj]
+/fx/fresh/Lib/Lib.csproj : warning NU1905: Audit source 'dead1' did not provide any vulnerability data.
+/fx/fresh/Lib/Lib.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:9/v3/index.json.
+/fx/fresh/Lib/Lib.csproj : warning NU1905: Audit source 'dead2' did not provide any vulnerability data.
+/fx/fresh/Lib/Lib.csproj : warning NU1900: Error occurred while getting package vulnerability data: Unable to load the service index for source https://127.0.0.1:10/v3/index.json.
+    25 Warning(s)
+    0 Error(s)
+
+BinaryLogger wrote to: /fx/fresh/mine.binlog
+
+Time Elapsed 00:00:11.86

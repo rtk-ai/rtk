@@ -1,0 +1,89 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<!-- Each card maps to a shipped pipeline or command:
+     1 rtk:default (engine/builtin/default.toml)        2 rtk:posthook (posthook.toml, Claude Code)
+     3 rtk:delegate-reads (file_lines_gt = 350, Claude Code)  4 rtk:proxy + `rtk claude`
+     Numbers: "up to 90%" is command output; −20.2% is the best author benchmark listed on
+     rtk-ai.app/pipelines (laya-tiered). No other figure is published, so no other card has one. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=block" rel="stylesheet">
+<style>
+:root{--bg:#060b18;--bg-card:#0f1629;--text:#e2e8f0;--text-bright:#f8fafc;--text-muted:#94a3b8;--text-dim:#7e8ca6;--accent:#00e599;--accent-hover:#00cc88;--accent-dim:rgba(0,229,153,.10);--accent-glow:rgba(0,229,153,.25);--scene:rgba(0,229,153,.09);--tint:rgba(0,229,153,.045);--vignette:rgba(0,0,0,.42);--grid:rgba(148,163,184,.05);--line:rgba(148,163,184,.14)}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:1280px;height:600px;background:transparent}
+.card{position:relative;width:1280px;height:600px;border-radius:20px;overflow:hidden;background:var(--bg);border:1px solid var(--line);isolation:isolate;font-family:'Geist','Inter',sans-serif;color:var(--text)}
+.atmo{position:absolute;inset:0;z-index:-1;background-image:
+ radial-gradient(ellipse 40% 80% at 18% 45%,var(--scene),transparent 62%),
+ linear-gradient(180deg,transparent 4%,var(--tint) 42%,transparent 84%),
+ radial-gradient(ellipse 120% 105% at 50% 48%,transparent 56%,var(--vignette) 100%)}
+.grid{position:absolute;inset:0;z-index:-1;background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);background-size:40px 40px;-webkit-mask-image:radial-gradient(ellipse 40% 70% at 18% 45%,#000 20%,transparent 75%)}
+.eyebrow{position:absolute;left:56px;top:34px;font-family:'JetBrains Mono',monospace;font-weight:500;font-size:14px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-dim)}
+.eyebrow b{color:var(--text-muted);font-weight:500}
+.file{position:absolute;right:56px;top:30px;font-family:'JetBrains Mono',monospace;font-size:15px;color:var(--text-muted)}
+.file span{color:var(--accent)}
+.row{position:absolute;left:56px;top:84px;display:flex;gap:22px}
+.c{position:relative;width:273px;height:352px;border:1px solid var(--line);border-radius:14px;background:linear-gradient(180deg,rgba(255,255,255,.025),transparent 30%),var(--bg-card);padding:22px 22px 18px;display:flex;flex-direction:column}
+.c.lit{border-color:rgba(0,229,153,.55);box-shadow:0 0 0 1px rgba(0,229,153,.10) inset,0 0 44px var(--accent-glow)}
+.chip{align-self:flex-start;font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;padding:4px 9px;border-radius:999px;border:1px solid var(--line);color:var(--text-dim)}
+.lit .chip{border-color:rgba(0,229,153,.5);color:var(--accent);background:var(--accent-dim)}
+.c h3{margin-top:18px;font-size:24px;font-weight:600;line-height:1.12;letter-spacing:-.02em;color:var(--text-bright)}
+.c p{margin-top:12px;font-size:15.5px;line-height:1.45;color:var(--text-muted)}
+.stat{margin-top:auto;font-size:40px;font-weight:600;letter-spacing:-.03em;line-height:1;background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 62%,var(--text-bright)) 0%,var(--accent) 58%,color-mix(in srgb,var(--accent-hover) 88%,var(--bg)) 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;filter:drop-shadow(0 0 18px var(--accent-dim))}
+.stat small{display:block;margin-top:6px;font-size:13px;font-weight:400;letter-spacing:0;-webkit-text-fill-color:var(--text-muted);filter:none}
+.where{margin-top:auto;font-family:'JetBrains Mono',monospace;font-size:12px;letter-spacing:.04em;color:var(--text-dim)}
+.where b{color:var(--text-muted);font-weight:500}
+.how{margin-top:12px;padding-top:12px;border-top:1px solid var(--line);font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--text-muted);white-space:nowrap}
+.how span{color:var(--accent)}
+.band{position:absolute;left:56px;right:56px;top:462px;height:94px;border:1px solid var(--line);border-radius:14px;background:linear-gradient(180deg,rgba(255,255,255,.02),transparent 40%),rgba(15,22,41,.7);display:flex;align-items:center;padding:0 26px;gap:26px}
+.band img{width:46px;height:46px;filter:drop-shadow(0 0 8px var(--accent-glow)) drop-shadow(0 0 20px var(--accent-glow))}
+.band h4{font-size:19px;font-weight:600;color:var(--text-bright);letter-spacing:-.01em}
+.band p{margin-top:4px;font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text-muted)}
+.band p span{color:var(--accent)}
+.band .best{margin-left:auto;text-align:right}
+.band .best b{display:block;font-size:30px;font-weight:600;letter-spacing:-.03em;line-height:1;color:var(--accent)}
+.band .best small{display:block;margin-top:5px;font-family:'JetBrains Mono',monospace;font-size:11.5px;letter-spacing:.04em;color:var(--text-dim)}
+</style></head>
+<body><div class="card"><div class="atmo"></div><div class="grid"></div>
+<p class="eyebrow">02 / Go further · <b>one line at a time</b></p>
+<p class="file"><span>~/.config/rtk/</span>pipeline.toml</p>
+
+<div class="row">
+ <div class="c lit">
+  <span class="chip">on by default</span>
+  <h3>Less command output</h3>
+  <p>Test runs, diffs, logs and builds are compressed before your agent reads them. Every agent.</p>
+  <div class="stat">up to 90%<small>less command output</small></div>
+  <div class="how"><span>$</span> rtk init -g</div>
+ </div>
+ <div class="c">
+  <span class="chip">one line</span>
+  <h3>Every tool, not just the shell</h3>
+  <p>Grep results, web pages, lockfiles and any output rtk has no filter for get the same treatment.</p>
+  <div class="where"><b>Claude Code</b></div>
+  <div class="how">extends = <span>"rtk:posthook"</span></div>
+ </div>
+ <div class="c">
+  <span class="chip">bring a model</span>
+  <h3>Big files, read for you</h3>
+  <p>A read over 350 lines is answered by a cheaper model you choose. The file never enters your agent's context.</p>
+  <div class="where"><b>Claude Code</b> · your API key</div>
+  <div class="how">extends = <span>"rtk:delegate-reads"</span></div>
+ </div>
+ <div class="c">
+  <span class="chip">optional daemon</span>
+  <h3>Clean API traffic</h3>
+  <p>Noise stripped from the conversation your agent re-sends every turn, with the prompt cache kept intact.</p>
+  <div class="where">any agent you <b>point at it</b></div>
+  <div class="how"><span>$</span> rtk claude</div>
+ </div>
+</div>
+
+<div class="band">
+ <img src="helmet.webp" alt="">
+ <div>
+  <h4>Install a pipeline someone shared, or share yours</h4>
+  <p><span>$</span> rtk pipeline add github:user/repo &nbsp;·&nbsp; <span>$</span> rtk pipeline share publish</p>
+ </div>
+ <div class="best"><b>−20.2%</b><small>total cost · author's benchmark<br>best listed on rtk-ai.app/pipelines</small></div>
+</div>
+</div></body></html>

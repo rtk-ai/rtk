@@ -1,0 +1,11 @@
+F.                                                                       [100%]
+=================================== FAILURES ===================================
+__________________________________ test_slow ___________________________________
+test_du.py:6: in test_slow
+    assert 1 == 2, 'slow fail'
+E   AssertionError: slow fail
+E   assert 1 == 2
+============================= slowest 2 durations ==============================
+0.03s call     test_du.py::test_slow
+0.00s teardown test_du.py::test_slow
+1 failed, 1 passed in 0.05s

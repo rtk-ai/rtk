@@ -1,0 +1,2 @@
+* legacyPackages.x86_64-linux.tests.gamma-test (3.0)
+  gamma only a test

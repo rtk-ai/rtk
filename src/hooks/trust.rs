@@ -213,6 +213,21 @@ pub fn gated_filter_paths_labeled() -> Vec<(&'static str, PathBuf)> {
     paths
 }
 
+pub fn gated_pipeline_paths() -> Vec<PathBuf> {
+    let mut out = vec![crate::core::pipeline_config::project_pipeline_path()];
+    let dir = crate::core::pipeline_config::project_pipelines_dir();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"))
+            .collect();
+        files.sort();
+        out.extend(files);
+    }
+    out
+}
+
 pub fn untrusted_active_filter_count() -> usize {
     gated_filter_paths_labeled()
         .into_iter()
@@ -302,11 +317,67 @@ pub fn run_trust(list: bool, yes: bool) -> Result<()> {
         eprintln!("  Enabled — revoke with `rtk untrust`.");
     }
 
+    for pipeline_path in gated_pipeline_paths() {
+        if !pipeline_path.exists() {
+            continue;
+        }
+        let bytes = std::fs::read(&pipeline_path)
+            .with_context(|| format!("Failed to read {}", pipeline_path.display()))?;
+        let content = String::from_utf8_lossy(&bytes);
+        match crate::core::pipeline_config::trust_summary(&content) {
+            Err(err) => {
+                had_error = true;
+                eprintln!(
+                    "  {} — invalid pipeline TOML, not loaded: {}",
+                    pipeline_path.display(),
+                    err
+                );
+            }
+            Ok(summary) => {
+                found_any = true;
+                if matches!(
+                    check_trust(&pipeline_path).unwrap_or(TrustStatus::Untrusted),
+                    TrustStatus::Trusted | TrustStatus::EnvOverride
+                ) {
+                    eprintln!("  {} already trusted.", pipeline_path.display());
+                    enabled_any = true;
+                } else {
+                    let yellow = "\x1b[33m";
+                    let reset = "\x1b[0m";
+                    eprintln!();
+                    eprintln!(
+                        "{yellow}Detected a project pipeline in {} — it reshapes tool output for the agent:{reset}",
+                        pipeline_path.display()
+                    );
+                    for line in &summary {
+                        eprintln!("{yellow}    {line}{reset}");
+                    }
+                    if yes || confirm_enable_at_tty()? {
+                        let hash = crate::hooks::integrity::compute_hash_bytes(&bytes);
+                        trust_filter_with_hash(&pipeline_path, &hash)?;
+                        enabled_any = true;
+                        eprintln!("  Enabled — revoke with `rtk untrust`.");
+                        #[cfg(feature = "engine")]
+                        crate::core::pipeline_cmd::print_auth_guidance(
+                            &crate::core::pipeline_config::load().resolved,
+                        );
+                    } else {
+                        eprintln!(
+                            "  Not enabled — re-run `rtk trust --yes` to trust non-interactively."
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     if !found_any {
         if had_error {
             anyhow::bail!("Filter file present but not valid TOML — see the error above.");
         }
-        anyhow::bail!("No custom filters found (.rtk/filters.toml or ~/.config/rtk/filters.toml)");
+        anyhow::bail!(
+            "No custom filters or pipeline found (.rtk/filters.toml, ~/.config/rtk/filters.toml, .rtk/pipeline.toml)"
+        );
     }
     if !enabled_any {
         if !interactive {
@@ -349,7 +420,9 @@ pub fn confirm_enable_at_tty() -> Result<bool> {
 /// Run `rtk untrust` — revoke trust for project-local filters.
 pub fn run_untrust() -> Result<()> {
     let mut revoked_any = false;
-    for filter_path in gated_filter_paths() {
+    let mut gated = gated_filter_paths();
+    gated.extend(gated_pipeline_paths());
+    for filter_path in gated {
         if untrust_filter(&filter_path).unwrap_or(false) {
             revoked_any = true;
             println!("Trust revoked for {}", filter_path.display());

@@ -14,6 +14,12 @@
 //! The other is a clean run of a command whose output format rtk injected
 //! (`runner::RunOptions::clean_outputs`): ruff's `[]` answers a question the
 //! user never asked, so the filter's summary is shown although it is longer.
+//!
+//! `rtk json --keys-only` bypasses the guard outright rather than being allowed
+//! past it. It asks for the structure *without* the values, so a raw fallback
+//! prints exactly what the flag exists to hide. Raw JSON is not a rendering of
+//! the schema, so there is no pair to compare: the schema is the answer, and in
+//! compact form it is also smaller than the input in practice.
 
 use crate::core::tracking::estimate_tokens;
 

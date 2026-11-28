@@ -4,4 +4,7 @@
 tests/fixtures/** -text
 # Hook payloads are installed byte-for-byte; keep their line endings stable
 # across platforms for embedded fixtures, hashes, and generated installs.
-hooks/**/*.ts -text
+# Every extension under here is embedded with include_str! or hashed or both --
+# .ts, .md, .py, .yaml -- and a CRLF checkout would make a Windows-built binary
+# emit different bytes than a Linux-built one from the same commit.
+hooks/** -text

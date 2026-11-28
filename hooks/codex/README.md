@@ -1,6 +1,6 @@
 # Codex CLI Hooks
 
-> Part of [`hooks/`](../README.md) — see also [`src/hooks/`](../../src/hooks/README.md) for installation code
+> Part of [`hooks/`](../README.md)
 
 ## Specifics
 
@@ -15,13 +15,8 @@ Codex requires `permissionDecision: "allow"` in the hook response for `updatedIn
 
 RTK rewrites the documented Codex permission modes. Missing or unknown permission modes, no match, malformed JSON, unsupported commands, heredocs, substitutions, and file redirections fail open: the hook exits successfully without stdout and Codex executes the original command.
 
-The Codex handler uses RTK's shared hook decision pipeline through `Host::Codex`.
 RTK does not parse Codex execution rules or reuse another agent's permission
 files: Codex's native execution layer remains responsible for those rules.
-An internal `AskRewrite` still emits the required protocol-level `allow` with
-`updatedInput`; it is not recorded internally as an explicit permission grant.
-This preserves transparent rewriting but does not remove the classifier
-limitation described above.
 
 ## History in workspace-write sandboxes
 

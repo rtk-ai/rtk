@@ -30,16 +30,7 @@ RTK is a CLI tool that executes shell commands and handles user input. PRs from 
 Every PR triggers the security jobs in [`ci.yml`](.github/workflows/ci.yml):
 
 1. **Dependency audit** (`cargo audit`) - Detects known CVEs
-2. **Critical files alert** - Flags modifications to high-risk files
-3. **Dangerous pattern scan** - Regex-based detection of:
-   - Shell execution (`Command::new("sh")`)
-   - Environment manipulation (`.env("LD_PRELOAD")`)
-   - Network operations (`reqwest::`, `std::net::`)
-   - Unsafe code blocks
-   - Panic-inducing patterns (`.unwrap()` in production)
-4. **Clippy security lints** - Enforces Rust best practices
-
-Results are posted in the PR's GitHub Actions summary.
+2. **Clippy lints** - Enforces Rust best practices
 
 ---
 
@@ -48,15 +39,15 @@ Results are posted in the PR's GitHub Actions summary.
 The following files are considered **high-risk** and trigger mandatory 2-reviewer approval:
 
 ### Tier 1: Shell Execution & System Interaction
-- **`src/runner.rs`** - Shell command execution engine (primary injection vector)
-- **`src/summary.rs`** - Command output aggregation (data exfiltration risk)
-- **`src/tracking.rs`** - SQLite database operations (privacy/telemetry concerns)
+- **`src/core/runner.rs`** - Shell command execution engine (primary injection vector)
+- **`src/cmds/system/summary.rs`** - Command output aggregation (data exfiltration risk)
+- **`src/core/tracking.rs`** - SQLite database operations (privacy/telemetry concerns)
 - **`src/discover/registry.rs`** - Rewrite logic for all commands (command injection risk via rewrite rules)
-- **`hooks/rtk-rewrite.sh`** / **`.claude/hooks/rtk-rewrite.sh`** - Thin delegator hook (executes in Claude Code context, intercepts all commands)
+- **`src/hooks/`** and **`hooks/`** - Agent hook processors and integrations (execute in the agent's context, intercept commands)
 
 ### Tier 2: Input Validation
-- **`src/pnpm_cmd.rs`** - Package name validation (prevents injection via malicious names)
-- **`src/container.rs`** - Docker/container operations (privilege escalation risk)
+- **`src/cmds/js/pnpm_cmd.rs`** - Package name validation (prevents injection via malicious names)
+- **`src/cmds/cloud/container.rs`** - Docker/container operations (privilege escalation risk)
 
 ### Tier 3: Supply Chain & CI/CD
 - **`Cargo.toml`** - Dependency manifest (typosquatting, backdoored crates)
@@ -83,13 +74,8 @@ The following files are considered **high-risk** and trigger mandatory 2-reviewe
 Use the comprehensive security review process:
 
 ```bash
-# If Claude Code available, run the dedicated skill:
-/rtk-pr-security <PR_NUMBER>
-
-# Manual review (without Claude):
 gh pr view <PR_NUMBER>
-gh pr diff <PR_NUMBER> > /tmp/pr.diff
-bash scripts/detect-dangerous-patterns.sh /tmp/pr.diff
+gh pr diff <PR_NUMBER>
 ```
 
 **Review checklist:**
@@ -102,7 +88,7 @@ bash scripts/detect-dangerous-patterns.sh /tmp/pr.diff
 
 ---
 
-## Dangerous Patterns We Check For
+## Dangerous Patterns Reviewers Look For
 
 | Pattern | Risk | Example |
 |---------|------|---------|
@@ -113,8 +99,6 @@ bash scripts/detect-dangerous-patterns.sh /tmp/pr.diff
 | `.unwrap()` in `src/` | DoS via panic | Crashes on invalid input |
 | `SystemTime::now() > ...` | Logic bombs | Delayed malicious behavior |
 | Base64/hex strings | Obfuscation | Hides malicious URLs/commands |
-
-See [Dangerous Patterns Reference](https://github.com/rtk-ai/rtk/wiki/Dangerous-Patterns) for exploitation examples.
 
 ---
 
@@ -198,11 +182,9 @@ Critical vulnerabilities (remote code execution, data exfiltration) may be fast-
 
 ## Security Tooling
 
-- **`cargo audit`** - Automated CVE scanning (runs in CI)
-- **`cargo deny`** - License compliance + banned dependencies
+- **`cargo audit`** - Automated CVE scanning
 - **`cargo clippy`** - Lints for unsafe patterns
 - **GitHub Dependabot** - Automated dependency updates
-- **GitHub Code Scanning** - Static analysis via CodeQL (planned)
 
 ---
 
@@ -210,8 +192,3 @@ Critical vulnerabilities (remote code execution, data exfiltration) may be fast-
 
 - **Security issues**: security@rtk-ai.app
 - **General questions**: https://github.com/rtk-ai/rtk/discussions
-- **Maintainers**: @FlorianBruniaux (active fork maintainer)
-
----
-
-**Last updated**: 2026-03-05
