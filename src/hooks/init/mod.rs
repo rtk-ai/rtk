@@ -1392,10 +1392,12 @@ fn prompt_telemetry_consent() -> Result<()> {
     use std::io::{self, BufRead, IsTerminal};
 
     let config = crate::core::config::Config::load().unwrap_or_default();
-    match config.telemetry.consent_given {
-        Some(true) => return Ok(()),
-        Some(false) => return Ok(()),
-        None => {}
+    if !crate::core::telemetry_cmd::consent_due(
+        config.telemetry.consent_given,
+        config.telemetry.consent_date.as_deref(),
+        chrono::Utc::now(),
+    ) {
+        return Ok(());
     }
 
     // Explicit opt-out must short-circuit before the TTY heuristic: some
@@ -1423,6 +1425,18 @@ fn prompt_telemetry_consent() -> Result<()> {
     eprintln!("           request erasure with `rtk telemetry forget`");
     eprintln!("  Details: https://github.com/rtk-ai/rtk/blob/master/docs/TELEMETRY.md");
     eprintln!();
+    if let (Some(answer), Some(date)) = (
+        config.telemetry.consent_given,
+        config.telemetry.consent_date.as_deref(),
+    ) {
+        eprintln!(
+            "You answered {} on {}. RTK asks again every {} months.",
+            if answer { "Yes" } else { "No" },
+            date.get(..10).unwrap_or(date),
+            crate::core::telemetry_cmd::CONSENT_VALID_MONTHS
+        );
+        eprintln!();
+    }
 
     let accepted = if crate::core::ask::interactive() {
         crate::core::ask::confirm(

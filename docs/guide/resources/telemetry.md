@@ -113,7 +113,7 @@ Example values below are illustrative.
 
 ## Consent
 
-Telemetry requires explicit opt-in consent (GDPR Art. 6, 7). Consent is requested by `rtk init` (project or `--global`, whichever agents you set up), as the last setup question, or via `rtk telemetry enable`. `rtk init` asks only while you have not answered, only when stdin is a terminal, and never with `--dry-run` or `RTK_TELEMETRY_DISABLED=1`. Without consent, no data is sent.
+Telemetry requires explicit opt-in consent (GDPR Art. 6, 7). Consent is requested by `rtk init` (project or `--global`, whichever agents you set up), as the last setup question, or via `rtk telemetry enable`. `rtk init` asks only when stdin is a terminal, never with `--dry-run` or `RTK_TELEMETRY_DISABLED=1`, and only while you have no answer or your answer is more than 6 months old. RTK keeps a Yes or a No for 6 months, then asks again at the next interactive `rtk init`, with all the information above, defaulting to No. Until then your answer stands, and `rtk telemetry status` shows when it will be asked again. Without consent, no data is sent.
 
 ```bash
 rtk telemetry status     # Check current consent state

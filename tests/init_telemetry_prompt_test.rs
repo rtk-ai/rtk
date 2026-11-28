@@ -1,4 +1,4 @@
-//! The telemetry question closes every interactive `rtk init`, project or global, and is asked once.
+//! The telemetry question closes every interactive `rtk init`, project or global, and an answer stands for 6 months.
 #![cfg(all(unix, feature = "engine"))]
 
 use std::fs::File;
@@ -117,4 +117,58 @@ fn a_project_setup_for_any_agent_ends_with_the_telemetry_question() {
     assert!(stderr.contains(QUESTION), "{stderr}");
     assert!(stderr.contains("Telemetry disabled."), "{stderr}");
     assert!(project.join(".kilocode/rules/rtk-rules.md").exists());
+}
+
+fn saved_config(dir: &Path) -> Option<std::path::PathBuf> {
+    std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+        let path = entry.path();
+        if path.is_dir() {
+            saved_config(&path)
+        } else if path.file_name()? == "config.toml"
+            && std::fs::read_to_string(&path)
+                .ok()?
+                .contains("consent_date")
+        {
+            Some(path)
+        } else {
+            None
+        }
+    })
+}
+
+#[test]
+fn an_answer_older_than_six_months_is_asked_again_once() {
+    let home = common::tempdir();
+    std::fs::create_dir(home.path().join("bin")).expect("create test bin");
+    let project = home.path().join("project");
+    std::fs::create_dir(&project).expect("create project");
+    let args = ["--agent", "kilocode"];
+
+    let first = answered(init(home.path(), &project, &args), b"n\n\x04");
+    assert!(first.status.success(), "{first:?}");
+    let config = saved_config(home.path()).expect("the answer is saved");
+    let saved = std::fs::read_to_string(&config).expect("read config");
+    let line = saved
+        .lines()
+        .find(|l| l.starts_with("consent_date"))
+        .expect("consent_date line");
+    let old = (chrono::Utc::now() - chrono::Duration::days(213)).to_rfc3339();
+    std::fs::write(
+        &config,
+        saved.replace(line, &format!("consent_date = \"{old}\"")),
+    )
+    .expect("backdate the answer");
+
+    let renewed = answered(init(home.path(), &project, &args), b"n\n\x04");
+    assert!(renewed.status.success(), "{renewed:?}");
+    let stderr = String::from_utf8_lossy(&renewed.stderr);
+    assert!(stderr.contains(QUESTION), "asked again: {stderr}");
+    assert!(
+        stderr.contains(&format!("You answered No on {}", &old[..10])),
+        "{stderr}"
+    );
+
+    let after = answered(init(home.path(), &project, &args), b"n\n\x04");
+    let again = String::from_utf8_lossy(&after.stderr);
+    assert!(!again.contains(QUESTION), "kept 6 months again: {again}");
 }
