@@ -1,10 +1,8 @@
 //! Compares RTK-routed vs raw commands in a coding session.
 
-use crate::core::cmdline::lexer::JoinedLine;
 use crate::core::utils::format_tokens;
-use crate::discover::is_already_rtk;
 use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
-use crate::discover::registry::{Classification, classify_command, split_command_chain_parts};
+use crate::discover::{RewriteConfig, commands_rtk_filters};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -27,29 +25,27 @@ impl SessionSummary {
     }
 }
 
-/// Count RTK-covered commands from extracted commands.
-/// A command is "covered" if it either:
-/// - is an explicit rtk invocation, excluding `rtk bypass` (see `is_already_rtk` —
-///   bypass deliberately runs the raw command unfiltered, so it must not count as
-///   adopted usage), or
-/// - would be rewritten by the hook (classify_command returns Supported)
+/// Count RTK-covered commands from extracted commands, as discover reads them
+/// ([`commands_rtk_filters`]), under the configuration the hook rewrites under. A command
+/// is "covered" if it either:
+/// - is an explicit rtk invocation, under any assignments and wrappers, excluding
+///   `rtk bypass`, which deliberately runs the raw command unfiltered and must not count
+///   as adopted usage. rtk itself does not read `RTK_DISABLED`, so `RTK_DISABLED=1 rtk git
+///   status` counts; or
+/// - has a rule, and the hook rewrites it where it stands: not behind an
+///   `RTK_DISABLED=`, not a command `exclude_commands` names, not one the rewrite declines
+///   (a pipe's producer it leaves raw, a consumer it leaves raw), and not on a line the
+///   hook cannot attest (`nohup cargo test > test.log 2>&1 &`).
 ///
 /// Chained commands (e.g. "cd ./path && rtk ls") and the lines of a multi-line call are
 /// split so each part is classified independently — matching the discover module's behavior.
-fn count_rtk_commands(cmds: &[ExtractedCommand]) -> (usize, usize, usize) {
+fn count_rtk_commands(cmds: &[ExtractedCommand], config: &RewriteConfig) -> (usize, usize, usize) {
     let mut total: usize = 0;
     let mut rtk: usize = 0;
     for c in cmds {
-        let line = JoinedLine::of(&c.command);
-        for part in split_command_chain_parts(&line) {
-            let part = part.text;
-            total += 1;
-            if is_already_rtk(part)
-                || matches!(classify_command(part), Classification::Supported { .. })
-            {
-                rtk += 1;
-            }
-        }
+        let (commands, filtered) = commands_rtk_filters(&c.command, config);
+        total += commands;
+        rtk += filtered;
     }
     let output: usize = cmds.iter().filter_map(|c| c.output_len).sum();
     (total, rtk, output)
@@ -97,6 +93,7 @@ pub fn run(_verbose: u8) -> Result<()> {
     session_files.truncate(10);
 
     let mut summaries: Vec<SessionSummary> = Vec::new();
+    let config = RewriteConfig::load();
 
     for path in &session_files {
         let cmds = match provider.extract_commands(path) {
@@ -108,7 +105,7 @@ pub fn run(_verbose: u8) -> Result<()> {
             continue;
         }
 
-        let (total_cmds, rtk_cmds, output_tokens) = count_rtk_commands(&cmds);
+        let (total_cmds, rtk_cmds, output_tokens) = count_rtk_commands(&cmds, &config);
 
         // Extract session ID from filename
         let id = path
@@ -200,6 +197,11 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    /// [`super::count_rtk_commands`] with no `exclude_commands` and no transparent prefixes.
+    fn count_rtk_commands(cmds: &[ExtractedCommand]) -> (usize, usize, usize) {
+        super::count_rtk_commands(cmds, &RewriteConfig::default())
+    }
+
     fn make_cmd(command: &str, output_len: Option<usize>) -> ExtractedCommand {
         ExtractedCommand {
             command: command.to_string(),
@@ -268,7 +270,7 @@ mod tests {
     #[test]
     fn test_count_hook_rewritten_commands() {
         // Hook rewrites "git status" → "rtk git status" but JSONL logs the original.
-        // count_rtk_commands should detect these via classify_command.
+        // count_rtk_commands should detect these by their classification.
         let cmds = vec![
             make_cmd("git status", Some(500)),
             make_cmd("cargo test", Some(3000)),
@@ -311,7 +313,7 @@ mod tests {
     fn test_count_rtk_bypass_not_counted_as_adopted() {
         // `rtk bypass <cmd>` deliberately runs the raw command unfiltered — it must
         // not count as adopted rtk usage, or the session report would flatter
-        // itself via its own escape hatch (mirrors discover::is_already_rtk).
+        // itself via its own escape hatch (as discover reads it).
         let cmds = vec![
             make_cmd("rtk bypass git log -20", Some(2000)),
             make_cmd("rtk git status", Some(200)),
@@ -332,6 +334,79 @@ mod tests {
         let (total, rtk, _) = count_rtk_commands(&cmds);
         assert_eq!(total, 3);
         assert_eq!(rtk, 2);
+    }
+
+    /// A command is read under its assignments and wrappers, as discover reads it.
+    #[test]
+    fn test_count_reads_the_command_under_its_wrappers() {
+        let cmds = vec![
+            make_cmd("timeout 5 rtk git status", Some(200)),
+            make_cmd("FOO=1 rtk git status", Some(200)),
+            make_cmd("timeout 5 git status", Some(200)),
+            make_cmd("time cargo test", Some(200)),
+            make_cmd("FOO=1 rtk bypass git status", Some(200)),
+        ];
+        let (total, rtk, _) = count_rtk_commands(&cmds);
+        assert_eq!((total, rtk), (5, 4));
+    }
+
+    /// A command with a rule counts only where the hook rewrites it, as discover asks.
+    #[test]
+    fn test_count_only_what_the_hook_rewrites_where_it_stands() {
+        for (command, expected) in [
+            // A line the hook cannot attest: it leaves the whole line alone.
+            ("nohup cargo test > test.log 2>&1 &", (1, 0)),
+            ("git status; echo $(date)", (2, 0)),
+            // A pipe consumer the rewrite leaves raw, behind a producer it takes.
+            ("git log | head -5", (2, 1)),
+            ("cargo test 2>&1 | tail -5", (2, 1)),
+            // A pipe whose consumer it does not know is left alone whole.
+            ("git log | time head -5", (2, 0)),
+            // One only a TOML filter rewrites has no rule; discover lists it unsupported.
+            ("stat f", (1, 0)),
+        ] {
+            let (total, rtk, _) = count_rtk_commands(&[make_cmd(command, Some(200))]);
+            assert_eq!((total, rtk), expected, "{command:?}");
+        }
+    }
+
+    /// The count reads under the configuration the hook rewrites under: a command
+    /// `exclude_commands` names is left alone, and one behind a transparent prefix is
+    /// rewritten.
+    #[test]
+    fn test_count_reads_under_the_hooks_configuration() {
+        let count = |command: &str, config: &RewriteConfig| {
+            let (total, rtk, _) =
+                super::count_rtk_commands(&[make_cmd(command, Some(200))], config);
+            (total, rtk)
+        };
+        let excluded = RewriteConfig::of(&["git".to_string()], &[]);
+        let prefixed = RewriteConfig::of(&[], &["chronic".to_string(), "sudo".to_string()]);
+        let none = RewriteConfig::default();
+        assert_eq!(count("git status", &none), (1, 1));
+        assert_eq!(count("git status", &excluded), (1, 0));
+        assert_eq!(count("cargo test", &excluded), (1, 1));
+        assert_eq!(count("chronic git status", &none), (1, 0));
+        assert_eq!(count("chronic git status", &prefixed), (1, 1));
+        assert_eq!(count("sudo cargo test", &prefixed), (1, 1));
+        // The command behind a prefix of several words is the one the rewrite settles at.
+        let nice = RewriteConfig::of(&[], &["nice -n 19 ionice".to_string()]);
+        assert_eq!(count("nice -n 19 ionice git status", &none), (1, 0));
+        assert_eq!(count("nice -n 19 ionice git status", &nice), (1, 1));
+    }
+
+    /// A command an `RTK_DISABLED=` keeps the hook off is no adoption, behind a wrapper
+    /// too; rtk itself does not read the variable, so an `rtk` behind one still counts.
+    #[test]
+    fn test_count_rtk_disabled_not_counted_as_adopted() {
+        let cmds = vec![
+            make_cmd("RTK_DISABLED=1 git status", Some(200)),
+            make_cmd("RTK_DISABLED=1 timeout 5 git status", Some(200)),
+            make_cmd("RTK_DISABLED=1 time cargo test", Some(200)),
+            make_cmd("RTK_DISABLED=1 rtk git status", Some(200)),
+        ];
+        let (total, rtk, _) = count_rtk_commands(&cmds);
+        assert_eq!((total, rtk), (4, 1));
     }
 
     #[test]

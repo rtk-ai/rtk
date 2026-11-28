@@ -57,4 +57,4 @@ Session                         Total   RTK   Coverage
 Average coverage: 95.0%
 ```
 
-Low coverage on a session usually means RTK was disabled (`RTK_DISABLED=1`) or the hook wasn't active for a specific subagent.
+A command counts as RTK when it runs `rtk` (behind `timeout`, `env` or an assignment too, but not `rtk bypass`), or when it has an `rtk` rule and the hook rewrites it where it stands, with your `exclude_commands` and `transparent_prefixes`. A command with no rule that the hook rewrites anyway (`stat f` through a filter) does not count, and neither does one the hook declines: a pipe's raw consumer (the `head` of `git log | head -5`) or raw producer (`cat file | tail -5`). Low coverage on a session usually means RTK was disabled (`RTK_DISABLED=1`), the hook wasn't active for a specific subagent, or the commands were written in a form the hook leaves alone: a line with a substitution (`$(…)`) or a redirect to a file (`cargo test > test.log 2>&1`). `rtk discover` lists the commands on such a line as opportunities (unless the hook's log shows it rewrote the line), and a raw producer too; it leaves out a raw pipe consumer.

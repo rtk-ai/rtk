@@ -213,7 +213,7 @@ classify_command(cmd)                              [src/discover/registry.rs]
   |  6. Guard: cat/head/tail with redirect (>, >>) → Unsupported (write, not read)
   |  7. Match against REGEX_SET (60+ compiled patterns from rules.rs)
   |  8. Extract subcommand → lookup custom savings/status overrides
-  |  9. Return Classification::Supported { rtk_equivalent, category, savings, status }
+  |  9. Return Classification::Supported { rule, rtk_equivalent, category, savings, status }
   |
   v
 Result: "rtk cargo fmt --all && rtk cargo test 2>&1 | tail -20"
