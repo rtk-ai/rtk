@@ -416,6 +416,10 @@ fn build_capped_listing(files: &[String], max_results: usize) -> String {
     listing
 }
 
+fn build_explicit_listing(files: &[String], max_results: usize) -> String {
+    build_capped_listing(&display_ordered(files), max_results)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     label: &str,
@@ -666,6 +670,18 @@ fn render(
             Some(note) => crate::core::runner::emit_guarded(note, None, note),
             None => String::new(),
         };
+        timer.track(track_cmd, &rtk_cmd, raw_output, &shown);
+        return shown;
+    }
+
+    if max_explicit {
+        let listing = build_explicit_listing(&files, max_results);
+        let mut listing = listing.trim_end_matches('\n').to_string();
+        if let Some(note) = &note {
+            listing.push('\n');
+            listing.push_str(note);
+        }
+        let shown = crate::core::runner::emit_guarded(&listing, None, &listing);
         timer.track(track_cmd, &rtk_cmd, raw_output, &shown);
         return shown;
     }
@@ -1014,6 +1030,20 @@ mod tests {
         let ordered = display_ordered(&args(&[".", "a.rs"]));
         assert_eq!(ordered, args(&[".", "a.rs"]));
         assert_eq!(build_capped_listing(&ordered, 10), ".\na.rs\n");
+    }
+
+    #[test]
+    fn explicit_listing_displays_exactly_max_names() {
+        let files: Vec<String> = (0..120).map(|i| format!("file-{i:03}.rs")).collect();
+
+        for max in [10, 100] {
+            let listing = build_explicit_listing(&files, max);
+            let displayed = listing
+                .lines()
+                .filter(|line| !line.starts_with('+'))
+                .count();
+            assert_eq!(displayed, max);
+        }
     }
 
     #[test]
