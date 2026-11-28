@@ -242,6 +242,18 @@ rtk gain --text
 
 `--watch` and `--text` are mutually exclusive. Asking for `--watch` without a terminal falls back to the text view with a warning rather than failing.
 
+## Optional Windows tray widget
+
+For a small desktop view of the same summary, [`rtk-gain-widget.ps1`](https://github.com/rtk-ai/rtk/blob/develop/examples/windows/rtk-gain-widget.ps1) provides an opt-in Windows notification-area widget. It polls `rtk gain --format json` every five minutes and shows saved tokens, command count, and average savings. The tray icon's menu can open the stats window, refresh it, or exit; closing the window hides it back in the notification area. The widget is not installed or started automatically.
+
+Run it with Windows PowerShell 5.1 and RTK on `PATH`:
+
+```powershell
+powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\examples\windows\rtk-gain-widget.ps1
+```
+
+The script uses Windows Forms and makes no network requests. To run it at sign-in, create a shortcut in the Windows Startup folder whose target is `powershell.exe` and whose arguments are `-WindowStyle Hidden -NoProfile -STA -ExecutionPolicy Bypass -File "<path-to-rtk-gain-widget.ps1>"`.
+
 ## Attribution
 
 The default report tells you *how much* was saved. The attribution flags tell you *where it came from*, which helps you tune a pipeline. Each covers both the hook and proxy sites; proxy figures appear only if you run the [RTK Proxy](../proxy/overview.md).
