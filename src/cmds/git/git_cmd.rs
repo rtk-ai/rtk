@@ -7832,6 +7832,49 @@ nothing added to commit but untracked files present (use \"git add\" to track)
     }
 
     #[test]
+    fn test_filter_status_with_args_keeps_clean_phrase_path_line_verbatim() {
+        // The status columns and indentation are part of the entry: trimmed, the unstaged
+        // ` M` would read as a staged `M`, and the long-form path as git's own sentence.
+        let porcelain = " M \"nothing to commit, working tree clean\"\n M zz-after.txt\n";
+        assert_eq!(
+            filter_status_with_args(porcelain),
+            " M \"nothing to commit, working tree clean\"\n M zz-after.txt"
+        );
+
+        let long = "On branch main
+Untracked files:
+  (use \"git add <file>...\" to include in what will be committed)
+\tnothing to commit, working tree clean
+\tzz-after.txt
+
+nothing added to commit but untracked files present (use \"git add\" to track)
+";
+        let result = filter_status_with_args(long);
+        assert!(
+            result.starts_with(
+                "On branch main\nUntracked files:\n\tnothing to commit, working tree clean\n\tzz-after.txt"
+            ),
+            "{result}"
+        );
+    }
+
+    #[test]
+    fn test_filter_status_with_args_keeps_stash_summary_after_clean_tree() {
+        // `git status --show-stash` prints its summary after the clean-tree sentence.
+        let raw = "On branch main
+Your branch is ahead of 'up' by 1 commit.
+  (use \"git push\" to publish your local commits)
+
+nothing to commit, working tree clean
+Your stash currently has 1 entry
+";
+        assert_eq!(
+            filter_status_with_args(raw),
+            "On branch main\nYour branch is ahead of 'up' by 1 commit.\nnothing to commit, working tree clean\nYour stash currently has 1 entry"
+        );
+    }
+
+    #[test]
     fn test_filter_log_output_multibyte() {
         // Thai characters: each is 3 bytes. A line with >80 bytes but few chars
         let thai_msg = format!("abc1234 {} (2 days ago) <author>", "ก".repeat(30));
