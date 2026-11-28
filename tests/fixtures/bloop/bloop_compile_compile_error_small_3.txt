@@ -1,0 +1,9 @@
+Compiling root (1 Scala source)
+[E] [E1] src/main/scala/example/Defect1.scala:5:21
+[E]      Found:    ("not an int" : String)
+[E]      Required: Int
+[E]      L5:   val broken: Int = "not an int"
+[E]                              ^^^^^^^^^^^^
+[E] src/main/scala/example/Defect1.scala: L5 [E1]
+Compiled root (1683ms)
+[E] Failed to compile 'root'
