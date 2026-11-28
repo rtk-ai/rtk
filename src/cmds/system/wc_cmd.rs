@@ -7,6 +7,7 @@
 //! - `wc -c file.py`  → `978`
 //! - `wc -l *.py`     → table with common path prefix stripped
 
+use crate::core::arg_tokenizer::{TokenKind, tokenize};
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::display_args;
 use crate::core::utils::{ChildArgExt, resolved_command};
@@ -55,9 +56,20 @@ enum WcMode {
     Chars,
     /// Multiple flags combined — keep compact format
     Mixed,
+    /// Any columns including -L: laid out like `Mixed`, but the total line holds the
+    /// longest line, not a sum, so it keeps wc's own `total` word instead of `Σ`
+    Longest,
 }
 
 fn detect_mode(args: &[String]) -> WcMode {
+    let longest = tokenize(args).iter().any(|t| {
+        (t.kind == TokenKind::Short && t.text == "L")
+            || (t.kind == TokenKind::Long && t.text == "max-line-length")
+    });
+    if longest {
+        return WcMode::Longest;
+    }
+
     let flags: Vec<&str> = args
         .iter()
         .filter(|a| a.starts_with('-'))
@@ -151,7 +163,7 @@ fn format_single_line(line: &str, mode: &WcMode) -> String {
                 line.trim().to_string()
             }
         }
-        WcMode::Mixed => {
+        WcMode::Mixed | WcMode::Longest => {
             // Strip file path, keep numbers only
             if parts.len() >= 2 {
                 let last_is_path = parts.last().is_some_and(|p| p.parse::<u64>().is_err());
@@ -218,10 +230,14 @@ fn format_multi_line(lines: &[&str], mode: &WcMode) -> String {
                     result.push(line.trim().to_string());
                 }
             }
-            WcMode::Mixed => {
+            WcMode::Mixed | WcMode::Longest => {
                 if is_total {
-                    let nums: Vec<&str> = parts[..parts.len() - 1].to_vec();
-                    result.push(format!("Σ {}", nums.join(" ")));
+                    let nums = parts[..parts.len() - 1].join(" ");
+                    if *mode == WcMode::Longest {
+                        result.push(format!("{nums} total"));
+                    } else {
+                        result.push(format!("Σ {nums}"));
+                    }
                 } else if parts.len() >= 2 {
                     let last_is_path = parts.last().is_some_and(|p| p.parse::<u64>().is_err());
                     if last_is_path {
@@ -359,6 +375,33 @@ mod tests {
     fn test_detect_mode_separate_flags() {
         let args: Vec<String> = vec!["-l".into(), "-w".into(), "file.py".into()];
         assert_eq!(detect_mode(&args), WcMode::Mixed);
+    }
+
+    #[test]
+    fn longest_line_total_keeps_wcs_total_word() {
+        let raw = "      5 a.txt\n      7 c.txt\n      7 total\n";
+        let result = filter_wc_output(raw, &WcMode::Longest);
+        assert_eq!(result, "5 a.txt\n7 c.txt\n7 total");
+    }
+
+    #[test]
+    fn longest_line_with_line_counts_keeps_every_column() {
+        let raw = "  1  5 a.txt\n  2  7 c.txt\n  3  7 total\n";
+        let result = filter_wc_output(raw, &WcMode::Longest);
+        assert_eq!(result, "1 5 a.txt\n2 7 c.txt\n3 7 total");
+    }
+
+    #[test]
+    fn test_detect_mode_longest() {
+        for args in [
+            vec!["-L", "a.txt"],
+            vec!["-lL", "a.txt"],
+            vec!["-l", "-L", "a.txt"],
+            vec!["--max-line-length", "a.txt"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(String::from).collect();
+            assert_eq!(detect_mode(&args), WcMode::Longest, "{args:?}");
+        }
     }
 
     #[test]
