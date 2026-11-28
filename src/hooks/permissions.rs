@@ -1641,6 +1641,54 @@ mod tests {
         );
     }
 
+    /// A quoted value is one word up to its closing quote, also where it ends
+    /// the statement: an assignment that is a whole statement runs nothing, so
+    /// the text inside its value is never a reading a rule matches.
+    #[test]
+    fn test_a_quoted_assignment_ending_its_statement_is_one_word() {
+        let deny = vec!["rm -rf *".to_string()];
+        let allow = vec!["*".to_string()];
+        for cmd in [
+            "MSG=\"chore: rm -rf build dir\"",
+            "MSG=\"chore: rm -rf build dir\" && git commit -m \"$MSG\"",
+            "MSG='chore: rm -rf build dir'; git status",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &allow),
+                PermissionVerdict::Allow,
+                "{cmd:?}"
+            );
+        }
+        // The command behind a quoted assignment is still read.
+        assert_eq!(
+            check_command_with_rules("MSG=\"a b\" rm -rf build", &deny, &[], &allow),
+            PermissionVerdict::Deny
+        );
+    }
+
+    /// A value the word scan cannot read, or reads differently from a first look, must not
+    /// hide the command behind it: the deny rule for `curl` fires for each of these, as it does
+    /// for a plain `A=1 curl x`.
+    #[test]
+    fn test_an_assignment_value_does_not_hide_the_command_behind_it_from_a_deny_rule() {
+        let deny = vec!["curl *".to_string()];
+        let allow = vec!["*".to_string()];
+        for cmd in [
+            "A=$${ curl x",
+            "A=$(( 1 + 2 )) curl x",
+            "A=$(echo hi) curl x",
+            "A=1 B=\\${ curl x",
+            "A=\\${ curl x",
+            "env A=\\${ curl x",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &allow),
+                PermissionVerdict::Deny,
+                "{cmd}"
+            );
+        }
+    }
+
     /// Each assignment is a prefix of its own, so an ordinary line that sets
     /// many variables before its command stays well inside the cap: no
     /// prompt where develop answered allow.

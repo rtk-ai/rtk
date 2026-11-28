@@ -187,9 +187,9 @@ rewrite_segment(seg, excluded)                     [src/discover/registry.rs]
   |
   |  Step 7 — Build rewritten command
   |  a. Find matching rule from rules.rs
-  |  b. Extract env prefix (ENV_PREFIX regex, second pass — first was in classify)
+  |  b. Extract env prefix (split_env_prefix, second pass — first was in classify)
   |     e.g. "GIT_SSH_COMMAND=\"ssh -o ...\" git push" → prefix="GIT_SSH_COMMAND=..."
-  |  c. Guard: RTK_DISABLED=1 in prefix → None
+  |  c. Guard: RTK_DISABLED=1 in the prefix of a command that has one behind it → None
   |  d. Guard: gh with --json/--jq/--template → None
   |  e. Apply rule's rewrite_prefixes: "cargo fmt" → "rtk cargo fmt"
   |  f. Reassemble: env_prefix + rtk_cmd + args + redirect_suffix
@@ -198,7 +198,7 @@ rewrite_segment(seg, excluded)                     [src/discover/registry.rs]
 classify_command(cmd)                              [src/discover/registry.rs]
   |  1. Check IGNORED_EXACT (cd, echo, fi, done, ...)
   |  2. Check IGNORED_PREFIXES (rtk, mkdir, mv, ...)
-  |  3. Strip env prefix with ENV_PREFIX regex (for pattern matching only)
+  |  3. Strip env prefix with split_env_prefix (for pattern matching only)
   |  4. Normalize absolute paths: /usr/bin/grep → grep
   |  5. Strip git global opts: git -C /tmp status → git status
   |  6. Guard: cat/head/tail with redirect (>, >>) → Unsupported (write, not read)

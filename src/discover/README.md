@@ -33,7 +33,7 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 4. Apply the rewrite — find the matching rule, replace the command prefix with `rtk <cmd>`, re-prepend the env prefix, re-append the redirect suffix
 
 **Guards along the way:**
-- `RTK_DISABLED=1` in the env prefix → skip rewrite
+- `RTK_DISABLED=1` (or `RTK_DISABLED+=1`) in the env prefix of a command that has one behind it → skip rewrite; `RTK_DISABLED=1; git status` assigns a shell variable and the command after the `;` is rewritten
 - `gh` with `--json`/`--jq`/`--template` → skip (structured output, rtk would corrupt it)
 - `cat` with flags other than `-n` → skip (different semantics than `rtk read`)
 - `cat`/`head`/`tail` with `>` or `>>` → skip (write operation, not a read)
@@ -70,12 +70,16 @@ The classification logic is shared between discover and rewrite — same pattern
 
 ## Env Prefix Handling
 
-The `ENV_PREFIX` regex strips env variable assignments and `env` from the front of commands. `sudo` is deliberately not stripped, so sudo-prefixed commands stay unclassified and pass through unrewritten. It handles:
+`split_env_prefix` strips env variable assignments and `env` from the front of commands, a word at a time, a quoted value being one word. `sudo` is deliberately not stripped, so sudo-prefixed commands stay unclassified and pass through unrewritten. It handles:
 - Unquoted: `FOO=bar`
 - Double-quoted with spaces: `FOO="bar baz"`
 - Single-quoted: `FOO='bar baz'`
 - Escaped quotes: `FOO="he said \"hello\""`
+- An escaped blank or a `$'…'` string: `FOO=a\ b`, `FOO=$'a b'`
+- Any name bash assigns (`foo=bar`, `foo+=x`), a newline ending a word as a blank does
 - Chained: `A="x y" B=1 env git status`
+
+An array, a substitution, a backtick or an expansion in a value (`a=(git diff)`, `x=$(date)`) holds blanks in ways reading is the lexer's job, so the word has no certain end. For the names the pattern this replaced knew (uppercase, `=`) it ends at its first blank, as before; for a name this change adds (`a=(git diff)`, `x=${y} git status`) the word is not an assignment and the line is left alone rather than edited inside the value.
 
 The prefix is stripped twice: once in `classify_command()` to match the underlying command against rules, and again in `rewrite_segment()` to extract it for re-prepending to the rewritten command.
 
