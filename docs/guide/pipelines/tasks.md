@@ -73,13 +73,61 @@ An upstream is a model endpoint, shared by tasks and [judges](./conditions.md#ju
 | `provider` | `anthropic` · `openai` · `google` for a task; a judge upstream is reached through its `base_url`, whatever its `provider` says |
 | `model` | the model name |
 | `base_url` | optional — any compatible endpoint |
-| `api_key_env` | the environment variable holding the key. Omit it for the provider's conventional variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), which `validate` names for you. A literal `api_key = "…"` does not load (E015) |
+| `api_key_env` | the environment variable holding the key. Omit it for the provider's conventional variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), which `validate` names for you, or for a judge that needs no key. A judge on this computer (`127.0.0.1`, `localhost`, `[::1]`) whose variable is unset is called without a key; a hosted one is skipped until it is set. A literal `api_key = "…"` does not load (E015) |
 | `api_key_command` | or run a command and take its stdout (keychain, vault) — the same shape as Claude Code's `apiKeyHelper`. It runs through `sh` on Linux/macOS and `cmd` on Windows, so a command written for Git Bash needs rewriting there, or an explicit `bash -c "…"`. An upstream with one is never reported as needing auth |
 | `timeout_secs` | default 30; set it lower for anything on the hook path |
+| `dependency` | the [`[dependency.<name>]`](#dependencies) that serves this upstream on this computer; its `base_url` must point at the dependency's `listen` address (E022) |
 
 `rtk pipeline validate`, `rtk trust` and `rtk init` print `auth needed: export VAR=...` for any key that is unset.
 
 **Already-authenticated agents need no second key.** When the [RTK Proxy](../proxy/overview.md) is running and the upstream names a provider it speaks (`anthropic`, `openai`), a worker with no credential of its own is routed through the daemon, which lends the credential the agent is already relaying. An agent set up with `rtk init` delegates with nothing further to configure. A request that brings its own key is never substituted; with no daemon up the worker goes direct and a missing key is still an error. To refuse borrowing, set `RTK_PROXY_RELAY_BORROWING=false` on the daemon.
+
+## Dependencies
+
+A dependency is a service the pipeline needs on this computer, with the recipe to install and run it. RTK installs it only after the user says yes in a terminal, or when the user names a reviewed pipeline with `rtk init -g --pipeline <name>` where no terminal can ask ([how that works](./commands.md#what-a-pipeline-needs)). A pipeline whose dependency is refused is not installed. RTK starts the dependency when a call to the upstream that names it finds it stopped.
+
+```toml
+[upstream.judge]
+provider   = "laya"
+model      = "laya"
+base_url   = "http://127.0.0.1:41733/v1/systemone"
+dependency = "laya"
+
+[dependency.laya]
+about     = "Laya, an open-source decision model the judge asks"
+needs     = "Node.js 20+, ~1.7 GB of model weights on first start, ~2 GB of RAM"
+npm       = "@receptron/laya@0.2.0"
+integrity = "sha512-C7eBcUUj/S4Mn2ccQoqflZghEi9OPu6RBUbSjcbnuPbQQAWTVFGxDRoLyyP59hm2t4oF8JbE+dP0IaUE58XsJQ=="
+node      = 20
+run       = ["node", "server.mjs"]
+listen    = "127.0.0.1:41733"
+health    = "/health"
+
+[dependency.laya.files]
+"server.mjs" = '''
+// the server, shipped in the pipeline file
+'''
+```
+
+| Key | Meaning |
+|---|---|
+| `npm` + `integrity` | an exact `name@version` and the sha512 npm publishes for it (`npm view <name>@<version> dist.integrity`). Uses the user's Node.js; `node` sets the lowest major version |
+| `pip` | a list of `name==version --hash=sha256:<hex>` lines, installed into the dependency's own environment with `--require-hashes`, so every package, sub-dependencies included, must be listed with its hash. `python` sets the lowest version, like `"3.10"` |
+| `binary` | one table per platform (`macos-arm64`, `macos-x64`, `linux-x64`, `linux-arm64`, `windows-x64`) with an https `url` and the file's `sha256`; a `.tar.gz`, `.tgz`, `.tar` or `.zip` is unpacked |
+| `run` | the command that starts the service, program first. RTK looks for the program in the dependency's directory, its `bin/`, its Python environment, `node_modules/.bin`, then your `PATH` |
+| `listen` | the local address it answers on: `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>` |
+| `health` | optional path RTK asks for status: 2xx is running, 503 is starting (a short plain-text body is shown as its progress) |
+| `files` | small files written next to it before it runs, such as a server script |
+| `env` | variables for running the service (not `PATH`). They are shown before the question, and never passed to npm, pip or the download |
+| `about`, `needs` | what it is and what it needs, shown to the user before the question |
+
+Exactly one installer per dependency. A recipe that is not pinned, or not local, does not load (E021). A key this rtk does not know (from a newer recipe format) loads with W026, and this rtk will not install that dependency. rtk 1.2 and older refuse a file with a `[dependency]` section, so set [`rtk_min`](./writing-pipelines.md#pipeline) on it. Dependency names are shared by every pipeline on the computer: two files that declare the same name with different recipes load with W028, and RTK refuses to install the second one.
+
+**What people who install your pipeline need.** Before installing a pipeline, RTK checks what its file needs and does not install it when something is missing ([how that works](./commands.md#what-a-pipeline-needs)). As an author:
+
+- Declare a `[dependency]` for every local service an upstream calls, and link it with `dependency = "<name>"`. An upstream at a loopback address with no linked dependency counts as a service the user must already be running: a user without it cannot install your pipeline, and RTK cannot offer to install it.
+- Extending `rtk:proxy`, or writing `proxy.request` rules, makes the RTK daemon a need. A user who declines it, or has no `rtk-proxy`, does not get the pipeline.
+- A hosted upstream needs only a key, and a key is never a need: RTK installs the pipeline and prints `auth needed` until the key is set.
 
 ## Cost
 

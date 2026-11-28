@@ -6,7 +6,7 @@
 
 The **lifecycle management** layer for LLM agent hooks: install, uninstall, verify integrity, audit usage, and manage trust. This component creates and maintains the hook artifacts that live in `hooks/` (root), but does **not** execute rewrite logic itself — that lives in `discover/registry`.
 
-Owns: `rtk init` installation flows (Claude Code by default, `--agent <AgentTarget>` for the other enum agents, `--gemini`, `--codex` and `--copilot` for the agents outside the enum, `-g --opencode` for the OpenCode plugin), SHA-256 integrity verification, hook version checking, audit log analysis, `rtk rewrite` CLI entry point, and TOML filter trust management.
+Owns: `rtk init` installation flows (the guided agent and pipeline menus in `init/guided.rs` for a bare run in a terminal; otherwise Claude Code by default, `--agent <AgentTarget>` for the other enum agents, `--gemini`, `--codex` and `--copilot` for the agents outside the enum, `-g --opencode` for the OpenCode plugin), SHA-256 integrity verification, hook version checking, audit log analysis, `rtk rewrite` CLI entry point, and TOML filter trust management.
 
 Does **not** own: the deployed hook scripts themselves (that's `hooks/`), the rewrite pattern registry (that's `discover/`), or command filtering (that's `cmds/`).
 
@@ -24,8 +24,10 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 
 | Mode | Command | Creates | Patches |
 |------|---------|---------|----------|
-| Default (global) | `rtk init -g` | Hook, SHA-256 hash, RTK.md | settings.json, CLAUDE.md |
-| Hook only | `rtk init -g --hook-only` | Hook, SHA-256 hash | settings.json |
+| Guided (terminal, no agent named) | `rtk init -g` / `rtk init` | Whatever each picked agent's mode creates; with `-g`, the chosen reviewed pipeline in the user pipelines dir | Each picked agent's files |
+| Claude Code (global) | `rtk init -g --agent claude` (a bare `rtk init -g` without a terminal) | RTK.md | settings.json (`rtk hook claude`), CLAUDE.md (`@RTK.md`) |
+| Claude Code (project) | `rtk init --agent claude` | `.rtk/filters.toml` template | `./CLAUDE.md` (RTK block) |
+| Hook only | `rtk init -g --hook-only` | -- | settings.json |
 | Claude-MD (legacy) | `rtk init --claude-md` | 134-line RTK block | CLAUDE.md |
 | Windsurf | `rtk init -g --agent windsurf` | `.windsurfrules` | -- |
 | Cline | `rtk init --agent cline` | `.clinerules` | -- |

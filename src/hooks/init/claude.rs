@@ -5,7 +5,7 @@ use super::*;
 use crate::core::user_dirs;
 use crate::hooks::constants::{
     CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CURSOR_DIR, HOOKS_SUBDIR, POST_TOOL_USE_KEY, PRE_TOOL_USE_KEY,
-    REWRITE_HOOK_FILE, SESSION_START_KEY, SETTINGS_JSON,
+    REWRITE_HOOK_FILE, SESSION_START_KEY, SETTINGS_JSON, SUBAGENT_STOP_KEY,
 };
 
 /// Legacy mode (--claude-md): inject the full RTK_INSTRUCTIONS block into CLAUDE.md.
@@ -128,7 +128,12 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
 
 pub(super) fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
     let mut modified = false;
-    for event_key in [PRE_TOOL_USE_KEY, POST_TOOL_USE_KEY, SESSION_START_KEY] {
+    for event_key in [
+        PRE_TOOL_USE_KEY,
+        POST_TOOL_USE_KEY,
+        SESSION_START_KEY,
+        SUBAGENT_STOP_KEY,
+    ] {
         if !remove_hook_entries(root, event_key, HookEntries::Grouped, |hook| {
             is_command_hook(hook, |cmd| {
                 is_claude_hook_command(cmd) || is_legacy_rewrite_hook(cmd)
@@ -466,13 +471,33 @@ pub(super) fn claude_events_of(
             rtk_engine::block::Event::AfterTool => POST_TOOL_USE_KEY,
             rtk_engine::block::Event::Request => continue,
         };
-        let subjects = loaded.resolved.subjects_used(site, event);
+        let mut subjects = loaded.resolved.subjects_used(site, event);
+        if key == POST_TOOL_USE_KEY
+            && crate::core::delegation::routes_to_subagents(&loaded.resolved)
+        {
+            subjects.extend(SUBAGENT_READS);
+        }
         if let Some(matcher) = crate::hooks::constants::claude_matcher(&subjects) {
             out.push((key, matcher));
         }
     }
+    if crate::core::delegation::routes_to_subagents(&loaded.resolved) {
+        if !out.iter().any(|(key, _)| *key == POST_TOOL_USE_KEY)
+            && let Some(matcher) = crate::hooks::constants::claude_matcher(&SUBAGENT_READS)
+        {
+            out.push((POST_TOOL_USE_KEY, matcher));
+        }
+        out.push((SUBAGENT_STOP_KEY, String::new()));
+    }
     out
 }
+
+#[cfg(feature = "engine")]
+const SUBAGENT_READS: [rtk_engine::block::Subject; 3] = [
+    rtk_engine::block::Subject::Shell,
+    rtk_engine::block::Subject::Read,
+    rtk_engine::block::Subject::Search,
+];
 
 #[cfg(feature = "engine")]
 pub(super) fn required_claude_events_scoped(
@@ -505,6 +530,9 @@ pub(super) fn refresh_hook_matcher(
     event_key: &str,
     matcher: &str,
 ) -> bool {
+    if matcher.is_empty() {
+        return false;
+    }
     let entries = match root
         .get_mut("hooks")
         .and_then(|h| h.get_mut(event_key))
@@ -747,9 +775,6 @@ pub(super) fn run_default_mode(
         {
             if let Err(e) = offer_proxy_onramp(&claude_dir.join(SETTINGS_JSON), patch_mode, ctx) {
                 eprintln!("  [warn] proxy on-ramp skipped: {e}");
-            }
-            if let Err(e) = offer_delegation_onramp(patch_mode, ctx) {
-                eprintln!("  [warn] delegation on-ramp skipped: {e}");
             }
         }
     }
@@ -1434,6 +1459,48 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "engine")]
+    #[test]
+    fn a_routing_pipeline_registers_subagent_stop_and_subagent_reads() {
+        let routing = crate::core::pipeline_config::load_candidate(
+            "schema_version = 1\n[pipeline]\nname = \"p\"\nextends = [\"rtk:default\"]\n[task.t]\nkind = \"digest\"\nupstream = \"u\"\n[upstream.u]\nprovider = \"anthropic\"\nmodel = \"m\"\n[[hook.before_tool.shell]]\nname = \"delegate\"\naction = \"route\"\ntask = \"t\"\n",
+            "p",
+        );
+        let events = claude_events_of(&routing);
+        assert!(
+            events.contains(&(SUBAGENT_STOP_KEY, String::new())),
+            "{events:?}"
+        );
+        let post = events
+            .iter()
+            .find(|(k, _)| *k == POST_TOOL_USE_KEY)
+            .map(|(_, m)| m.clone())
+            .expect("PostToolUse");
+        for tool in ["Bash", "Read", "Grep", "Glob"] {
+            assert!(post.split('|').any(|t| t == tool), "{post}");
+        }
+        let default = crate::core::pipeline_config::load_candidate(
+            "schema_version = 1\n[pipeline]\nname = \"d\"\nextends = [\"rtk:default\"]\n",
+            "d",
+        );
+        assert_eq!(
+            claude_events_of(&default),
+            vec![(PRE_TOOL_USE_KEY, "Bash".to_string())]
+        );
+    }
+
+    #[test]
+    fn subagent_stop_is_written_without_a_matcher_and_removed_on_uninstall() {
+        let mut root = serde_json::json!({});
+        super::super::insert_hook_entry(&mut root, SUBAGENT_STOP_KEY, "", CLAUDE_HOOK_COMMAND)
+            .expect("insert");
+        let entry = &root["hooks"][SUBAGENT_STOP_KEY][0];
+        assert!(entry.get("matcher").is_none(), "{entry}");
+        assert!(!refresh_hook_matcher(&mut root, SUBAGENT_STOP_KEY, ""));
+        assert!(remove_hook_from_json(&mut root));
+        assert!(root["hooks"].get(SUBAGENT_STOP_KEY).is_none(), "{root}");
+    }
+
     #[test]
     fn test_remove_hook_from_json_absolute_new_command() {
         let mut json_content = serde_json::json!({
@@ -2012,6 +2079,8 @@ mod tests {
 
     #[test]
     fn test_global_uninstall_removes_artifacts() {
+        #[cfg(feature = "engine")]
+        let _deps = crate::core::deps::test_root_lock();
         let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, None, InitContext::default()).unwrap();
@@ -2164,6 +2233,8 @@ mod tests {
 
     #[test]
     fn test_uninstall_dry_run_preserves_artifacts() {
+        #[cfg(feature = "engine")]
+        let _deps = crate::core::deps::test_root_lock();
         let tmp = test_isolation::tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             // Stage a real install first
@@ -2691,7 +2762,7 @@ mod tests {
                 remove_settings_entries(InitContext::default()).expect("remove settings"),
                 SettingsRemoval {
                     hook: true,
-                    proxy_base_url: false,
+                    proxy_base_url: false
                 }
             );
 

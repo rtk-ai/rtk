@@ -175,15 +175,68 @@ rtk pipeline share --gist        # non-interactive gist; prints: rtk pipeline ad
 
 Everything goes through your own `gh` CLI — RTK never sees or stores a token. If `gh` is missing or logged out, the publisher prints the exact manual steps instead. Publishing the same pipeline again updates the same repo, so its link and stars survive. If the pipeline was itself installed from someone else's repo, the publisher offers to **fork** that repo instead of creating a fresh one, keeping the attribution chain visible on GitHub.
 
+A pipeline that declares [dependencies](#dependencies) shows a notice before it is shared: rtk-ai verifies and approves every pipeline before it enters the catalog, and refuses pipelines from untrusted sources and dependencies it cannot verify. Anyone who adds yours from the share installs its dependencies at their own risk, after RTK asks them.
+
 What leaves your machine: the pipeline file and the aggregate percentages from your share card. No commands, no paths, no history — and every number is labeled **self-reported** on the published card.
 
 :::caution[Publishing is public, permanent, and your responsibility]
-A repo or gist is public, permanent, and indexable. **You** are responsible for its contents — RTK does not review or endorse shared pipelines. Your pipeline file is published **verbatim**, including any `[upstream.*]` blocks (`base_url`, `api_key_env`). Before publishing, a pre-flight scan checks for API-key shapes, tokens, private-key blocks, absolute home paths, and email addresses; a finding blocks publication unless you explicitly type `publish anyway` (or pass `--force`). The scan is a safety net, not a guarantee: read the card yourself before sharing it.
+A repo or gist is public, permanent, and indexable. **You** are responsible for its contents — RTK does not review or endorse shared pipelines. Your pipeline file is published **verbatim**, including any `[upstream.*]` blocks (`base_url`, `api_key_env`), with one line added at the top: `# author: @<login> · shared with rtk pipeline share · <date>`, taken from your `gh` login. Before publishing, a pre-flight scan checks for API-key shapes, tokens, private-key blocks, absolute home paths, and email addresses; a finding blocks publication unless you explicitly type `publish anyway` (or pass `--force`). The scan is a safety net, not a guarantee: read the card yourself before sharing it.
 :::
 
 ## Adopting a shared pipeline
 
-`add` is the other half of `share`: one command validates a shared pipeline, installs it, and tells you what it needs.
+`add` is the other half of `share`: one command validates a shared pipeline, checks that this computer has what it needs to run (see [What a pipeline needs](#what-a-pipeline-needs)), and installs it. When the file carries an `# author: @login` header, `add` shows it next to the GitHub owner of the repository or gist it came from, and warns when they differ. The header is attribution, not proof: anyone can write any name in it, so the owner is what to trust.
+
+The pipelines reviewed at [rtk-ai.app/pipelines](https://www.rtk-ai.app/pipelines/) can also be picked by name during setup. `rtk init -g` in a terminal lists them, with the one you run now marked `current`, and installs your choice pinned to its reviewed commit, once it has what it needs to run. Choosing another reviewed pipeline later turns off the reviewed one you had, only after the new one is installed, by renaming its file to `<name>.toml.bak`, which RTK does not load, so your edits to it are kept; your own pipeline files are never touched. Choosing `default-bash-compress` goes back to RTK's default with nothing installed. A run that names an agent, or that has no terminal, shows no menu and keeps the current pipeline; pass the name to change it:
+
+```bash
+rtk init -g --agent claude --pipeline <name>    # a name from rtk-ai.app/pipelines
+```
+
+A pipeline installed this way goes into your user pipelines folder and applies to every project. That is why `rtk init` run for a single project shows no pipeline menu, and why `--pipeline` installs for your user account even without `-g`.
+
+At the end of a pipeline's line, the menu shows the pipeline's [`note`](./writing-pipelines.md#pipeline), such as the hardware a local model needs; `--pipeline <name>` prints it before installing. A line wider than the terminal is cut with `…`. Init fetches the list from `rtk-ai.app/pipelines/index.json` with a 2-second limit and drops revoked entries. When the site cannot be reached, it uses the newer of two copies: the last list this computer fetched, or the list shipped with your rtk version.
+
+### What a pipeline needs
+
+RTK reads what a pipeline needs from its own file, before installing it:
+
+- each **dependency** it declares under `[dependency.<name>]` (see [Dependencies](#dependencies) below). One that something already answers for at its address, such as a copy you run yourself, is met without installing anything. One that a pipeline you already run declares with a different recipe is never met: installing it would replace the copy that pipeline uses;
+- each **local service** it calls at a loopback address (`127.0.0.1`, `localhost`, `[::1]`) without a dependency that says how to install it. That one is met only if something already answers there;
+- the **RTK daemon**, when the file extends `rtk:proxy` or has proxy rules of its own. The proxy rule that RTK's default ships does not count. The daemon is met when Claude Code's `settings.json` routes to it or it is running, and set up through [the daemon question](../proxy/overview.md#rtk-init--g--the-guided-setup).
+
+API keys are not needs: RTK prints `auth needed: export VAR=...` for any key that is unset (see [Tasks and Upstreams](./tasks.md#upstreams)).
+
+When something is missing, `rtk init -g` (after you pick a pipeline) and `rtk pipeline add` (after its review panel) list each need and its state, then:
+
+- **In a terminal**, they install or ask for each missing piece. If you answer No, or a piece cannot be had (a local service that is not running, `rtk-proxy` not installed, a recipe this computer cannot use), the pipeline is **not installed** and the pipelines you already run stay as they are. A yellow alert names what is missing and the command to run again. A No exits 0; anything that failed exits 1.
+- **Without a terminal** (pipes, CI, `--auto-patch`), `rtk init -g --pipeline <name>` installs the dependencies of a [reviewed](https://www.rtk-ai.app/pipelines/) pipeline without asking, after printing the same panel, because you named it. It never sets up the RTK daemon this way, and `--no-patch` installs nothing. Anything still missing, or any pipeline from another source, means the pipeline is not installed, with the alert, and the command exits 1. `rtk pipeline add` without a terminal never installs a dependency.
+
+"Reviewed" means the file on disk is still exactly the one installed from the catalog's reviewed commit: once you edit it, or replace it from another source, it is treated as any other source. If `rtk init -g --pipeline <name>` finds a different file of the same name that rtk did not install, it keeps yours as `<name>.toml.bak` before installing the reviewed one.
+
+A reviewed pipeline you pick again in `rtk init -g` while it is already installed is never turned off. A copy older than the catalog's reviewed commit is updated first; if the update's needs are not met, the installed version stays. Then init offers any dependency it can install, and if a need is still missing (for example a local service that is stopped right now), the alert lists it and the pipeline stays installed. That exits 0 in a terminal and 1 without one, so a CI job notices.
+
+### Dependencies
+
+A pipeline can need a service on your computer, such as a local decision model its judge asks. It declares it under `[dependency.<name>]` in its own file (see [Dependencies](./tasks.md#dependencies)), so a shared pipeline carries it. A hosted service (TypeSafe Jev, hosted Laya, any API) is not a dependency: it is an upstream with a key, and RTK never installs, starts or stops it.
+
+Before installing a dependency, RTK shows what it will install, where it goes, what it runs on which address, and whether rtk-ai reviewed the pipeline:
+
+- A pipeline from the [reviewed catalog](https://www.rtk-ai.app/pipelines/), installed at its reviewed commit, says so.
+- A pipeline from any other source (your organization's repository, a gist, a URL, a file) shows a "not reviewed by rtk-ai" panel: you install its dependencies at your own risk. It is not refused.
+
+No flag or environment variable answers for you, except naming a reviewed pipeline with `rtk init -g --pipeline <name>` where no terminal can ask. When `rtk init -g` runs in a terminal without you picking a pipeline, it also asks about any dependency the pipelines you already run still miss; those pipelines keep running without the rules that need it until it is installed.
+
+Every recipe pins an exact version and its hash, and RTK checks the hash before anything runs. For npm that covers the named package; npm picks the package's own dependencies at install time. pip checks every package. RTK records the recipe you accepted and only ever starts that copy; if a pipeline later declares a different recipe, `rtk init -g` asks again.
+
+After that, nothing needs starting or stopping by hand:
+
+- When a tool call needs the dependency and finds it stopped, that call goes ahead without the rules that need it, and RTK starts it in the background for the calls that follow. Claude Code shows a one-line message when this happens. After a failed start, RTK waits 30 minutes before trying again.
+- If another program answers on the dependency's address, RTK leaves it alone.
+- `rtk pipeline status` shows each dependency: running, starting (with its progress), stopped, not installed, or not installable on this computer.
+- Dependencies stay installed when you switch pipelines, so switching back costs nothing; `rtk pipeline status` lists the unused ones. `rtk init -g --uninstall` stops and removes every dependency RTK installed. Data a dependency keeps elsewhere, such as Laya's model weights in `~/.cache/receptron-laya`, is not removed.
+
+The `laya-route.toml` example declares [Laya](https://github.com/receptron/laya), an open-source decision model (Node.js 20+, about 1.7 GB of weights, about 2 GB of RAM while running), this way.
 
 ```bash
 rtk pipeline add github:owner/repo              # a published repo (see `share publish`)
@@ -258,7 +311,7 @@ Pipeline eval — `squeeze-term` · last 30 days · vs raw, same trajectory
 
 Both lines are measured on the **same** outputs, so the comparison is apples-to-apples. Limits, stated on the report itself: token counts are bytes÷4 estimates; a candidate's classifier- or route-driven rules are excluded (they would need live LLM calls), so eval covers its deterministic transforms.
 
-The continuous counterpart lives in `rtk gain`: a per-mechanism efficiency section (filter+compress, LLM-spend, recalls, directives, proxy bill actual-vs-without) with a confidence tag on every line — `measured` where real provider usage exists, `est.` where it is a size estimate.
+The continuous counterpart lives in `rtk gain`: a per-mechanism efficiency section (filter+compress, delegation, LLM-spend on hosted judges, recalls, proxy bill actual-vs-without) with a confidence tag on every line — `measured` where real provider usage exists, `est.` where it is a size estimate.
 
 ## Related commands
 

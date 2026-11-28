@@ -14,7 +14,7 @@ Writing nothing is also a configuration: with no pipeline file you are on
 | `tune-one-thing.toml` | output compression plus delegated reads, with the oversize-read threshold raised by one `[override]` line |
 | `delegate-reads-adoption.toml` | oversize reads route to a cheap model you bind |
 | `classify-routing.toml` | a Jev classifier labels shell output; failing test runs route to a digest task |
-| `laya-route.toml` | a local System-1 judge (Laya) gates routing of heavy shell output to Haiku/Sonnet digest workers — see its header for the prerequisite (local Laya, or hosted Jev + token) |
+| `laya-route.toml` | a local System-1 judge (Laya) gates routing of heavy shell output to Haiku/Sonnet digest workers — declares local Laya as a `[dependency]`, so rtk offers to install it (or point the judge at hosted Jev + token instead) |
 | `judge-before-tool.toml` | a judge decides before a read, command or fetch runs whether a cheaper model handles it; fail-open |
 | `complex-session.toml` | a Jev classifier drives a custom plugin method plus built-in chains per output kind — needs a build with `--features example-plugins` |
 

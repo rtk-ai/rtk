@@ -28,7 +28,9 @@ The daemon is a second binary, `rtk-proxy`, shipped as its own release archive (
 
 ## Install the daemon
 
-Download the `rtk-proxy-<target>` archive for your platform from the [releases page](https://github.com/rtk-ai/rtk/releases) and put the binary next to `rtk` (anywhere on your `PATH` also works).
+`rtk init -g` installs it for you. When `rtk-proxy` is missing and you answer Yes to the daemon question, rtk downloads the `rtk-proxy-<target>` archive of its own version from the [GitHub release](https://github.com/rtk-ai/rtk/releases), checks it against that release's `checksums.txt`, makes sure the binary reports the same version, and puts it in rtk's data folder: `~/Library/Application Support/rtk/bin/` on macOS, `~/.local/share/rtk/bin/` on Linux, `%LOCALAPPDATA%\rtk\bin\` on Windows. If the download fails, nothing is changed. After you update rtk, the next `rtk init -g` offers to update that copy to the matching version (default No). Until then, `rtk llm-proxy status` and every start of the daemon (`rtk claude`, `rtk llm-proxy start`, the SessionStart hook's message) say that the two versions differ; nothing is downloaded without that question. `rtk init -g --uninstall` removes it.
+
+You can also install it yourself: download the `rtk-proxy-<target>` archive for your platform from the [releases page](https://github.com/rtk-ai/rtk/releases) and put the binary next to `rtk` (anywhere on your `PATH` also works). rtk never replaces a copy you installed yourself; it only tells you when its version differs.
 
 From a source checkout:
 
@@ -36,7 +38,7 @@ From a source checkout:
 cargo build --release --manifest-path proxy/Cargo.toml
 ```
 
-`rtk` looks for the daemon next to its own binary first, then on `PATH`. If it cannot find it, `rtk llm-proxy` tells you exactly where it looked.
+`rtk` looks for the daemon next to its own binary first, then on `PATH`, then in its data folder. If it cannot find it, `rtk llm-proxy` tells you exactly where it looked.
 
 ## Quick start
 
@@ -58,15 +60,20 @@ Two independent ways in. `rtk init` configures your agent once and persists it; 
 
 ### `rtk init -g` — the guided setup
 
-On a Claude Code init, RTK asks:
+When `rtk init -g` sets up Claude Code (picked in the agent menu, or named with `--agent claude`), it asks once the hook is in `settings.json`, after the agent and pipeline menus:
 
 ```
-Set up the RTK proxy (routes Claude Code's API traffic through a local daemon)? [y/N]
+  Set up the RTK daemon? It runs your pipeline on the requests Claude Code sends to the model (model routing, tool-result compression and more).
+    Yes  next, choose how it comes back after a reboot
+  ▶ No  nothing changes
+  ↑/↓ choose · y/n answer · enter confirm · esc cancel
 ```
 
 Before asking, RTK warns that proxying Claude Code disables [Remote Control](https://code.claude.com/docs/en/remote-control#requirements): Claude Code does not support it when `ANTHROPIC_BASE_URL` points at a proxy rather than `api.anthropic.com`.
 
-Say yes, then choose how the daemon should come back after a reboot:
+In a terminal both questions are menus (arrow keys, `y`/`n`, or the option number). With stdout redirected they are plain `[y/N]` and `[1/2/3]` prompts, and without a terminal on stdin the proxy is not offered.
+
+Say yes and it writes `env.ANTHROPIC_BASE_URL` into `settings.json` and adds `extends = "rtk:proxy"` to your pipeline. Then it asks how the daemon should come back after a reboot:
 
 | Choice | What it does |
 |---|---|
@@ -84,7 +91,9 @@ If you already enabled the persistent setup, remove only the `env.ANTHROPIC_BASE
 
 If you already have the base URL set but nothing restarting the daemon, re-running `rtk init -g` asks only the persistence question.
 
-The question is only asked when the daemon can actually run: the `rtk-proxy` binary is installed (next to `rtk` or on `PATH`) or an rtk-proxy already answers on `127.0.0.1:8080`. Otherwise init says the proxy was not offered and leaves `settings.json` alone. `rtk init -g --uninstall` removes the `env.ANTHROPIC_BASE_URL` this flow wrote, when it still points at the RTK daemon; a base URL aimed anywhere else is kept.
+A pipeline that needs the daemon, because it extends `rtk:proxy` or has proxy rules of its own, asks the same question when you pick it in `rtk init -g` or add it with `rtk pipeline add`. If you answer No, the pipeline is not installed (see [What a pipeline needs](../pipelines/commands.md#what-a-pipeline-needs)).
+
+The daemon is only set up once it can actually run: the `rtk-proxy` binary is installed, so the SessionStart hook can start it again after a reboot. A daemon that only answers on `127.0.0.1:8080` today does not count. When the binary is missing, the question says that Yes downloads it first ([Install the daemon](#install-the-daemon)); if no `rtk-proxy` is published for your computer, init says the daemon was not offered and leaves `settings.json` alone. When `settings.json` already routes Claude Code through the daemon but the binary is gone, init offers to download it again. `--auto-patch`, `--no-patch` and `--dry-run` never ask it, and the Apache-2.0 edition does not have it. `rtk init -g --uninstall` removes the `env.ANTHROPIC_BASE_URL` this flow wrote, when it still points at the RTK daemon (a base URL aimed anywhere else is kept), and the `rtk-proxy` it downloaded.
 
 #### What the SessionStart hook actually does
 
@@ -92,7 +101,7 @@ It does **not** do the redirection — that is the `settings.json` entry above. 
 
 If a listener at that address does not identify as RTK at `/health`, the hook never starts a daemon over it. It warns when `env.ANTHROPIC_BASE_URL` in `settings.json` or `RTK_PROXY_BIND` names that address, because the listener could be another service taking the requests or a hung RTK daemon, and the hook cannot tell which. With neither set, the hook treats the listener as your own gateway and stays silent. After starting a daemon, the hook still verifies the RTK identity before reporting that it started successfully.
 
-It reports through `systemMessage`, which is user-visible and never enters model context — RTK spends no tokens configuring itself. A problem is at most a warning; the hook never disrupts the session.
+It reports through `systemMessage`, which is user-visible and never enters model context — RTK spends no tokens configuring itself. When the daemon it starts is a copy `rtk init -g` downloaded for an older rtk, the message says so and how to update it. A problem is at most a warning; the hook never disrupts the session.
 
 This route only exists on harnesses that *have* a SessionStart hook, which is why the next one matters.
 

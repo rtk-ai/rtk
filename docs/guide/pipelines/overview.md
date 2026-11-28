@@ -30,7 +30,7 @@ RTK can act in two places, and a pipeline can add two more kinds of things.
 
 **Nothing.** Upgrade, run `rtk init`, and you have `rtk:default` — RTK exactly as it worked before: the shell-command rewrite, the awareness file, your `filters.toml`, your `config.toml`. No new hooks are registered, nothing changes.
 
-**Turn on more.** Output compression after every tool call, and the proxy's cache layer, are [reference pipelines](./reference-pipelines.md) you opt into — `rtk init` offers the proxy one; `rtk:posthook` you add by hand, as below.
+**Turn on more.** Output compression after every tool call, and the proxy's cache layer, are [reference pipelines](./reference-pipelines.md) you opt into — `rtk init -g` offers the proxy one; `rtk:posthook` you add by hand, as below. `rtk init -g` in a terminal also lists the [reviewed pipelines](https://www.rtk-ai.app/pipelines/) and installs the one you pick; see [Adopting a shared pipeline](./commands.md#adopting-a-shared-pipeline).
 
 ```toml
 # ~/.config/rtk/pipeline.toml

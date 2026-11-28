@@ -821,6 +821,7 @@ pub fn run_claude() -> Result<()> {
 
     #[cfg(feature = "engine")]
     if claude_pipeline::handle(&v, raw_len)? {
+        write_claude_leftover();
         return Ok(());
     }
 
@@ -840,6 +841,8 @@ pub fn run_claude() -> Result<()> {
             // on every single Bash tool call now (not just RTK-covered ones), that
             // latency must never sit in front of the response, or it directly
             // stalls the tool call it's supposedly just logging.
+            #[cfg(feature = "engine")]
+            let output = crate::core::notice::claude_answer(&output.to_string());
             let _ = writeln!(io::stdout(), "{output}");
             audit_log("rewrite", &cmd, &rewritten);
             log_hook_decision(&v, &cmd, decision, Some(&rewritten));
@@ -862,8 +865,17 @@ pub fn run_claude() -> Result<()> {
         }
         PayloadAction::Ignore => {}
     }
+    #[cfg(feature = "engine")]
+    write_claude_leftover();
 
     Ok(())
+}
+
+#[cfg(feature = "engine")]
+fn write_claude_leftover() {
+    if let Some(answer) = crate::core::notice::claude_leftover() {
+        let _ = writeln!(io::stdout(), "{answer}");
+    }
 }
 
 #[cfg(test)]

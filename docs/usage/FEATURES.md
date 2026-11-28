@@ -1259,10 +1259,10 @@ Claude Code "git status"
 settings.json -> PreToolUse hook
     |
     v
-rtk-rewrite.sh (bash)
+rtk hook claude (native binary command, no shell or jq)
     |
     v
-rtk rewrite "git status"  ->  "rtk git status"
+rewrite registry: "git status"  ->  "rtk git status"
     |
     v
 Claude Code runs "rtk git status"
@@ -1273,7 +1273,7 @@ Filtered output returned to Claude
 
 **Key points:**
 - Claude never sees the rewrite -- it simply receives optimized output
-- The hook is a lightweight delegator that calls `rtk rewrite`
+- The hook runs the same rewrite registry as `rtk rewrite`, in-process
 - Commands already prefixed with `rtk` pass through unchanged
 - Heredocs (`<<`) are not modified
 - Unrecognized commands pass through unchanged
@@ -1281,8 +1281,10 @@ Filtered output returned to Claude
 ### Installation
 
 ```bash
-rtk init -g                     # Recommended install (hook + RTK.md)
-rtk init -g --auto-patch        # Non-interactive (CI/CD)
+rtk init -g                     # Recommended install: a terminal shows a menu of agents and pipelines
+rtk init -g --agent claude      # Claude Code directly, no agent menu
+rtk init -g --auto-patch        # Non-interactive (CI/CD); with no --agent it sets up Claude Code
+rtk init -g --pipeline <name>   # Also install a reviewed pipeline (names at rtk-ai.app/pipelines); it applies to every project, with or without -g
 rtk init -g --hook-only         # Hook only, without RTK.md
 rtk init --show                 # Check the installation
 rtk init -g --uninstall         # Uninstall
@@ -1292,9 +1294,9 @@ rtk init -g --uninstall         # Uninstall
 
 | File | Description |
 |------|-------------|
-| `~/.claude/hooks/rtk-rewrite.sh` | Hook script (delegates to `rtk rewrite`) |
+| `~/.claude/settings.json` | `rtk hook claude` on PreToolUse; on PostToolUse too when the active pipeline compresses tool output; on SessionStart when you let init restart the RTK daemon with each session (backup in `settings.json.bak`) |
 | `~/.claude/RTK.md` | Minimal instructions for the LLM |
-| `~/.claude/settings.json` | PreToolUse hook registration |
+| `~/.claude/CLAUDE.md` | `@RTK.md` reference |
 
 ### `rtk rewrite` -- Command rewriting
 
@@ -1524,7 +1526,7 @@ field for manual editing is `[retriever] mode`.
 
 ## Telemetry
 
-RTK can send one anonymous ping per day (23-hour interval) for usage statistics. Telemetry is opt-in and **disabled by default**; it requires explicit consent (GDPR Art. 6, 7). `rtk init` asks for consent with a `[y/N]` prompt.
+RTK can send one anonymous ping per day (23-hour interval) for usage statistics. Telemetry is opt-in and **disabled by default**; it requires explicit consent (GDPR Art. 6, 7). `rtk init` asks for consent with a Yes/No question that defaults to No.
 
 **Data sent:** device hash (SHA-256 of a random salt), version, OS, architecture, command count over 24h, top commands, bash output reduction percentage, recall counters per filter family (elisions/retrievals -- names taken from a closed allowlist, never a hash, path, argument or content).
 

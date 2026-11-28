@@ -405,6 +405,13 @@ pub fn print_filter_notice(path: &Path, scope: &str, filters: &[(String, String)
 
 pub fn confirm_enable_at_tty() -> Result<bool> {
     use std::io::{self, BufRead, IsTerminal};
+    if crate::core::ask::interactive() {
+        return crate::core::ask::confirm(
+            "  Enable these filters?",
+            "apply them as they are now; an edit needs `rtk trust` again",
+            "leave them off",
+        );
+    }
     if !io::stdin().is_terminal() {
         return Ok(false);
     }

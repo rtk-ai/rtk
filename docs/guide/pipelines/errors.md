@@ -44,6 +44,8 @@ Errors stop that file from loading; the other files stay active (W025 names the 
 | E018 | unknown subject or tool category |
 | E019 | classifier problem: unknown classifier or label in a condition, question/key mismatch, missing or unknown upstream, bad `question` or `min_confidence` |
 | E020 | `deny` gated on a classifier — the protection would vanish whenever the judge is unavailable |
+| E021 | dependency recipe problem: not pinned to an exact version and hash, not a local `listen` address, no `run`, no installer or two, a file name with a directory, `PATH` in `env` |
+| E022 | upstream `dependency` names no `[dependency.*]`, or its `base_url` does not point at that dependency's `listen` address |
 
 | Code | Warning |
 |---|---|
@@ -71,6 +73,10 @@ Errors stop that file from loading; the other files stay active (W025 names the 
 | W023 | the routed task's kind cannot take this call (see [Routing before a tool](./writing-pipelines.md#routing-before-a-tool)) |
 | W024 | a rule field has the wrong type (`enabled = "false"`, `action = 5`) — the rule is disabled; the rest of the file still loads |
 | W025 | a pipeline file has errors and is not loaded; the other files stay active (the file's own errors are listed with it) |
+| W026 | a dependency recipe has a key this rtk does not know (a newer recipe format) — the file still loads, and this rtk will not install that dependency |
+| W027 | `[pipeline] rtk_min` asks for a newer rtk than this one, or is not a version — the file still loads |
+| W028 | two loaded files declare the same `[dependency.<name>]` with different recipes — the later file's recipe is used, so the other pipeline runs against a version it did not declare |
+| W029 | `[pipeline] note` is longer than 40 characters, or not a string — the `rtk init` menu shows the first 40 characters; a note that is not a string is ignored |
 
 ## Limits
 

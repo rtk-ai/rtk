@@ -3,8 +3,8 @@ use super::conditions::{Condition, parse_when};
 use super::diag::{Code, Diagnostic, did_you_mean};
 use super::position::Position;
 use super::schema::{
-    ClassifierDef, DirectiveDef, MethodDef, OverrideDef, PipelineFile, RuleDef, TaskDef,
-    UpstreamDef,
+    ClassifierDef, DependencyDef, DirectiveDef, MethodDef, OverrideDef, PipelineFile, RuleDef,
+    TaskDef, UpstreamDef,
 };
 use std::collections::BTreeMap;
 
@@ -83,6 +83,7 @@ pub struct Resolved {
     pub tasks: BTreeMap<String, (TaskDef, String)>,
     pub upstreams: BTreeMap<String, (UpstreamDef, String)>,
     pub classifiers: BTreeMap<String, (ClassifierDef, String)>,
+    pub dependencies: BTreeMap<String, (DependencyDef, String)>,
     pub guards: Guards,
 }
 
@@ -375,6 +376,29 @@ pub fn resolve(local: &[SourceFile]) -> (Resolved, Vec<Diagnostic>) {
                 .classifiers
                 .insert(classifier_name.clone(), (def.clone(), source.label.clone()));
         }
+        for (dependency_name, def) in &source.file.dependencies {
+            if let Some((existing, origin)) = resolved.dependencies.get(dependency_name) {
+                let unlined = |d: &DependencyDef| DependencyDef {
+                    line: None,
+                    ..d.clone()
+                };
+                if unlined(existing) != unlined(def) {
+                    diagnostics.push(
+                        Diagnostic::new(
+                            Code::W028,
+                            format!(
+                                "dependency `{dependency_name}` is declared differently in {origin} and {}; the one in {} is used, so the other pipeline runs against a version it did not declare",
+                                source.label, source.label
+                            ),
+                        )
+                        .at(source.label.clone(), def.line),
+                    );
+                }
+            }
+            resolved
+                .dependencies
+                .insert(dependency_name.clone(), (def.clone(), source.label.clone()));
+        }
         for (upstream_name, def) in &source.file.upstreams {
             match resolved.upstreams.get_mut(upstream_name) {
                 Some((existing, origin)) => {
@@ -395,6 +419,9 @@ pub fn resolve(local: &[SourceFile]) -> (Resolved, Vec<Diagnostic>) {
                     }
                     if def.timeout_secs.is_some() {
                         existing.timeout_secs = def.timeout_secs;
+                    }
+                    if def.dependency.is_some() {
+                        existing.dependency = def.dependency.clone();
                     }
                     *origin = source.label.clone();
                 }
@@ -1033,6 +1060,30 @@ mod tests {
             .find(|d| d.code == Code::E013)
             .expect("E013");
         assert!(e013.message.contains("a.toml") && e013.message.contains("b.toml"));
+    }
+
+    #[test]
+    fn a_dependency_declared_differently_in_two_files_is_w028() {
+        let recipe = |version: &str| {
+            format!(
+                "[dependency.svc]\nrun = [\"svc\"]\nlisten = \"127.0.0.1:41950\"\n[dependency.svc.binary.linux-x64]\nurl = \"https://example.com/svc-{version}\"\nsha256 = \"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\"\n"
+            )
+        };
+        let a = parse_local(Scope::User, "a.toml", &recipe("1"));
+        let same = parse_local(Scope::User, "b.toml", &format!("\n\n{}", recipe("1")));
+        let (_, diagnostics) = resolve(&[a.clone(), same]);
+        assert!(
+            !diagnostics.iter().any(|d| d.code == Code::W028),
+            "{diagnostics:#?}"
+        );
+        let other = parse_local(Scope::User, "b.toml", &recipe("2"));
+        let (resolved, diagnostics) = resolve(&[a, other]);
+        let w028 = diagnostics
+            .iter()
+            .find(|d| d.code == Code::W028)
+            .expect("W028");
+        assert!(w028.message.contains("a.toml") && w028.message.contains("b.toml"));
+        assert_eq!(resolved.dependencies["svc"].1, "b.toml");
     }
 
     #[test]

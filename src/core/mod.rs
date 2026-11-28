@@ -2,6 +2,7 @@
 
 pub mod arg_tokenizer;
 pub mod args_utils;
+pub mod ask;
 #[cfg(feature = "engine")]
 pub mod call_context;
 #[cfg(feature = "engine")]
@@ -9,11 +10,19 @@ pub mod classify;
 pub mod config;
 pub mod constants;
 pub mod db;
+#[cfg(feature = "engine")]
+pub mod delegation;
+#[cfg(feature = "engine")]
+pub mod deps;
 pub mod display_helpers;
 pub mod filter;
 pub mod guard;
 pub mod http;
 pub mod invocation;
+#[cfg(feature = "engine")]
+pub mod notice;
+#[cfg(feature = "engine")]
+pub mod pipeline_catalog;
 #[cfg(feature = "engine")]
 pub mod pipeline_cmd;
 #[cfg(feature = "engine")]
@@ -24,9 +33,13 @@ pub mod pipeline_config;
 #[cfg(feature = "engine")]
 pub mod pipeline_log;
 #[cfg(feature = "engine")]
+pub mod pipeline_needs;
+#[cfg(feature = "engine")]
 pub mod pipeline_remote;
 #[cfg(feature = "engine")]
 pub mod plugins_cmd;
+#[cfg(feature = "engine")]
+pub mod proxy_download;
 pub mod retriever;
 pub mod runner;
 pub mod shell;

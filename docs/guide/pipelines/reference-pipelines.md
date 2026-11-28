@@ -39,7 +39,7 @@ min_size = 512
 
 How the rewrite flows: your agent calls `Bash "ls -la"` → the hook evaluates `hook.before_tool.shell` → `rtk-rewrite` matches → the call becomes `rtk ls -la` → inside `rtk`, the `ls` filter (built-in, or yours from `filters.toml`) applies. Excluding a command is a `passthrough` rule ahead of `rtk-rewrite`, or `[hooks] exclude_commands` in `config.toml` as before.
 
-**Hooks follow the pipeline.** `rtk init` registers only the events your active pipeline uses, for the tools its rules name. With `rtk:default` that is `PreToolUse` on `Bash`, as today. Enable `rtk:posthook` and `PostToolUse` is registered too. Registration happens at `rtk init`: after adding a rule at a new event or for a new tool (a `hook.before_tool.read` rule, any `hook.after_tool` rule), run `rtk init -g` again. Until you do, `rtk pipeline validate`, `rtk gain` and `rtk init --show` print `hook needed: …`.
+**Hooks follow the pipeline.** `rtk init` registers only the events your active pipeline uses, for the tools its rules name. With `rtk:default` that is `PreToolUse` on `Bash`, as today. Enable `rtk:posthook` and `PostToolUse` is registered too. A pipeline with a rule that routes calls to the agent's sub-agents also gets `PostToolUse` for `Bash`, `Read`, `Grep` and `Glob` and `SubagentStop`, so `rtk gain` can measure what the sub-agents read. Registration happens at `rtk init`: after adding a rule at a new event or for a new tool (a `hook.before_tool.read` rule, any `hook.after_tool` rule), run `rtk init -g` again. Until you do, `rtk pipeline validate`, `rtk gain` and `rtk init --show` print `hook needed: …`.
 
 ## `rtk:posthook` — compress every tool's output
 
@@ -83,7 +83,7 @@ use  = ["web"]
 
 ## `rtk:proxy` — cache alignment in the proxy
 
-Opt in; needs the RTK proxy running (`rtk init` offers to install it). Normalisation
+Opt in; needs the RTK proxy running (`rtk init -g` offers to set it up once `rtk-proxy` is installed). Normalisation
 (`ansi`, `progress`, `dedup`) is inherited from `rtk:default`, so what this pipeline adds on top
 is the cache breakpoint.
 

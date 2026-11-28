@@ -182,7 +182,11 @@ fn validate_stock_pi_plugin_path(
                 PatchMode::Skip => false,
                 PatchMode::Ask => {
                     let prompt = format!("Overwrite the non-stock {} at {}?", name, path.display());
-                    prompt_user_confirmation(&prompt)?
+                    prompt_user_confirmation(
+                        &prompt,
+                        "replace it with the stock RTK extension; your edits are not kept",
+                        "keep your file; init stops without changing it",
+                    )?
                 }
             };
 
@@ -469,7 +473,11 @@ fn confirm_shared_extension_uninstall(
             }
 
             let prompt = format!("Remove the shared Pi/OMP extension at {}?", path.display());
-            if prompt_user_confirmation(&prompt)? {
+            if prompt_user_confirmation(
+                &prompt,
+                "remove it; the other agent loses it too",
+                "keep it in place",
+            )? {
                 Ok(true)
             } else {
                 println!("Skipped removal of shared Pi/OMP extension.");

@@ -61,6 +61,39 @@ pub fn get(url: &str) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
         .with_context(|| format!("GET {url}"))
 }
 
+#[cfg(feature = "engine")]
+pub fn get_release_asset(url: &str) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
+    use anyhow::Context;
+    // nosemgrep: ureq-outside-telemetry -- inbound GET of the rtk-proxy release asset of this rtk's version, checked against that release's checksums.txt, only after the user said yes to the daemon
+    let request = ureq::get(url);
+    connect_timeout(request, CONNECT_TIMEOUT)
+        .call()
+        .with_context(|| format!("GET {url}"))
+}
+
+#[cfg(feature = "engine")]
+pub fn get_download(url: &str) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
+    use anyhow::Context;
+    // nosemgrep: ureq-outside-telemetry -- inbound GET of a pipeline dependency's file, pinned by its sha256, only after the user said yes to installing it
+    let request = ureq::get(url);
+    connect_timeout(request, CONNECT_TIMEOUT)
+        .call()
+        .with_context(|| format!("GET {url}"))
+}
+
+#[cfg(feature = "engine")]
+pub fn get_within(
+    url: &str,
+    timeout: Duration,
+) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
+    use anyhow::Context;
+    // nosemgrep: ureq-outside-telemetry -- inbound GET of the reviewed-pipeline catalog, during rtk init and a terminal rtk pipeline add
+    let request = ureq::get(url);
+    global_timeout(request, timeout)
+        .call()
+        .with_context(|| format!("GET {url}"))
+}
+
 /// Abandons the request if the connection takes longer than `timeout` (ureq's
 /// `timeout_connect`); a slow body is left to finish.
 #[cfg(feature = "engine")]

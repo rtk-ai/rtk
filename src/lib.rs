@@ -495,7 +495,7 @@ enum Commands {
         #[arg(long)]
         gemini: bool,
 
-        /// Target agent to install hooks for (default: claude)
+        /// Target agent to install hooks for. Without one, a terminal shows a menu of agents; other runs set up Claude Code
         #[arg(long, value_enum)]
         agent: Option<AgentTarget>,
 
@@ -541,6 +541,10 @@ enum Commands {
         /// Preview changes without writing any files (combine with -v to show content)
         #[arg(long = "dry-run", conflicts_with = "show")]
         dry_run: bool,
+
+        /// Use a reviewed pipeline from rtk-ai.app/pipelines by name, installed pinned to its reviewed commit, for your user account (every project, with or without -g)
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["show", "uninstall"])]
+        pipeline: Option<String>,
     },
 
     /// Download with compact output (strips progress bars)
@@ -3029,6 +3033,7 @@ fn run_cli() -> Result<i32> {
             codex,
             copilot,
             dry_run,
+            pipeline,
         } => {
             let ctx = hooks::init::InitContext {
                 verbose: cli.verbose,
@@ -3046,6 +3051,15 @@ fn run_cli() -> Result<i32> {
             } else {
                 hooks::init::PatchMode::Ask
             };
+            let filter_trust = if trust_filters {
+                hooks::init::FilterTrust::Trust
+            } else if no_trust_filters || auto_patch {
+                hooks::init::FilterTrust::Skip
+            } else {
+                hooks::init::FilterTrust::Ask
+            };
+            let explicit_agent =
+                agent.is_some() || gemini || codex || copilot || opencode || claude_md;
             if show {
                 hooks::init::show_config(codex, agent == Some(AgentTarget::Omp))?;
             } else if uninstall && copilot {
@@ -3065,70 +3079,95 @@ fn run_cli() -> Result<i32> {
                     hooks::init::uninstall_hermes,
                     hooks::init::uninstall_with_patch_mode,
                 );
-            } else if gemini {
-                hooks::init::run_gemini(global, hook_only, patch_mode, ctx)?;
-            } else if copilot {
-                if global {
-                    hooks::init::run_copilot_global(ctx)?;
-                } else {
-                    hooks::init::run_copilot(ctx)?;
-                }
-            } else if agent == Some(AgentTarget::Pi) {
-                hooks::init::run_pi_mode_with_patch_mode(global, patch_mode, ctx)?
-            } else if agent == Some(AgentTarget::Trae) {
-                hooks::init::run_trae_mode(global, ctx)?
-            } else if agent == Some(AgentTarget::Omp) {
-                hooks::init::run_omp_mode_with_patch_mode(global, patch_mode, ctx)?
-            } else if agent == Some(AgentTarget::Kilocode) {
-                if global {
-                    anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
-                }
-                hooks::init::run_kilocode_mode(ctx)?;
-            } else if agent == Some(AgentTarget::Antigravity) {
-                hooks::init::run_antigravity_mode(global, ctx)?;
-            } else if agent == Some(AgentTarget::Kimi) {
-                if global {
-                    anyhow::bail!("Kimi AI is project-scoped. Use: rtk init --agent kimi");
-                }
-                hooks::init::run_kimi_mode(ctx)?;
-            } else if agent == Some(AgentTarget::Hermes) {
-                hooks::init::run_hermes_mode(ctx)?;
-            } else if agent == Some(AgentTarget::Droid) {
-                hooks::init::run_droid_mode(global, ctx)?;
-            } else if agent == Some(AgentTarget::Vibe) {
-                hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
-            } else {
-                let install_opencode = opencode;
-                let install_cursor = agent == Some(AgentTarget::Cursor);
-                let install_windsurf = agent == Some(AgentTarget::Windsurf);
-                let install_cline = agent == Some(AgentTarget::Cline);
-                // Sibling agents (Cursor, Windsurf, Cline) fall through to this
-                // shared init path; only the default (no --agent) or an explicit
-                // Claude target should install Claude Code files. Without this
-                // guard, `rtk init -g --agent cursor` writes into ~/.claude (#2097).
-                let install_claude = !install_cursor && !install_windsurf && !install_cline;
-
-                hooks::init::run(
+            } else if hooks::init::guided_allowed(explicit_agent, patch_mode, dry_run) {
+                return hooks::init::run_guided(
                     global,
-                    install_claude,
-                    install_opencode,
-                    install_cursor,
-                    install_windsurf,
-                    install_cline,
-                    claude_md,
                     hook_only,
-                    codex,
                     patch_mode,
                     ctx,
-                )?;
-                let filter_trust = if trust_filters {
-                    hooks::init::FilterTrust::Trust
-                } else if no_trust_filters || auto_patch {
-                    hooks::init::FilterTrust::Skip
+                    filter_trust,
+                    pipeline.as_deref(),
+                );
+            } else {
+                if !explicit_agent {
+                    hooks::init::print_default_agent_hint(global);
+                }
+                #[cfg(feature = "engine")]
+                let pipeline_code = if pipeline.is_some() {
+                    hooks::init::pipeline_step_or_warn(pipeline.as_deref(), patch_mode, ctx)
                 } else {
-                    hooks::init::FilterTrust::Ask
+                    0
                 };
-                hooks::init::finalize_filter_trust(global, dry_run, filter_trust)?;
+                #[cfg(not(feature = "engine"))]
+                let pipeline_code = 0;
+                #[cfg(not(feature = "engine"))]
+                if pipeline.is_some() {
+                    anyhow::bail!("--pipeline needs the full edition of rtk");
+                }
+                if gemini {
+                    hooks::init::run_gemini(global, hook_only, patch_mode, ctx)?;
+                } else if copilot {
+                    if global {
+                        hooks::init::run_copilot_global(ctx)?;
+                    } else {
+                        hooks::init::run_copilot(ctx)?;
+                    }
+                } else if agent == Some(AgentTarget::Pi) {
+                    hooks::init::run_pi_mode_with_patch_mode(global, patch_mode, ctx)?
+                } else if agent == Some(AgentTarget::Trae) {
+                    hooks::init::run_trae_mode(global, ctx)?
+                } else if agent == Some(AgentTarget::Omp) {
+                    hooks::init::run_omp_mode_with_patch_mode(global, patch_mode, ctx)?
+                } else if agent == Some(AgentTarget::Kilocode) {
+                    if global {
+                        anyhow::bail!(
+                            "Kilo Code is project-scoped. Use: rtk init --agent kilocode"
+                        );
+                    }
+                    hooks::init::run_kilocode_mode(ctx)?;
+                } else if agent == Some(AgentTarget::Antigravity) {
+                    hooks::init::run_antigravity_mode(global, ctx)?;
+                } else if agent == Some(AgentTarget::Kimi) {
+                    if global {
+                        anyhow::bail!("Kimi AI is project-scoped. Use: rtk init --agent kimi");
+                    }
+                    hooks::init::run_kimi_mode(ctx)?;
+                } else if agent == Some(AgentTarget::Hermes) {
+                    hooks::init::run_hermes_mode(ctx)?;
+                } else if agent == Some(AgentTarget::Droid) {
+                    hooks::init::run_droid_mode(global, ctx)?;
+                } else if agent == Some(AgentTarget::Vibe) {
+                    hooks::init::run_vibe_mode(global, hook_only, patch_mode, ctx)?;
+                } else {
+                    let install_opencode = opencode;
+                    let install_cursor = agent == Some(AgentTarget::Cursor);
+                    let install_windsurf = agent == Some(AgentTarget::Windsurf);
+                    let install_cline = agent == Some(AgentTarget::Cline);
+                    // Sibling agents (Cursor, Windsurf, Cline) fall through to this
+                    // shared init path; only the default (no --agent) or an explicit
+                    // Claude target should install Claude Code files. Without this
+                    // guard, `rtk init -g --agent cursor` writes into ~/.claude (#2097).
+                    let install_claude = !install_cursor && !install_windsurf && !install_cline;
+
+                    hooks::init::run(
+                        global,
+                        install_claude,
+                        install_opencode,
+                        install_cursor,
+                        install_windsurf,
+                        install_cline,
+                        claude_md,
+                        hook_only,
+                        codex,
+                        patch_mode,
+                        ctx,
+                    )?;
+                    hooks::init::finalize_filter_trust(global, dry_run, filter_trust)?;
+                }
+                hooks::init::ask_telemetry_consent(dry_run)?;
+                if pipeline_code != 0 {
+                    return Ok(pipeline_code);
+                }
             }
             0
         }

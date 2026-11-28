@@ -105,7 +105,7 @@ cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
 ### 확인
 
 ```bash
-rtk --version   # "rtk 0.27.x" 표시되어야 함
+rtk --version   # "rtk x.y.z" 표시되어야 함
 rtk gain        # 토큰 절약 통계 표시되어야 함
 ```
 
@@ -113,9 +113,9 @@ rtk gain        # 토큰 절약 통계 표시되어야 함
 
 ```bash
 # 1. 해당 AI 도구용 hook 설치
-rtk init --global               # Claude Code (기본값)
-rtk init --agent trae           # Trae (프로젝트)
-rtk init --global --agent trae  # Trae (전역)
+rtk init --global               # 메뉴: 에이전트와 파이프라인 선택
+rtk init --global --agent claude  # Claude Code 직접 설정 (메뉴 없음)
+# 다른 에이전트 (Cursor, Gemini, Codex, Copilot 등): https://www.rtk-ai.app/docs/getting-started/supported-agents/ 참고
 
 # 2. 해당 AI 도구를 재시작한 후 테스트
 git status  # 자동으로 rtk git status로 재작성

@@ -4,6 +4,7 @@
 //! nothing, reviews nothing, and never holds a token — everything goes
 //! through the user's own `gh`.
 
+use crate::core::ask::{interactive, prompt, select_menu};
 use crate::core::http;
 use crate::core::pipeline_config;
 use anyhow::{Context, Result};
@@ -139,6 +140,7 @@ fn http_get(url: &str) -> Result<String> {
 pub struct InstallOrigin {
     pub source: String,
     pub sha: Option<String>,
+    pub content: Option<String>,
 }
 
 fn read_ledger() -> toml::Table {
@@ -168,11 +170,23 @@ fn ledger_upsert(table: &mut toml::Table, name: &str, updates: &[(&str, String)]
 /// fork offer, and the card's publish CTA), so a failed write warns and
 /// never blocks anything.
 fn ledger_write(name: &str, updates: &[(&str, String)]) {
+    ledger_edit(name, updates, &[]);
+}
+
+fn ledger_edit(name: &str, updates: &[(&str, String)], removals: &[&str]) {
     let Some(path) = pipeline_config::installs_ledger_path() else {
         return;
     };
     let mut table = read_ledger();
     ledger_upsert(&mut table, name, updates);
+    if let Some(entry) = table.get_mut(name).and_then(|e| e.as_table_mut()) {
+        for key in removals {
+            entry.remove(*key);
+        }
+        if entry.is_empty() {
+            table.remove(name);
+        }
+    }
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -181,15 +195,32 @@ fn ledger_write(name: &str, updates: &[(&str, String)]) {
     }
 }
 
-pub fn record_install(name: &str, source: &str, sha: Option<&str>) {
+pub fn record_install(name: &str, source: &str, sha: Option<&str>, toml: &str) {
     let mut updates = vec![
         ("source", source.to_string()),
         ("date", chrono::Local::now().format("%Y-%m-%d").to_string()),
+        ("content", content_digest(toml)),
     ];
-    if let Some(sha) = sha {
-        updates.push(("sha", sha.to_string()));
-    }
-    ledger_write(name, &updates);
+    let removals: &[&str] = match sha {
+        Some(sha) => {
+            updates.push(("sha", sha.to_string()));
+            &[]
+        }
+        None => &["sha"],
+    };
+    ledger_edit(name, &updates, removals);
+}
+
+pub fn forget_install(name: &str) {
+    ledger_edit(name, &[], &["source", "sha", "content", "date"]);
+}
+
+pub fn content_digest(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Where this pipeline was published, as the install source others run
@@ -214,6 +245,10 @@ pub fn install_origin(name: &str) -> Option<InstallOrigin> {
         source: entry.get("source")?.as_str()?.to_string(),
         sha: entry
             .get("sha")
+            .and_then(|s| s.as_str())
+            .map(str::to_string),
+        content: entry
+            .get("content")
             .and_then(|s| s.as_str())
             .map(str::to_string),
     })
@@ -367,128 +402,6 @@ fn repo_readme(card_md: &str, full: &str, headline: Option<&str>) -> String {
     out
 }
 
-/// Arrow-key menu on crossterm (the same backend as the gain TUI): ↑/↓ or
-/// j/k move, enter confirms, 1-9 pick directly, esc/q cancels. The menu
-/// erases itself and leaves one line echoing the choice, so transcripts
-/// stay readable. Terminals that refuse raw mode get a numbered prompt.
-pub(crate) fn select_menu(items: &[(&str, &str)], default: usize) -> Result<Option<usize>> {
-    use colored::Colorize;
-    use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
-    use crossterm::{cursor, execute, terminal};
-    use std::io::Write;
-
-    if items.is_empty() {
-        return Ok(None);
-    }
-    if terminal::enable_raw_mode().is_err() {
-        return select_menu_plain(items, default);
-    }
-    let mut out = std::io::stdout();
-    let mut idx = default.min(items.len() - 1);
-    let render = |out: &mut std::io::Stdout, idx: usize| -> Result<()> {
-        for (i, (label, hint)) in items.iter().enumerate() {
-            if i == idx {
-                write!(
-                    out,
-                    "  {} {}  {}\r\n",
-                    "▶".green(),
-                    label.green().bold(),
-                    hint.dimmed()
-                )
-                .context("render menu")?;
-            } else {
-                write!(out, "    {label}  {}\r\n", hint.dimmed()).context("render menu")?;
-            }
-        }
-        write!(
-            out,
-            "{}\r\n",
-            "  ↑/↓ choose · enter confirm · esc cancel".dimmed()
-        )
-        .context("render menu")?;
-        out.flush().context("flush menu")?;
-        Ok(())
-    };
-    let lines = items.len() as u16 + 1;
-    let mut run = || -> Result<Option<usize>> {
-        render(&mut std::io::stdout(), idx)?;
-        loop {
-            let Event::Key(key) = read().context("read key")? else {
-                continue;
-            };
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    idx = if idx == 0 { items.len() - 1 } else { idx - 1 };
-                }
-                KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-                    idx = (idx + 1) % items.len();
-                }
-                KeyCode::Char(c @ '1'..='9') => {
-                    let n = c as usize - '1' as usize;
-                    if n < items.len() {
-                        return Ok(Some(n));
-                    }
-                }
-                KeyCode::Enter => return Ok(Some(idx)),
-                KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    return Ok(None);
-                }
-                _ => {}
-            }
-            execute!(
-                out,
-                cursor::MoveUp(lines),
-                terminal::Clear(terminal::ClearType::FromCursorDown)
-            )
-            .context("redraw menu")?;
-            render(&mut std::io::stdout(), idx)?;
-        }
-    };
-    let result = run();
-    let _ = terminal::disable_raw_mode();
-    let result = result?;
-    execute!(
-        out,
-        cursor::MoveUp(lines),
-        terminal::Clear(terminal::ClearType::FromCursorDown)
-    )
-    .ok();
-    match result {
-        Some(i) => println!("  {} {}", "✓".green(), items[i].0),
-        None => println!("  ✗ cancelled"),
-    }
-    Ok(result)
-}
-
-fn select_menu_plain(items: &[(&str, &str)], default: usize) -> Result<Option<usize>> {
-    for (i, (label, hint)) in items.iter().enumerate() {
-        println!("  {}. {label}  ({hint})", i + 1);
-    }
-    let answer = prompt(&format!("choice [{}]: ", default + 1))?;
-    if answer.is_empty() {
-        return Ok(Some(default.min(items.len() - 1)));
-    }
-    match answer.parse::<usize>() {
-        Ok(n) if (1..=items.len()).contains(&n) => Ok(Some(n - 1)),
-        _ => Ok(None),
-    }
-}
-
-pub(crate) fn prompt(question: &str) -> Result<String> {
-    use std::io::Write;
-    print!("{question}");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    std::io::stdin()
-        .read_line(&mut line)
-        .context("read answer")?;
-    Ok(line.trim().to_string())
-}
-
 fn gh(args: &[String]) -> Result<String> {
     let out = std::process::Command::new("gh")
         .args(args)
@@ -576,11 +489,6 @@ fn gh_put_file(full: &str, path: &str, content: &str, message: &str) -> Result<(
         .with_context(|| format!("upload {path} to {full}"))
 }
 
-pub(crate) fn interactive() -> bool {
-    use std::io::IsTerminal;
-    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
-}
-
 /// `rtk pipeline share publish` — the interactive publisher. GitHub repo is
 /// the recommended channel (searchable, starrable, forkable, one install
 /// line); gists stay available for a single low-key link.
@@ -591,9 +499,11 @@ pub fn run_publish(name: Option<&str>, force: bool) -> Result<i32> {
              (the non-interactive path is `rtk pipeline share --gist`)"
         );
     }
-    let Some(card) = crate::core::pipeline_cmd::collect_card(name)? else {
+    let Some(mut card) = crate::core::pipeline_cmd::collect_card(name)? else {
         return Ok(1);
     };
+    crate::core::pipeline_cmd::sharing_notice(&card.sources);
+    crate::core::pipeline_cmd::sign_sources(&mut card.sources);
     if card.is_active {
         let loaded = crate::core::pipeline_cmd::load_for_cli();
         if has_errors(&loaded.diagnostics) {

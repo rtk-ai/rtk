@@ -8,6 +8,7 @@ pub const HOOKS_JSON: &str = "hooks.json";
 pub const PRE_TOOL_USE_KEY: &str = "PreToolUse";
 pub const POST_TOOL_USE_KEY: &str = "PostToolUse";
 pub const SESSION_START_KEY: &str = "SessionStart";
+pub const SUBAGENT_STOP_KEY: &str = "SubagentStop";
 pub const BEFORE_TOOL_KEY: &str = "BeforeTool";
 
 /// Native Rust hook command for Claude Code (replaces rtk-rewrite.sh).

@@ -30,6 +30,7 @@ mod copilot;
 pub(crate) mod cursor;
 pub(crate) mod droid;
 pub(crate) mod gemini;
+mod guided;
 pub(crate) mod hermes;
 mod instructions_agents;
 pub(crate) mod opencode;
@@ -63,6 +64,9 @@ pub(crate) use copilot::{COPILOT_HOOK_JSON, copilot_user_dir};
 pub use copilot::{run_copilot, run_copilot_global, uninstall_copilot, uninstall_copilot_global};
 pub use droid::{run_droid_mode, uninstall_droid};
 pub use gemini::run_gemini;
+#[cfg(feature = "engine")]
+pub use guided::pipeline_step_or_warn;
+pub use guided::{guided_allowed, print_default_agent_hint, run_guided};
 pub use hermes::{run_hermes_mode, uninstall_hermes};
 pub use instructions_agents::{run_kilocode_mode, run_kimi_mode};
 pub use pi::{run_omp_mode_with_patch_mode, run_pi_mode_with_patch_mode};
@@ -536,7 +540,6 @@ pub fn run(
     }
 
     if !dry_run {
-        prompt_telemetry_consent()?;
         // Best-effort: unconditionally re-run tracking-DB schema migrations during
         // install/upgrade (bypassing the `user_version` gate `Tracker::new()` uses
         // on its hot path). This both pre-warms the schema so the first PreToolUse
@@ -853,10 +856,17 @@ fn backup_and_atomic_write(path: &Path, content: &str) -> Result<Option<PathBuf>
 }
 
 /// Prompt user for confirmation.
-/// Prints to stderr (stdout may be piped), reads from stdin, and defaults to
-/// No in non-interactive environments.
-pub(super) fn prompt_user_confirmation(prompt: &str) -> Result<bool> {
+pub(super) fn prompt_user_confirmation(
+    prompt: &str,
+    yes_hint: &str,
+    no_hint: &str,
+) -> Result<bool> {
     use std::io::{self, BufRead, IsTerminal};
+
+    if crate::core::ask::interactive() {
+        println!();
+        return crate::core::ask::confirm(prompt, yes_hint, no_hint);
+    }
 
     eprint!("\n{} [y/N] ", prompt);
     io::stderr().flush().context("Failed to flush prompt")?;
@@ -915,6 +925,36 @@ pub(super) fn proxy_env_target() -> Option<String> {
     root.pointer("/env/ANTHROPIC_BASE_URL")?
         .as_str()
         .map(str::to_string)
+}
+
+#[cfg(feature = "engine")]
+pub(crate) fn daemon_ready() -> bool {
+    let base_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
+    proxy_env_target().as_deref() == Some(base_url.as_str()) || crate::llm_proxy::is_reachable()
+}
+
+#[cfg(feature = "engine")]
+pub(crate) fn daemon_unavailable() -> Option<String> {
+    if !crate::llm_proxy::binary_available() && crate::core::proxy_download::asset().is_none() {
+        return Some(
+            "rtk-proxy is not installed, and none is published for this computer".to_string(),
+        );
+    }
+    if crate::core::user_env::var("RTK_ONRAMP_DISABLED").as_deref() == Some("1") {
+        return Some("RTK_ONRAMP_DISABLED=1 turns off the question that sets it up".to_string());
+    }
+    None
+}
+
+#[cfg(feature = "engine")]
+pub(crate) fn ask_daemon(pipeline: &str) -> Result<bool> {
+    let settings_path = resolve_claude_dir()?.join(SETTINGS_JSON);
+    println!();
+    println!(
+        "  {pipeline} needs the RTK daemon: its rules act on the requests your agent sends to the model."
+    );
+    offer_proxy_onramp(&settings_path, PatchMode::Ask, InitContext::default())?;
+    Ok(daemon_ready())
 }
 
 #[cfg(feature = "engine")]
@@ -1021,6 +1061,100 @@ fn project_scope_footer_lines(
 }
 
 #[cfg(feature = "engine")]
+fn proxy_download_dir() -> String {
+    crate::core::proxy_download::managed_binary()
+        .and_then(|bin| bin.parent().map(|dir| dir.display().to_string()))
+        .unwrap_or_else(|| "rtk's data folder".to_string())
+}
+
+#[cfg(feature = "engine")]
+fn ask_yes(menu: bool, question: &str, yes: &str, no: &str) -> Result<bool> {
+    use std::io::BufRead;
+    if menu {
+        return crate::core::ask::confirm(question, yes, no);
+    }
+    eprint!("{question} [y/N] ");
+    let mut line = String::new();
+    let n = std::io::stdin().lock().read_line(&mut line)?;
+    Ok(n > 0 && matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
+#[cfg(feature = "engine")]
+fn ask_proxy_download(menu: bool) -> Result<bool> {
+    ask_yes(
+        menu,
+        &format!(
+            "  Download rtk-proxy {} (BUSL-1.1) from github.com/rtk-ai/rtk?",
+            crate::core::proxy_download::version()
+        ),
+        &format!("into {}", proxy_download_dir()),
+        "nothing changes",
+    )
+}
+
+#[cfg(feature = "engine")]
+fn fetch_proxy() -> bool {
+    use colored::Colorize;
+    let version = crate::core::proxy_download::version();
+    match crate::core::proxy_download::install() {
+        Ok(path) => {
+            println!("  rtk-proxy {version}: installed at {}", path.display());
+            true
+        }
+        Err(e) => {
+            eprintln!(
+                "{}",
+                format!(
+                    "  rtk-proxy {version} could not be downloaded: {e:#}. Nothing was changed; run `rtk init -g` again to retry."
+                )
+                .yellow()
+            );
+            false
+        }
+    }
+}
+
+#[cfg(feature = "engine")]
+fn offer_proxy_update(menu: bool) -> Result<()> {
+    let Some(bin) = crate::llm_proxy::located_binary() else {
+        return Ok(());
+    };
+    if !crate::core::proxy_download::is_managed(&bin) {
+        return Ok(());
+    }
+    let ours = crate::core::proxy_download::version();
+    let theirs = crate::core::proxy_download::reported_version(&bin);
+    if theirs.as_deref() == Some(ours) {
+        return Ok(());
+    }
+    eprintln!();
+    match theirs.as_deref() {
+        Some(theirs) => {
+            eprintln!("  The rtk-proxy rtk downloaded is version {theirs}; this rtk is {ours}.")
+        }
+        None => eprintln!(
+            "  The rtk-proxy rtk downloaded ({}) does not run.",
+            bin.display()
+        ),
+    }
+    let question = format!("  Update rtk-proxy to {ours}?");
+    if !ask_yes(
+        menu,
+        &question,
+        "download it from github.com/rtk-ai/rtk",
+        "keep the current one",
+    )? {
+        return Ok(());
+    }
+    if fetch_proxy() && crate::llm_proxy::is_reachable() {
+        println!(
+            "  The running daemon keeps the previous version until it restarts: rtk llm-proxy stop && rtk llm-proxy start"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
 fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
     use std::io::{BufRead, IsTerminal};
     // Only `PatchMode::Ask` may prompt. `--auto-patch` exists to run without a
@@ -1037,6 +1171,8 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
         return Ok(());
     }
     let base_url = format!("http://{}", crate::llm_proxy::DEFAULT_BIND);
+    let menu = crate::core::ask::interactive();
+    offer_proxy_update(menu)?;
 
     let mut root: serde_json::Value = if settings_path.exists() {
         let content = fs::read_to_string(settings_path)?;
@@ -1054,18 +1190,37 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
         .and_then(|v| v.as_str().map(str::to_string));
     let aimed_here = already.as_deref() == Some(base_url.as_str());
     let autostart_present = session_start_entry_present(&root);
-    if aimed_here && autostart_present {
+    let missing = !crate::llm_proxy::binary_available();
+    if aimed_here && autostart_present && !missing {
         return Ok(());
     }
     // Routing Claude Code at a daemon that cannot be started breaks every
     // session (#4604): only offer the proxy when its binary is installed, so
     // the SessionStart hook can start it again after a reboot. A daemon that
     // merely answers on the port today may not be startable tomorrow.
-    if !crate::llm_proxy::binary_available() {
+    if missing && crate::core::proxy_download::asset().is_none() {
         eprintln!();
         eprintln!(
-            "  RTK proxy not offered: rtk-proxy is not installed (`rtk llm-proxy start` says where to get it)."
+            "  RTK daemon not offered: rtk-proxy is not installed, and none is published for this computer."
         );
+        return Ok(());
+    }
+
+    if aimed_here && autostart_present {
+        eprintln!();
+        eprintln!(
+            "  settings.json routes Claude Code through the RTK daemon, but rtk-proxy is not installed, so the daemon cannot start."
+        );
+        if !ask_proxy_download(menu)? {
+            println!("  Skipped — run `rtk init -g` again to download it.");
+            return Ok(());
+        }
+        if fetch_proxy() {
+            match crate::llm_proxy::ensure_running(crate::llm_proxy::DEFAULT_BIND) {
+                Ok(_) => println!("  rtk-proxy: running"),
+                Err(e) => println!("  [warn] rtk-proxy not started: {e}"),
+            }
+        }
         return Ok(());
     }
 
@@ -1077,6 +1232,15 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
         eprintln!(
             "  The RTK proxy is configured in settings.json, but nothing restarts the daemon after a reboot."
         );
+        if missing {
+            if !ask_proxy_download(menu)? {
+                println!("  Skipped — run `rtk init -g` again to download it.");
+                return Ok(());
+            }
+            if !fetch_proxy() {
+                return Ok(());
+            }
+        }
     } else {
         eprintln!();
         eprintln!(
@@ -1086,44 +1250,103 @@ fn offer_proxy_onramp(settings_path: &Path, patch_mode: PatchMode, ctx: InitCont
             "  For Remote Control in plain `claude` sessions, leave ANTHROPIC_BASE_URL unset"
         );
         eprintln!("  in settings.json and your shell; use `rtk claude` only for proxied sessions.");
-        if let Some(foreign) = already.as_deref() {
+        if missing {
+            eprintln!(
+                "  rtk-proxy is not installed: Yes downloads rtk-proxy {} (BUSL-1.1) from github.com/rtk-ai/rtk into {}.",
+                crate::core::proxy_download::version(),
+                proxy_download_dir()
+            );
+        }
+        let read_yes = || -> Result<bool> {
+            let mut line = String::new();
+            let n = std::io::stdin().lock().read_line(&mut line)?;
+            Ok(n > 0 && matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
+        };
+        let accepted = if let Some(foreign) = already.as_deref() {
             eprintln!(
                 "  settings.json already routes Claude Code through {foreign} — another proxy or gateway."
             );
-            eprint!("  Replace it with the RTK proxy? Your current routing stops working. [y/N] ");
+            if menu {
+                crate::core::ask::confirm(
+                    "  Replace it with the RTK daemon?",
+                    "your current routing stops working",
+                    "keep your current routing",
+                )?
+            } else {
+                eprint!(
+                    "  Replace it with the RTK daemon? Your current routing stops working. [y/N] "
+                );
+                read_yes()?
+            }
+        } else if menu {
+            crate::core::ask::confirm(
+                "  Set up the RTK daemon? It runs your pipeline on the requests Claude Code sends to the model (model routing, tool-result compression and more).",
+                if missing {
+                    "download rtk-proxy, then choose how it comes back after a reboot"
+                } else {
+                    "next, choose how it comes back after a reboot"
+                },
+                "nothing changes",
+            )?
         } else {
             eprint!(
-                "  Set up the RTK proxy (routes Claude Code's API traffic through a local daemon)? [y/N] "
+                "  Set up the RTK daemon? It runs your pipeline on the requests Claude Code sends to the model (model routing, tool-result compression and more). [y/N] "
             );
-        }
-        let mut line = String::new();
-        let n = std::io::stdin().lock().read_line(&mut line)?;
-        if n == 0 || !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
+            read_yes()?
+        };
+        if !accepted {
             println!("  Skipped — enable later with `rtk init -g` or `rtk llm-proxy start --env`.");
+            return Ok(());
+        }
+        if missing && !fetch_proxy() {
             return Ok(());
         }
     }
 
-    eprintln!("  How should the daemon come back after a reboot?");
-    eprintln!(
-        "    1) SessionStart hook — start it automatically when a Claude session begins (recommended)"
-    );
-    eprintln!("    2) Background service — `rtk llm-proxy service install`");
-    eprintln!("    3) Neither — print the export line; settings.json is not touched");
-    eprint!("  [1/2/3, default 1] ");
-    let mut choice_line = String::new();
-    let n = std::io::stdin().lock().read_line(&mut choice_line)?;
-    if n == 0 {
-        println!("  No answer — nothing changed. Re-run `rtk init -g` to decide later.");
-        return Ok(());
-    }
-    let choice = match choice_line.trim() {
-        "" | "1" => 1,
-        "2" => 2,
-        "3" => 3,
-        other => {
-            println!("  Unrecognized `{other}` — nothing changed.");
+    let choice = if menu {
+        match crate::core::ask::choose(
+            "  How should the daemon come back after a reboot?",
+            &[
+                (
+                    "SessionStart hook",
+                    "start it automatically when a Claude session begins (recommended)",
+                ),
+                ("Background service", "`rtk llm-proxy service install`"),
+                (
+                    "Neither",
+                    "print the export line; settings.json is not touched",
+                ),
+            ],
+            0,
+        )? {
+            Some(i) => i + 1,
+            None => {
+                println!("  No answer — nothing changed. Re-run `rtk init -g` to decide later.");
+                return Ok(());
+            }
+        }
+    } else {
+        eprintln!("  How should the daemon come back after a reboot?");
+        eprintln!(
+            "    1) SessionStart hook — start it automatically when a Claude session begins (recommended)"
+        );
+        eprintln!("    2) Background service — `rtk llm-proxy service install`");
+        eprintln!("    3) Neither — print the export line; settings.json is not touched");
+        eprint!("  [1/2/3, default 1] ");
+        let mut choice_line = String::new();
+        let n = std::io::stdin().lock().read_line(&mut choice_line)?;
+        if n == 0 {
+            println!("  No answer — nothing changed. Re-run `rtk init -g` to decide later.");
             return Ok(());
+        }
+        match choice_line.trim() {
+            "" | "1" => 1,
+            "2" => 2,
+            "3" => 3,
+            other => {
+                println!("  Unrecognized `{other}` — nothing changed.");
+                return Ok(());
+            }
         }
     };
 
@@ -1276,69 +1499,13 @@ fn ensure_pipeline_extends(builtin: &str, extra_body: &str) -> PipelineChange {
     }
 }
 
-#[cfg(feature = "engine")]
-/// Delegation on-ramp: offer delegated reads. Writes the
-/// adoption block only into a fresh pipeline.toml; an existing file gets the
-/// block printed for the user to merge by hand.
-fn offer_delegation_onramp(patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
-    use std::io::{BufRead, IsTerminal};
-    if !matches!(patch_mode, PatchMode::Ask) {
-        return Ok(());
-    }
-    if ctx.dry_run || !std::io::stdin().is_terminal() {
-        return Ok(());
-    }
-    if crate::core::user_env::var("RTK_ONRAMP_DISABLED").as_deref() == Some("1") {
-        return Ok(());
-    }
-    let loaded = crate::core::pipeline_config::load();
-    if loaded
-        .resolved
-        .tasks
-        .values()
-        .any(|(task, _)| task.upstream.is_some())
-    {
-        return Ok(());
-    }
-
-    eprintln!();
-    eprint!("  Delegate oversize reads to a cheaper model (needs a model API key)? [y/N] ");
-    let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
-    if !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
-        println!(
-            "  Skipped — adopt later with `extends = \"rtk:delegate-reads\"` (see `rtk pipeline show rtk:delegate-reads`)."
-        );
-        return Ok(());
-    }
-
-    const ADOPTION_BODY: &str = "\n[upstream.flash]\nprovider    = \"google\"\nmodel       = \"gemini-2.5-flash\"\napi_key_env = \"GEMINI_API_KEY\"\n\n[task.bulk-read]\nupstream = \"flash\"\n\n[task.code-write]\nupstream = \"flash\"\n";
-    match ensure_pipeline_extends("rtk:delegate-reads", ADOPTION_BODY) {
-        PipelineChange::Created(path) => {
-            println!("  {path}: created with the rtk:delegate-reads adoption block");
-            crate::core::pipeline_cmd::print_auth_guidance(
-                &crate::core::pipeline_config::load().resolved,
-            );
-            println!(
-                "  Set GEMINI_API_KEY (or edit the [upstream.flash] block), then re-run `rtk init -g`."
-            );
-        }
-        PipelineChange::AlreadyActive => {}
-        PipelineChange::ManualNeeded => {
-            println!("  Merge this into your pipeline.toml:");
-            println!("    [pipeline]");
-            println!("    extends = \"rtk:delegate-reads\"");
-            for body_line in ADOPTION_BODY.lines().filter(|l| !l.is_empty()) {
-                println!("    {body_line}");
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Prompt user for consent to patch settings.json.
 pub(super) fn prompt_user_consent(settings_path: &Path) -> Result<bool> {
-    prompt_user_confirmation(&format!("Patch existing {}?", settings_path.display()))
+    prompt_user_confirmation(
+        &format!("Patch existing {}?", settings_path.display()),
+        "add the RTK hook entries to it",
+        "leave it alone and print the lines to add by hand",
+    )
 }
 
 pub fn save_telemetry_consent(accepted: bool) -> Result<()> {
@@ -1351,14 +1518,23 @@ pub fn save_telemetry_consent(accepted: bool) -> Result<()> {
         .context("Failed to save telemetry consent to config.toml")
 }
 
+pub fn ask_telemetry_consent(dry_run: bool) -> Result<()> {
+    if dry_run {
+        return Ok(());
+    }
+    prompt_telemetry_consent()
+}
+
 fn prompt_telemetry_consent() -> Result<()> {
     use std::io::{self, BufRead, IsTerminal};
 
     let config = crate::core::config::Config::load().unwrap_or_default();
-    match config.telemetry.consent_given {
-        Some(true) => return Ok(()),
-        Some(false) => return Ok(()),
-        None => {}
+    if !crate::core::telemetry_cmd::consent_due(
+        config.telemetry.consent_given,
+        config.telemetry.consent_date.as_deref(),
+        chrono::Utc::now(),
+    ) {
+        return Ok(());
     }
 
     // Explicit opt-out must short-circuit before the TTY heuristic: some
@@ -1386,16 +1562,33 @@ fn prompt_telemetry_consent() -> Result<()> {
     eprintln!("           request erasure with `rtk telemetry forget`");
     eprintln!("  Details: https://github.com/rtk-ai/rtk/blob/master/docs/TELEMETRY.md");
     eprintln!();
-    eprint!("Enable anonymous telemetry? [y/N] ");
+    if let (Some(answer), Some(date)) = (
+        config.telemetry.consent_given,
+        config.telemetry.consent_date.as_deref(),
+    ) {
+        eprintln!(
+            "You answered {} on {}. RTK asks again every {} months.",
+            if answer { "Yes" } else { "No" },
+            date.get(..10).unwrap_or(date),
+            crate::core::telemetry_cmd::CONSENT_VALID_MONTHS
+        );
+        eprintln!();
+    }
 
-    let stdin = io::stdin();
-    let mut line = String::new();
-    stdin
-        .lock()
-        .read_line(&mut line)
-        .context("Failed to read user input")?;
-
-    let accepted = {
+    let accepted = if crate::core::ask::interactive() {
+        crate::core::ask::confirm(
+            "Enable anonymous telemetry?",
+            "send the daily metrics described above",
+            "send nothing",
+        )?
+    } else {
+        eprint!("Enable anonymous telemetry? [y/N] ");
+        let stdin = io::stdin();
+        let mut line = String::new();
+        stdin
+            .lock()
+            .read_line(&mut line)
+            .context("Failed to read user input")?;
         let response = line.trim().to_lowercase();
         response == "y" || response == "yes"
     };
@@ -1669,6 +1862,27 @@ pub fn uninstall_with_patch_mode(
     let cursor_removed = remove_cursor_hooks(ctx)?;
     removed.extend(cursor_removed);
 
+    #[cfg(feature = "engine")]
+    match crate::core::deps::remove_all(dry_run) {
+        Ok(dirs) => removed.extend(dirs.into_iter().map(|dir| {
+            format!(
+                "pipeline dependency: stopped and removed {} (data it keeps elsewhere, such as a model cache, is not removed)",
+                dir.display()
+            )
+        })),
+        Err(e) => eprintln!("  [warn] pipeline dependencies were not removed: {e:#}"),
+    }
+
+    #[cfg(feature = "engine")]
+    match crate::core::proxy_download::remove(dry_run) {
+        Ok(files) => removed.extend(
+            files
+                .into_iter()
+                .map(|file| format!("rtk-proxy downloaded by rtk: removed {}", file.display())),
+        ),
+        Err(e) => eprintln!("  [warn] the rtk-proxy rtk downloaded was not removed: {e:#}"),
+    }
+
     // Report results
     if removed.is_empty() {
         println!("RTK was not installed (nothing to remove)");
@@ -1869,13 +2083,15 @@ pub(super) fn insert_hook_entry(
         .as_array_mut()
         .with_context(|| format!("{event_key} value is not an array"))?;
 
-    event_array.push(serde_json::json!({
-        "matcher": matcher,
-        "hooks": [{
-            "type": "command",
-            "command": hook_command
-        }]
-    }));
+    let hooks = serde_json::json!([{
+        "type": "command",
+        "command": hook_command
+    }]);
+    event_array.push(if matcher.is_empty() {
+        serde_json::json!({ "hooks": hooks })
+    } else {
+        serde_json::json!({ "matcher": matcher, "hooks": hooks })
+    });
     Ok(())
 }
 
@@ -3136,6 +3352,8 @@ level = "high"
 
     #[test]
     fn test_uninstall_handles_both_artifacts() {
+        #[cfg(feature = "engine")]
+        let _deps = crate::core::deps::test_root_lock();
         let temp = TempDir::new().expect("create isolated home");
         with_claude_dir_override(&temp, |claude_dir| {
             let claude_md = claude_dir.join(CLAUDE_MD);
@@ -3166,6 +3384,8 @@ level = "high"
 
     #[test]
     fn test_uninstall_preserves_prose_without_exact_rtk_reference() {
+        #[cfg(feature = "engine")]
+        let _deps = crate::core::deps::test_root_lock();
         let temp = TempDir::new().expect("create isolated home");
         with_claude_dir_override(&temp, |claude_dir| {
             let claude_md = claude_dir.join(CLAUDE_MD);
@@ -3194,6 +3414,8 @@ level = "high"
 
     #[test]
     fn test_uninstall_dry_run_preserves_instruction_artifacts() {
+        #[cfg(feature = "engine")]
+        let _deps = crate::core::deps::test_root_lock();
         let temp = TempDir::new().expect("create isolated home");
         with_claude_dir_override(&temp, |claude_dir| {
             let claude_md = claude_dir.join(CLAUDE_MD);

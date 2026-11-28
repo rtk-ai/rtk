@@ -828,7 +828,7 @@ Modules with Exit Code Preservation:
 
 > For config file format, recall/tee settings, tracking database path, and TOML filter tiers, see [src/core/README.md](../../src/core/README.md).
 
-Two tiers: **User settings** (`~/.config/rtk/config.toml`) and **LLM integration** (CLAUDE.md via `rtk init`).
+Two tiers: **User settings** (`~/.config/rtk/config.toml`) and **LLM integration** (the agent's hook and awareness file, via `rtk init`).
 
 ### Initialization Flow
 
@@ -837,30 +837,34 @@ Two tiers: **User settings** (`~/.config/rtk/config.toml`) and **LLM integration
 │                      rtk init Workflow                                 │
 └────────────────────────────────────────────────────────────────────────┘
 
-$ rtk init [--global]
+$ rtk init [-g] [--agent <name>] [--pipeline <name>]
       ↓
-Check existing CLAUDE.md:
-  • --global? → ~/.config/rtk/CLAUDE.md
-  • else      → ./CLAUDE.md
+Agent named, no terminal, CI, --auto-patch, --no-patch or --dry-run?
+  ├─ Yes → that agent (Claude Code when none is named, with a stderr hint)
+  └─ No  → checkbox menu of the agents the scope supports
+           (agents whose config directory exists are ticked)
       ↓
-      ├─ Exists? → Warn user, ask to overwrite
-      └─ Not exists? → Continue
+-g in the menu flow, or --pipeline given?   (full edition only)
+  └─ Yes → reviewed-pipeline menu (or the named one), pinned to its
+           reviewed commit. src/core/pipeline_needs.rs reads what it
+           needs (dependencies, local services, the RTK daemon) and
+           installs or asks for each; unmet → not installed, yellow
+           alert, previous pipelines kept (exit 1 without a terminal)
       ↓
-Prompt: "Initialize rtk for LLM usage? [y/N]"
-      ↓ Yes
-Write template:
-┌─────────────────────────────────────┐
-│ # CLAUDE.md                         │
-│                                     │
-│ Use `rtk` prefix for commands:      │
-│ - rtk git status                    │
-│ - rtk lint                          │
-│ - rtk test                          │
-│                                     │
-│ Benefits: ≥20% less bash output     │
-└─────────────────────────────────────┘
+For each agent: its own mode (src/hooks/init/<agent>.rs)
+  Claude Code, global:
+    • ~/.claude/RTK.md          awareness file (awareness.level)
+    • ~/.claude/CLAUDE.md       @RTK.md reference
+    • ~/.claude/settings.json   `rtk hook claude` for the events the
+                                active pipeline uses, after
+                                "Patch existing …/settings.json?"
+                                (backup: settings.json.bak)
+    • RTK daemon question when rtk-proxy is installed
+  Claude Code, project:
+    • ./CLAUDE.md               RTK block
+    • .rtk/filters.toml         template
       ↓
-Success: "✓ Initialized rtk for LLM integration"
+Telemetry consent (asked once, default No)
 ```
 
 ---

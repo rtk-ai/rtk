@@ -144,11 +144,21 @@ fn patch_vibe_hooks_toml(
                 hooks_path.display()
             );
         } else {
-            print!("Patch {} with RTK hook? [y/N] ", hooks_path.display());
-            std::io::stdout().flush().ok();
-            let mut answer = String::new();
-            std::io::stdin().read_line(&mut answer).ok();
-            if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+            let question = format!("Patch {} with RTK hook?", hooks_path.display());
+            let accepted = if crate::core::ask::interactive() {
+                crate::core::ask::confirm(
+                    &question,
+                    "add the RTK hook entry",
+                    "add the hook by hand later",
+                )?
+            } else {
+                print!("{question} [y/N] ");
+                std::io::stdout().flush().ok();
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer).ok();
+                matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
+            };
+            if !accepted {
                 println!(
                     "Skipped. Re-run with --auto-patch, or add the hook manually to {}",
                     hooks_path.display()

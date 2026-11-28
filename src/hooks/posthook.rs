@@ -65,7 +65,11 @@ fn apply_terminal(
 pub fn run(event: &Value) {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| process(event)));
     if let Ok(Some((output, loaded))) = outcome {
-        let _ = writeln!(io::stdout(), "{output}");
+        let _ = writeln!(
+            io::stdout(),
+            "{}",
+            crate::core::notice::claude_answer(&output)
+        );
         pipeline_config::write_status(&loaded);
         pipeline_log::flush();
     } else if let Ok(None) = outcome {

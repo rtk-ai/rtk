@@ -13,7 +13,7 @@ RTK ships as **three downloads**. Which one you want depends on what you need an
 |---|---|---|---|
 | `rtk-<target>` | `rtk` | Apache-2.0 + BUSL-1.1 | Hook core, every command filter, **and** the compression engine |
 | `rtk-oss-<target>` | `rtk` | Apache-2.0 only | Hook core and every command filter. No engine. |
-| `rtk-proxy-<target>` | `rtk-proxy` | BUSL-1.1 | The RTK Proxy daemon. Never bundled with either `rtk`. |
+| `rtk-proxy-<target>` | `rtk-proxy` | BUSL-1.1 | The RTK Proxy daemon. Never bundled with either `rtk`; `rtk init -g` downloads it when you set the daemon up. |
 
 The two `rtk` downloads install a binary with the **same name**, so hooks, scripts and agent configuration work unchanged across editions. They cannot be installed side by side.
 
@@ -23,7 +23,7 @@ The two `rtk` downloads install a binary with the **same name**, so hooks, scrip
 
 **Install the Apache-2.0 edition** if your organisation requires that every binary it runs carry an OSI-approved licence, or if you intend to redistribute RTK as part of a commercial offering.
 
-**Add `rtk-proxy`** only if you want the [RTK Proxy](../proxy/overview.md). It is independent of both `rtk` editions.
+**Add `rtk-proxy`** only if you want the [RTK Proxy](../proxy/overview.md). It is independent of both `rtk` editions. With the `rtk` edition, `rtk init -g` downloads it for you when you answer Yes to the daemon question; the Apache-2.0 edition never offers it.
 
 ## What the Apache-2.0 edition leaves out
 
@@ -36,8 +36,9 @@ It is the same binary minus the compression engine. What that removes:
 | `rtk tasks` | Listing and running delegation tasks |
 | PostToolUse compression | Compressing the output of an agent's own `Read` and MCP tools |
 | Pipeline files | A `pipeline.toml` on disk is inert, exactly as in a build predating the engine |
+| Pipeline and daemon steps of `rtk init` | The reviewed-pipeline menu, `rtk init --pipeline` (it says it needs the full edition), and the question offering the RTK daemon |
 
-**What stays is the part you use all day.** The PreToolUse rewrite hook — the mechanism that turns your agent's `git status` into `rtk git status` — is Apache-2.0 and behaves identically. So does every command filter, `rtk init`, `rtk gain`, `rtk discover`, `rtk session`, `rtk recall`, and `rtk llm-proxy`.
+**What stays is the part you use all day.** The PreToolUse rewrite hook — the mechanism that turns your agent's `git status` into `rtk git status` — is Apache-2.0 and behaves identically. So does every command filter, `rtk init` and its agent menu, `rtk gain`, `rtk discover`, `rtk session`, `rtk recall`, and `rtk llm-proxy`.
 
 The practical difference: bash output is filtered exactly as in the full edition; output your agent reads through its *own* file and MCP tools is not.
 

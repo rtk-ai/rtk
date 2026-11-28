@@ -201,10 +201,22 @@ pub fn print_auth_guidance(resolved: &rtk_engine::pipeline::Resolved) {
         if std::env::var(&env).is_ok_and(|v| !v.is_empty()) {
             continue;
         }
-        println!(
-            "auth needed: export {env}=...   (upstream `{upstream}` — {})",
-            users.join(", ")
-        );
+        let local = resolved
+            .upstreams
+            .get(&upstream)
+            .and_then(|(u, _)| u.base_url.as_deref())
+            .and_then(rtk_engine::pipeline::url_authority)
+            .filter(|a| rtk_engine::pipeline::local_listen(a));
+        match local {
+            Some(address) => println!(
+                "key not set: {env} (upstream `{upstream}` — {}); rtk calls the local service on {address} without one, export it if that service needs one",
+                users.join(", ")
+            ),
+            None => println!(
+                "auth needed: export {env}=...   (upstream `{upstream}` — {})",
+                users.join(", ")
+            ),
+        }
     }
 }
 
@@ -370,6 +382,95 @@ pub(crate) fn scan_for_secrets(sources: &[(String, String)]) -> Vec<String> {
     out
 }
 
+pub(crate) fn sharing_notice(sources: &[(String, String)]) {
+    let installs = sources.iter().any(|(label, text)| {
+        rtk_engine::pipeline::parse(text, label)
+            .file
+            .is_some_and(|file| !file.dependencies.is_empty())
+    });
+    if !installs {
+        return;
+    }
+    let page = crate::core::pipeline_catalog::CATALOG_PAGE;
+    warning_panel_err(
+        "This pipeline installs software on the computers that add it",
+        &[
+            &format!(
+                "rtk-ai verifies and approves every pipeline before it enters the catalog ({page}), and refuses pipelines from untrusted sources and dependencies it cannot verify."
+            ),
+            "Anyone who adds it from this share installs its dependencies at their own risk, and only after rtk asks them.",
+            &format!("To submit it for review, see {page}"),
+        ],
+    );
+    eprintln!();
+}
+
+pub(crate) fn sign_sources(sources: &mut [(String, String)]) {
+    let Some(login) = gh_login() else {
+        return;
+    };
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    for (_, text) in sources.iter_mut() {
+        *text = with_author(text, &login, &date);
+    }
+}
+
+fn gh_login() -> Option<String> {
+    let out = std::process::Command::new("gh")
+        .args(["api", "user", "--jq", ".login"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let login = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && valid_login(&login)).then_some(login)
+}
+
+fn valid_login(login: &str) -> bool {
+    !login.is_empty()
+        && login.len() <= 39
+        && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+const AUTHOR_PREFIX: &str = "# author: @";
+
+fn with_author(text: &str, login: &str, date: &str) -> String {
+    let rest: String = text
+        .lines()
+        .filter(|line| !line.starts_with(AUTHOR_PREFIX))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    format!("{AUTHOR_PREFIX}{login} · shared with rtk pipeline share · {date}\n{rest}")
+}
+
+fn shared_author(toml: &str) -> Option<String> {
+    toml.lines()
+        .take_while(|line| line.trim_start().starts_with('#') || line.trim().is_empty())
+        .find_map(|line| line.trim_start().strip_prefix(AUTHOR_PREFIX))
+        .map(|rest| {
+            rest.chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect::<String>()
+        })
+        .filter(|login| valid_login(login))
+}
+
+fn source_owner(source: &str) -> Option<String> {
+    if let Some(src) = crate::core::pipeline_remote::parse_github_source(source) {
+        return Some(src.owner);
+    }
+    let rest = [
+        "https://gist.github.com/",
+        "https://gist.githubusercontent.com/",
+        "https://github.com/",
+        "https://raw.githubusercontent.com/",
+    ]
+    .iter()
+    .find_map(|prefix| source.strip_prefix(prefix))?;
+    let mut parts = rest.split('/');
+    let owner = parts.next()?;
+    (parts.next().is_some_and(|p| !p.is_empty()) && valid_login(owner)).then(|| owner.to_string())
+}
+
 pub(crate) fn gh_available() -> bool {
     std::process::Command::new("gh")
         .arg("--version")
@@ -475,9 +576,8 @@ pub(crate) fn publish_gist(
     force: bool,
 ) -> Result<i32> {
     print_publish_warning();
-    if crate::core::pipeline_remote::interactive() {
-        if !crate::core::pipeline_remote::prompt("I understand — continue? [y/N] ")?
-            .eq_ignore_ascii_case("y")
+    if crate::core::ask::interactive() {
+        if !crate::core::ask::prompt("I understand — continue? [y/N] ")?.eq_ignore_ascii_case("y")
         {
             println!("not published");
             return Ok(1);
@@ -551,12 +651,74 @@ pub(crate) fn publish_gist(
     Ok(0)
 }
 
+pub(crate) enum Added {
+    Live,
+    Declined,
+    Unmet,
+    Code(i32),
+}
+
 pub fn run_add(
     source: &str,
     name_override: Option<&str>,
     force: bool,
     shadow: bool,
 ) -> Result<i32> {
+    use crate::core::pipeline_needs::Consent;
+    let consent = if crate::core::ask::interactive() && !crate::core::ask::in_ci() {
+        Consent::Ask
+    } else {
+        Consent::NoTerminal
+    };
+    let rerun = format!(
+        "rtk pipeline add {}",
+        crate::core::utils::sanitize_for_terminal(source)
+    );
+    let added = add_pipeline(
+        source,
+        name_override,
+        force,
+        shadow,
+        false,
+        (consent, None),
+        &rerun,
+    )?;
+    Ok(match added {
+        Added::Live | Added::Declined => 0,
+        Added::Unmet => 1,
+        Added::Code(code) => code,
+    })
+}
+
+pub(crate) fn install_from_init(
+    source: &str,
+    consent: crate::core::pipeline_needs::Consent,
+    review: crate::core::deps::Review,
+    rerun: &str,
+) -> Result<Added> {
+    add_pipeline(
+        source,
+        None,
+        true,
+        false,
+        true,
+        (consent, Some(review)),
+        rerun,
+    )
+}
+
+fn add_pipeline(
+    source: &str,
+    name_override: Option<&str>,
+    force: bool,
+    shadow: bool,
+    from_init: bool,
+    (consent, review): (
+        crate::core::pipeline_needs::Consent,
+        Option<crate::core::deps::Review>,
+    ),
+    rerun: &str,
+) -> Result<Added> {
     let (raw, pin) = match crate::core::pipeline_remote::parse_github_source(source) {
         Some(src) => {
             let fetched = crate::core::pipeline_remote::fetch_github_pipeline(&src)?;
@@ -609,7 +771,7 @@ pub fn run_add(
         );
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
         warning_panel_err("Refused: api_key_command", &refs);
-        return Ok(1);
+        return Ok(Added::Code(1));
     }
     let loaded = pipeline_config::load_candidate(&toml, &name);
     print_diagnostics(&loaded);
@@ -632,7 +794,7 @@ pub fn run_add(
             );
         }
         eprintln!("not installed — fix the errors above");
-        return Ok(1);
+        return Ok(Added::Code(1));
     }
 
     println!();
@@ -667,6 +829,24 @@ pub fn run_add(
         );
         println!("    you alone are responsible for any plugin you build and run.");
     }
+    if let Some(author) = shared_author(&toml) {
+        use colored::Colorize;
+        match source_owner(source) {
+            Some(owner) if owner.eq_ignore_ascii_case(&author) => {
+                println!("    author: @{author}, the owner of its source")
+            }
+            Some(owner) => println!(
+                "    {}",
+                format!(
+                    "[warn] its header says @{author} wrote it, but its source belongs to @{owner}"
+                )
+                .yellow()
+            ),
+            None => println!(
+                "    author: @{author} (from its header; this source has no GitHub owner to check it against)"
+            ),
+        }
+    }
     if let Some((src, sha)) = &pin {
         match sha {
             Some(sha) => println!(
@@ -691,9 +871,41 @@ pub fn run_add(
         if *old == toml {
             println!("`{name}` is already installed and identical — nothing to change");
             if let Some((src, sha)) = &pin {
-                crate::core::pipeline_remote::record_install(&name, src, sha.as_deref());
+                crate::core::pipeline_remote::record_install(&name, src, sha.as_deref(), &toml);
             }
-            return Ok(0);
+            let needs = crate::core::pipeline_needs::of(&loaded.resolved, &name);
+            if needs.is_empty() {
+                return Ok(Added::Live);
+            }
+            let review = match review {
+                Some(review) => review,
+                None if consent == crate::core::pipeline_needs::Consent::NoTerminal => {
+                    crate::core::deps::Review::Unreviewed
+                }
+                None => catalog_review(pin.as_ref()),
+            };
+            let settled = crate::core::pipeline_needs::settle(
+                &needs,
+                &name,
+                &review,
+                consent,
+                &format!("{name} stays installed without it"),
+            )?;
+            if settled == crate::core::pipeline_needs::Settled::Met {
+                return Ok(Added::Live);
+            }
+            crate::core::pipeline_needs::alert(
+                &name,
+                &settled,
+                "stays installed, but parts of it cannot run",
+                &crate::core::pipeline_needs::running_now(""),
+                rerun,
+            );
+            return Ok(if settled.exit_code() == 0 {
+                Added::Declined
+            } else {
+                Added::Unmet
+            });
         }
         let mut lines = vec![format!(
             "`{name}` is already installed — what you install REPLACES the live version."
@@ -727,7 +939,7 @@ pub fn run_add(
     match choose_install_mode(existing.is_some(), force, shadow)? {
         InstallMode::Quit => {
             println!("nothing installed");
-            return Ok(1);
+            return Ok(Added::Code(1));
         }
         InstallMode::Shadow => {
             let sdir = pipeline_config::shadow_pipelines_dir().context("no config directory")?;
@@ -736,7 +948,7 @@ pub fn run_add(
             std::fs::write(&sdest, &toml).with_context(|| format!("write {}", sdest.display()))?;
             pipeline_config::set_eval_candidate(Some(&name)).context("write eval state")?;
             if let Some((src, sha)) = &pin {
-                crate::core::pipeline_remote::record_install(&name, src, sha.as_deref());
+                crate::core::pipeline_remote::record_install(&name, src, sha.as_deref(), &toml);
             }
             println!("trying `{name}` silently — measured on your sessions, applied to nothing.");
             if existing.is_some() {
@@ -745,35 +957,77 @@ pub fn run_add(
             println!("  measure:   rtk pipeline eval {name}      (after a few sessions)");
             println!("  go live:   rtk pipeline promote {name}");
             println!("  discard:   rtk pipeline promote {name} --discard");
-            return Ok(0);
+            return Ok(Added::Code(0));
         }
         InstallMode::Live => {}
     }
+    let needs = crate::core::pipeline_needs::of(&loaded.resolved, &name);
+    if !needs.is_empty() {
+        let review = match review {
+            Some(review) => review,
+            None if consent == crate::core::pipeline_needs::Consent::NoTerminal => {
+                crate::core::deps::Review::Unreviewed
+            }
+            None => catalog_review(pin.as_ref()),
+        };
+        let refusal = if existing.is_some() {
+            format!("{name} is not updated; the installed version stays")
+        } else {
+            format!("{name} is not installed")
+        };
+        let settled =
+            crate::core::pipeline_needs::settle(&needs, &name, &review, consent, &refusal)?;
+        if settled != crate::core::pipeline_needs::Settled::Met {
+            let (outcome, running) = if existing.is_some() {
+                (
+                    "is not updated",
+                    crate::core::pipeline_needs::running_now(""),
+                )
+            } else {
+                (
+                    "is not installed",
+                    crate::core::pipeline_needs::running_now(&name),
+                )
+            };
+            crate::core::pipeline_needs::alert(&name, &settled, outcome, &running, rerun);
+            return Ok(if settled.exit_code() == 0 {
+                Added::Declined
+            } else {
+                Added::Unmet
+            });
+        }
+    }
+    if from_init && let Some(old) = &existing {
+        let untouched = crate::core::pipeline_remote::install_origin(&name)
+            .and_then(|o| o.content)
+            .is_some_and(|c| c == crate::core::pipeline_remote::content_digest(old));
+        if !untouched {
+            let backup = pipeline_config::backup_path(&dir, &name);
+            std::fs::rename(&dest, &backup)
+                .with_context(|| format!("move {} to {}", dest.display(), backup.display()))?;
+            println!(
+                "your previous {name}.toml differs from what rtk installed; it is kept as {}",
+                backup.display()
+            );
+        }
+    }
     std::fs::write(&dest, &toml).with_context(|| format!("write {}", dest.display()))?;
-    if let Some((src, sha)) = &pin {
-        crate::core::pipeline_remote::record_install(&name, src, sha.as_deref());
+    match &pin {
+        Some((src, sha)) => {
+            crate::core::pipeline_remote::record_install(&name, src, sha.as_deref(), &toml)
+        }
+        None => crate::core::pipeline_remote::forget_install(&name),
     }
 
     println!("installed: {}", dest.display());
     print_auth_guidance(&loaded.resolved);
-    let wants_proxy = loaded.resolved.extends.iter().any(|e| e == "rtk:proxy")
-        || loaded
-            .resolved
-            .rules
-            .iter()
-            .filter(|(p, _)| p.site == rtk_engine::pipeline::SiteKind::Proxy)
-            .flat_map(|(_, rules)| rules)
-            .any(|r| !BUILTIN_NAMES.contains(&r.origin.as_str()));
-    if wants_proxy {
-        println!("this pipeline has proxy rules — start the daemon: rtk llm-proxy start");
-    }
     let has_after_tool = loaded
         .resolved
         .rules
         .keys()
         .any(|p| p.site == rtk_engine::pipeline::SiteKind::Hook && p.event == Event::AfterTool);
     let has_directives = loaded.resolved.directives.iter().any(|d| d.def.enabled);
-    if has_after_tool || has_directives {
+    if (has_after_tool || has_directives) && !from_init {
         let what = match (has_after_tool, has_directives) {
             (true, true) => "output compression and directives",
             (true, false) => "output compression",
@@ -784,7 +1038,23 @@ pub fn run_add(
         );
     }
     println!("active now, merged with your other pipelines — see `rtk pipeline show`");
-    Ok(0)
+    Ok(Added::Live)
+}
+
+fn catalog_review(pin: Option<&(String, Option<String>)>) -> crate::core::deps::Review {
+    use crate::core::deps::Review;
+    let Some((source, Some(sha))) = pin else {
+        return Review::Unreviewed;
+    };
+    let reviewed = crate::core::pipeline_catalog::load()
+        .entries
+        .iter()
+        .any(|entry| entry.canonical() == *source && entry.sha.as_deref() == Some(sha.as_str()));
+    if reviewed {
+        Review::Reviewed(sha.clone())
+    } else {
+        Review::Unreviewed
+    }
 }
 
 enum InstallMode {
@@ -800,7 +1070,7 @@ fn choose_install_mode(updating: bool, force: bool, shadow: bool) -> Result<Inst
     if force {
         return Ok(InstallMode::Live);
     }
-    if !crate::core::pipeline_remote::interactive() {
+    if !crate::core::ask::interactive() {
         if updating {
             anyhow::bail!(
                 "refusing to replace an installed pipeline non-interactively — pass --force \
@@ -840,13 +1110,11 @@ fn choose_install_mode(updating: bool, force: bool, shadow: bool) -> Result<Inst
             0,
         )
     };
-    Ok(
-        match crate::core::pipeline_remote::select_menu(items, default)? {
-            Some(0) => InstallMode::Live,
-            Some(1) => InstallMode::Shadow,
-            _ => InstallMode::Quit,
-        },
-    )
+    Ok(match crate::core::ask::select_menu(items, default)? {
+        Some(0) => InstallMode::Live,
+        Some(1) => InstallMode::Shadow,
+        _ => InstallMode::Quit,
+    })
 }
 
 /// `rtk pipeline promote <name>` — move a shadow install live (or discard
@@ -904,10 +1172,10 @@ pub fn run_promote(name: &str, discard: bool, force: bool) -> Result<i32> {
         ],
     );
     if !force {
-        if !crate::core::pipeline_remote::interactive() {
+        if !crate::core::ask::interactive() {
             anyhow::bail!("refusing to promote non-interactively — pass --force");
         }
-        if !crate::core::pipeline_remote::prompt("promote? [y/N] ")?.eq_ignore_ascii_case("y") {
+        if !crate::core::ask::prompt("promote? [y/N] ")?.eq_ignore_ascii_case("y") {
             println!("kept in shadow — nothing changed");
             return Ok(1);
         }
@@ -1197,7 +1465,10 @@ pub fn run_share(name: Option<&str>, force_md: bool, gist: bool, force: bool) ->
     // A terminal gets the screenshot-able card; a pipe or redirect gets the
     // paste-ready markdown, so `rtk pipeline share > card.md` keeps working
     // and the two renderings never mix on one stream.
+    sharing_notice(&card.sources);
     if gist {
+        let mut card = card;
+        sign_sources(&mut card.sources);
         let card_md = card.card_md();
         return publish_gist(&card.display, &card.sources, &card_md, force);
     }
@@ -1665,6 +1936,9 @@ pub fn run_status() -> Result<i32> {
             let loaded = load_for_cli();
             println!("active: {}", loaded.resolved.name);
             print_auth_guidance(&loaded.resolved);
+            for line in crate::core::deps::status_lines(&loaded.resolved) {
+                println!("{line}");
+            }
             let has_proxy_rules = loaded
                 .resolved
                 .rules
@@ -2170,6 +2444,49 @@ pub fn run_methods_list() -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    use super::{AUTHOR_PREFIX, shared_author, source_owner, with_author};
+
+    #[test]
+    fn a_shared_pipeline_carries_one_author_header() {
+        let signed = with_author(
+            "# old note\n[pipeline]\nname = \"p\"\n",
+            "alice",
+            "2026-11-24",
+        );
+        assert_eq!(
+            signed,
+            "# author: @alice · shared with rtk pipeline share · 2026-11-24\n# old note\n[pipeline]\nname = \"p\"\n"
+        );
+        let resigned = with_author(&signed, "bob", "2026-11-25");
+        assert_eq!(resigned.matches(AUTHOR_PREFIX).count(), 1);
+        assert_eq!(shared_author(&resigned).as_deref(), Some("bob"));
+        assert_eq!(shared_author("[pipeline]\n# author: @late\n"), None);
+        assert_eq!(
+            shared_author("# author: @bad;login\n"),
+            Some("bad".to_string())
+        );
+        assert_eq!(shared_author("# no header\n"), None);
+    }
+
+    #[test]
+    fn the_source_owner_comes_from_where_it_was_fetched() {
+        assert_eq!(source_owner("github:acme/pipes").as_deref(), Some("acme"));
+        assert_eq!(
+            source_owner("https://gist.github.com/alice/0123abcd").as_deref(),
+            Some("alice")
+        );
+        assert_eq!(
+            source_owner("https://gist.githubusercontent.com/alice/0123abcd/raw").as_deref(),
+            Some("alice")
+        );
+        assert_eq!(
+            source_owner("https://raw.githubusercontent.com/acme/pipes/main/p.toml").as_deref(),
+            Some("acme")
+        );
+        assert_eq!(source_owner("https://example.com/alice/p.toml"), None);
+        assert_eq!(source_owner("./p.toml"), None);
+        assert_eq!(source_owner("https://gist.github.com/alice"), None);
+    }
     use rtk_engine::pipeline::{
         BUILTIN_NAMES, Scope, SourceFile, ValidateCtx, builtin_text, has_errors, parse, resolve,
         validate,

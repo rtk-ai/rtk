@@ -5,6 +5,25 @@ use clap::Subcommand;
 
 pub(crate) const TELEMETRY_DISABLED_ENV: &str = "RTK_TELEMETRY_DISABLED";
 const TELEMETRY_DISABLED_VALUE: &str = "1";
+pub(crate) const CONSENT_VALID_MONTHS: u32 = 6;
+
+pub(crate) fn consent_renewal(consent_date: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(consent_date?)
+        .ok()?
+        .with_timezone(&chrono::Utc)
+        .checked_add_months(chrono::Months::new(CONSENT_VALID_MONTHS))
+}
+
+pub(crate) fn consent_due(
+    consent_given: Option<bool>,
+    consent_date: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    match consent_given {
+        None => true,
+        Some(_) => consent_renewal(consent_date).is_some_and(|renewal| now >= renewal),
+    }
+}
 
 /// Label for the `device hash` row when no salt file exists.
 ///
@@ -92,7 +111,7 @@ pub fn run(command: &TelemetrySubcommand) -> Result<()> {
 /// `RTK_TELEMETRY_DISABLED` env var (value `"1"`).
 ///
 /// Single source of truth for the env opt-out so the consent prompt
-/// (`init::prompt_telemetry_consent`), the status command, and
+/// (`init::ask_telemetry_consent`), the status command, and
 /// `telemetry::maybe_ping` never diverge — if the accepted values ever grow
 /// (e.g. `"true"`, `"y"`), they change here once.
 pub fn telemetry_disabled_by_env() -> bool {
@@ -120,6 +139,14 @@ fn run_status() -> Result<()> {
     println!("  consent:       {}", consent_str);
     if let Some(date) = &config.telemetry.consent_date {
         println!("  consent date:  {}", date);
+    }
+    if config.telemetry.consent_given.is_some()
+        && let Some(renewal) = consent_renewal(config.telemetry.consent_date.as_deref())
+    {
+        println!(
+            "  asked again:   at the first interactive `rtk init` after {}",
+            renewal.format("%Y-%m-%d")
+        );
     }
     println!("  enabled:       {}", enabled_str);
     if env_override {
@@ -270,6 +297,34 @@ fn send_erasure_request(device_hash: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at(date: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(date)
+            .expect("test date")
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn an_answer_is_kept_six_months_then_asked_again() {
+        let given = Some("2026-05-01T10:00:00+00:00");
+        assert!(consent_due(None, None, at("2026-05-01T10:00:00Z")));
+        assert!(!consent_due(Some(true), given, at("2026-10-31T10:00:00Z")));
+        assert!(!consent_due(Some(false), given, at("2026-11-01T09:59:59Z")));
+        assert!(consent_due(Some(false), given, at("2026-11-01T10:00:00Z")));
+        assert!(consent_due(Some(true), given, at("2027-03-01T00:00:00Z")));
+    }
+
+    #[test]
+    fn an_answer_without_a_readable_date_is_kept() {
+        let now = at("2030-01-01T00:00:00Z");
+        assert!(!consent_due(Some(false), None, now));
+        assert!(!consent_due(Some(true), Some("last spring"), now));
+        assert_eq!(consent_renewal(Some("not a date")), None);
+        assert_eq!(
+            consent_renewal(Some("2026-08-31T12:00:00+02:00")).map(|d| d.to_rfc3339()),
+            Some("2027-02-28T10:00:00+00:00".to_string())
+        );
+    }
 
     /// Regression for #1307: the env opt-out must short-circuit telemetry
     /// consent paths so `rtk init` cannot hang in non-interactive environments.
