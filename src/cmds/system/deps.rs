@@ -27,47 +27,44 @@ pub fn run(path: &Path, verbose: u8) -> Result<()> {
     }
 
     let mut found = false;
+    let mut summarized = false;
     let mut rtk = String::new();
     let mut raw = String::new();
+    let mut failures = Vec::new();
 
-    let cargo_path = dir.join("Cargo.toml");
-    if cargo_path.exists() {
+    type Summarizer = fn(&Path) -> Result<String>;
+    let manifests: [(&str, &str, Summarizer); 5] = [
+        ("Cargo.toml", "Rust", summarize_cargo_str),
+        ("package.json", "Node.js", summarize_package_json_str),
+        ("requirements.txt", "Python", summarize_requirements_str),
+        ("pyproject.toml", "Python", summarize_pyproject_str),
+        ("go.mod", "Go", summarize_gomod_str),
+    ];
+
+    for (filename, language, summarize) in manifests {
+        let manifest = dir.join(filename);
+        if !manifest.exists() {
+            continue;
+        }
         found = true;
-        raw.push_str(&fs::read_to_string(&cargo_path).unwrap_or_default());
-        rtk.push_str("Rust (Cargo.toml):\n");
-        rtk.push_str(&summarize_cargo_str(&cargo_path)?);
+        match summarize(&manifest) {
+            Ok(summary) => {
+                raw.push_str(&fs::read_to_string(&manifest).unwrap_or_default());
+                summarized = true;
+                rtk.push_str(&format!("{} ({}):\n", language, filename));
+                rtk.push_str(&summary);
+            }
+            Err(error) => failures.push(error),
+        }
     }
 
-    let package_path = dir.join("package.json");
-    if package_path.exists() {
-        found = true;
-        raw.push_str(&fs::read_to_string(&package_path).unwrap_or_default());
-        rtk.push_str("Node.js (package.json):\n");
-        rtk.push_str(&summarize_package_json_str(&package_path)?);
+    // Diagnostics are separate from the compacted output: never_worse may
+    // choose raw manifest text, but must not hide a failed section (#3767).
+    for error in &failures {
+        eprintln!("rtk deps: warning: {error:#}");
     }
-
-    let requirements_path = dir.join("requirements.txt");
-    if requirements_path.exists() {
-        found = true;
-        raw.push_str(&fs::read_to_string(&requirements_path).unwrap_or_default());
-        rtk.push_str("Python (requirements.txt):\n");
-        rtk.push_str(&summarize_requirements_str(&requirements_path)?);
-    }
-
-    let pyproject_path = dir.join("pyproject.toml");
-    if pyproject_path.exists() {
-        found = true;
-        raw.push_str(&fs::read_to_string(&pyproject_path).unwrap_or_default());
-        rtk.push_str("Python (pyproject.toml):\n");
-        rtk.push_str(&summarize_pyproject_str(&pyproject_path)?);
-    }
-
-    let gomod_path = dir.join("go.mod");
-    if gomod_path.exists() {
-        found = true;
-        raw.push_str(&fs::read_to_string(&gomod_path).unwrap_or_default());
-        rtk.push_str("Go (go.mod):\n");
-        rtk.push_str(&summarize_gomod_str(&gomod_path)?);
+    if !summarized && let Some(error) = failures.pop() {
+        return Err(error.context("No dependency manifest could be summarized"));
     }
 
     if !found {
