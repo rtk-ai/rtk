@@ -896,6 +896,52 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "subprocess fixture for missing_tracking_tables_keep_telemetry_reads_silent"]
+    fn payload_read_with_missing_tracking_table() {
+        let dir = crate::core::test_isolation::tempdir();
+        let database = dir.path().join("history.db");
+        crate::core::user_env::with_path("RTK_DB_PATH", Some(&database), || {
+            let _tracker = tracking::Tracker::new().expect("initialize tracking");
+            rusqlite::Connection::open(&database)
+                .expect("open the initialized database")
+                .execute_batch("DROP TABLE commands;")
+                .expect("drop the table without changing the schema version");
+            assert!(build_payload().is_object());
+        });
+    }
+
+    #[test]
+    fn missing_tracking_tables_keep_telemetry_reads_silent() {
+        let dir = crate::core::test_isolation::tempdir();
+        let mut child =
+            std::process::Command::new(std::env::current_exe().expect("test executable"));
+        // A separate fixture avoids process-environment flags, which user_env
+        // intentionally ignores in a test build.
+        child
+            .env("RUST_MIN_STACK", "8388608")
+            .env("TMPDIR", dir.path())
+            .env("TMP", dir.path())
+            .env("TEMP", dir.path())
+            .current_dir(dir.path())
+            .args([
+                "--ignored",
+                "--exact",
+                "core::telemetry::tests::payload_read_with_missing_tracking_table",
+                "--nocapture",
+                "--test-threads=1",
+            ]);
+        let output = child
+            .output()
+            .expect("run the telemetry reads in isolation");
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "{output:?}"
+        );
+        assert!(output.stderr.is_empty(), "{output:?}");
+    }
+
+    #[test]
     fn test_enriched_stats_returns_valid_data() {
         let tracker = match tracking::Tracker::new() {
             Ok(t) => t,
