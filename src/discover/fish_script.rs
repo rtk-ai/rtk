@@ -247,6 +247,9 @@ mod tests {
         assert!(!is_unambiguous_fish(
             "if test -d src\ncat <<EOF\nx\nEOF\nend"
         ));
+        assert!(!is_unambiguous_fish(
+            "if test -d src\ncat 0<<EOF\nx\nEOF\nend"
+        ));
     }
 
     #[test]
