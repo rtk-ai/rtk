@@ -286,7 +286,7 @@ fn decide_with_attestation(
         );
     }
 
-    if crate::discover::lexer::contains_unattestable_construct(cmd) {
+    if crate::core::cmdline::lexer::contains_unattestable_construct(cmd) {
         return HookDecision::Defer;
     }
 
