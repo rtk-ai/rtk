@@ -3164,6 +3164,7 @@ fn run_cli() -> Result<i32> {
                     )?;
                     hooks::init::finalize_filter_trust(global, dry_run, filter_trust)?;
                 }
+                hooks::init::ask_telemetry_consent(dry_run)?;
                 if pipeline_code != 0 {
                     return Ok(pipeline_code);
                 }

@@ -216,6 +216,7 @@ pub fn run_guided(
     if !failed.is_empty() {
         anyhow::bail!("setup failed for {}", failed.join(", "));
     }
+    super::ask_telemetry_consent(ctx.dry_run)?;
     Ok(code)
 }
 

@@ -540,7 +540,6 @@ pub fn run(
     }
 
     if !dry_run {
-        prompt_telemetry_consent()?;
         // Best-effort: unconditionally re-run tracking-DB schema migrations during
         // install/upgrade (bypassing the `user_version` gate `Tracker::new()` uses
         // on its hot path). This both pre-warms the schema so the first PreToolUse
@@ -1380,6 +1379,13 @@ pub fn save_telemetry_consent(accepted: bool) -> Result<()> {
     config
         .save()
         .context("Failed to save telemetry consent to config.toml")
+}
+
+pub fn ask_telemetry_consent(dry_run: bool) -> Result<()> {
+    if dry_run {
+        return Ok(());
+    }
+    prompt_telemetry_consent()
 }
 
 fn prompt_telemetry_consent() -> Result<()> {
