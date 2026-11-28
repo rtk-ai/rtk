@@ -41,6 +41,7 @@ const HUMAN_READABLE: Flag = Flag::long("human-readable");
 /// `-n`'s long spelling: a long listing with numeric owner and group.
 const NUMERIC_UID_GID: Flag = Flag::long("numeric-uid-gid");
 const SI: Flag = Flag::long("si");
+const RECURSIVE: Flag = Flag::long("recursive");
 
 /// Every long option GNU ls accepts, transcribed from its own `--help`. Needed in full, not
 /// just the value-taking ones: ls resolves unambiguous abbreviations (`--sor time` sorts by
@@ -79,7 +80,7 @@ const LONG_FLAGS: &[Flag] = &[
     NUMERIC_UID_GID,
     Flag::long("quote-name"),
     Flag::long("quoting-style").takes(MANDATORY),
-    Flag::long("recursive"),
+    RECURSIVE,
     Flag::long("reverse"),
     Flag::long("show-control-chars"),
     SI,
@@ -192,6 +193,7 @@ fn shows_dotfiles(tokens: &[Token<'_>]) -> bool {
 struct LsPlan {
     show_all: bool,
     show_long: bool,
+    recursive: bool,
     child_args: Vec<String>,
 }
 
@@ -223,6 +225,9 @@ fn plan_for(args: &[String], flavor: Flavor) -> LsPlan {
     LsPlan {
         show_all,
         show_long,
+        recursive: tokens
+            .iter()
+            .any(|t| is_short_in(t, &['R']) || t.is(&RECURSIVE)),
         child_args: build_child_args(&tokens),
     }
 }
@@ -306,6 +311,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let LsPlan {
         show_all,
         show_long,
+        recursive,
         child_args,
     } = plan(args);
 
@@ -330,7 +336,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "ls",
         &label,
         |raw, code| match (code, &native) {
-            (0, _) => render(raw, listed, show_all, show_long, verbose),
+            (0, _) => render(raw, listed, show_all, show_long, !recursive, verbose),
             (_, Some((native, _))) => never_worse(native, raw).to_string(),
             (_, None) => raw.to_string(),
         },
@@ -351,15 +357,20 @@ fn native_listing(args: &[String]) -> Option<(String, bool)> {
     ))
 }
 
-fn render(raw: &str, native: Option<&str>, show_all: bool, show_long: bool, verbose: u8) -> String {
-    let (entries, parsed_count, truncated, filtered) = compact_ls(raw, show_all, show_long);
+fn render(
+    raw: &str,
+    native: Option<&str>,
+    show_all: bool,
+    show_long: bool,
+    keep_sections: bool,
+    verbose: u8,
+) -> String {
+    let (entries, parsed_count, truncated, filtered) =
+        compact_ls(raw, show_all, show_long, keep_sections);
 
-    // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
-    // This is safer than returning "(empty)" for a non-empty directory.
-    let has_real_content = raw.lines().any(|l| {
-        !l.starts_with("total ") && !l.is_empty() && !is_dotdir(l) && !is_listing_header(l)
-    });
-    if parsed_count == 0 && has_real_content {
+    // The parser returns no compact text if it saw entries but parsed none.
+    // An actually empty listing yields a marker instead, subject to Never Worse.
+    if parsed_count == 0 && entries.is_empty() {
         return native
             .map_or(raw, |native| never_worse(native, raw))
             .to_string();
@@ -524,11 +535,38 @@ fn perms_to_octal(perms: &str) -> Option<String> {
 
 /// Long-listing mode and link-count fields remain recognizable even when the
 /// date parser cannot understand the locale or an explicit time format.
-static LS_ROW_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[bcdlps?-][rwxstST-]{9}[.+@]?\s+\d+\s").unwrap());
+static LS_ROW_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^[ \t]*(?:[0-9]+(?:\.[0-9]+)?[KMGTPEZY]?[ \t]+)*([bcdlps?-][rwxstST-]{9}[.+@]?)\s+\d+\s",
+    )
+    .unwrap()
+});
 
 fn is_listing_header(line: &str) -> bool {
     line.ends_with(':') && !LS_ROW_RE.is_match(line)
+}
+
+/// The section still has entries when a row cannot be parsed or is filtered.
+/// Only an exact literal directory name, following the date metadata, is exempt.
+fn is_section_dot_entry(line: &str) -> bool {
+    line.starts_with('d')
+        && LS_DATE_RE
+            .find(line)
+            .is_some_and(|date| matches!(&line[date.end()..], "." | ".."))
+}
+
+fn strip_numeric_row_prefix(line: &str) -> &str {
+    if line
+        .trim_start()
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_digit)
+        && let Some(mode) = LS_ROW_RE.captures(line).and_then(|fields| fields.get(1))
+    {
+        &line[mode.start()..]
+    } else {
+        line
+    }
 }
 
 fn attributed_line(header: Option<&str>, line: &str) -> String {
@@ -553,18 +591,19 @@ fn attributed_line(header: Option<&str>, line: &str) -> String {
 /// parsed_count tracks how many non-header lines were successfully parsed.
 /// truncated holds compact entries beyond the CAP_INVENTORY display cap,
 /// each prefixed with its directory header when present.
-/// filtered holds the display name of each entry RTK removed from view
-/// (noise dirs without -a/-A as `name/`, plus raw unparsable non-dotdir
-/// lines).
+/// filtered holds excluded noise directory names and unparsable entries, with
+/// directory attribution when present.
 /// If parsed_count == 0 but raw had content, caller should fall back to raw output.
 fn compact_ls(
     raw: &str,
     show_all: bool,
     show_long: bool,
+    keep_sections: bool,
 ) -> (String, usize, Vec<String>, Vec<String>) {
     #[derive(Default)]
     struct ListingGroup {
         header: Option<String>,
+        has_entries: bool,
         dirs: Vec<(String, Option<String>)>,
         files: Vec<(String, String, Option<String>)>,
     }
@@ -574,23 +613,60 @@ fn compact_ls(
     let mut dotdirs: usize = 0;
     let mut filtered: Vec<String> = Vec::new();
 
-    for line in raw.lines() {
-        if is_listing_header(line) {
+    // GNU --dired indents headers, totals and rows, and appends offsets.
+    // Detect its footer before stripping indentation from a possible path.
+    let dired = keep_sections
+        && raw
+            .lines()
+            .next_back()
+            .is_some_and(|line| line.starts_with("//DIRED-OPTIONS// "));
+    let mut at_section_start = true;
+    for raw_line in raw.lines() {
+        if raw_line.is_empty() {
+            at_section_start = true;
+            continue;
+        }
+        let line = if dired {
+            if ["//DIRED//", "//SUBDIRED//", "//DIRED-OPTIONS//"]
+                .iter()
+                .any(|prefix| raw_line.starts_with(prefix))
+            {
+                continue;
+            }
+            raw_line.strip_prefix("  ").unwrap_or(raw_line)
+        } else {
+            raw_line
+        };
+        if keep_sections && at_section_start && is_listing_header(line) {
             groups.push(ListingGroup {
                 header: Some(line.to_string()),
                 ..ListingGroup::default()
             });
+            at_section_start = false;
             continue;
         }
-        if line.starts_with("total ") || line.is_empty() {
+        at_section_start = false;
+        if line.starts_with("total ") {
             continue;
         }
         lines_seen += 1;
         let index = groups.len() - 1;
         let group = &mut groups[index];
+        let named = group.header.is_some();
+        let row = if keep_sections {
+            strip_numeric_row_prefix(line)
+        } else {
+            line
+        };
+        let dot_entry = if named {
+            is_section_dot_entry(row)
+        } else {
+            is_dotdir(row)
+        };
+        group.has_entries |= !dot_entry;
 
-        let Some((file_type, perms, size, name)) = parse_ls_line(line) else {
-            if is_dotdir(line) {
+        let Some((file_type, perms, size, name)) = parse_ls_line(row) else {
+            if dot_entry {
                 dotdirs += 1;
             } else {
                 filtered.push(attributed_line(group.header.as_deref(), line.trim()));
@@ -650,7 +726,13 @@ fn compact_ls(
             });
         }
 
-        if all_lines.is_empty() && group.header.is_none() && groups.len() > 1 {
+        if all_lines.is_empty()
+            && (if group.header.is_some() {
+                group.has_entries
+            } else {
+                groups.len() > 1
+            })
+        {
             continue;
         }
         if all_lines.is_empty() || displayed < CAP_INVENTORY {
@@ -684,6 +766,29 @@ fn compact_ls(
 mod tests {
     use super::*;
     use crate::core::arg_tokenizer::{TakesValueRow, assert_takes_value_table};
+
+    fn compact_ls(raw: &str, all: bool, long: bool) -> (String, usize, Vec<String>, Vec<String>) {
+        super::compact_ls(raw, all, long, true)
+    }
+
+    fn render(raw: &str, native: Option<&str>, all: bool, long: bool, verbose: u8) -> String {
+        super::render(raw, native, all, long, true, verbose)
+    }
+
+    #[test]
+    fn test_recursive_listing_uses_option_tokens_not_operands_or_values() {
+        for args in [&["-lR", "d"][..], &["--recursive", "d"], &["--rec", "d"]] {
+            assert!(plan_of(args).recursive, "{args:?}");
+        }
+        for args in [
+            &["--", "-R"][..],
+            &["--", "--recursive"],
+            &["-I", "-R", "d"],
+        ] {
+            assert!(!plan_of(args).recursive, "{args:?}");
+        }
+        assert!(!plan_bsd(&["-D", "-R", "d"]).recursive);
+    }
 
     /// The long options both flavours share: every one GNU ls has, with the spec each takes.
     const LONG_ROWS: [TakesValueRow; 3] = [
@@ -764,6 +869,105 @@ mod tests {
     }
 
     #[test]
+    fn regression_review_prefixed_and_indented_rows_are_not_headers() {
+        for (prefix, indent) in [("0 ", ""), ("12345 ", ""), ("", "  ")] {
+            let mut raw = format!(
+                "{indent}{prefix}-rw-r--r-- 1 me me 0 Jan  1 12:00 loose:\n\n\
+                 {indent}d:\n{indent}total 4\n\
+                 {indent}{prefix}prw-rw-r-- 1 me me 0 Jan  1 12:00 fifo:\n\
+                 {indent}{prefix}-rw-r--r-- 1 me me 0 Jan  1 12:00 same:\n\
+                 {indent}{prefix}drwxr-xr-x 2 me me 0 Jan  1 12:00 sub:\n\n\
+                 {indent}b:\n{indent}total 4\n\
+                 {indent}{prefix}-rw-r--r-- 1 me me 0 Jan  1 12:00 other:\n"
+            );
+            if !indent.is_empty() {
+                raw.push_str(
+                    "//DIRED// 31 37\n//SUBDIRED// 40 41\n//DIRED-OPTIONS// --quoting-style=literal\n",
+                );
+            }
+            let (visible, count, truncated, filtered) = compact_ls(&raw, true, true);
+            let (loose, groups) = visible.split_once("\nd:\n").expect(&visible);
+            let (d, b) = groups.split_once("\nb:\n").expect(&visible);
+            assert!(loose.contains("loose:  0B"), "{visible}");
+            assert!(d.contains("755  sub:/"), "{visible}");
+            assert!(
+                d.contains("fifo:  0B") && d.contains("same:  0B"),
+                "{visible}"
+            );
+            assert!(b.contains("other:  0B"), "{visible}");
+            assert!(!visible.contains("(empty)"), "{visible}");
+            assert_eq!(count, 5);
+            assert!(truncated.is_empty() && filtered.is_empty());
+        }
+    }
+
+    #[test]
+    fn regression_review_colon_rows_in_captured_long_formats() {
+        let raw = "d:\ntotal 0\n\
+                   -rw-rw-r--+ 1 me me 0 Jan  1 12:00 acl:\n\
+                   -rw-r--r--@ 1 me me 0 Jan  1 12:00 x:\n\
+                   prw-rw-r-- 1 me me 0 Jan  1 12:00 fifo:\n\
+                   lrwxrwxrwx 1 me me 4 Jan  1 12:00 link -> tgt:\n\n\
+                   b:\ntotal 0\n";
+        // The same shapes can appear before the first header as loose operands.
+        for row in raw.lines().skip(2).take(4) {
+            assert!(!is_listing_header(row), "{row}");
+        }
+        let (visible, count, _, _) = compact_ls(raw, true, true);
+        assert_eq!(count, 4);
+        assert_eq!(
+            visible,
+            "d:\n664  acl:  0B\n644  x:  0B\n664  fifo:  0B\n777  link -> tgt:  4B\n\nb:\n(empty)\n"
+        );
+    }
+
+    #[test]
+    fn regression_review_real_rows_do_not_make_an_empty_group() {
+        for row in [
+            "-rw-r--r-- 1 me me 0 Jan  1 12:00 notes.",
+            "-rw-r--r-- 1 me me 0 Jan  1 10000 future",
+            "drwxr-xr-x 2 me me 0 Jan  1 12:00 node_modules",
+        ] {
+            let raw = format!(
+                "a:\ntotal 0\n{row}\n\nb:\ntotal 0\n{}\nempty:\ntotal 0\n",
+                long_line('-', "ordinary")
+            );
+            let (visible, _, _, filtered) = compact_ls(&raw, false, true);
+            assert!(!visible.contains("a:\n(empty)"), "{visible}");
+            assert!(visible.contains("b:\n644  ordinary"), "{visible}");
+            assert!(visible.ends_with("empty:\n(empty)\n"), "{visible}");
+            if row.ends_with("future") {
+                assert_eq!(filtered, [format!("a:\n{row}")]);
+            }
+        }
+    }
+
+    #[test]
+    fn regression_review_header_is_hidden_when_all_its_entries_are_capped() {
+        let mut raw = String::from("big:\ntotal 0\n");
+        for n in 0..120 {
+            raw.push_str(&long_line('-', &format!("file-{n:03}")));
+        }
+        raw.push_str("\ncolon:\ntotal 0\n");
+        raw.push_str(&long_line('-', "one:"));
+        raw.push_str(&long_line('-', "two:"));
+        let (visible, count, truncated, filtered) = compact_ls(&raw, false, true);
+        assert_eq!(count, 122);
+        assert!(!visible.lines().any(|line| line == "colon:"), "{visible}");
+        assert_eq!(truncated.len(), count - CAP_INVENTORY);
+        let hidden_colon: Vec<_> = truncated
+            .iter()
+            .filter(|line| line.starts_with("colon:\n"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            hidden_colon,
+            ["colon:\n644  one:  1.2K", "colon:\n644  two:  1.2K"]
+        );
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
     fn test_grouped_captured_gnu_listing() {
         // Captured with LC_ALL=C ls -l 'first dir' second (duplicate colon names).
         let raw = "first dir:\ntotal 4\n-rw------- 1 hermesworker hermesworker 7 Oct 31 21:56 same:\n\nsecond:\ntotal 4\n-rw------- 1 hermesworker hermesworker 7 Oct 31 21:56 same:\n";
@@ -804,7 +1008,7 @@ mod tests {
     }
 
     #[test]
-    fn regression_grouped_empty_and_recursive_labels() {
+    fn regression_grouped_empty_directory_labels() {
         let raw = "total samples:\ntotal 0\n\nparent/child:\ntotal 0\n";
         let expected = "total samples:\n(empty)\n\nparent/child:\n(empty)\n";
         let native = "total samples:\n\nparent/child:\n";

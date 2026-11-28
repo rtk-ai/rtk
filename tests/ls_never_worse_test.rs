@@ -203,3 +203,40 @@ fn bare_ls_of_an_empty_directory_prints_nothing_like_ls() {
     let (rtk, native) = compare(dir.path(), &[]);
     assert_eq!(rtk, native);
 }
+
+#[test]
+fn recursive_ls_keeps_develops_flat_compact_output() {
+    let dir = common::tempdir();
+    let root = dir.path().join("root");
+    let child = root.join("sub");
+    fs::create_dir_all(&child).unwrap();
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).unwrap();
+    for (parent, name) in [(&root, "top"), (&child, "leaf")] {
+        file(parent, name, 0);
+        fs::set_permissions(parent.join(name), fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    // Develop flattens the listing and counts the two native headers as filtered rows.
+    let expected = "755  sub/\n644  top  0B\n644  leaf  0B\n... (2 filtered)";
+    let check = |args: &[&str]| {
+        let out = common::rtk_command()
+            .env("LC_ALL", "C")
+            .env("RTK_RECALL", "0")
+            .arg("ls")
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .expect("rtk ls");
+        assert!(out.status.success(), "{args:?}: {:?}", out.stderr);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim_end_matches('\n'),
+            expected,
+            "{args:?}"
+        );
+    };
+    check(&["-lR", "root"]);
+    if cfg!(target_os = "linux") {
+        for flag in ["--recursive", "--rec"] {
+            check(&["-l", flag, "root"]);
+        }
+    }
+}
