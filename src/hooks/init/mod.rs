@@ -29,6 +29,7 @@ pub(crate) mod codex;
 mod copilot;
 pub(crate) mod cursor;
 pub(crate) mod droid;
+pub(crate) mod dsh;
 pub(crate) mod gemini;
 pub(crate) mod hermes;
 mod instructions_agents;
@@ -62,6 +63,7 @@ pub use claude::claude_hook_gaps;
 pub(crate) use copilot::{COPILOT_HOOK_JSON, copilot_user_dir};
 pub use copilot::{run_copilot, run_copilot_global, uninstall_copilot, uninstall_copilot_global};
 pub use droid::{run_droid_mode, uninstall_droid};
+pub use dsh::{run_dsh_mode, uninstall_dsh};
 pub use gemini::run_gemini;
 pub use hermes::{run_hermes_mode, uninstall_hermes};
 pub use instructions_agents::{run_kilocode_mode, run_kimi_mode};
@@ -163,6 +165,24 @@ pub(super) fn awareness_content(level: AwarenessLevel) -> &'static str {
         AwarenessLevel::High => RTK_AWARENESS_HIGH,
         AwarenessLevel::Full => RTK_AWARENESS_FULL,
     }
+}
+
+/// Agents without a command hook must prefix `rtk` themselves, which only the `full` level
+/// teaches, so they always receive `RTK_AWARENESS_FULL`. This prints the one-line note that
+/// tells the user why their configured `awareness.level` was not applied.
+pub(super) fn print_instructions_agents_awareness_note(agent: &str, ctx: InitContext) {
+    let prefix = if ctx.dry_run { "[dry-run] " } else { "  " };
+    let ignored = if ctx.awareness == AwarenessLevel::Full {
+        String::new()
+    } else {
+        format!(
+            " (config awareness.level = \"{}\" does not apply here)",
+            ctx.awareness
+        )
+    };
+    println!(
+        "{prefix}Awareness: full — {agent} has no command hook, so the agent is told to prefix rtk itself{ignored}"
+    );
 }
 
 /// Awareness content plus the resolved pipeline's awareness-file directives,
